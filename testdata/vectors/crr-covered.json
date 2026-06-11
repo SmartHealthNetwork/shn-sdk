@@ -1,0 +1,1 @@
+{"status":"active","purpose":["benefits"],"patient":{"reference":"Patient/MBR-COVERED"},"created":"2026-06-04T00:00:00Z","request":{"reference":"CoverageEligibilityRequest/req-vec-c1"},"outcome":"complete","insurer":{"reference":"Organization/payer"},"insurance":[{"coverage":{"reference":"Coverage/MBR-COVERED"},"inforce":true}],"resourceType":"CoverageEligibilityResponse"}

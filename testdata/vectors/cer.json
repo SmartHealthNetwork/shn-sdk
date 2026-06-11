@@ -1,0 +1,1 @@
+{"status":"active","purpose":["benefits"],"patient":{"reference":"Patient/MBR-COVERED"},"created":"2026-06-04T00:00:00Z","provider":{"reference":"Practitioner/1234567890"},"insurer":{"reference":"Organization/payer"},"resourceType":"CoverageEligibilityRequest"}
