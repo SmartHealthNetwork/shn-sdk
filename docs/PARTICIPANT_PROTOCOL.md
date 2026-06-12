@@ -72,6 +72,7 @@ Returns (the Accounts service, `accounts.<apex>`):
     "patientAccess": "https://fhir.<apex>"
   },
   "authzPublicKeyURL": "https://authz.<apex>/pubkey",
+  "hubTransportKeyURL": "https://hub.<apex>/transport-key",
   "sandboxResponders": [{ "role": "payer", "holderId": "payer" }],
   "operations": [ { "frame": "provider-tpo", "operation": "eligibility-inquiry", "transactionType": "coverage-eligibility" }, … ],
   "sandboxPersonas": [
@@ -92,6 +93,7 @@ Returns (the Accounts service, `accounts.<apex>`):
 | `igVersions` | Pinned IG versions the substrate validates against (server-side gate). |
 | `endpoints.{hub,authz,registrar,patientAccess}` | The live participant-facing base URLs. `hub` is where you originate a leg (`POST /route`); `authz` mints/serves tokens; `registrar` serves the holder feed; `patientAccess` is the FHIR/Patient-Access surface (`GET /metadata`). |
 | `authzPublicKeyURL` | Where to fetch the Authorization Framework Ed25519 verifying key (`{authz}/pubkey`). |
+| `hubTransportKeyURL` | Where to fetch the Hub's Ed25519 transport verifying key (`{hub}/transport-key` → `{"pubkey": "<base64 ed25519>"}`). Responders use this key to verify `X-Hub-Assertion` on every inbound forward (§6.2a). |
 | `sandboxResponders[]` | The responders you may exchange with (`role` + `holderId`). For UC-01 there is one: the payer. |
 | `operations[]` | The advertised `(frame, operation, transactionType)` triples the substrate authorizes. |
 | `sandboxPersonas[]` | The seeded synthetic patients and their `expectedEligibility` (`"covered"` \| `"not-covered"`) — the inputs + expected outcomes `shn doctor` asserts. |
@@ -222,7 +224,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `role` | `"provider"` \| `"payer"` \| `"facility"` \| `"phg"` |
 | `encPub` | Base64 X25519 public key (32 bytes raw) — envelope encryption target |
 | `signPub` | Base64 Ed25519 public key (32 bytes raw) — assertion verification |
-| `baseURL` | Where the Hub delivers inbound envelopes. Must not contain ASCII control characters (< 0x20) |
+| `baseURL` | Where the Hub delivers inbound envelopes. Must be a publicly resolvable https URL — no userinfo, no ASCII control characters (< 0x20) — and must not redirect at /substrate/inbound (the Hub refuses redirects). Originator-only clients are never dialed but the URL must still validate. |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
 
 **Proof-of-possession (`pop`).** In addition to the Trust admin gate, the
@@ -254,6 +256,7 @@ Rejection cases:
 | Missing or invalid Trust admin credential | 401 (`"missing or invalid Trust admin credential"`) |
 | `id` or `baseURL` absent, or `role` not in the allowed set | 400 |
 | `id` or `baseURL` contains a control character | 400 (`"id/baseURL must not contain control characters"`) |
+| `baseURL` is not an acceptable public https URL (scheme, userinfo, private/unresolvable address) | 400 — body `{"error":"invalid baseURL: <reason>"}`; the `"invalid baseURL: "` prefix is the stable contract, the reason tail may evolve |
 | `encPub` / `signPub` malformed (not valid base64 / wrong length) | 400 (`"malformed encPub/signPub"`) |
 | `pop` absent or malformed (not valid base64 / empty) | 400 (`"missing registration proof-of-possession"`) |
 | `pop` does not verify against the submitted `signPub` | 401 (`"registration proof-of-possession failed"`) |
@@ -281,7 +284,7 @@ to the registry on the same poll cycle.
    shared `adminPub`/signing key from the provisioning bundle; OAuth 2.1 self-serve
    client registration is the next sub-slice, replacing this step).
 2. Generate X25519 and Ed25519 key pairs for your holder.
-3. `POST /register` with your public keys, role, and gateway `baseURL`.
+3. `POST /register` with your public keys, role, and gateway `baseURL` (public https — see the baseURL requirements above).
 4. Within ~3 seconds (one poll cycle), Hub and Authorization Framework will route to
    your `baseURL` and accept assertions signed by your `signPub`.
 
@@ -925,6 +928,85 @@ Hub to return 502 to the originator.
 to serve this endpoint. Inbound-receiver support is listed in §9 as a tracked
 next sub-slice for external participants.
 
+### 6.2a Inbound transport authentication (`X-Hub-Assertion`)
+
+Every Hub forward to `/substrate/inbound` carries an **`X-Hub-Assertion`** header.
+It has the same assertion shape as `X-Holder-Assertion` (§3) but is signed by the
+Hub's own transport key — it authenticates the **channel** (the caller is the Hub),
+not the envelope authority.
+
+**Header shape:**
+
+```
+X-Hub-Assertion: base64(json(assertion))
+```
+
+where the assertion JSON is identical to the `Assertion` struct in §3.1, with:
+
+| Field | Value |
+|---|---|
+| `holderId` | `"hub"` (issuer pin — MUST equal this string) |
+| `audience` | Your holder ID (the `recipient` in the envelope `Metadata`) |
+| `issuedAt` / `expiry` | UTC timestamps; TTL is 2 minutes |
+| `jti` | A single-use, per-forward unique identifier |
+| `sig` | Ed25519 signature by the Hub's transport key |
+
+**Verification key.** Fetch from the discovery descriptor's `hubTransportKeyURL`:
+
+```
+GET {hubTransportKeyURL}     →     {"pubkey": "<base64 ed25519>"}
+```
+
+e.g. `GET https://hub.<apex>/transport-key`. Load this key at startup; do not
+re-fetch per request.
+
+**A conformant responder MUST, BEFORE processing the envelope:**
+
+1. Decode and parse the `X-Hub-Assertion` header.
+2. Assert `holderId == "hub"` (issuer pin — cheap fast-fail before crypto).
+3. Verify the Ed25519 signature against the Hub transport key.
+4. Assert `audience` equals **your** holder ID.
+5. Assert `expiry` is in the future and `issuedAt` is not in the future beyond
+   the 5-minute clock-skew allowance (same bounds as §3.1).
+6. Assert the `jti` has not been seen before (one-time-use). Retain seen `jti`
+   values for at least the maximum assertion lifetime (1 hour —
+   `MaxAssertionTTL`), not merely the 2-minute TTL: the substrate's own guard
+   retains for the full hour.
+
+> **Go participants:** `shnsdk.Responder` implements this full verification pipeline —
+> steps 1–6 above, plus authz token `VerifyBound`, decryption, adjudication, and the
+> sealed-and-authorized response — in one call to `NewResponder` + `Handler()`. See
+> `docs/SANDBOX.md` §3c for the quickstart.
+
+On any failure, reject the request with:
+
+```
+403 {"error":"missing or invalid hub assertion"}
+```
+
+This is the stable error string — do not vary it.
+
+**Rejection table (inbound):**
+
+| Condition | Status | Body |
+|---|---|---|
+| `X-Hub-Assertion` header absent | 403 | `{"error":"missing or invalid hub assertion"}` |
+| Signature invalid or key mismatch | 403 | `{"error":"missing or invalid hub assertion"}` |
+| `holderId != "hub"` | 403 | `{"error":"missing or invalid hub assertion"}` |
+| `audience` does not match this holder's ID | 403 | `{"error":"missing or invalid hub assertion"}` |
+| Assertion expired or future-dated beyond skew | 403 | `{"error":"missing or invalid hub assertion"}` |
+| `jti` already seen (replay) | 403 | `{"error":"missing or invalid hub assertion"}` |
+
+**Channel vs. authority.** The transport assertion authenticates the **channel**
+(the caller is the Hub); the bound `authzToken` inside the envelope remains the
+**authority** check (§4.4, AI-11). Both are required; neither substitutes for the
+other. Verify the hub assertion first, then proceed to `VerifyBound`.
+
+**Compatibility note.** A responder built before this header existed simply receives
+one extra header — ignoring it is safe for continuity, but verifying it is
+**required for conformance** from this protocol version on. The header has no off
+state: the Hub sends it on every forward unconditionally.
+
 ---
 
 ## 7. Worked example — eligibility round-trip (UC-01)
@@ -1383,6 +1465,25 @@ must conform to it.
 
 ### Changelog
 
+- **2026-06-12 — Payer responder (eligibility) delivered.** `shnsdk.Responder` is now
+  available in the public SDK (`github.com/SmartHealthNetwork/shn-sdk`). It implements
+  the full inbound pipeline — `X-Hub-Assertion` verification (§6.2a) first, then authz
+  token `VerifyBound`, decryption, `Adjudicator.Eligibility`, and a sealed-and-authorized
+  response — for the `coverage-eligibility` transaction type. See `docs/SANDBOX.md` §3c
+  for the quickstart. The CRD/DTR/PAS responder chain (`Adjudicator` methods for CRD
+  cards, DTR questionnaire, PAS adjudication) is landing; the interface is designed for
+  additive growth (existing methods never change).
+- **2026-06-12 — Inbound transport authentication (`X-Hub-Assertion`).** The Hub
+  now signs every forward to `/substrate/inbound` with an `X-Hub-Assertion` header
+  (same assertion shape as `X-Holder-Assertion`; `holderId == "hub"`; 2-minute TTL;
+  single-use `jti`). Responders MUST verify it — signature, issuer pin, audience,
+  expiry, jti-once — before processing the envelope (§6.2a); failure → 403
+  `{"error":"missing or invalid hub assertion"}` (stable string). The verification
+  key is `hubTransportKeyURL` from the discovery descriptor → Hub `GET /transport-key`
+  → `{"pubkey": "<base64 ed25519>"}`. This header is mandatory with no off state;
+  a responder built before this version simply receives an extra header (safe to
+  ignore for continuity, required to verify for conformance). The discovery descriptor
+  now carries `hubTransportKeyURL`; see §1a field table.
 - **2026-06-10 — Prior-authorization (UC-03, CRD→DTR→PAS).** Added §7a: the three-leg
   prior-auth sequence (frames/operations/transaction-types, the no-PA short-circuit and
   canonical-substitution guards), the `PriorAuthResult` outcome vocabulary
@@ -1444,7 +1545,7 @@ must conform to it.
 | Feature | Notes |
 |---|---|
 | **Push-notify on admission** | Hub + authz poll today (~3-second cycle); push-notify is the tracked fast-follow |
-| **Inbound-receiver onboarding** | End-to-end test for an external payer serving `/substrate/inbound` (responder role) |
+| **Responder PA chain (CRD/DTR/PAS)** | `shnsdk.Responder` eligibility delivered; `Adjudicator` grows CRD/DTR/PAS methods additively (existing methods never change) |
 | **Public/cloud sandbox** | The separated topology on managed infra for external partners to run against without a local stack |
 | **Holder/Hub documentation CapabilityStatements** (FR-37) | Machine-readable capability declarations for provider and Hub roles |
 | **Trust-issued PCI** (AI-5 goal state) | Today: deterministic hash (demo only); goal: unguessable Trust-minted PCI |

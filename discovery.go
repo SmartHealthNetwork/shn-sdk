@@ -7,16 +7,23 @@ package shnsdk
 // registrar /holders feed; AuthzPub from /pubkey). No keys are embedded (no drift).
 // MUST stay wire-identical to the substrate's accountsvc.Discovery (test/sdkparity).
 type Discovery struct {
-	Sandbox             bool                 `json:"sandbox"`
-	SyntheticDataOnly   bool                 `json:"syntheticDataOnly"`
-	WireProtocolVersion string               `json:"wireProtocolVersion"`
-	IGVersions          map[string]string    `json:"igVersions"`
-	Endpoints           DiscoveryEndpoints   `json:"endpoints"`
-	AuthzPublicKeyURL   string               `json:"authzPublicKeyURL"`
-	SandboxResponders   []DiscoveryResponder `json:"sandboxResponders"`
-	Operations          []DiscoveryOp        `json:"operations"`
-	SandboxPersonas     []DiscoveryPersona   `json:"sandboxPersonas"`
-	Docs                string               `json:"docs"`
+	Sandbox             bool               `json:"sandbox"`
+	SyntheticDataOnly   bool               `json:"syntheticDataOnly"`
+	WireProtocolVersion string             `json:"wireProtocolVersion"`
+	IGVersions          map[string]string  `json:"igVersions"`
+	Endpoints           DiscoveryEndpoints `json:"endpoints"`
+	AuthzPublicKeyURL   string             `json:"authzPublicKeyURL"`
+	// HubTransportKeyURL is the URL of the Hub's X-Hub-Assertion verification
+	// key (hub GET /transport-key). Consumers use this to verify per-hop
+	// transport assertions on inbound messages. ADDITIVE optional field — an
+	// older consumer ignores it; does NOT bump wireProtocolVersion (same
+	// precedent as ExpectedPriorAuth in DiscoveryPersona). No embedded key
+	// (no drift). Producer: internal/accountsvc/discovery.go.
+	HubTransportKeyURL string               `json:"hubTransportKeyURL"`
+	SandboxResponders  []DiscoveryResponder `json:"sandboxResponders"`
+	Operations         []DiscoveryOp        `json:"operations"`
+	SandboxPersonas    []DiscoveryPersona   `json:"sandboxPersonas"`
+	Docs               string               `json:"docs"`
 }
 
 type DiscoveryEndpoints struct {

@@ -9,6 +9,11 @@ Validate** path, with the exact `shn` commands per step.
 > Registration (key generation) and runs stay the `shn` CLI — the portal is the
 > Discover + manage surface.
 
+> **First time here? Request access.** The sandbox is invite-gated: submit the
+> **Request access** form at `https://developers.shn-preview.org` (no account
+> needed). When approved you'll receive an invite email with a temporary
+> password — sign in at the portal, set your password, and continue below.
+
 > **Synthetic data only (FR-39).** The sandbox is seeded with deterministic synthetic
 > personas (Linda Johansson et al.). **Never send production PHI.** Every persona,
 > member id, and DOB below is fabricated test data.
@@ -68,6 +73,7 @@ curl https://accounts.shn-preview.org/discovery
     "patientAccess": "https://fhir.shn-preview.org"
   },
   "authzPublicKeyURL": "https://authz.shn-preview.org/pubkey",
+  "hubTransportKeyURL": "https://hub.shn-preview.org/transport-key",
   "sandboxResponders": [{ "role": "payer", "holderId": "payer" }],
   "sandboxPersonas": [
     { "memberId": "MBR-COVERED",    "dob": "1975-04-02", "family": "Johansson", "expectedEligibility": "covered" },
@@ -95,9 +101,16 @@ shn login --accounts https://accounts.shn-preview.org
 # Register a client. The holder id is server-assigned and printed on success;
 # keys are written to -out.
 shn register --accounts https://accounts.shn-preview.org \
-  --role provider --name acme --base-url https://acme.example -out ./keys
+  --role provider --name acme --base-url https://your-org.example.com -out ./keys
 # → Registered acme-7f3a. Keys in ./keys.
 ```
+
+> `--base-url` must be an **https URL that publicly resolves** (the registrar
+> rejects private, loopback, link-local, and unresolvable addresses with
+> `400 "invalid baseURL: …"`). If you only *originate* requests (CRD/DTR/PAS via
+> the CLI or SDK), the Hub never dials your baseURL — use any https URL you
+> control, e.g. your organization's website. Responders must use the real
+> endpoint where their gateway listens.
 
 List or revoke your clients:
 
@@ -273,6 +286,153 @@ is the first `processNote`. There is no `preAuthRef` on a denied response.
 
 ---
 
+## 3c. Run a payer responder (eligibility)
+
+If you are building a **payer** integration that receives eligibility queries, you can
+stand up a responder endpoint using `shnsdk.Responder`. The responder serves
+`POST /substrate/inbound` with the same pipeline as the substrate's own gateway:
+`X-Hub-Assertion` verification first (before the body is read), then authz token
+verification, decryption, adjudication, and a sealed-and-authorized response —
+all in one call to `responder.Handler()`, minus the runtime FHIR $validate the operator-run gateways perform at their own edges (your response shape is parity-pinned against the substrate builder).
+
+**Register a payer-role client:**
+
+```sh
+shn register --accounts https://accounts.shn-preview.org \
+  --role payer --name acme-payer --base-url https://your-endpoint.example.com -out ./keys
+```
+
+> `--base-url` must be a **publicly resolvable https URL** (the registrar rejects
+> private, loopback, link-local, and unresolvable addresses with
+> `400 "invalid baseURL: …"`). The Hub will POST `{baseURL}/substrate/inbound` — the
+> endpoint **must not redirect** on that path.
+
+**Go example (~50 lines). Every symbol references a real public SDK export:**
+
+```go
+package main
+
+import (
+	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+	"golang.org/x/crypto/curve25519"
+)
+
+type myAdjudicator struct{}
+
+func (myAdjudicator) Eligibility(memberID string) (bool, string) {
+	// Your adjudication logic. Return (false, "reason") to deny.
+	return true, ""
+}
+
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// 1. Discovery: GET /discovery, unmarshal into shnsdk.Discovery.
+	//    (shnsdk.Discovery is a public type; the fetch is plain HTTP.)
+	resp, err := client.Get("https://accounts.shn-preview.org/discovery")
+	if err != nil { log.Fatal(err) }
+	body, _ := io.ReadAll(resp.Body); resp.Body.Close()
+	var disc shnsdk.Discovery
+	if err := json.Unmarshal(body, &disc); err != nil { log.Fatal(err) }
+
+	// 2. Hub transport key — FetchHubTransportKey IS a public SDK function.
+	hubKey, err := shnsdk.FetchHubTransportKey(ctx, client, disc.HubTransportKeyURL)
+	if err != nil { log.Fatal(err) }
+
+	// 3. Authz public key: GET {authzPublicKeyURL} → {"pubkey": "<base64 ed25519>"}.
+	//    (No public FetchAuthzKey helper; fetch inline.)
+	resp2, err := client.Get(disc.AuthzPublicKeyURL)
+	if err != nil { log.Fatal(err) }
+	body2, _ := io.ReadAll(resp2.Body); resp2.Body.Close()
+	var authzKeyResp struct { Pubkey string `json:"pubkey"` }
+	if err := json.Unmarshal(body2, &authzKeyResp); err != nil { log.Fatal(err) }
+	authzPubRaw, err := base64.StdEncoding.DecodeString(authzKeyResp.Pubkey)
+	if err != nil { log.Fatal(err) }
+	authzPub := ed25519.PublicKey(authzPubRaw)
+
+	// 4. Load identity from keys written by `shn register -out ./keys`.
+	//    Files: sign.key (base64 ed25519 private key), enc.key (base64 X25519 private key),
+	//    manifest.json ({"id": "<holderID>", ...}).
+	//    (No public LoadIdentity helper; read the files directly.)
+	keysDir := "./keys"
+	signB64, _ := os.ReadFile(filepath.Join(keysDir, "sign.key"))
+	signPrivRaw, err := base64.StdEncoding.DecodeString(string(signB64))
+	if err != nil { log.Fatal(err) }
+	encB64, _ := os.ReadFile(filepath.Join(keysDir, "enc.key"))
+	encPrivRaw, err := base64.StdEncoding.DecodeString(string(encB64))
+	if err != nil { log.Fatal(err) }
+	manifestB, _ := os.ReadFile(filepath.Join(keysDir, "manifest.json"))
+	var man struct { ID string `json:"id"` }
+	_ = json.Unmarshal(manifestB, &man)
+
+	signPriv := ed25519.PrivateKey(signPrivRaw)
+	var encPriv, encPub [32]byte
+	copy(encPriv[:], encPrivRaw)
+	curve25519.ScalarBaseMult(&encPub, &encPriv)
+	// Derive the public key from the private scalar — must match what shn register stored.
+	id := shnsdk.Identity{
+		HolderID: man.ID,
+		SignPub:  signPriv.Public().(ed25519.PublicKey),
+		SignPriv: signPriv,
+		EncPub:   &encPub,
+		EncPriv:  &encPriv,
+	}
+
+	// 5. Wire up the responder. NewFeedEncResolver and NewResponder are public SDK exports.
+	responder, err := shnsdk.NewResponder(shnsdk.ResponderConfig{
+		Identity: id,
+		AuthzURL: disc.Endpoints.Authz,
+		// AuthzPub must be the verifying key of the SAME service AuthzURL points
+		// at (both come from one discovery descriptor here — keep it that way).
+		AuthzPub:        authzPub,
+		HubTransportPub: hubKey,
+		ResolveEnc:      shnsdk.NewFeedEncResolver(client, disc.Endpoints.Registrar),
+		Adjudicator:     myAdjudicator{},
+	})
+	if err != nil { log.Fatal(err) }
+
+	log.Fatal(http.ListenAndServe(":8443", responder.Handler()))
+}
+```
+
+The example listens on plain HTTP — in deployment, terminate TLS in front of it (reverse proxy or load balancer): your registered `--base-url` must be **https**, and the Hub connects to that https endpoint.
+
+> **Note on key loading.** There is no public `LoadIdentity` helper in the SDK today —
+> the `loadIdentity` function lives in the `shn` CLI (package-private). The example
+> above shows the exact file layout `shn register -out ./keys` produces: `sign.key`
+> (std-base64 ed25519 private key, 64 bytes), `enc.key` (std-base64 X25519 private key,
+> 32 bytes), and `manifest.json` (`{"id":"<holderID>","role":"payer","encPub":"...","signPub":"...","baseURL":"..."}`).
+> You derive `encPub` from `encPriv` via `curve25519.ScalarBaseMult`, or read it directly
+> from `manifest.json "encPub"`. A public `LoadIdentity` is on the tracked list.
+
+**Supported operations today:** `coverage-eligibility` (UC-01). The `Adjudicator`
+interface carries one method — `Eligibility(memberID string) (covered bool, reason string)`.
+
+> **CRD/DTR/PAS responder chain is landing — do not build against it yet.** The
+> `Adjudicator` interface will grow new methods (CRD cards, DTR questionnaire, PAS
+> adjudication) additively; existing methods never change. Watch
+> `docs/PARTICIPANT_PROTOCOL.md` §9 changelog.
+
+The Hub verifies that your baseURL endpoint serves `POST /substrate/inbound` and sends
+an `X-Hub-Assertion` header on every forward (see `PARTICIPANT_PROTOCOL.md` §6.2a).
+`shnsdk.Responder` verifies this assertion for you — signature, issuer pin, audience,
+expiry, and jti-once — before the body is read.
+
+---
+
 ## 4. Validate
 
 `shn doctor` is the one-command self-validate: it fetches the discovery descriptor and
@@ -318,3 +478,5 @@ Run a single persona with `--persona MBR-COVERED`.
   (`shnsdk.Identity.RunEligibility`, envelope crypto, FHIR helpers). See its README.
 - **Integration options:** run the SHN Smart Gateway binary, or implement the wire
   contract natively — `docs/PARTICIPANT_PROTOCOL.md` §6 covers both surfaces.
+- **Payer responder:** if you receive eligibility queries, see §3c above for the
+  `shnsdk.Responder` quickstart (eligibility available; CRD/DTR/PAS chain is landing).

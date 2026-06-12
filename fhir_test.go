@@ -95,3 +95,85 @@ func TestEligibilityRoundTrip(t *testing.T) {
 		t.Error("ParseEligibilityResponse should reject a non-CoverageEligibilityResponse resource")
 	}
 }
+
+// TestParseEligibilityRequestMember checks the payer-side parser: round-trips the
+// member out of the SDK's own BuildEligibilityRequest output, rejects a wrong
+// resourceType, and rejects a CoverageEligibilityRequest missing patient.reference.
+// Wire-interop with the substrate builder is proven in test/sdkparity.
+func TestParseEligibilityRequestMember(t *testing.T) {
+	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+
+	// Round-trip: SDK-built CER → ParseEligibilityRequestMember → member.
+	cerBytes, err := BuildEligibilityRequest("MBR-ROUNDTRIP", "1234567890", now)
+	if err != nil {
+		t.Fatalf("BuildEligibilityRequest: %v", err)
+	}
+	member, err := ParseEligibilityRequestMember(cerBytes)
+	if err != nil {
+		t.Fatalf("ParseEligibilityRequestMember(SDK-built): %v", err)
+	}
+	if member != "MBR-ROUNDTRIP" {
+		t.Errorf("member = %q, want MBR-ROUNDTRIP", member)
+	}
+
+	// Rejects wrong resourceType.
+	if _, err := ParseEligibilityRequestMember([]byte(`{"resourceType":"Patient"}`)); err == nil {
+		t.Error("ParseEligibilityRequestMember should reject a Patient resource")
+	}
+
+	// Rejects CoverageEligibilityRequest missing patient.reference.
+	noPatRef := `{"resourceType":"CoverageEligibilityRequest","status":"active"}`
+	if _, err := ParseEligibilityRequestMember([]byte(noPatRef)); err == nil {
+		t.Error("ParseEligibilityRequestMember should reject a CER missing patient.reference")
+	}
+}
+
+// TestBuildEligibilityResponse checks the payer-side builder: covered=true round-trips
+// via the SDK's own ParseEligibilityResponse; covered=false with a reason round-trips
+// both; and two calls with the same fixed clock produce byte-identical output.
+// Wire-interop with the substrate parser is proven in test/sdkparity.
+func TestBuildEligibilityResponse(t *testing.T) {
+	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
+
+	// covered=true round-trip.
+	b, err := BuildEligibilityResponse("corr-1", "Patient/MBR-1", true, "", t0)
+	if err != nil {
+		t.Fatalf("BuildEligibilityResponse(covered): %v", err)
+	}
+	gotCovered, gotReason, err := ParseEligibilityResponse(b)
+	if err != nil {
+		t.Fatalf("ParseEligibilityResponse(covered): %v", err)
+	}
+	if !gotCovered || gotReason != "" {
+		t.Errorf("covered round-trip: covered=%v reason=%q, want true/empty", gotCovered, gotReason)
+	}
+
+	// covered=false with reason round-trip.
+	b2, err := BuildEligibilityResponse("corr-2", "Patient/MBR-2", false, "not a member", t0)
+	if err != nil {
+		t.Fatalf("BuildEligibilityResponse(not-covered): %v", err)
+	}
+	gotCovered2, gotReason2, err := ParseEligibilityResponse(b2)
+	if err != nil {
+		t.Fatalf("ParseEligibilityResponse(not-covered): %v", err)
+	}
+	if gotCovered2 {
+		t.Errorf("not-covered round-trip: covered=true, want false")
+	}
+	if gotReason2 != "not a member" {
+		t.Errorf("not-covered round-trip: reason=%q, want %q", gotReason2, "not a member")
+	}
+
+	// Determinism: two calls with same args → byte-identical output.
+	b3, err := BuildEligibilityResponse("corr-det", "Patient/MBR-DET", true, "", t0)
+	if err != nil {
+		t.Fatalf("BuildEligibilityResponse(det-1): %v", err)
+	}
+	b4, err := BuildEligibilityResponse("corr-det", "Patient/MBR-DET", true, "", t0)
+	if err != nil {
+		t.Fatalf("BuildEligibilityResponse(det-2): %v", err)
+	}
+	if string(b3) != string(b4) {
+		t.Errorf("non-deterministic output:\n  call1=%s\n  call2=%s", b3, b4)
+	}
+}
