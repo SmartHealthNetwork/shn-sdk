@@ -128,3 +128,94 @@ func TestBuildQuestionnaireFetchAndParseURL(t *testing.T) {
 		t.Errorf("parsed url = %q, want %q", url, SupportedQuestionnaireCanonical)
 	}
 }
+
+// TestSandboxLumbarQuestionnaire_Unmarshals: SandboxLumbarQuestionnaire returns bytes
+// that unmarshal as a fhir.Questionnaire whose canonical == QuestionnaireCanonicalLumbarMRI.
+func TestSandboxLumbarQuestionnaire_Unmarshals(t *testing.T) {
+	data := SandboxLumbarQuestionnaire()
+	if len(data) == 0 {
+		t.Fatal("SandboxLumbarQuestionnaire returned empty bytes")
+	}
+
+	// Must unmarshal as fhir.Questionnaire (samply model).
+	var q struct {
+		ResourceType string  `json:"resourceType"`
+		URL          *string `json:"url"`
+		Version      *string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &q); err != nil {
+		t.Fatalf("SandboxLumbarQuestionnaire does not unmarshal: %v", err)
+	}
+	if q.ResourceType != "Questionnaire" {
+		t.Errorf("resourceType = %q, want Questionnaire", q.ResourceType)
+	}
+	if q.URL == nil || *q.URL == "" {
+		t.Fatal("SandboxLumbarQuestionnaire: url field is absent or empty")
+	}
+	// The canonical (url|version when version is set) must equal QuestionnaireCanonicalLumbarMRI.
+	// questionnaireCanonical in the SDK appends "|version" when version is set; we test
+	// the raw url here (the canonical constant has no version suffix) and verify via
+	// ParseQuestionnaireURL which reads the url field directly.
+	got, err := ParseQuestionnaireURL(data)
+	if err != nil {
+		t.Fatalf("ParseQuestionnaireURL on SandboxLumbarQuestionnaire: %v", err)
+	}
+	if got != QuestionnaireCanonicalLumbarMRI {
+		t.Errorf("canonical = %q, want %q", got, QuestionnaireCanonicalLumbarMRI)
+	}
+}
+
+// TestSandboxLumbarQuestionnaire_FillAccepts: FillQuestionnaire accepts
+// SandboxLumbarQuestionnaire() and produces a non-empty completed QR, proving the
+// SDK's own autofill accepts the fixture.
+func TestSandboxLumbarQuestionnaire_FillAccepts(t *testing.T) {
+	data := SandboxLumbarQuestionnaire()
+	qc := QRContext{
+		PatientRef:  "Patient/MBR-COVERED",
+		CoverageRef: "Coverage/MBR-COVERED",
+		OrderRef:    "ServiceRequest/sr-MBR-COVERED",
+		Authored:    mbrCoveredQC().Authored,
+	}
+	qr, err := FillQuestionnaire(data, SandboxUC03Context(), qc)
+	if err != nil {
+		t.Fatalf("FillQuestionnaire(SandboxLumbarQuestionnaire, SandboxUC03Context): %v", err)
+	}
+	if len(qr) == 0 {
+		t.Fatal("FillQuestionnaire returned empty QR")
+	}
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+		Status       string `json:"status"`
+		Item         []any  `json:"item"`
+	}
+	if err := json.Unmarshal(qr, &probe); err != nil {
+		t.Fatalf("resulting QR does not unmarshal: %v", err)
+	}
+	if probe.ResourceType != "QuestionnaireResponse" {
+		t.Errorf("resourceType = %q, want QuestionnaireResponse", probe.ResourceType)
+	}
+	if probe.Status != "completed" {
+		t.Errorf("status = %q, want completed", probe.Status)
+	}
+	if len(probe.Item) == 0 {
+		t.Error("resulting QR has no items; expected at least one filled item")
+	}
+}
+
+// TestSandboxLumbarQuestionnaire_DeterministicBytes: SandboxLumbarQuestionnaire is
+// deterministic — two calls return identical bytes.
+func TestSandboxLumbarQuestionnaire_DeterministicBytes(t *testing.T) {
+	a := SandboxLumbarQuestionnaire()
+	b := SandboxLumbarQuestionnaire()
+	if string(a) != string(b) {
+		t.Errorf("SandboxLumbarQuestionnaire is non-deterministic:\n a=%s\n b=%s", a, b)
+	}
+	// Verify callers get independent copies (mutation isolation).
+	if len(a) > 0 {
+		a[0] ^= 0xFF
+		c := SandboxLumbarQuestionnaire()
+		if c[0] == a[0] {
+			t.Error("SandboxLumbarQuestionnaire shares underlying storage; mutation was visible to subsequent call")
+		}
+	}
+}

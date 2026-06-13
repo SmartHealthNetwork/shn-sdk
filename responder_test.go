@@ -133,6 +133,8 @@ func buildValidForward(
 
 // ---- test Adjudicator ----
 
+// testAdjudicator is the B1 eligibility adjudicator. The PA-chain methods
+// use sandbox defaults so existing eligibility tests are unaffected.
 type testAdjudicator struct {
 	covered bool
 	reason  string
@@ -140,6 +142,50 @@ type testAdjudicator struct {
 
 func (a *testAdjudicator) Eligibility(_ string) (bool, string) {
 	return a.covered, a.reason
+}
+
+func (a *testAdjudicator) OrderSelect(cpt string) (bool, string) {
+	if cpt == "72148" {
+		return true, QuestionnaireCanonicalLumbarMRI
+	}
+	return false, ""
+}
+
+func (a *testAdjudicator) Questionnaire(canonical string) ([]byte, bool) {
+	if canonical == QuestionnaireCanonicalLumbarMRI {
+		return SandboxLumbarQuestionnaire(), true
+	}
+	return nil, false
+}
+
+func (a *testAdjudicator) PriorAuth(qrJSON []byte, hasDR bool) (PASDecision, error) {
+	return SandboxAdjudicate(qrJSON, hasDR, time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC), nil)
+}
+
+// sandboxTestAdjudicator is the full sandbox adjudicator used in PA-chain tests.
+// It delegates to the same sandbox helpers the sample participant uses.
+type sandboxTestAdjudicator struct {
+	now time.Time
+}
+
+func (a *sandboxTestAdjudicator) Eligibility(_ string) (bool, string) { return true, "" }
+
+func (a *sandboxTestAdjudicator) OrderSelect(cpt string) (bool, string) {
+	if cpt == "72148" {
+		return true, QuestionnaireCanonicalLumbarMRI
+	}
+	return false, ""
+}
+
+func (a *sandboxTestAdjudicator) Questionnaire(canonical string) ([]byte, bool) {
+	if canonical == QuestionnaireCanonicalLumbarMRI {
+		return SandboxLumbarQuestionnaire(), true
+	}
+	return nil, false
+}
+
+func (a *sandboxTestAdjudicator) PriorAuth(qrJSON []byte, hasDR bool) (PASDecision, error) {
+	return SandboxAdjudicate(qrJSON, hasDR, a.now, nil)
 }
 
 // ---- helpers ----
@@ -943,5 +989,1090 @@ func TestNewResponder_FailsClosed(t *testing.T) {
 				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+// ---- PA-chain test harness ----
+
+// paTestHarness holds shared key material and servers for PA-chain tests.
+type paTestHarness struct {
+	now          time.Time
+	authzPub     ed25519.PublicKey
+	authzPriv    ed25519.PrivateKey
+	hubPub       ed25519.PublicKey
+	hubPriv      ed25519.PrivateKey
+	responderID  string
+	responderEnc *[32]byte // *[32]byte alias for EncPub
+	senderID     string
+	senderEncPub *[32]byte
+	senderEncPrv *[32]byte
+	authzSrv     *httptest.Server
+}
+
+// newPAHarness sets up keys, authz server, and identities for a PA-chain test.
+func newPAHarness(t *testing.T) (*paTestHarness, Identity, Identity) {
+	t.Helper()
+	now := time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC)
+
+	authzPub, authzPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen authz key: %v", err)
+	}
+	hubPub, hubPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen hub key: %v", err)
+	}
+
+	responderIdent, err := GenerateIdentity("test-payer")
+	if err != nil {
+		t.Fatalf("GenerateIdentity responder: %v", err)
+	}
+	responderIdent.Clock = func() time.Time { return now }
+
+	senderIdent, err := GenerateIdentity("test-provider")
+	if err != nil {
+		t.Fatalf("GenerateIdentity sender: %v", err)
+	}
+	senderIdent.Clock = func() time.Time { return now }
+
+	authzSrv := testAuthzServer(t, authzPriv, now)
+	t.Cleanup(authzSrv.Close)
+
+	h := &paTestHarness{
+		now:          now,
+		authzPub:     authzPub,
+		authzPriv:    authzPriv,
+		hubPub:       hubPub,
+		hubPriv:      hubPriv,
+		responderID:  responderIdent.HolderID,
+		responderEnc: responderIdent.EncPub,
+		senderID:     senderIdent.HolderID,
+		senderEncPub: senderIdent.EncPub,
+		senderEncPrv: senderIdent.EncPriv,
+		authzSrv:     authzSrv,
+	}
+	return h, responderIdent, senderIdent
+}
+
+// makeResponderSrv builds a Responder+httptest.Server using the harness.
+func (h *paTestHarness) makeResponderSrv(t *testing.T, responderIdent Identity, adj Adjudicator) (*Responder, *httptest.Server) {
+	t.Helper()
+	r, err := NewResponder(ResponderConfig{
+		Identity:        responderIdent,
+		AuthzURL:        h.authzSrv.URL,
+		AuthzPub:        h.authzPub,
+		HubTransportPub: h.hubPub,
+		ResolveEnc: func(holderID string) (*[32]byte, bool) {
+			if holderID == h.senderID {
+				return h.senderEncPub, true
+			}
+			return nil, false
+		},
+		Adjudicator: adj,
+		Clock:       func() time.Time { return h.now },
+		Client:      h.authzSrv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewResponder: %v", err)
+	}
+	srv := httptest.NewServer(r.Handler())
+	t.Cleanup(srv.Close)
+	return r, srv
+}
+
+// buildForwardEnv builds a valid inbound envelope for the given txType and payload,
+// with the authz token pinned to txOp and the hub assertion header.
+func (h *paTestHarness) buildForwardEnv(t *testing.T, txType, txOp, corrID string, payload []byte) (envBytes []byte, hubHdr string) {
+	t.Helper()
+	meta := Metadata{
+		Sender:          h.senderID,
+		Recipient:       h.responderID,
+		TransactionType: txType,
+		AuthorityFrame:  "provider-tpo",
+		Timestamp:       h.now.UTC().Format(time.RFC3339),
+		CorrelationID:   corrID,
+	}
+	env, err := Seal(meta, payload, h.responderEnc)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	ctHash := sha256.Sum256(env.Ciphertext)
+	subject := ResolvePCI("MBR-001", "1975-04-02", "Johansson")
+	inTok := Token{
+		Operation:     txOp,
+		Scope:         "coverage",
+		Subject:       subject,
+		Frame:         "provider-tpo",
+		CorrelationID: corrID,
+		Holder:        h.senderID,
+		PayloadHash:   hex.EncodeToString(ctHash[:]),
+		Expiry:        h.now.Add(time.Hour),
+	}
+	inTok.Signature = ed25519.Sign(h.authzPriv, tokenSigningPayload(inTok))
+	inTokJSON, _ := json.Marshal(inTok)
+	env.Metadata.AuthzToken = string(inTokJSON)
+	envBytes, err = EncodeEnvelope(env)
+	if err != nil {
+		t.Fatalf("EncodeEnvelope: %v", err)
+	}
+	hubHdr = makeHubAssertion(t, h.hubPriv, "hub", h.responderID, h.now, 2*time.Minute, "jti-"+corrID)
+	return envBytes, hubHdr
+}
+
+// openResponse decrypts the response envelope using the sender's enc keys.
+func (h *paTestHarness) openResponse(t *testing.T, body []byte) []byte {
+	t.Helper()
+	respEnv, err := DecodeEnvelope(body)
+	if err != nil {
+		t.Fatalf("DecodeEnvelope: %v", err)
+	}
+	plaintext, err := Open(respEnv, h.senderEncPub, h.senderEncPrv)
+	if err != nil {
+		t.Fatalf("Open response: %v", err)
+	}
+	return plaintext
+}
+
+// assertError asserts that resp is an error response with the given status and message.
+func assertError(t *testing.T, resp *http.Response, body []byte, wantStatus int, wantMsg string) {
+	t.Helper()
+	if resp.StatusCode != wantStatus {
+		t.Errorf("status = %d, want %d; body: %s", resp.StatusCode, wantStatus, body)
+	}
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &errResp); err != nil {
+		t.Fatalf("unmarshal error body %q: %v", body, err)
+	}
+	if errResp.Error != wantMsg {
+		t.Errorf("error = %q, want %q", errResp.Error, wantMsg)
+	}
+}
+
+// ---- TestResponder_CRD ----
+
+// TestResponder_CRD proves the crd-order-select dispatch: happy path + rejection rows.
+func TestResponder_CRD(t *testing.T) {
+	h, responderIdent, _ := newPAHarness(t)
+	adj := &sandboxTestAdjudicator{now: h.now}
+	_, srv := h.makeResponderSrv(t, responderIdent, adj)
+
+	// Build a valid order-select payload.
+	patientRef := "Patient/MBR-COVERED"
+	srJSON, err := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", patientRef)
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	covJSON, err := BuildCoverage(patientRef, "Coverage/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildCoverage: %v", err)
+	}
+	osPayload, err := BuildOrderSelectRequest(srJSON, covJSON, patientRef)
+	if err != nil {
+		t.Fatalf("BuildOrderSelectRequest: %v", err)
+	}
+
+	t.Run("happy path → crd-cards + PA required + canonical", func(t *testing.T) {
+		corrID := "crd-happy-1"
+		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", corrID, osPayload)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
+		}
+		plaintext := h.openResponse(t, body)
+		paRequired, canonical, err := ParseCards(plaintext)
+		if err != nil {
+			t.Fatalf("ParseCards: %v", err)
+		}
+		if !paRequired {
+			t.Error("paRequired = false, want true")
+		}
+		if canonical != QuestionnaireCanonicalLumbarMRI {
+			t.Errorf("canonical = %q, want %q", canonical, QuestionnaireCanonicalLumbarMRI)
+		}
+	})
+
+	t.Run("garbage payload → 400 parse order-select failed", func(t *testing.T) {
+		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-garbage-1", []byte("not json"))
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusBadRequest, "parse order-select failed")
+	})
+
+	t.Run("SR subject ≠ coverage beneficiary → 400 inconsistent patient", func(t *testing.T) {
+		// Build an OS request where SR is for patient A, Coverage for patient B.
+		srA, _ := BuildServiceRequest("72148", "MRI", "M51.16", "Patient/A")
+		covB, _ := BuildCoverage("Patient/B", "Coverage/B")
+		payload, _ := BuildOrderSelectRequest(srA, covB, "Patient/A")
+		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-inconsist-1", payload)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusBadRequest, "inconsistent patient in order-select")
+	})
+
+	t.Run("context.patientId mismatch → 400 inconsistent patient", func(t *testing.T) {
+		// SR and Coverage agree on patient A, but context.patientId is B.
+		srA, _ := BuildServiceRequest("72148", "MRI", "M51.16", "Patient/A")
+		covA, _ := BuildCoverage("Patient/A", "Coverage/A")
+		payload, _ := BuildOrderSelectRequest(srA, covA, "Patient/B") // mismatch context
+		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-ctx-mismatch-1", payload)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusBadRequest, "inconsistent patient in order-select")
+	})
+
+	t.Run("CPT missing → 400 parse CPT failed", func(t *testing.T) {
+		// Build a SR with no code.coding (just resourceType + subject).
+		srNoCPT := []byte(`{"resourceType":"ServiceRequest","status":"draft","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[]}}`)
+		covOK, _ := BuildCoverage(patientRef, "Coverage/MBR-COVERED")
+		payload, _ := BuildOrderSelectRequest(srNoCPT, covOK, patientRef)
+		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-nocpt-1", payload)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusBadRequest, "parse CPT failed")
+	})
+}
+
+// ---- TestResponder_DTR ----
+
+// TestResponder_DTR proves the dtr-questionnaire-fetch dispatch: happy path + rejections.
+func TestResponder_DTR(t *testing.T) {
+	h, responderIdent, _ := newPAHarness(t)
+	adj := &sandboxTestAdjudicator{now: h.now}
+	_, srv := h.makeResponderSrv(t, responderIdent, adj)
+
+	t.Run("happy path → questionnaire round-trips", func(t *testing.T) {
+		fetchPayload, err := BuildQuestionnaireFetch(QuestionnaireCanonicalLumbarMRI)
+		if err != nil {
+			t.Fatalf("BuildQuestionnaireFetch: %v", err)
+		}
+		envBytes, hubHdr := h.buildForwardEnv(t, "dtr-questionnaire-fetch", "dtr-questionnaire-fetch", "dtr-happy-1", fetchPayload)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
+		}
+		plaintext := h.openResponse(t, body)
+		url, err := ParseQuestionnaireURL(plaintext)
+		if err != nil {
+			t.Fatalf("ParseQuestionnaireURL: %v", err)
+		}
+		if url != QuestionnaireCanonicalLumbarMRI {
+			t.Errorf("canonical = %q, want %q", url, QuestionnaireCanonicalLumbarMRI)
+		}
+	})
+
+	t.Run("unknown canonical → 400 unknown questionnaire canonical", func(t *testing.T) {
+		fetchPayload, _ := BuildQuestionnaireFetch("http://example.com/unknown-questionnaire")
+		envBytes, hubHdr := h.buildForwardEnv(t, "dtr-questionnaire-fetch", "dtr-questionnaire-fetch", "dtr-unknown-1", fetchPayload)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusBadRequest, "unknown questionnaire canonical")
+	})
+
+	t.Run("garbage payload → 400 parse questionnaire fetch failed", func(t *testing.T) {
+		envBytes, hubHdr := h.buildForwardEnv(t, "dtr-questionnaire-fetch", "dtr-questionnaire-fetch", "dtr-garbage-1", []byte("not json"))
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusBadRequest, "parse questionnaire fetch failed")
+	})
+}
+
+// ---- PAS test helpers ----
+
+// approvedQRForResponder builds an approved-path QR for responder PAS tests.
+func approvedQRForResponder(t *testing.T, patientRef string, now time.Time) []byte {
+	t.Helper()
+	q := SandboxLumbarQuestionnaire()
+	qr, err := FillQuestionnaire(q, SandboxUC03Context(), QRContext{
+		PatientRef:  patientRef,
+		CoverageRef: "Coverage/MBR-COVERED",
+		OrderRef:    "ServiceRequest/sr-1",
+		Authored:    now,
+	})
+	if err != nil {
+		t.Fatalf("FillQuestionnaire approved: %v", err)
+	}
+	return qr
+}
+
+// priorSurgeryQRForResponder builds a prior-surgery QR (pended path).
+func priorSurgeryQRForResponder(t *testing.T, patientRef string, now time.Time) []byte {
+	t.Helper()
+	q := SandboxLumbarQuestionnaire()
+	cc := SandboxUC03Context()
+	cc.PriorSurgery = true
+	cc.PriorSurgeryRef = "Procedure/proc-laminectomy"
+	qr, err := FillQuestionnaire(q, cc, QRContext{
+		PatientRef:  patientRef,
+		CoverageRef: "Coverage/MBR-UC04",
+		OrderRef:    "ServiceRequest/sr-1",
+		Authored:    now,
+	})
+	if err != nil {
+		t.Fatalf("FillQuestionnaire prior-surgery: %v", err)
+	}
+	return qr
+}
+
+// deniedQRForResponder builds a denied-path QR (4 weeks conservative therapy).
+func deniedQRForResponder(t *testing.T, patientRef string, now time.Time) []byte {
+	t.Helper()
+	q := SandboxLumbarQuestionnaire()
+	cc := SandboxUC08Context()
+	qr, err := FillQuestionnaire(q, cc, QRContext{
+		PatientRef:  patientRef,
+		CoverageRef: "Coverage/MBR-UC08",
+		OrderRef:    "ServiceRequest/sr-1",
+		Authored:    now,
+	})
+	if err != nil {
+		t.Fatalf("FillQuestionnaire denied: %v", err)
+	}
+	return qr
+}
+
+// buildValidPASBundle creates a valid PAS submit bundle for the given QR and SR.
+func buildValidPASBundle(t *testing.T, qrJSON, srJSON []byte, patientRef, corrID string, now time.Time) []byte {
+	t.Helper()
+	bundle, err := BuildClaimBundle(qrJSON, srJSON, patientRef, "Coverage/MBR-COVERED", corrID, now)
+	if err != nil {
+		t.Fatalf("BuildClaimBundle: %v", err)
+	}
+	return bundle
+}
+
+// ---- TestResponder_PASSubmit ----
+
+// TestResponder_PASSubmit proves the pas-claim dispatch: all three branches + rejections.
+func TestResponder_PASSubmit(t *testing.T) {
+	h, responderIdent, _ := newPAHarness(t)
+	adj := &sandboxTestAdjudicator{now: h.now}
+	_, srv := h.makeResponderSrv(t, responderIdent, adj)
+
+	const patientRef = "Patient/MBR-COVERED"
+	srJSON, _ := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", patientRef)
+
+	t.Run("approved (UC-03 QR + hasDR bundle) → ClaimResponse approved", func(t *testing.T) {
+		qrJSON := approvedQRForResponder(t, patientRef, h.now)
+		// Build a bundle with a DiagnosticReport so hasDR=true.
+		drJSON, err := BuildDiagnosticReport("dr-test-1", patientRef, "72148", "MRI lumbar spine")
+		if err != nil {
+			t.Fatalf("BuildDiagnosticReport: %v", err)
+		}
+		// Add DR to a bundle manually.
+		corrID := "pas-approved-1"
+		// BuildClaimBundle doesn't support DR directly, build via update helper conceptually.
+		// Use BuildClaimBundle then add DR via custom approach.
+		bundle, err := BuildClaimBundle(qrJSON, srJSON, patientRef, "Coverage/MBR-COVERED", corrID, h.now)
+		if err != nil {
+			t.Fatalf("BuildClaimBundle: %v", err)
+		}
+		// Inject DR into the bundle JSON.
+		var raw map[string]json.RawMessage
+		_ = json.Unmarshal(bundle, &raw)
+		var entries []json.RawMessage
+		_ = json.Unmarshal(raw["entry"], &entries)
+		drEntry, _ := json.Marshal(map[string]interface{}{
+			"resource": json.RawMessage(drJSON),
+		})
+		entries = append(entries, json.RawMessage(drEntry))
+		entriesJSON, _ := json.Marshal(entries)
+		raw["entry"] = entriesJSON
+		bundle, _ = json.Marshal(raw)
+
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", corrID, bundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
+		}
+		plaintext := h.openResponse(t, body)
+		cr, err := ParseClaimResponse(plaintext)
+		if err != nil {
+			t.Fatalf("ParseClaimResponse: %v", err)
+		}
+		if cr.Outcome != "approved" {
+			t.Errorf("outcome = %q, want approved", cr.Outcome)
+		}
+		if cr.PreAuthRef == "" {
+			t.Error("PreAuthRef is empty, want non-empty")
+		}
+	})
+
+	t.Run("pended (prior-surgery QR, no DR) → pended bundle with NeededItems", func(t *testing.T) {
+		patientPend := "Patient/MBR-UC04"
+		srPend, _ := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", patientPend)
+		qrPend := priorSurgeryQRForResponder(t, patientPend, h.now)
+		corrID := "pas-pended-1"
+		bundle := buildValidPASBundle(t, qrPend, srPend, patientPend, corrID, h.now)
+
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", corrID, bundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
+		}
+		plaintext := h.openResponse(t, body)
+		pended, items, err := ParsePendedResponse(plaintext)
+		if err != nil {
+			t.Fatalf("ParsePendedResponse: %v", err)
+		}
+		if !pended {
+			t.Error("pended = false, want true")
+		}
+		if len(items) == 0 {
+			t.Error("NeededItems is empty, want at least one")
+		}
+	})
+
+	t.Run("denied (< 6 weeks) → denial parses with rationale", func(t *testing.T) {
+		patientDeny := "Patient/MBR-UC08"
+		srDeny, _ := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", patientDeny)
+		qrDeny := deniedQRForResponder(t, patientDeny, h.now)
+		corrID := "pas-denied-1"
+		// Override coverage ref in bundle to match patient.
+		bundle2, _ := BuildClaimBundle(qrDeny, srDeny, patientDeny, "Coverage/MBR-UC08", corrID, h.now)
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", corrID, bundle2)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
+		}
+		plaintext := h.openResponse(t, body)
+		cr, err := ParseClaimResponse(plaintext)
+		if err != nil {
+			t.Fatalf("ParseClaimResponse: %v", err)
+		}
+		if cr.Outcome != "denied" {
+			t.Errorf("outcome = %q, want denied", cr.Outcome)
+		}
+		if cr.Denial == nil || cr.Denial.Rationale == "" {
+			t.Error("Denial rationale is empty")
+		}
+	})
+
+	t.Run("garbage payload → 400 parse bundle failed", func(t *testing.T) {
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-garbage-1", []byte("not json"))
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusBadRequest, "parse bundle failed")
+	})
+
+	t.Run("QR subject missing → 403 PAS bundle QuestionnaireResponse missing subject", func(t *testing.T) {
+		qrNoSubj := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-ns","status":"completed"}`)
+		srOK, _ := BuildServiceRequest("72148", "MRI", "M51.16", patientRef)
+		bundle, _ := BuildClaimBundle(qrNoSubj, srOK, patientRef, "Coverage/MBR-COVERED", "pas-qrsubj-1", h.now)
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-qrsubj-1", bundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusForbidden, "PAS bundle QuestionnaireResponse missing subject")
+	})
+
+	t.Run("SR/QR patient ≠ Claim patient → 403 inconsistent patient in PAS bundle", func(t *testing.T) {
+		qrB := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-b","status":"completed","subject":{"reference":"Patient/B"}}`)
+		srB, _ := BuildServiceRequest("72148", "MRI", "M51.16", "Patient/B")
+		// Bundle with Claim for Patient/A but QR/SR for Patient/B.
+		bundle, _ := BuildClaimBundle(qrB, srB, "Patient/A", "Coverage/A", "pas-inconsist-1", h.now)
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-inconsist-1", bundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusForbidden, "inconsistent patient in PAS bundle")
+	})
+
+	t.Run("adjudicator error → 422 with error text", func(t *testing.T) {
+		// Use a custom adjudicator that always errors.
+		errAdj := &errorAdjudicator{paErr: "payer system unavailable"}
+		_, errSrv := h.makeResponderSrv(t, responderIdent, errAdj)
+
+		qrJSON := approvedQRForResponder(t, patientRef, h.now)
+		bundle := buildValidPASBundle(t, qrJSON, srJSON, patientRef, "pas-err-1", h.now)
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-err-1", bundle)
+		resp := postInbound(t, errSrv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusUnprocessableEntity, "payer system unavailable")
+	})
+}
+
+// errorAdjudicator is an adjudicator that returns an error from PriorAuth.
+type errorAdjudicator struct {
+	paErr string
+}
+
+func (a *errorAdjudicator) Eligibility(_ string) (bool, string)   { return true, "" }
+func (a *errorAdjudicator) OrderSelect(_ string) (bool, string)   { return false, "" }
+func (a *errorAdjudicator) Questionnaire(_ string) ([]byte, bool) { return nil, false }
+func (a *errorAdjudicator) PriorAuth(_ []byte, _ bool) (PASDecision, error) {
+	return PASDecision{}, &paErrString{a.paErr}
+}
+
+type paErrString struct{ s string }
+
+func (e *paErrString) Error() string { return e.s }
+
+// ---- TestResponder_PASUpdate ----
+
+// TestResponder_PASUpdate proves the pas-claim-update dispatch: happy path + rejections.
+func TestResponder_PASUpdate(t *testing.T) {
+	h, responderIdent, _ := newPAHarness(t)
+	adj := &sandboxTestAdjudicator{now: h.now}
+
+	// Build the base pended submit to exercise the ledger.
+	patientRef := "Patient/MBR-UC04"
+	srJSON, _ := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", patientRef)
+	qrPend := priorSurgeryQRForResponder(t, patientRef, h.now)
+	origCorr := "pas-update-orig-1"
+	submitBundle, _ := BuildClaimBundle(qrPend, srJSON, patientRef, "Coverage/MBR-UC04", origCorr, h.now)
+
+	// Submit function: submits a PAS bundle and asserts pended response.
+	submitAndAssertPended := func(t *testing.T, srv *httptest.Server, corrID string, bundle []byte) {
+		t.Helper()
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", corrID, bundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("submit: status = %d, want 200; body: %s", resp.StatusCode, body)
+		}
+		plaintext := h.openResponse(t, body)
+		pended, _, err := ParsePendedResponse(plaintext)
+		if err != nil {
+			t.Fatalf("ParsePendedResponse: %v", err)
+		}
+		if !pended {
+			t.Fatal("submit did not pend, want pended")
+		}
+	}
+
+	t.Run("pend→update(with DR+Provenance)→approved", func(t *testing.T) {
+		_, srv := h.makeResponderSrv(t, responderIdent, adj)
+
+		// First: submit → pended.
+		submitAndAssertPended(t, srv, origCorr, submitBundle)
+
+		// Build the update bundle.
+		drJSON, err := BuildDiagnosticReport("dr-uc04-op", patientRef, "72148", "MRI lumbar spine w/o contrast")
+		if err != nil {
+			t.Fatalf("BuildDiagnosticReport: %v", err)
+		}
+		provJSON, err := BuildProvenance("DiagnosticReport/dr-uc04-op", "Organization/provider", h.now)
+		if err != nil {
+			t.Fatalf("BuildProvenance: %v", err)
+		}
+
+		// Build an approved QR (6 weeks + prior surgery + has DR → approve).
+		qrApproved := approvedQRForResponder(t, patientRef, h.now)
+
+		updateCorr := "pas-update-1"
+		updateBundle, err := BuildClaimUpdateBundle(qrApproved, srJSON, drJSON, provJSON,
+			patientRef, "Coverage/MBR-UC04", updateCorr, origCorr, h.now)
+		if err != nil {
+			t.Fatalf("BuildClaimUpdateBundle: %v", err)
+		}
+
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", updateCorr, updateBundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("update: status = %d, want 200; body: %s", resp.StatusCode, body)
+		}
+		plaintext := h.openResponse(t, body)
+		cr, err := ParseClaimResponse(plaintext)
+		if err != nil {
+			t.Fatalf("ParseClaimResponse: %v", err)
+		}
+		if cr.Outcome != "approved" {
+			t.Errorf("update outcome = %q, want approved", cr.Outcome)
+		}
+	})
+
+	t.Run("replayed identical update → 409", func(t *testing.T) {
+		_, srv := h.makeResponderSrv(t, responderIdent, adj)
+		origCorr2 := "pas-update-orig-2"
+		sb, _ := BuildClaimBundle(qrPend, srJSON, patientRef, "Coverage/MBR-UC04", origCorr2, h.now)
+		submitAndAssertPended(t, srv, origCorr2, sb)
+
+		// First update → approve.
+		drJSON, _ := BuildDiagnosticReport("dr-replay", patientRef, "72148", "MRI lumbar spine")
+		provJSON, _ := BuildProvenance("DiagnosticReport/dr-replay", "Organization/provider", h.now)
+		qrApproved := approvedQRForResponder(t, patientRef, h.now)
+		updateCorr := "pas-update-replay-1"
+		updateBundle, _ := BuildClaimUpdateBundle(qrApproved, srJSON, drJSON, provJSON,
+			patientRef, "Coverage/MBR-UC04", updateCorr, origCorr2, h.now)
+
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", updateCorr, updateBundle)
+		resp1 := postInbound(t, srv, envBytes, hubHdr)
+		body1 := readBody(t, resp1)
+		if resp1.StatusCode != http.StatusOK {
+			t.Fatalf("first update: status = %d; body: %s", resp1.StatusCode, body1)
+		}
+
+		// Second update: same origCorr → ledger has been finalized → 409.
+		updateCorr2 := "pas-update-replay-2"
+		updateBundle2, _ := BuildClaimUpdateBundle(qrApproved, srJSON, drJSON, provJSON,
+			patientRef, "Coverage/MBR-UC04", updateCorr2, origCorr2, h.now)
+		envBytes2, hubHdr2 := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", updateCorr2, updateBundle2)
+		resp2 := postInbound(t, srv, envBytes2, hubHdr2)
+		body2 := readBody(t, resp2)
+		assertError(t, resp2, body2, http.StatusConflict, "ClaimUpdate references no pending claim available for this patient")
+	})
+
+	t.Run("missing Claim.related → 403", func(t *testing.T) {
+		_, srv := h.makeResponderSrv(t, responderIdent, adj)
+		drJSON, _ := BuildDiagnosticReport("dr-norelated", patientRef, "72148", "MRI")
+		provJSON, _ := BuildProvenance("DiagnosticReport/dr-norelated", "Organization/provider", h.now)
+		qrJSON := approvedQRForResponder(t, patientRef, h.now)
+		// Build update bundle with empty origCorr → Claim.related is empty.
+		updateBundle, err := BuildClaimUpdateBundle(qrJSON, srJSON, drJSON, provJSON,
+			patientRef, "Coverage/MBR-UC04", "pas-norelated-1", "", h.now)
+		if err != nil {
+			t.Fatalf("BuildClaimUpdateBundle: %v", err)
+		}
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", "pas-norelated-1", updateBundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusForbidden, "ClaimUpdate missing original-claim reference (Claim.related)")
+	})
+
+	t.Run("no prior pend → 409", func(t *testing.T) {
+		_, srv := h.makeResponderSrv(t, responderIdent, adj)
+		drJSON, _ := BuildDiagnosticReport("dr-nopend", patientRef, "72148", "MRI")
+		provJSON, _ := BuildProvenance("DiagnosticReport/dr-nopend", "Organization/provider", h.now)
+		qrJSON := approvedQRForResponder(t, patientRef, h.now)
+		// origCorr that was never submitted.
+		updateBundle, _ := BuildClaimUpdateBundle(qrJSON, srJSON, drJSON, provJSON,
+			patientRef, "Coverage/MBR-UC04", "pas-nopend-upd-1", "nonexistent-corr", h.now)
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", "pas-nopend-upd-1", updateBundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusConflict, "ClaimUpdate references no pending claim available for this patient")
+	})
+
+	t.Run("missing Provenance → 403", func(t *testing.T) {
+		_, srv := h.makeResponderSrv(t, responderIdent, adj)
+		origCorr3 := "pas-update-orig-3"
+		sb, _ := BuildClaimBundle(qrPend, srJSON, patientRef, "Coverage/MBR-UC04", origCorr3, h.now)
+		submitAndAssertPended(t, srv, origCorr3, sb)
+
+		// Build an update bundle WITHOUT Provenance entry.
+		drJSON, _ := BuildDiagnosticReport("dr-noprov", patientRef, "72148", "MRI")
+		qrJSON := approvedQRForResponder(t, patientRef, h.now)
+		// Manually build the bundle without provenance.
+		updateBundle, _ := BuildClaimUpdateBundle(qrJSON, srJSON, drJSON, nil,
+			patientRef, "Coverage/MBR-UC04", "pas-noprov-1", origCorr3, h.now)
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", "pas-noprov-1", updateBundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusForbidden, "ClaimUpdate missing Provenance")
+	})
+
+	t.Run("Provenance without agent → 403", func(t *testing.T) {
+		_, srv := h.makeResponderSrv(t, responderIdent, adj)
+		origCorr4 := "pas-update-orig-4"
+		sb, _ := BuildClaimBundle(qrPend, srJSON, patientRef, "Coverage/MBR-UC04", origCorr4, h.now)
+		submitAndAssertPended(t, srv, origCorr4, sb)
+
+		// Build a Provenance without agent.
+		provNoAgent := []byte(`{"resourceType":"Provenance","target":[{"reference":"DiagnosticReport/dr-noagent"}],"recorded":"2026-06-12T10:00:00Z","agent":[]}`)
+		drJSON, _ := BuildDiagnosticReport("dr-noagent", patientRef, "72148", "MRI")
+		qrJSON := approvedQRForResponder(t, patientRef, h.now)
+		updateBundle, _ := BuildClaimUpdateBundle(qrJSON, srJSON, drJSON, provNoAgent,
+			patientRef, "Coverage/MBR-UC04", "pas-noagent-1", origCorr4, h.now)
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", "pas-noagent-1", updateBundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusForbidden, "ClaimUpdate Provenance missing agent")
+	})
+
+	t.Run("Provenance wrong target → 403", func(t *testing.T) {
+		_, srv := h.makeResponderSrv(t, responderIdent, adj)
+		origCorr5 := "pas-update-orig-5"
+		sb, _ := BuildClaimBundle(qrPend, srJSON, patientRef, "Coverage/MBR-UC04", origCorr5, h.now)
+		submitAndAssertPended(t, srv, origCorr5, sb)
+
+		drJSON, _ := BuildDiagnosticReport("dr-wrongtarget", patientRef, "72148", "MRI")
+		// Provenance targets DIFFERENT resource.
+		provWrong, _ := BuildProvenance("DiagnosticReport/OTHER-ID", "Organization/provider", h.now)
+		qrJSON := approvedQRForResponder(t, patientRef, h.now)
+		updateBundle, _ := BuildClaimUpdateBundle(qrJSON, srJSON, drJSON, provWrong,
+			patientRef, "Coverage/MBR-UC04", "pas-wrongtarget-1", origCorr5, h.now)
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", "pas-wrongtarget-1", updateBundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusForbidden, "ClaimUpdate Provenance does not target the supplemental data")
+	})
+
+	t.Run("still-insufficient amendment → 422 + claim released (next complete update succeeds)", func(t *testing.T) {
+		_, srv := h.makeResponderSrv(t, responderIdent, adj)
+		origCorr6 := "pas-update-orig-6"
+		sb, _ := BuildClaimBundle(qrPend, srJSON, patientRef, "Coverage/MBR-UC04", origCorr6, h.now)
+		submitAndAssertPended(t, srv, origCorr6, sb)
+
+		// First update: still insufficient (no DR, prior-surgery QR → still pended).
+		// Use a handcrafted QR with an id for the Provenance target (not the
+		// priorSurgeryQRForResponder fixture, which lacks an id field).
+		qrWithID := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-insuff-1","status":"completed","subject":{"reference":"Patient/MBR-UC04"},"item":[{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},{"linkId":"prior-surgery","answer":[{"valueBoolean":true}]}]}`)
+		provQR, _ := BuildProvenance("QuestionnaireResponse/qr-insuff-1", "Organization/provider", h.now)
+
+		updateCorr7 := "pas-update-insuff-1"
+		updateBundle, err := BuildClaimUpdateBundle(qrWithID, srJSON, nil, provQR,
+			patientRef, "Coverage/MBR-UC04", updateCorr7, origCorr6, h.now)
+		if err != nil {
+			t.Fatalf("BuildClaimUpdateBundle insuff: %v", err)
+		}
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", updateCorr7, updateBundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		assertError(t, resp, body, http.StatusUnprocessableEntity, "amendment still insufficient")
+
+		// Claim was released → a subsequent complete update (with DR) succeeds.
+		drJSON, _ := BuildDiagnosticReport("dr-complete", patientRef, "72148", "MRI")
+		provDR, _ := BuildProvenance("DiagnosticReport/dr-complete", "Organization/provider", h.now)
+		qrApproved := approvedQRForResponder(t, patientRef, h.now)
+		updateCorr8 := "pas-update-complete-1"
+		completBundle, _ := BuildClaimUpdateBundle(qrApproved, srJSON, drJSON, provDR,
+			patientRef, "Coverage/MBR-UC04", updateCorr8, origCorr6, h.now)
+		envBytes2, hubHdr2 := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", updateCorr8, completBundle)
+		resp2 := postInbound(t, srv, envBytes2, hubHdr2)
+		body2 := readBody(t, resp2)
+		if resp2.StatusCode != http.StatusOK {
+			t.Fatalf("complete update: status = %d, want 200; body: %s", resp2.StatusCode, body2)
+		}
+	})
+}
+
+// ---- TestResponder_PASUpdate_AuthzFailureReleasesClaim ----
+
+// TestResponder_PASUpdate_AuthzFailureReleasesClaim pins the fix for the
+// stranded-approved-claim regression (PR review Finding 1): when seal+authorize
+// fail AFTER handlePASUpdate returns a successful crJSON, the claim must be
+// released (rollback) so the provider can retry. Before the fix, finalize ran
+// inside the handler before the pipeline; a 502 from authz left the claim
+// finalized/removed, so a retry would hit begin() → 409.
+//
+// Strategy: use a toggleable authz stub — a single httptest.Server whose handler
+// is swapped between a working implementation and a 500-returning stub. Both the
+// submit (pend) and the first update (failing authz) share the same Responder so
+// they share the same pendedLedger instance.
+func TestResponder_PASUpdate_AuthzFailureReleasesClaim(t *testing.T) {
+	h, responderIdent, _ := newPAHarness(t)
+	adj := &sandboxTestAdjudicator{now: h.now}
+
+	// toggleable authz: starts working, can be set to fail.
+	authzFail := false
+	toggleAuthz := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if authzFail {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		// Delegate to the harness's working authz server.
+		if r.Method != http.MethodPost || r.URL.Path != "/authorize" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		holderID := "unknown"
+		if hdrVal := r.Header.Get("X-Holder-Assertion"); hdrVal != "" {
+			if raw, err2 := base64.StdEncoding.DecodeString(hdrVal); err2 == nil {
+				var a assertion
+				if err2 := json.Unmarshal(raw, &a); err2 == nil {
+					holderID = a.HolderID
+				}
+			}
+		}
+		var req AuthorizeRequest
+		body, _ := io.ReadAll(io.LimitReader(r.Body, MaxRequestBytes))
+		if err2 := json.Unmarshal(body, &req); err2 != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		tok := Token{
+			Operation:     req.Operation,
+			Scope:         "coverage",
+			Subject:       req.SubjectPCI,
+			Frame:         req.Frame,
+			CorrelationID: req.CorrelationID,
+			Holder:        holderID,
+			PayloadHash:   req.PayloadHash,
+			Expiry:        h.now.Add(time.Hour),
+		}
+		tok.Signature = ed25519.Sign(h.authzPriv, tokenSigningPayload(tok))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(authorizeResp{Token: tok})
+	}))
+	t.Cleanup(toggleAuthz.Close)
+
+	// Build one Responder (and thus one pendedLedger) wired to the toggleable stub.
+	r, err := NewResponder(ResponderConfig{
+		Identity:        responderIdent,
+		AuthzURL:        toggleAuthz.URL,
+		AuthzPub:        h.authzPub,
+		HubTransportPub: h.hubPub,
+		ResolveEnc: func(holderID string) (*[32]byte, bool) {
+			if holderID == h.senderID {
+				return h.senderEncPub, true
+			}
+			return nil, false
+		},
+		Adjudicator: adj,
+		Clock:       func() time.Time { return h.now },
+		Client:      toggleAuthz.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewResponder: %v", err)
+	}
+	srv := httptest.NewServer(r.Handler())
+	t.Cleanup(srv.Close)
+
+	// 1. Submit → pend (authz working).
+	patientRef := "Patient/MBR-UC04"
+	srJSON, _ := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", patientRef)
+	qrPend := priorSurgeryQRForResponder(t, patientRef, h.now)
+	origCorr := "authz-fail-update-orig-1"
+	submitBundle, _ := BuildClaimBundle(qrPend, srJSON, patientRef, "Coverage/MBR-UC04", origCorr, h.now)
+
+	envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", origCorr, submitBundle)
+	resp := postInbound(t, srv, envBytes, hubHdr)
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("submit: status = %d, want 200; body: %s", resp.StatusCode, body)
+	}
+	plaintext := h.openResponse(t, body)
+	pended, _, err := ParsePendedResponse(plaintext)
+	if err != nil || !pended {
+		t.Fatalf("submit did not pend: pended=%v err=%v", pended, err)
+	}
+
+	// 2. Build the complete update bundle (approved path).
+	drJSON, _ := BuildDiagnosticReport("dr-authzfail", patientRef, "72148", "MRI lumbar spine w/o contrast")
+	provJSON, _ := BuildProvenance("DiagnosticReport/dr-authzfail", "Organization/provider", h.now)
+	qrApproved := approvedQRForResponder(t, patientRef, h.now)
+	updateCorr1 := "authz-fail-update-1"
+	updateBundle, err := BuildClaimUpdateBundle(qrApproved, srJSON, drJSON, provJSON,
+		patientRef, "Coverage/MBR-UC04", updateCorr1, origCorr, h.now)
+	if err != nil {
+		t.Fatalf("BuildClaimUpdateBundle: %v", err)
+	}
+
+	// 3. First update attempt: authz is FAILING → expect 502.
+	authzFail = true
+	envBytes2, hubHdr2 := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", updateCorr1, updateBundle)
+	resp2 := postInbound(t, srv, envBytes2, hubHdr2)
+	body2 := readBody(t, resp2)
+	assertError(t, resp2, body2, http.StatusBadGateway, "authorize response leg failed")
+
+	// 4. Second update attempt: authz is WORKING → expect 200 approved.
+	// This proves the claim was RELEASED on the 502 (rollback ran), not stranded.
+	// Before the fix, the claim was finalized inside the handler before authz ran,
+	// so the retry would hit begin() → 409.
+	authzFail = false
+	updateCorr2 := "authz-fail-update-2"
+	updateBundle2, err := BuildClaimUpdateBundle(qrApproved, srJSON, drJSON, provJSON,
+		patientRef, "Coverage/MBR-UC04", updateCorr2, origCorr, h.now)
+	if err != nil {
+		t.Fatalf("BuildClaimUpdateBundle retry: %v", err)
+	}
+	envBytes3, hubHdr3 := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", updateCorr2, updateBundle2)
+	resp3 := postInbound(t, srv, envBytes3, hubHdr3)
+	body3 := readBody(t, resp3)
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("retry update after authz-fail: status = %d, want 200; body: %s", resp3.StatusCode, body3)
+	}
+	plaintext3 := h.openResponse(t, body3)
+	cr, err := ParseClaimResponse(plaintext3)
+	if err != nil {
+		t.Fatalf("ParseClaimResponse retry: %v", err)
+	}
+	if cr.Outcome != "approved" {
+		t.Errorf("retry update outcome = %q, want approved", cr.Outcome)
+	}
+}
+
+// ---- TestResponder_PASSubmit_AuthzFailureLeavesNoPend ----
+
+// TestResponder_PASSubmit_AuthzFailureLeavesNoPend pins the fix for the
+// submit-pend orphan (PR review Finding 1, submit side): when a pended-class
+// submit's authz call fails (502), the ledger record must NOT have been made —
+// commit runs only on success. A subsequent ClaimUpdate referencing that correlation
+// must 409 (no pend exists), proving no orphan was created.
+func TestResponder_PASSubmit_AuthzFailureLeavesNoPend(t *testing.T) {
+	h, responderIdent, _ := newPAHarness(t)
+	adj := &sandboxTestAdjudicator{now: h.now}
+
+	// A permanently failing authz for the submit attempt.
+	failingAuthz := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	t.Cleanup(failingAuthz.Close)
+
+	// Responder wired to the failing authz stub. Uses failingAuthz.Client() so the
+	// transport is from the same server (matches testAuthzServer pattern).
+	rFail, err := NewResponder(ResponderConfig{
+		Identity:        responderIdent,
+		AuthzURL:        failingAuthz.URL,
+		AuthzPub:        h.authzPub,
+		HubTransportPub: h.hubPub,
+		ResolveEnc: func(holderID string) (*[32]byte, bool) {
+			if holderID == h.senderID {
+				return h.senderEncPub, true
+			}
+			return nil, false
+		},
+		Adjudicator: adj,
+		Clock:       func() time.Time { return h.now },
+		Client:      failingAuthz.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewResponder (fail): %v", err)
+	}
+	srvFail := httptest.NewServer(rFail.Handler())
+	t.Cleanup(srvFail.Close)
+
+	// 1. Send a pended-class submit to the failing responder → expect 502.
+	patientRef := "Patient/MBR-UC04"
+	srJSON, _ := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", patientRef)
+	qrPend := priorSurgeryQRForResponder(t, patientRef, h.now)
+	origCorr := "no-pend-orphan-orig-1"
+	submitBundle, _ := BuildClaimBundle(qrPend, srJSON, patientRef, "Coverage/MBR-UC04", origCorr, h.now)
+
+	envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", origCorr, submitBundle)
+	resp := postInbound(t, srvFail, envBytes, hubHdr)
+	body := readBody(t, resp)
+	assertError(t, resp, body, http.StatusBadGateway, "authorize response leg failed")
+
+	// 2. Now send a ClaimUpdate referencing origCorr to a WORKING responder that
+	//    shares the SAME pendedLedger as rFail. Since NewResponder always allocates a
+	//    fresh ledger, we verify via the failing responder itself: a ClaimUpdate on
+	//    the same rFail instance (which would use the same ledger) returns 409 because
+	//    no pend was ever recorded — proving commit was not called on the 502 path.
+	//    Use the working authz harness server for the update token (inbound token only).
+	drJSON, _ := BuildDiagnosticReport("dr-nopend", patientRef, "72148", "MRI")
+	provJSON, _ := BuildProvenance("DiagnosticReport/dr-nopend", "Organization/provider", h.now)
+	qrApproved := approvedQRForResponder(t, patientRef, h.now)
+	updateCorr := "no-pend-orphan-update-1"
+	updateBundle, err := BuildClaimUpdateBundle(qrApproved, srJSON, drJSON, provJSON,
+		patientRef, "Coverage/MBR-UC04", updateCorr, origCorr, h.now)
+	if err != nil {
+		t.Fatalf("BuildClaimUpdateBundle: %v", err)
+	}
+
+	// The update envelope is sent to the failing responder (same ledger). The inbound
+	// token is signed by h.authzPriv (as built by buildForwardEnv), so it passes
+	// VerifyBound. The claim-update handler will hit begin() → false → 409 because no
+	// record was committed during the failed submit.
+	envBytes2, hubHdr2 := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", updateCorr, updateBundle)
+	resp2 := postInbound(t, srvFail, envBytes2, hubHdr2)
+	body2 := readBody(t, resp2)
+	assertError(t, resp2, body2, http.StatusConflict, "ClaimUpdate references no pending claim available for this patient")
+}
+
+// ---- T3 review follow-ups ----
+
+// TestParseClaimBundle_DuplicateClaim: two Claim entries → parse error.
+func TestParseClaimBundle_DuplicateClaim(t *testing.T) {
+	// Build a valid bundle then inject a second Claim entry.
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-dup","status":"completed","subject":{"reference":"Patient/P"}}`)
+	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-dup","status":"active","subject":{"reference":"Patient/P"}}`)
+	bundle, _ := BuildClaimBundle(qr, sr, "Patient/P", "Coverage/P", "corr-dup", time.Now())
+	// Inject a second Claim entry.
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(bundle, &raw)
+	var entries []json.RawMessage
+	_ = json.Unmarshal(raw["entry"], &entries)
+	claimEntry := entries[0] // first entry should be the Claim
+	entries = append(entries, claimEntry)
+	entriesJSON, _ := json.Marshal(entries)
+	raw["entry"] = entriesJSON
+	bundle, _ = json.Marshal(raw)
+
+	_, err := ParseClaimBundle(bundle)
+	if err == nil {
+		t.Fatal("expected error on duplicate Claim, got nil")
+	}
+}
+
+// TestParseClaimBundle_MissingPatientReference: missing patient.reference → parse error,
+// surfaced via the responder as 400 "parse bundle failed".
+func TestParseClaimBundle_MissingPatientReference(t *testing.T) {
+	// Build a bundle where the Claim has no patient.reference.
+	claimNoPatient := []byte(`{"resourceType":"Claim","id":"c1","status":"active","type":{"coding":[{"system":"x","code":"y"}]},"use":"preauthorization","patient":{"reference":""},"created":"2026-06-12T10:00:00Z","insurer":{"reference":"Organization/payer"},"provider":{"reference":"Practitioner/1"},"priority":{"coding":[{"code":"normal"}]},"insurance":[{"sequence":1,"focal":true,"coverage":{"reference":"Coverage/P"}}]}`)
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-np","status":"completed","subject":{"reference":"Patient/P"}}`)
+	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-np","status":"active","subject":{"reference":"Patient/P"}}`)
+	bundle := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":` + string(claimNoPatient) + `},{"resource":` + string(qr) + `},{"resource":` + string(sr) + `}]}`)
+
+	_, err := ParseClaimBundle(bundle)
+	if err == nil {
+		t.Fatal("expected error on missing patient.reference, got nil")
+	}
+}
+
+// TestParseClaimBundle_MissingPatientReference_ViaResponder proves the responder
+// surfaces missing patient.reference as 400 "parse bundle failed".
+func TestParseClaimBundle_MissingPatientReference_ViaResponder(t *testing.T) {
+	h, responderIdent, _ := newPAHarness(t)
+	adj := &sandboxTestAdjudicator{now: h.now}
+	_, srv := h.makeResponderSrv(t, responderIdent, adj)
+
+	claimNoPatient := []byte(`{"resourceType":"Claim","id":"c1","status":"active","type":{"coding":[{"system":"x","code":"y"}]},"use":"preauthorization","patient":{"reference":""},"created":"2026-06-12T10:00:00Z","insurer":{"reference":"Organization/payer"},"provider":{"reference":"Practitioner/1"},"priority":{"coding":[{"code":"normal"}]},"insurance":[{"sequence":1,"focal":true,"coverage":{"reference":"Coverage/P"}}]}`)
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-np2","status":"completed","subject":{"reference":"Patient/P"}}`)
+	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-np2","status":"active","subject":{"reference":"Patient/P"}}`)
+	bundle := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":` + string(claimNoPatient) + `},{"resource":` + string(qr) + `},{"resource":` + string(sr) + `}]}`)
+
+	envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-nopatref-1", bundle)
+	resp := postInbound(t, srv, envBytes, hubHdr)
+	body := readBody(t, resp)
+	assertError(t, resp, body, http.StatusBadRequest, "parse bundle failed")
+}
+
+// TestSandboxAdjudicate_HighDisabilityUnattested: high-disability=true without
+// clinician attestation → PASPended.
+func TestSandboxAdjudicate_HighDisabilityUnattested(t *testing.T) {
+	// Build a QR with high-disability=true but no clinician-attestation extension.
+	qr, _ := json.Marshal(map[string]interface{}{
+		"resourceType": "QuestionnaireResponse",
+		"status":       "completed",
+		"item": []map[string]interface{}{
+			{
+				"linkId": "conservative-therapy-weeks",
+				"answer": []map[string]interface{}{{"valueInteger": 6}},
+			},
+			{
+				"linkId": "high-disability",
+				"answer": []map[string]interface{}{{"valueBoolean": true}},
+			},
+		},
+	})
+	dec, err := SandboxAdjudicate(qr, false, time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("SandboxAdjudicate: %v", err)
+	}
+	if dec.Outcome != PASPended {
+		t.Errorf("Outcome = %v, want PASPended (high-disability unattested)", dec.Outcome)
+	}
+}
+
+// TestSandboxAdjudicate_PatientReportedRequired_Unattested: patient-reported-required=true
+// without patient signature → PASPended.
+func TestSandboxAdjudicate_PatientReportedRequired_Unattested(t *testing.T) {
+	qr, _ := json.Marshal(map[string]interface{}{
+		"resourceType": "QuestionnaireResponse",
+		"status":       "completed",
+		"item": []map[string]interface{}{
+			{
+				"linkId": "conservative-therapy-weeks",
+				"answer": []map[string]interface{}{{"valueInteger": 6}},
+			},
+			{
+				"linkId": "patient-reported-required",
+				"answer": []map[string]interface{}{{"valueBoolean": true}},
+			},
+		},
+	})
+	dec, err := SandboxAdjudicate(qr, false, time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("SandboxAdjudicate: %v", err)
+	}
+	if dec.Outcome != PASPended {
+		t.Errorf("Outcome = %v, want PASPended (patient-reported unattested)", dec.Outcome)
 	}
 }

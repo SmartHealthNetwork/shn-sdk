@@ -1465,14 +1465,22 @@ must conform to it.
 
 ### Changelog
 
+- **2026-06-13 — PA-chain responder available.** `Adjudicator` grows three new methods —
+  `OrderSelect(cpt string) (paRequired bool, questionnaireCanonical string)`,
+  `Questionnaire(canonical string) (questionnaireJSON []byte, ok bool)`, and
+  `PriorAuth(qrJSON []byte, hasDiagnosticReport bool) (PASDecision, error)` — served by
+  `shnsdk.Responder` across four transaction types: `crd-order-select`,
+  `dtr-questionnaire-fetch`, `pas-claim`, `pas-claim-update`. Sandbox helpers:
+  `SandboxLumbarQuestionnaire()`, `SandboxAdjudicate(...)`, `QuestionnaireCanonicalLumbarMRI`,
+  `SandboxUC03Context()`, `SandboxUC03Order()`. The pended-claim ledger is per-process;
+  deployments needing durable pends across replicas front it with their own store. See
+  `docs/SANDBOX.md` §3c for the updated quickstart.
 - **2026-06-12 — Payer responder (eligibility) delivered.** `shnsdk.Responder` is now
   available in the public SDK (`github.com/SmartHealthNetwork/shn-sdk`). It implements
   the full inbound pipeline — `X-Hub-Assertion` verification (§6.2a) first, then authz
   token `VerifyBound`, decryption, `Adjudicator.Eligibility`, and a sealed-and-authorized
   response — for the `coverage-eligibility` transaction type. See `docs/SANDBOX.md` §3c
-  for the quickstart. The CRD/DTR/PAS responder chain (`Adjudicator` methods for CRD
-  cards, DTR questionnaire, PAS adjudication) is landing; the interface is designed for
-  additive growth (existing methods never change).
+  for the quickstart.
 - **2026-06-12 — Inbound transport authentication (`X-Hub-Assertion`).** The Hub
   now signs every forward to `/substrate/inbound` with an `X-Hub-Assertion` header
   (same assertion shape as `X-Holder-Assertion`; `holderId == "hub"`; 2-minute TTL;
@@ -1545,7 +1553,6 @@ must conform to it.
 | Feature | Notes |
 |---|---|
 | **Push-notify on admission** | Hub + authz poll today (~3-second cycle); push-notify is the tracked fast-follow |
-| **Responder PA chain (CRD/DTR/PAS)** | `shnsdk.Responder` eligibility delivered; `Adjudicator` grows CRD/DTR/PAS methods additively (existing methods never change) |
 | **Public/cloud sandbox** | The separated topology on managed infra for external partners to run against without a local stack |
 | **Holder/Hub documentation CapabilityStatements** (FR-37) | Machine-readable capability declarations for provider and Hub roles |
 | **Trust-issued PCI** (AI-5 goal state) | Today: deterministic hash (demo only); goal: unguessable Trust-minted PCI |

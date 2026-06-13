@@ -221,5 +221,79 @@ func dtrQRContextExtensions(qc QRContext) []fhir.Extension {
 	}
 }
 
+// sandboxLumbarQuestionnaireBytes holds the precomputed sandbox UC-03 lumbar-MRI
+// questionnaire bytes. Computed once at package init and served as fresh copies by
+// SandboxLumbarQuestionnaire. The fixture is a fixed, compile-time-known struct, so
+// json.Marshal cannot fail — a failure would be a programmer error and panics (matching
+// the substrate's dtr.QuestionnaireFor panic posture).
+var sandboxLumbarQuestionnaireBytes []byte
+
+func init() {
+	q := fhir.Questionnaire{
+		Id:      strPtr("pa-lumbar-mri"),
+		Url:     strPtr(QuestionnaireCanonicalLumbarMRI),
+		Version: strPtr("1.0.0"),
+		Status:  fhir.PublicationStatusActive,
+		Item: []fhir.QuestionnaireItem{
+			{
+				LinkId: "conservative-therapy-weeks",
+				Type:   fhir.QuestionnaireItemTypeInteger,
+				Text:   strPtr("Weeks of conservative therapy completed"),
+			},
+			{
+				LinkId: "neuro-deficit",
+				Type:   fhir.QuestionnaireItemTypeBoolean,
+				Text:   strPtr("Progressive neurological deficit present?"),
+			},
+			{
+				LinkId: "prior-imaging",
+				Type:   fhir.QuestionnaireItemTypeBoolean,
+				Text:   strPtr("Prior imaging performed?"),
+			},
+			{
+				LinkId: "prior-surgery",
+				Type:   fhir.QuestionnaireItemTypeBoolean,
+				Text:   strPtr("Prior lumbar surgery?"),
+			},
+			{
+				LinkId: "high-disability",
+				Type:   fhir.QuestionnaireItemTypeBoolean,
+				Text:   strPtr("High disability index flag?"),
+			},
+			{
+				// UC-07 trigger flag: when true, the functional-status-oswestry item must
+				// be patient-attested. Absent / false means no patient-authorship leg is
+				// needed (UC-03/04/06 paths are unchanged).
+				LinkId: "patient-reported-required",
+				Type:   fhir.QuestionnaireItemTypeBoolean,
+				Text:   strPtr("Patient-reported functional status required?"),
+			},
+			{
+				LinkId: "functional-status-oswestry",
+				Type:   fhir.QuestionnaireItemTypeText,
+				Text:   strPtr("Oswestry disability index (clinician-attested)"),
+			},
+		},
+	}
+	raw, err := json.Marshal(q)
+	if err != nil {
+		panic("shnsdk: marshal fixed sandbox lumbar questionnaire fixture: " + err.Error())
+	}
+	sandboxLumbarQuestionnaireBytes = raw
+}
+
+// SandboxLumbarQuestionnaire returns the FHIR Questionnaire JSON for the sandbox
+// UC-03 lumbar-MRI PA questionnaire. SANDBOX fixture — exported so reference
+// adjudicators (tests, feedsmoke, the quickstart) can serve the sandbox PA flow; a
+// real payer serves its own questionnaires from its Adjudicator. The bytes are
+// byte-identical to dtr.QuestionnaireFor(crd.QuestionnaireCanonicalLumbarMRI)
+// (proven by test/sdkparity/dtr_parity_test.go). Each call returns a fresh copy so
+// callers may mutate the slice without affecting future calls.
+func SandboxLumbarQuestionnaire() []byte {
+	cp := make([]byte, len(sandboxLumbarQuestionnaireBytes))
+	copy(cp, sandboxLumbarQuestionnaireBytes)
+	return cp
+}
+
 func intPtr(i int) *int    { return &i }
 func boolPtr(b bool) *bool { return &b }

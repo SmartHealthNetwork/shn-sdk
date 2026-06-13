@@ -286,14 +286,9 @@ is the first `processNote`. There is no `preAuthRef` on a denied response.
 
 ---
 
-## 3c. Run a payer responder (eligibility)
+## 3c. Run a payer responder (eligibility + full PA chain)
 
-If you are building a **payer** integration that receives eligibility queries, you can
-stand up a responder endpoint using `shnsdk.Responder`. The responder serves
-`POST /substrate/inbound` with the same pipeline as the substrate's own gateway:
-`X-Hub-Assertion` verification first (before the body is read), then authz token
-verification, decryption, adjudication, and a sealed-and-authorized response —
-all in one call to `responder.Handler()`, minus the runtime FHIR $validate the operator-run gateways perform at their own edges (your response shape is parity-pinned against the substrate builder).
+If you are building a **payer** integration that receives eligibility queries and prior-authorization requests, you can stand up a responder endpoint using `shnsdk.Responder`. The responder serves `POST /substrate/inbound` with the same pipeline as the substrate's own gateway: `X-Hub-Assertion` verification first (before the body is read), then authz token verification, decryption, adjudication, and a sealed-and-authorized response — all in one call to `responder.Handler()`, minus the runtime FHIR $validate the operator-run gateways perform at their own edges (your response shape is parity-pinned against the substrate builder).
 
 **Register a payer-role client:**
 
@@ -331,8 +326,28 @@ import (
 type myAdjudicator struct{}
 
 func (myAdjudicator) Eligibility(memberID string) (bool, string) {
-	// Your adjudication logic. Return (false, "reason") to deny.
-	return true, ""
+	return true, "" // your coverage logic; (false, "reason") to deny
+}
+
+// OrderSelect decides whether a CPT needs prior auth and which questionnaire applies.
+func (myAdjudicator) OrderSelect(cpt string) (bool, string) {
+	if cpt == "72148" { // lumbar-spine MRI — the sandbox UC-03 order
+		return true, shnsdk.QuestionnaireCanonicalLumbarMRI
+	}
+	return false, ""
+}
+
+// Questionnaire returns the FHIR Questionnaire for a canonical you advertise.
+func (myAdjudicator) Questionnaire(canonical string) ([]byte, bool) {
+	if canonical == shnsdk.QuestionnaireCanonicalLumbarMRI {
+		return shnsdk.SandboxLumbarQuestionnaire(), true // serve your own in production
+	}
+	return nil, false
+}
+
+// PriorAuth adjudicates a PAS submission (and ClaimUpdate re-adjudication).
+func (myAdjudicator) PriorAuth(qrJSON []byte, hasDiagnosticReport bool) (shnsdk.PASDecision, error) {
+	return shnsdk.SandboxAdjudicate(qrJSON, hasDiagnosticReport, time.Now(), nil) // replace with your policy
 }
 
 func main() {
@@ -418,13 +433,11 @@ The example listens on plain HTTP — in deployment, terminate TLS in front of i
 > You derive `encPub` from `encPriv` via `curve25519.ScalarBaseMult`, or read it directly
 > from `manifest.json "encPub"`. A public `LoadIdentity` is on the tracked list.
 
-**Supported operations today:** `coverage-eligibility` (UC-01). The `Adjudicator`
-interface carries one method — `Eligibility(memberID string) (covered bool, reason string)`.
-
-> **CRD/DTR/PAS responder chain is landing — do not build against it yet.** The
-> `Adjudicator` interface will grow new methods (CRD cards, DTR questionnaire, PAS
-> adjudication) additively; existing methods never change. Watch
-> `docs/PARTICIPANT_PROTOCOL.md` §9 changelog.
+**Supported operations today:** all five transaction types — `coverage-eligibility`,
+`crd-order-select`, `dtr-questionnaire-fetch`, `pas-claim`, `pas-claim-update` — handled
+by the four-method `Adjudicator` interface above. The pended-claim ledger is per-process:
+if your deployment needs durable pends across restarts or replicas, front the responder
+with your own store keyed on the `preAuthRef` the adjudicator returns.
 
 The Hub verifies that your baseURL endpoint serves `POST /substrate/inbound` and sends
 an `X-Hub-Assertion` header on every forward (see `PARTICIPANT_PROTOCOL.md` §6.2a).
@@ -478,5 +491,6 @@ Run a single persona with `--persona MBR-COVERED`.
   (`shnsdk.Identity.RunEligibility`, envelope crypto, FHIR helpers). See its README.
 - **Integration options:** run the SHN Smart Gateway binary, or implement the wire
   contract natively — `docs/PARTICIPANT_PROTOCOL.md` §6 covers both surfaces.
-- **Payer responder:** if you receive eligibility queries, see §3c above for the
-  `shnsdk.Responder` quickstart (eligibility available; CRD/DTR/PAS chain is landing).
+- **Payer responder:** if you receive eligibility queries or prior-authorization requests,
+  see §3c above for the `shnsdk.Responder` quickstart (full PA chain available:
+  eligibility + CRD/DTR/PAS prior-auth).

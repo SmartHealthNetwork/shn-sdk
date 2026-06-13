@@ -5,6 +5,87 @@ import (
 	"testing"
 )
 
+// TestParseOrderSelectRequest_RoundTrip verifies that ParseOrderSelectRequest
+// recovers the patientID, draft-order SR, and Coverage from BuildOrderSelectRequest
+// output.
+func TestParseOrderSelectRequest_RoundTrip(t *testing.T) {
+	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-1"}`)
+	cov := []byte(`{"resourceType":"Coverage","id":"cov-1"}`)
+	const patientRef = "Patient/MBR-COVERED"
+
+	b, err := BuildOrderSelectRequest(sr, cov, patientRef)
+	if err != nil {
+		t.Fatalf("BuildOrderSelectRequest: %v", err)
+	}
+	req, err := ParseOrderSelectRequest(b)
+	if err != nil {
+		t.Fatalf("ParseOrderSelectRequest: %v", err)
+	}
+	if req.Hook != "order-select" {
+		t.Errorf("hook = %q, want order-select", req.Hook)
+	}
+	if req.Context.PatientID != patientRef {
+		t.Errorf("patientId = %q, want %q", req.Context.PatientID, patientRef)
+	}
+	if len(req.Context.DraftOrders) != 1 {
+		t.Fatalf("draftOrders len = %d, want 1", len(req.Context.DraftOrders))
+	}
+	if string(req.Context.DraftOrders[0]) != string(sr) {
+		t.Errorf("draftOrders[0] = %s, want %s", req.Context.DraftOrders[0], sr)
+	}
+	if string(req.Prefetch.Coverage) != string(cov) {
+		t.Errorf("prefetch.coverage = %s, want %s", req.Prefetch.Coverage, cov)
+	}
+}
+
+// TestParseOrderSelectRequest_Rejects verifies the two invalid inputs are rejected.
+func TestParseOrderSelectRequest_Rejects(t *testing.T) {
+	// Empty draft orders.
+	if _, err := ParseOrderSelectRequest([]byte(`{"hook":"order-select","context":{"patientId":"p","draftOrders":[]},"prefetch":{"coverage":{}}}`)); err == nil {
+		t.Error("ParseOrderSelectRequest should reject empty draftOrders")
+	}
+	// Garbage JSON.
+	if _, err := ParseOrderSelectRequest([]byte(`not json`)); err == nil {
+		t.Error("ParseOrderSelectRequest should reject garbage JSON")
+	}
+	// Wrong hook.
+	if _, err := ParseOrderSelectRequest([]byte(`{"hook":"appointment-book","context":{"patientId":"p","draftOrders":[{}]},"prefetch":{"coverage":{}}}`)); err == nil {
+		t.Error("ParseOrderSelectRequest should reject wrong hook")
+	}
+}
+
+// TestBuildCards covers the PA-required and no-PA branches, and verifies that
+// ParseCards round-trips each branch correctly.
+func TestBuildCards(t *testing.T) {
+	const canon = QuestionnaireCanonicalLumbarMRI
+
+	// PA-required branch.
+	b, err := BuildCards(true, canon)
+	if err != nil {
+		t.Fatalf("BuildCards(true): %v", err)
+	}
+	pa, gotCanon, err := ParseCards(b)
+	if err != nil {
+		t.Fatalf("ParseCards(pa-required): %v", err)
+	}
+	if !pa || gotCanon != canon {
+		t.Errorf("pa-required round-trip = (%v,%q), want (true,%q)", pa, gotCanon, canon)
+	}
+
+	// No-PA branch.
+	b, err = BuildCards(false, "")
+	if err != nil {
+		t.Fatalf("BuildCards(false): %v", err)
+	}
+	pa, gotCanon, err = ParseCards(b)
+	if err != nil {
+		t.Fatalf("ParseCards(no-pa): %v", err)
+	}
+	if pa || gotCanon != "" {
+		t.Errorf("no-pa round-trip = (%v,%q), want (false,\"\")", pa, gotCanon)
+	}
+}
+
 // TestBuildOrderSelectRequest_Shape verifies the CRD order-select request carries the
 // fixed hook, the patientId + the ServiceRequest as the sole draft order, and the
 // Coverage in prefetch — embedded VERBATIM (FR-14 minimum-necessary).
@@ -42,6 +123,69 @@ func TestBuildOrderSelectRequest_Shape(t *testing.T) {
 	}
 	if string(got.Prefetch.Coverage) != string(cov) {
 		t.Errorf("prefetch.coverage = %s, want %s", got.Prefetch.Coverage, cov)
+	}
+}
+
+// TestParseServiceRequestCPT verifies that ParseServiceRequestCPT extracts the CPT
+// code from BuildServiceRequest output and rejects wrong resourceType.
+func TestParseServiceRequestCPT(t *testing.T) {
+	const cpt = "72148"
+	sr, err := BuildServiceRequest(cpt, "MRI lumbar spine w/o contrast", "M51.16", "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	got, err := ParseServiceRequestCPT(sr)
+	if err != nil {
+		t.Fatalf("ParseServiceRequestCPT: %v", err)
+	}
+	if got != cpt {
+		t.Errorf("CPT = %q, want %q", got, cpt)
+	}
+	// Wrong resourceType.
+	if _, err := ParseServiceRequestCPT([]byte(`{"resourceType":"Coverage"}`)); err == nil {
+		t.Error("ParseServiceRequestCPT should reject wrong resourceType")
+	}
+}
+
+// TestParseServiceRequestSubject verifies that ParseServiceRequestSubject extracts
+// the subject reference from BuildServiceRequest output and rejects wrong resourceType.
+func TestParseServiceRequestSubject(t *testing.T) {
+	const patientRef = "Patient/MBR-COVERED"
+	sr, err := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", patientRef)
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	got, err := ParseServiceRequestSubject(sr)
+	if err != nil {
+		t.Fatalf("ParseServiceRequestSubject: %v", err)
+	}
+	if got != patientRef {
+		t.Errorf("subject = %q, want %q", got, patientRef)
+	}
+	// Wrong resourceType.
+	if _, err := ParseServiceRequestSubject([]byte(`{"resourceType":"Coverage","subject":{"reference":"Patient/X"}}`)); err == nil {
+		t.Error("ParseServiceRequestSubject should reject wrong resourceType")
+	}
+}
+
+// TestParseCoverageBeneficiary verifies that ParseCoverageBeneficiary extracts the
+// beneficiary reference from BuildCoverage output and rejects wrong resourceType.
+func TestParseCoverageBeneficiary(t *testing.T) {
+	const patientRef = "Patient/MBR-COVERED"
+	cov, err := BuildCoverage(patientRef, "Coverage/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildCoverage: %v", err)
+	}
+	got, err := ParseCoverageBeneficiary(cov)
+	if err != nil {
+		t.Fatalf("ParseCoverageBeneficiary: %v", err)
+	}
+	if got != patientRef {
+		t.Errorf("beneficiary = %q, want %q", got, patientRef)
+	}
+	// Wrong resourceType.
+	if _, err := ParseCoverageBeneficiary([]byte(`{"resourceType":"ServiceRequest","beneficiary":{"reference":"Patient/X"}}`)); err == nil {
+		t.Error("ParseCoverageBeneficiary should reject wrong resourceType")
 	}
 }
 

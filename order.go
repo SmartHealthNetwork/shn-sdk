@@ -2,6 +2,7 @@ package shnsdk
 
 import (
 	"encoding/json"
+	"fmt"
 
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
@@ -95,4 +96,87 @@ func BuildCoverage(patientRef, coverageRef string) ([]byte, error) {
 	}
 	// fhir.Coverage's MarshalJSON injects resourceType itself.
 	return json.Marshal(cov)
+}
+
+// ParseServiceRequestCPT extracts the CPT code from a ServiceRequest JSON
+// (code.coding[0] with system http://www.ama-assn.org/go/cpt).
+// It errors if the resourceType is not ServiceRequest or the CPT coding is absent.
+// PORTED standalone from internal/fhirmap.ParseServiceRequestCPT; byte/behavior parity
+// proven by test/sdkparity/crd_parity_test.go.
+func ParseServiceRequestCPT(data []byte) (string, error) {
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return "", err
+	}
+	if probe.ResourceType != "ServiceRequest" {
+		return "", fmt.Errorf("shnsdk: expected ServiceRequest, got %q", probe.ResourceType)
+	}
+
+	var sr fhir.ServiceRequest
+	if err := json.Unmarshal(data, &sr); err != nil {
+		return "", err
+	}
+	if sr.Code == nil || len(sr.Code.Coding) == 0 {
+		return "", fmt.Errorf("shnsdk: ServiceRequest missing code.coding")
+	}
+	for _, c := range sr.Code.Coding {
+		if c.System != nil && *c.System == systemCPT {
+			if c.Code != nil {
+				return *c.Code, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("shnsdk: ServiceRequest has no CPT coding (system %q)", systemCPT)
+}
+
+// ParseServiceRequestSubject extracts subject.reference from a ServiceRequest JSON
+// (e.g. "Patient/MBR-COVERED"). It errors if the resourceType is not ServiceRequest
+// or the subject reference is absent. Used to bind the token subject to the
+// order-select patient (H2). PORTED standalone from
+// internal/fhirmap.ParseServiceRequestSubject; behavior parity proven by
+// test/sdkparity/crd_parity_test.go.
+func ParseServiceRequestSubject(data []byte) (string, error) {
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+		Subject      struct {
+			Reference string `json:"reference"`
+		} `json:"subject"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return "", err
+	}
+	if probe.ResourceType != "ServiceRequest" {
+		return "", fmt.Errorf("shnsdk: expected ServiceRequest, got %q", probe.ResourceType)
+	}
+	if probe.Subject.Reference == "" {
+		return "", fmt.Errorf("shnsdk: ServiceRequest missing subject.reference")
+	}
+	return probe.Subject.Reference, nil
+}
+
+// ParseCoverageBeneficiary extracts beneficiary.reference from a Coverage JSON
+// (e.g. "Patient/MBR-COVERED"). It errors if the resourceType is not Coverage or
+// the beneficiary reference is absent. Used to bind the token subject to the
+// order-select patient (H2). PORTED standalone from
+// internal/fhirmap.ParseCoverageBeneficiary; behavior parity proven by
+// test/sdkparity/crd_parity_test.go.
+func ParseCoverageBeneficiary(data []byte) (string, error) {
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+		Beneficiary  struct {
+			Reference string `json:"reference"`
+		} `json:"beneficiary"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return "", err
+	}
+	if probe.ResourceType != "Coverage" {
+		return "", fmt.Errorf("shnsdk: expected Coverage, got %q", probe.ResourceType)
+	}
+	if probe.Beneficiary.Reference == "" {
+		return "", fmt.Errorf("shnsdk: Coverage missing beneficiary.reference")
+	}
+	return probe.Beneficiary.Reference, nil
 }
