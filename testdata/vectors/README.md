@@ -25,21 +25,21 @@ Every vector is minted under a single fixed clock: **`2026-06-04T00:00:00Z`**.
 | File | Kind | What the SDK does |
 |---|---|---|
 | `cer.json` | **REPRODUCE** | `shnsdk.BuildEligibilityRequest("MBR-COVERED","1234567890",clock)` rebuilds it byte-for-byte. |
-| `order-select.json` | **REPRODUCE** | `shnsdk.BuildOrderSelectRequest(sr, coverage, "Patient/MBR-COVERED")` rebuilds it byte-for-byte from the SR + Coverage input vectors below (the UC-03 / MBR-COVERED CRD inputs). |
+| `order-select.json` | **REPRODUCE** | `shnsdk.BuildOrderSelectRequest(sr, coverage, "Patient/MBR-COVERED")` rebuilds it byte-for-byte from the SR + Coverage input vectors below (the MBR-COVERED CRD inputs for the prior-auth flow). |
 | `order-select-sr.json` | INPUT | The lumbar-MRI `ServiceRequest` (CPT 72148) fed into `BuildOrderSelectRequest`. The SDK can't build it (fhirmap is substrate-only), so it ships as an input. |
 | `order-select-coverage.json` | INPUT | The member `Coverage` fed into `BuildOrderSelectRequest`. |
 | `crd-cards-pa.json` | CONSUME | `shnsdk.ParseCards` → `(true, "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri")` — the PA-required cards response for 72148. |
-| `questionnaire.json` | INPUT | The payer's sandbox UC-03 lumbar-MRI DTR `Questionnaire` fed into `shnsdk.FillQuestionnaire`. The SDK can't build the payer fixture (it's substrate-only), so it ships as an input. |
+| `questionnaire.json` | INPUT | The payer's sandbox lumbar-MRI DTR `Questionnaire` fed into `shnsdk.FillQuestionnaire`. The SDK can't build the payer fixture (it's substrate-only), so it ships as an input. |
 | `questionnaireresponse.json` | **REPRODUCE** | `shnsdk.FillQuestionnaire(questionnaire, cc, qc)` rebuilds it byte-for-byte from `questionnaire.json` + the MBR-COVERED `ClinicalContext`/`QRContext` (`authored` injected from the fixed clock). |
 | `claim-bundle.json` | **REPRODUCE** | `shnsdk.BuildClaimBundle(qr, sr, "Patient/MBR-COVERED", "Coverage/MBR-COVERED", "golden-corr", clock)` rebuilds it byte-for-byte from `questionnaireresponse.json` + `order-select-sr.json` (the PAS submit Bundle: Claim+QR+SR; the injected clock drives the bundle id/timestamp). |
 | `claimresponse-approved.json` | CONSUME | `shnsdk.ParseClaimResponse` → `PriorAuthResult{Outcome:"approved", PreAuthRef:"PA-0123456789ab", ValidUntil:"2026-09-02"}`. |
 | `diagnosticreport-uc04.json` | **REPRODUCE** | `shnsdk.BuildDiagnosticReport("dr-uc04-operative","Patient/MBR-UC04","72148","MRI lumbar spine w/o contrast")` rebuilds it byte-for-byte (no clock dependency — the effectiveDate is fixed). Also an input to `claimupdate-bundle-uc04.json`. |
 | `provenance-uc04.json` | **REPRODUCE** | `shnsdk.BuildProvenance("DiagnosticReport/dr-uc04-operative","Organization/provider",clock)` rebuilds it byte-for-byte under `vecClock`. Also an input to `claimupdate-bundle-uc04.json`. |
-| `servicerequest-uc04.json` | INPUT | The UC-04 lumbar-MRI `ServiceRequest` (CPT 72148, patient `MBR-UC04`) fed into `BuildClaimUpdateBundle`. |
-| `questionnaireresponse-uc04.json` | INPUT | UC-04 filled QR (prior-surgery context: `PriorSurgery=true`, 6 weeks conservative therapy) fed into `BuildClaimUpdateBundle`. |
+| `servicerequest-uc04.json` | INPUT | The pended→amend lumbar-MRI `ServiceRequest` (CPT 72148, patient `MBR-UC04`) fed into `BuildClaimUpdateBundle`. |
+| `questionnaireresponse-uc04.json` | INPUT | Pended→amend filled QR (prior-surgery context: `PriorSurgery=true`, 6 weeks conservative therapy) fed into `BuildClaimUpdateBundle`. |
 | `claimupdate-bundle-uc04.json` | **REPRODUCE** | `shnsdk.BuildClaimUpdateBundle(qr, sr, dr, prov, "Patient/MBR-UC04", "Coverage/MBR-UC04", "golden-corr-update", "golden-corr", clock)` rebuilds it byte-for-byte from the four input vectors above. |
-| `claimresponse-pended.json` | CONSUME | `shnsdk.ParsePendedResponse` → `(pended=true, needed=[{Code:"operative-diagnostic-report"}])`. UC-04 payer response requesting supplemental data. |
-| `claimresponse-denied-uc08.json` | CONSUME | `shnsdk.ParseClaimResponse` → `PriorAuthResult{Outcome:"denied", Denial:{ReasonCode:"A3", Rationale:"…"}}`. UC-08 denial with reviewAction A3 (Not Certified). |
+| `claimresponse-pended.json` | CONSUME | `shnsdk.ParsePendedResponse` → `(pended=true, needed=[{Code:"operative-diagnostic-report"}])`. Payer response requesting supplemental data (pended outcome). |
+| `claimresponse-denied-uc08.json` | CONSUME | `shnsdk.ParseClaimResponse` → `PriorAuthResult{Outcome:"denied", Denial:{ReasonCode:"A3", Rationale:"…"}}`. Denied prior-auth with reviewAction A3 (Not Certified). |
 | `crr-covered.json` | CONSUME | `shnsdk.ParseEligibilityResponse` → `(true, "")`. |
 | `crr-notcovered.json` | CONSUME | `shnsdk.ParseEligibilityResponse` → `(false, "coverage-terminated")`. |
 | `token.json` | CONSUME / VERIFY | `shnsdk.VerifyBound` accepts it (signed by `authz_pub.b64`) bound to `payer-coverage` / `eligibility-response` / `vec-corr-1` / `payer` / `pci:deadbeef…` / a fixed 64-hex `payloadHash` (AI-2). The SDK never mints tokens. |

@@ -49,10 +49,10 @@ type PASDecision struct {
 // subjectless QR.
 //
 // HasDiagnosticReport / DiagnosticReportJSON are set when the bundle includes
-// a DiagnosticReport (UC-04 update bundles). ProvenanceJSON is set when the
-// bundle includes a Provenance (FR-32). RelatedClaim is
-// Claim.related[0].claim.identifier.value (non-empty for update bundles; empty
-// for initial submit bundles). Partial D3.
+// a DiagnosticReport (prior-auth update bundles carrying supplemental evidence).
+// ProvenanceJSON is set when the bundle includes a Provenance (FR-32).
+// RelatedClaim is Claim.related[0].claim.identifier.value (non-empty for update
+// bundles; empty for initial submit bundles).
 //
 // PORTED-standalone: internal/pas.ClaimBundle (:161–187).
 type ClaimBundle struct {
@@ -263,9 +263,9 @@ func ParseClaimBundle(data []byte) (ClaimBundle, error) {
 	return b, nil
 }
 
-// SandboxAdjudicate applies the UC-03/04/06/07 sandbox adjudication rules to
-// the QR. hasDiagnosticReport reports whether the bundle carried an operative
-// DiagnosticReport (R1). Returns a PASDecision with the outcome and — on
+// SandboxAdjudicate applies the sandbox adjudication rules to the QR.
+// hasDiagnosticReport reports whether the bundle carried an operative
+// DiagnosticReport. Returns a PASDecision with the outcome and — on
 // Approved — a generated preAuthRef + validUntil. randSource seeds the auth
 // number (nil → crypto/rand, matching the nil-safe internal default).
 //
@@ -285,10 +285,9 @@ func SandboxAdjudicate(qrJSON []byte, hasDiagnosticReport bool, now time.Time, r
 	if highDisability && !attested {
 		return PASDecision{Outcome: PASPended, NeededItems: []string{"clinician-attested-functional-status"}}, nil
 	}
-	// R3 (UC-07): patient-reported functional status requires a patient Author's
-	// Signature attestation (FR-27). The FIRST submit (no patient signature,
-	// auto-filled item) pends; the ClaimUpdate (with the patient-attested item
-	// from the PHG) approves.
+	// R3: patient-reported functional status requires a patient Author's Signature
+	// attestation (FR-27). The FIRST submit (no patient signature, auto-filled item)
+	// pends; the ClaimUpdate (with the patient-attested item from the PHG) approves.
 	if patientReportedRequired && !patientAttested {
 		return PASDecision{Outcome: PASPended, NeededItems: []string{"patient-reported-functional-status"}}, nil
 	}

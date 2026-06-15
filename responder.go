@@ -56,7 +56,7 @@ type ResponderConfig struct {
 // synchronously.
 type Responder struct {
 	cfg    ResponderConfig
-	jti    *jtiGuard
+	jti    *ReplayGuard
 	ledger *pendedLedger
 }
 
@@ -109,7 +109,7 @@ func NewResponder(cfg ResponderConfig) (*Responder, error) {
 	if cfg.Client == nil {
 		cfg.Client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Responder{cfg: cfg, jti: newJTIGuard(MaxAssertionTTL, 1<<16), ledger: newPendedLedger()}, nil
+	return &Responder{cfg: cfg, jti: NewReplayGuard(MaxAssertionTTL, 1<<16), ledger: newPendedLedger()}, nil
 }
 
 // Handler returns a ServeMux with exactly POST /substrate/inbound wired to
@@ -193,8 +193,8 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// 3. Metadata guards: require binding-critical fields before trusting them
-	//    (mirrors gateway.go S1: empty frame/corr would skip VerifyBound's binding
-	//    checks and produce audit records with empty correlation).
+	//    (empty frame/corr would skip VerifyBound's binding checks and produce
+	//    audit records with empty correlation).
 	if env.Metadata.AuthorityFrame == "" {
 		respondErr(w, http.StatusBadRequest, "missing authority frame")
 		return

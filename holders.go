@@ -13,6 +13,7 @@ import (
 
 // Holder is one row of the public registrar /holders feed — wire-identical to
 // the substrate's registration DTO (id/role/encPub/signPub/baseURL, std base64).
+// For the decoded, in-memory runtime peer-cache entry (keys as usable values, no JSON tags) see RegistryEntry.
 type Holder struct {
 	ID      string `json:"id"`
 	Role    string `json:"role"`

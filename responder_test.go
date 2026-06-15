@@ -34,7 +34,7 @@ func testAuthzServer(t *testing.T, signPriv ed25519.PrivateKey, now time.Time) *
 		holderID := "unknown"
 		if hdrVal := r.Header.Get("X-Holder-Assertion"); hdrVal != "" {
 			if raw, err := base64.StdEncoding.DecodeString(hdrVal); err == nil {
-				var a assertion
+				var a Assertion
 				if err := json.Unmarshal(raw, &a); err == nil {
 					holderID = a.HolderID
 				}
@@ -1355,7 +1355,7 @@ func TestResponder_PASSubmit(t *testing.T) {
 	const patientRef = "Patient/MBR-COVERED"
 	srJSON, _ := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", patientRef)
 
-	t.Run("approved (UC-03 QR + hasDR bundle) → ClaimResponse approved", func(t *testing.T) {
+	t.Run("approved (autofilled QR + hasDR bundle) → ClaimResponse approved", func(t *testing.T) {
 		qrJSON := approvedQRForResponder(t, patientRef, h.now)
 		// Build a bundle with a DiagnosticReport so hasDR=true.
 		drJSON, err := BuildDiagnosticReport("dr-test-1", patientRef, "72148", "MRI lumbar spine")
@@ -1774,7 +1774,7 @@ func TestResponder_PASUpdate_AuthzFailureReleasesClaim(t *testing.T) {
 		holderID := "unknown"
 		if hdrVal := r.Header.Get("X-Holder-Assertion"); hdrVal != "" {
 			if raw, err2 := base64.StdEncoding.DecodeString(hdrVal); err2 == nil {
-				var a assertion
+				var a Assertion
 				if err2 := json.Unmarshal(raw, &a); err2 == nil {
 					holderID = a.HolderID
 				}

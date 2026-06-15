@@ -37,7 +37,7 @@ type Payer struct {
 	AuthzPub ed25519.PublicKey
 }
 
-// RunEligibility runs one UC-01 eligibility round-trip through the substrate and
+// RunEligibility runs one coverage-eligibility round-trip through the substrate and
 // returns coverage. It is the SDK port of the reference originate flow
 // (tools/sampleparticipant): resolve PCI → build CoverageEligibilityRequest →
 // random correlation id → Authorize the request leg → Seal+Encode the envelope →
@@ -50,7 +50,7 @@ type Payer struct {
 // fixed-clock substrate inject Identity.Clock so assertions/tokens fall inside the
 // substrate's ~5m skew window; real participants leave it nil.
 //
-// UC-01 wire values (ported from sampleparticipant, verified against the substrate):
+// Wire values (ported from sampleparticipant, verified against the substrate):
 //
 //	envelope TransactionType: "coverage-eligibility"
 //	request  frame/op:        "provider-tpo" / "eligibility-inquiry"

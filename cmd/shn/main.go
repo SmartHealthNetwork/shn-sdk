@@ -4,8 +4,8 @@
 //
 //	shn keygen       — generate signing+encryption keys and a public manifest snippet
 //	shn register     — build a proof-of-possession registration and POST it to a registrar
-//	shn eligibility  — run a UC-01 coverage-eligibility round-trip through the Hub
-//	shn priorauth    — run a UC-03 prior-authorization (CRD→DTR→PAS) through the Hub
+//	shn eligibility  — run a coverage-eligibility round-trip through the Hub
+//	shn priorauth    — run a prior-authorization (CRD→DTR→PAS) through the Hub
 //	shn login        — authenticate the CLI to the Accounts service (OAuth loopback-PKCE)
 package main
 
@@ -95,7 +95,7 @@ commands:
   keygen        generate signing+encryption keys and a public manifest snippet
   register      register a holder: --accounts (Accounts service) or --registrar (operator)
   eligibility   run a coverage-eligibility round-trip through the Hub
-  priorauth     run a UC-03 prior-authorization (CRD→DTR→PAS) through the Hub
+  priorauth     run a prior-authorization (CRD→DTR→PAS) through the Hub
   login         authenticate the CLI to the Accounts service (OAuth loopback-PKCE)
   clients       list your registered clients (Accounts service)
   revoke        revoke a client by id (Accounts service)
@@ -325,7 +325,7 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// cmdEligibility implements `shn eligibility`: run a UC-01 coverage-eligibility
+// cmdEligibility implements `shn eligibility`: run a coverage-eligibility
 // round-trip through the Hub via shnsdk.Identity.RunEligibility and print coverage.
 func cmdEligibility(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("eligibility", flag.ContinueOnError)

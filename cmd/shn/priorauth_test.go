@@ -10,7 +10,7 @@ import (
 
 // TestPriorAuth_Approved drives `shn priorauth` against the fake sandbox (reusing the
 // doctor fake, now extended with the three PA legs): it resolves Payer+Endpoints from
-// the discovery descriptor and runs the UC-03 MBR-COVERED→approved path, printing the
+// the discovery descriptor and runs the MBR-COVERED→approved prior-auth path, printing the
 // outcome.
 func TestPriorAuth_Approved(t *testing.T) {
 	f, devID, dir := newFakeSandbox(t)

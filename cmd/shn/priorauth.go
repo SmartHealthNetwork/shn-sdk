@@ -175,8 +175,8 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 }
 
 // cmdPriorAuthResume implements `shn priorauth resume`: load a resume handle, run the
-// UC-04 ClaimUpdate, print the resumed outcome. --sandbox-supplemental supplies the
-// SDK's SandboxUC04Report; otherwise the supplemental facts come from flags.
+// pended→amend ClaimUpdate, print the resumed outcome. --sandbox-supplemental supplies
+// the SDK's SandboxUC04Report; otherwise the supplemental facts come from flags.
 func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("priorauth resume", flag.ContinueOnError)
 	fs.SetOutput(stderr)

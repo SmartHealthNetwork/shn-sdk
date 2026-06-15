@@ -18,13 +18,13 @@ func newTestIdentity(t *testing.T) Identity {
 }
 
 // decodeAssertion base64-decodes the header value back to the wire struct.
-func decodeAssertion(t *testing.T, hdr string) assertion {
+func decodeAssertion(t *testing.T, hdr string) Assertion {
 	t.Helper()
 	raw, err := base64.StdEncoding.DecodeString(hdr)
 	if err != nil {
 		t.Fatalf("base64 decode header: %v", err)
 	}
-	var a assertion
+	var a Assertion
 	if err := json.Unmarshal(raw, &a); err != nil {
 		t.Fatalf("unmarshal assertion: %v", err)
 	}

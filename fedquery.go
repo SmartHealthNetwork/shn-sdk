@@ -1,6 +1,7 @@
-// Package shnsdk — fedquery builds and parses the UC-05 federated-query messages: a
-// narrow FHIR Parameters request (named patient + resource types, NO bulk export) and a
-// searchset Bundle response carrying only the named records (FR-24/FR-26, AI-1).
+// Package shnsdk — fedquery builds and parses the federated-query messages used in
+// prior auth with external supplemental evidence: a narrow FHIR Parameters request
+// (named patient + resource types, NO bulk export) and a searchset Bundle response
+// carrying only the named records (FR-24/FR-26, AI-1).
 package shnsdk
 
 import (

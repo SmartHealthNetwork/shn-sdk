@@ -56,8 +56,9 @@ type DiscoveryPersona struct {
 	// additive-change precedent — see internal/accountsvc/discovery.go for the producer.
 	ExpectedPriorAuth string `json:"expectedPriorAuth"` // "approved"|"pended"|"denied"|"" (n/a)
 	// ExpectedAfterAmend tells doctor the outcome to expect AFTER resuming a pended PA
-	// (UC-04): "approved" for a pended persona whose resume completes, "" = no resume
-	// stage. ADDITIVE optional field (an older consumer safely ignores it) ⇒ does NOT
-	// bump wireProtocolVersion. Producer: internal/accountsvc/discovery.go.
+	// (prior auth with local supplemental evidence): "approved" for a pended persona
+	// whose resume completes, "" = no resume stage. ADDITIVE optional field (an older
+	// consumer safely ignores it) ⇒ does NOT bump wireProtocolVersion.
+	// Producer: internal/accountsvc/discovery.go.
 	ExpectedAfterAmend string `json:"expectedAfterAmend"` // "approved" | "" (n/a)
 }

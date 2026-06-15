@@ -18,12 +18,12 @@ const (
 	// Mirrors internal/fhirmap.systemUSCoreDocClass (documentreference.go).
 	systemUSCoreDocClass = "http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category"
 
-	// docRefDateUC05 is the fixed instant for the UC-05 operative DocumentReference
-	// (matches the operative DiagnosticReport effectiveDateTime date — 2026-05-15).
-	// FHIR DocumentReference.date is an instant type, so a full ISO 8601 timestamp is
-	// required. recordClinicalDate truncates to YYYY-MM-DD for InRange comparison
-	// (FR-24). Fixed value keeps the golden byte-deterministic (FR-35/FR-39).
-	// Mirrors internal/fhirmap.docRefDateUC05 (documentreference.go).
+	// docRefDateUC05 is the fixed instant for the operative DocumentReference
+	// disclosed by the external facility (matches the operative DiagnosticReport
+	// effectiveDateTime date — 2026-05-15). FHIR DocumentReference.date is an instant
+	// type, so a full ISO 8601 timestamp is required. recordClinicalDate truncates to
+	// YYYY-MM-DD for InRange comparison (FR-24). Fixed value keeps the golden
+	// byte-deterministic (FR-35/FR-39). Mirrors internal/fhirmap.docRefDateUC05.
 	docRefDateUC05 = "2026-05-15T00:00:00Z"
 
 	// systemCARC is the X12 Claim Adjustment Reason Codes system (PDex PPA denial
@@ -104,8 +104,9 @@ func ParseEligibilityResponse(b []byte) (covered bool, reason string, err error)
 }
 
 // BuildEligibilityResponse constructs a FHIR R4 CoverageEligibilityResponse for the
-// payer side of UC-01. When covered, insurance is in force; when not covered, inforce
-// is false and reason is carried in the disposition. PORTED standalone from
+// payer side of a coverage-eligibility check. When covered, insurance is in force;
+// when not covered, inforce is false and reason is carried in the disposition.
+// PORTED standalone from
 // internal/fhirmap.BuildEligibilityResponse with identical field shapes — proven by
 // the cross-module parity test (test/sdkparity/fhir_parity_test.go).
 //
@@ -167,15 +168,16 @@ const (
 	profileUSCoreDiagnosticReportNote = "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
 	// systemV2DiagnosticService — HL7 v2-0074 code system for the required category.
 	systemV2DiagnosticService = "http://terminology.hl7.org/CodeSystem/v2-0074"
-	// effectiveDateUC04 — fixed effective date for UC-04 supplemental DiagnosticReports
+	// effectiveDateUC04 — fixed effective date for supplemental DiagnosticReports
 	// (deterministic across runs; no clock). Mirrors internal/fhirmap.effectiveDateUC04.
 	effectiveDateUC04 = "2026-05-15"
 )
 
-// BuildDiagnosticReport builds a US Core DiagnosticReport (Note profile) for the UC-04
-// supplemental operative report (FR-32). Reimplements internal/fhirmap.BuildDiagnosticReport
-// standalone; test/sdkparity asserts byte-identity. systemCPT is the package const from
-// order.go. Fixed effectiveDateTime ⇒ deterministic (no clock).
+// BuildDiagnosticReport builds a US Core DiagnosticReport (Note profile) for the
+// supplemental operative report attached to a pended prior-auth amendment (FR-32).
+// Reimplements internal/fhirmap.BuildDiagnosticReport standalone; test/sdkparity
+// asserts byte-identity. systemCPT is the package const from order.go.
+// Fixed effectiveDateTime ⇒ deterministic (no clock).
 func BuildDiagnosticReport(id, patientRef, cptCode, display string) ([]byte, error) {
 	effectiveDate := effectiveDateUC04
 	dr := fhir.DiagnosticReport{
@@ -208,17 +210,17 @@ func BuildDiagnosticReport(id, patientRef, cptCode, display string) ([]byte, err
 func strPtr(s string) *string { return &s }
 
 // BuildDocumentReference builds a base-R4 DocumentReference for the operative
-// report disclosed by the external facility (UC-05). type = LOINC 28570-0
-// (Procedure note); category = clinical-note; content.attachment.url references
-// the companion DiagnosticReport. drRef is "DiagnosticReport/<id>".
+// report disclosed by an external facility during a federated-query prior-auth flow.
+// type = LOINC 28570-0 (Procedure note); category = clinical-note;
+// content.attachment.url references the companion DiagnosticReport.
+// drRef is "DiagnosticReport/<id>".
 //
 // NOTE: no meta.profile is set — the US Core DocumentReference Type value set
 // requires LOINC codes, which the IG-enabled HAPI does not load, causing
 // validation failures. Base-R4 conformance is the pinned posture here; US Core
-// profile pinning for DocumentReference is a tracked fast-follow (same posture
-// as DiagnosticReport, ClaimBundle, etc. in Slice 1/2).
+// profile pinning for DocumentReference is a tracked fast-follow.
 //
-// Promoted verbatim from internal/fhirmap.BuildDocumentReference (E3b1); parity
+// Promoted verbatim from internal/fhirmap.BuildDocumentReference; parity
 // proven by test/sdkparity/fhirmap_builders_parity_test.go (byte-equal). FR-36
 // boundary guard: no fhircodes value-set is referenced — terminology-agnostic.
 func BuildDocumentReference(id, patientRef, drRef string) ([]byte, error) {
@@ -251,7 +253,7 @@ func BuildDocumentReference(id, patientRef, drRef string) ([]byte, error) {
 }
 
 // PADecision selects the adjudication shape of a PDex PA decision EOB.
-// Promoted verbatim from internal/fhirmap.PADecision (E3b1).
+// Promoted verbatim from internal/fhirmap.PADecision.
 type PADecision int
 
 const (
@@ -261,7 +263,7 @@ const (
 
 // eobJSON and its supporting types are package-local structs for the PDex PA
 // decision ExplanationOfBenefit wire shape. Promoted verbatim from
-// internal/fhirmap/eob.go (E3b1).
+// internal/fhirmap/eob.go.
 type eobJSON struct {
 	ResourceType string             `json:"resourceType"`
 	Id           string             `json:"id"`
@@ -332,9 +334,9 @@ type eobReference struct {
 //     renders the approved auth from the FHIR resource (no appeal processNote).
 //
 // Validated base-R4 + curated terminology; the PDex profile pin is the tracked
-// fast-follow (no meta.profile, per the UC-05 posture).
+// fast-follow (no meta.profile set; base-R4 conformance is the pinned posture).
 //
-// Promoted verbatim from internal/fhirmap.BuildPADecisionEOB (E3b1); parity
+// Promoted verbatim from internal/fhirmap.BuildPADecisionEOB; parity
 // proven by test/sdkparity/fhirmap_builders_parity_test.go (byte-equal, both
 // branches). FR-36 boundary guard: no fhircodes value-set referenced —
 // terminology-agnostic (codes come in as params / package-local system* URI consts).
@@ -349,6 +351,49 @@ type PADecisionEOBParams struct {
 	Decision    PADecision
 	AuthNumber  string
 	Created     time.Time
+}
+
+// BuildPatientAccessCapabilityStatement returns the CMS-0057/PDex Patient Access
+// CapabilityStatement the payer serves at GET /metadata (FR-37): a kind=instance
+// server statement declaring the ExplanationOfBenefit read+search surface (PDex PA
+// EOB profile), gated by the per-operation patient-access token (AI-11). It mirrors
+// the real payer routes (GET /ExplanationOfBenefit?patient= and /ExplanationOfBenefit/{id})
+// and validates as a base FHIR CapabilityStatement (0 errors).
+//
+// Promoted verbatim from internal/fhirmap.BuildPatientAccessCapabilityStatement.
+// fhircodes-clean — no value-set references; dependency-light.
+func BuildPatientAccessCapabilityStatement(created time.Time) ([]byte, error) {
+	doc := "Patient Access to prior-authorization decisions. Each request carries a per-operation patient-access authority token bound to the patient (AI-11) — no blanket access."
+	sec := "Per-operation patient-access bearer token (substrate Authorization Framework); subject-bound, signature-covered."
+	cs := fhir.CapabilityStatement{
+		Status:      fhir.PublicationStatusActive,
+		Date:        created.UTC().Format(time.RFC3339),
+		Kind:        fhir.CapabilityStatementKindInstance,
+		FhirVersion: fhir.FHIRVersion4_0_1,
+		Format:      []string{"json"},
+		Software:    &fhir.CapabilityStatementSoftware{Name: "SHN Payer Patient Access API"},
+		Implementation: &fhir.CapabilityStatementImplementation{
+			Description: "SHN CMS-0057 Patient Access API (Da Vinci PDex Prior Authorization ExplanationOfBenefit).",
+		},
+		Rest: []fhir.CapabilityStatementRest{{
+			Mode:          fhir.RestfulCapabilityModeServer,
+			Documentation: &doc,
+			Security:      &fhir.CapabilityStatementRestSecurity{Description: &sec},
+			Resource: []fhir.CapabilityStatementRestResource{{
+				Type:             fhir.ResourceTypeExplanationOfBenefit,
+				SupportedProfile: []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-priorauthorization"},
+				Interaction: []fhir.CapabilityStatementRestResourceInteraction{
+					{Code: fhir.TypeRestfulInteractionRead},
+					{Code: fhir.TypeRestfulInteractionSearchType},
+				},
+				SearchParam: []fhir.CapabilityStatementRestResourceSearchParam{
+					{Name: "_id", Type: fhir.SearchParamTypeToken},
+					{Name: "patient", Type: fhir.SearchParamTypeReference},
+				},
+			}},
+		}},
+	}
+	return json.Marshal(cs) // fhir.CapabilityStatement.MarshalJSON injects resourceType
 }
 
 func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {

@@ -9,14 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 )
-
-// MaxClockSkew mirrors the substrate verifier's tolerance for an assertion's
-// issuedAt being in the future (internal/holderauth.MaxClockSkew — keep the
-// values identical).
-const MaxClockSkew = 5 * time.Minute
 
 // parseAndVerifyHubAssertion verifies an X-Hub-Assertion header value exactly as
 // a substrate gateway does (PARTICIPANT_PROTOCOL.md §6.2a, same check order):
@@ -32,7 +26,7 @@ func parseAndVerifyHubAssertion(header, ownHolderID string, hubPub ed25519.Publi
 	if err != nil {
 		return "", fmt.Errorf("decode: %w", err)
 	}
-	var a assertion
+	var a Assertion
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return "", fmt.Errorf("parse: %w", err)
 	}
@@ -68,55 +62,6 @@ func parseAndVerifyHubAssertion(header, ownHolderID string, hubPub ed25519.Publi
 		return "", errors.New("missing jti")
 	}
 	return a.JTI, nil
-}
-
-// jtiGuard enforces one-time-use of hub-assertion jtis. In-memory and bounded:
-// PER-PROCESS scope. Retain at least MaxAssertionTTL (PARTICIPANT_PROTOCOL.md
-// §6.2a). At cap, the oldest entry is evicted; window pruning happens on insert.
-type jtiGuard struct {
-	mu     sync.Mutex
-	window time.Duration
-	cap    int
-	seen   map[string]time.Time
-}
-
-func newJTIGuard(window time.Duration, capacity int) *jtiGuard {
-	return &jtiGuard{window: window, cap: capacity, seen: make(map[string]time.Time)}
-}
-
-// CheckAndRecord returns true when jti was already seen within the window
-// (replay); otherwise records it and returns false (mirrors the substrate's
-// replayguard semantics).
-func (g *jtiGuard) CheckAndRecord(jti string, now time.Time) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	// Prune expired entries first.
-	for k, at := range g.seen {
-		if now.Sub(at) > g.window {
-			delete(g.seen, k)
-		}
-	}
-
-	if _, ok := g.seen[jti]; ok {
-		return true
-	}
-
-	// At cap: evict the oldest entry to make room.
-	if len(g.seen) >= g.cap {
-		var oldest string
-		var oldestAt time.Time
-		first := true
-		for k, at := range g.seen {
-			if first || at.Before(oldestAt) {
-				oldest, oldestAt, first = k, at, false
-			}
-		}
-		delete(g.seen, oldest)
-	}
-
-	g.seen[jti] = now
-	return false
 }
 
 // FetchHubTransportKey fetches the Hub's X-Hub-Assertion verification key from

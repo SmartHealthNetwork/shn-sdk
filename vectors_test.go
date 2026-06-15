@@ -285,7 +285,7 @@ func TestVectorAssertionVerify(t *testing.T) {
 	raw := readB64Vector(t, dir, "assertion.b64")
 	signerPub := ed25519.PublicKey(readB64Vector(t, dir, "assertion_signer_pub.b64"))
 
-	var a assertion
+	var a Assertion
 	if err := json.Unmarshal(raw, &a); err != nil {
 		t.Fatalf("unmarshal assertion vector: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestVectorProvenanceReproduce(t *testing.T) {
 	}
 }
 
-// TestVectorClaimUpdateReproduce: the SDK rebuilds the UC-04 ClaimUpdate from the
+// TestVectorClaimUpdateReproduce: the SDK rebuilds the pended→amend ClaimUpdate from the
 // emitted QR/SR/DR/Provenance input vectors (decoupled from SandboxUC04Context).
 func TestVectorClaimUpdateReproduce(t *testing.T) {
 	dir := vectorsDir(t)

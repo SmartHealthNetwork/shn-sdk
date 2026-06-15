@@ -42,10 +42,10 @@ type fakeSandbox struct {
 	// driving the priorauth command's denied / nonzero-exit path.
 	paDeny bool
 	// paPended makes the PAS submit PEND (Bundle + Task) and the ClaimUpdate APPROVE —
-	// the UC-04 pended→resume→approved path.
+	// the pended→resume→approved path.
 	paPended bool
 	// paUC08Denied makes the PAS submit return the real PAS A3 denied ClaimResponse
-	// (reviewActionCode A3) — the UC-08 path the widened ParseClaimResponse classifies.
+	// (reviewActionCode A3) — the denied path the widened ParseClaimResponse classifies.
 	paUC08Denied bool
 	// paNotRequired makes the CRD leg say PA is NOT required, short-circuiting to
 	// Outcome "no-pa-required". With a persona that expects "approved" this is a clean
@@ -343,7 +343,7 @@ func TestDoctor_HappyPath(t *testing.T) {
 	if !strings.Contains(stdout, "MBR-COVERED") || !strings.Contains(stdout, "MBR-NOTCOVERED") {
 		t.Errorf("stdout should mention both personas: %s", stdout)
 	}
-	// The UC-03 PA leg ran (after eligibility) and approved.
+	// The prior-auth leg ran (after eligibility) and approved.
 	if !strings.Contains(stdout, "priorauth MBR-COVERED") || !strings.Contains(stdout, "approved") {
 		t.Errorf("stdout should report the priorauth approved line: %s", stdout)
 	}
@@ -463,7 +463,7 @@ func TestDoctor_OutcomeMismatch(t *testing.T) {
 	}
 }
 
-// TestDoctor_PriorAuthPendedResume: a UC-04 persona pends, doctor resumes with the
+// TestDoctor_PriorAuthPendedResume: a pended persona pends, doctor resumes with the
 // sandbox supplemental, and the post-amend outcome is approved → exitOK.
 func TestDoctor_PriorAuthPendedResume(t *testing.T) {
 	f, devID, dir := newFakeSandbox(t)
@@ -490,7 +490,7 @@ func TestDoctor_PriorAuthPendedResume(t *testing.T) {
 	}
 }
 
-// TestDoctor_PriorAuthDenied: a UC-08 persona is denied (A3) → exitOK (the outcome
+// TestDoctor_PriorAuthDenied: a denied persona (A3 review action) → exitOK (the outcome
 // matches the persona's ExpectedPriorAuth "denied").
 func TestDoctor_PriorAuthDenied(t *testing.T) {
 	f, devID, dir := newFakeSandbox(t)

@@ -62,7 +62,7 @@ type AuditAppendRequest struct {
 //
 // The canonical format is pinned by signableAuditContent's field order and
 // json tags — a stable, deterministic JSON encoding. internal/audit delegates
-// to this function so there is exactly ONE canonicalisation (E3b1).
+// to this function so there is exactly ONE canonicalisation.
 func SignableContent(r AuditRecord) []byte {
 	b, _ := json.Marshal(signableAuditContent{
 		Timestamp:         r.Timestamp,

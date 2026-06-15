@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// sandboxQuestionnaireJSON is a minimal-but-faithful copy of the sandbox UC-03
-// lumbar-MRI questionnaire (the substrate's dtr.QuestionnaireFor output): the
+// sandboxQuestionnaireJSON is a minimal-but-faithful copy of the sandbox
+// lumbar-MRI prior-auth questionnaire (the substrate's dtr.QuestionnaireFor output): the
 // supported canonical url + the known items FillQuestionnaire fills. The SDK can't
 // import the substrate fixture, so the recognized shape lives here; the parity test
 // (test/sdkparity/dtr_parity_test.go) proves the fill matches the substrate on the

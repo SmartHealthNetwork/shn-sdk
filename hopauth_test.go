@@ -23,7 +23,7 @@ func hubTestKeys(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 // makeHubAssertion builds an X-Hub-Assertion header value signed by priv.
 func makeHubAssertion(t *testing.T, priv ed25519.PrivateKey, holderID, audience string, issuedAt time.Time, ttl time.Duration, jti string) string {
 	t.Helper()
-	a := assertion{
+	a := Assertion{
 		HolderID: holderID,
 		Audience: audience,
 		IssuedAt: issuedAt,
@@ -140,39 +140,6 @@ func TestVerifyHubAssertionHeader(t *testing.T) {
 				t.Errorf("jti = %q, want %q", jti, tc.wantJTI)
 			}
 		})
-	}
-}
-
-func TestJTIGuard(t *testing.T) {
-	now := time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC)
-
-	g := newJTIGuard(time.Hour, 4)
-
-	// First check: fresh jti — not a replay.
-	if got := g.CheckAndRecord("a", now); got != false {
-		t.Errorf("first CheckAndRecord(a): got %v, want false", got)
-	}
-	// Second check: replay.
-	if got := g.CheckAndRecord("a", now); got != true {
-		t.Errorf("second CheckAndRecord(a): got %v, want true (replay)", got)
-	}
-
-	// A jti recorded at now is forgotten when window has elapsed.
-	later := now.Add(time.Hour + time.Minute)
-	if got := g.CheckAndRecord("a", later); got != false {
-		t.Errorf("CheckAndRecord(a) after window: got %v, want false (forgotten)", got)
-	}
-
-	// Bounded: insert 5 distinct jtis at the same now → internal map length ≤ 4.
-	g2 := newJTIGuard(time.Hour, 4)
-	for i := 0; i < 5; i++ {
-		g2.CheckAndRecord(string(rune('b'+i)), now)
-	}
-	g2.mu.Lock()
-	mapLen := len(g2.seen)
-	g2.mu.Unlock()
-	if mapLen > 4 {
-		t.Errorf("map length = %d after 5 inserts into cap-4 guard, want ≤ 4", mapLen)
 	}
 }
 

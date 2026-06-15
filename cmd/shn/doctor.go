@@ -180,7 +180,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		return fail(exitSandboxHealth, "sandbox advertises no personas to test")
 	}
 
-	// One responder drives every persona (UC-01 has a single payer).
+	// One responder drives every persona (eligibility has a single payer).
 	resp := disc.SandboxResponders[0]
 	payer := shnsdk.Payer{ID: resp.HolderID, EncPub: payerEnc[resp.HolderID], AuthzPub: authzPub}
 	ep := shnsdk.Endpoints{HubURL: disc.Endpoints.Hub, AuthzURL: disc.Endpoints.Authz}
@@ -229,8 +229,8 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		pass("priorauth %s: %s", p.MemberID, res.Outcome)
 
-		// Resume stage (UC-04): if the persona advertises a post-amend outcome, the
-		// pended result must carry needed items + a resume handle; resume with the
+		// Resume stage (pended→amend): if the persona advertises a post-amend outcome,
+		// the pended result must carry needed items + a resume handle; resume with the
 		// sandbox supplemental and assert the post-amend outcome.
 		if p.ExpectedAfterAmend == "" {
 			continue

@@ -69,16 +69,16 @@ shn register --role provider --name ext-provider \
   --registrar https://registrar.shn-preview.org \
   --admin-assertion "$ADMIN_ASSERTION" -out ./keys
 
-# 3. Run a coverage-eligibility round-trip (UC-01) through the Hub.
+# 3. Run a coverage-eligibility round-trip through the Hub.
 shn eligibility --name ext-provider \
   --member MBR-COVERED --dob 1975-04-02 --family Johansson \
   --hub https://hub.shn-preview.org --authz https://authz.shn-preview.org \
   --payer-id payer --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
 # → covered: true
 
-# 4. Run a prior-authorization (UC-03 CRD→DTR→PAS) through the Hub. Payer +
+# 4. Run a prior-authorization (CRD→DTR→PAS) through the Hub. Payer +
 #    endpoints are resolved from the sandbox discovery descriptor; the order +
-#    clinical context are the fixed UC-03 sandbox values.
+#    clinical context are the fixed sandbox values.
 shn priorauth --member MBR-COVERED \
   --discovery https://accounts.shn-preview.org --id ext-provider -keys ./keys
 # → outcome=approved preAuthRef=PA-… validUntil=…
@@ -118,8 +118,8 @@ sandbox developers; the direct `POST /register` is the operator/Trust path (see
 
 One command answers "am I wired up + do my eligibility AND prior-auth round-trips
 conform". It fetches the sandbox discovery descriptor and runs eligibility against the
-seeded covered/not-covered personas, then — once eligibility passes — runs a UC-03
-prior-authorization for the persona that advertises an expected PA outcome, all using
+seeded covered/not-covered personas, then — once eligibility passes — runs a
+prior-authorization (CRD→DTR→PAS) for the persona that advertises an expected PA outcome, all using
 your OWN registered identity — no FHIR validator needed (the substrate validates
 server-side). Eligibility is checked first; the PA leg only runs once eligibility
 conforms.
@@ -176,13 +176,13 @@ covered, reason, err := id.RunEligibility(ctx, http.DefaultClient,
 | `Identity.Assertion(audience, now, ttl)` | Signed holder assertion (the `X-Holder-Assertion` header value). |
 | `Identity.Authorize(ctx, client, authzURL, req)` | Obtain a per-operation, scope-bound `Token`. |
 | `Identity.Registration(role, baseURL)` | Build a proof-of-possession `RegistrationRequest`. |
-| `Identity.RunEligibility(ctx, client, endpoints, payer, npi, member, dob, family)` | End-to-end UC-01 round-trip. |
+| `Identity.RunEligibility(ctx, client, endpoints, payer, npi, member, dob, family)` | End-to-end coverage-eligibility round-trip. |
 | `Seal(meta, payload, recipientEncPub)` / `Open(env, encPub, encPriv)` | NaCl anonymous-sealed-box envelope crypto (payload-blind routing). |
 | `EncodeEnvelope` / `DecodeEnvelope` | Envelope wire (JSON) codec. |
 | `BuildEligibilityRequest` / `ParseEligibilityResponse` | FHIR `CoverageEligibilityRequest` / `…Response` helpers. |
 | `BuildOrderSelectRequest` / `ParseCards` | CRD order-select request + cards-response (PA-required + DTR canonical) helpers. |
 | `BuildQuestionnaireFetch` / `ParseQuestionnaireURL` | DTR questionnaire-fetch request + fetched-`Questionnaire` url reader. |
-| `FillQuestionnaire(questionnaireJSON, cc, qc)` | Fill the sandbox UC-03 DTR questionnaire into a conformant `QuestionnaireResponse` (LOCAL answers + information-origin attribution). Sandbox-targeted: FAILS LOUDLY on an unrecognized questionnaire (never a half-filled QR). |
+| `FillQuestionnaire(questionnaireJSON, cc, qc)` | Fill the sandbox prior-auth DTR questionnaire into a conformant `QuestionnaireResponse` (LOCAL answers + information-origin attribution). Sandbox-targeted: FAILS LOUDLY on an unrecognized questionnaire (never a half-filled QR). |
 | `BuildClaimBundle(qr, sr, patientRef, coverageRef, corr, created)` / `ParseClaimResponse` | PAS preauthorization submit Bundle (Claim+QR+SR; `created` drives the deterministic bundle id/timestamp) + the `ClaimResponse` parser → `PriorAuthResult` (`Outcome:"approved"` + `PreAuthRef`/`ValidUntil`). Denied (explicit A3 review action) and pended responses parse to their own outcomes; an ambiguous response returns an error, never a wrong `Outcome`. |
 | `VerifyBound(tok, authzPub, now, frame, op, corr, holder, subject, payloadHash)` | Verify a token is bound to exactly this leg, INCLUDING `payloadHash = sha256hex(ciphertext)` (STRICT, AI-2) — the SDK verifies, never mints. Seal-then-authorize: seal the payload first, then authorize against its ciphertext. |
 

@@ -10,7 +10,7 @@ import (
 )
 
 // SupportedQuestionnaireCanonical is the ONE DTR questionnaire FillQuestionnaire
-// recognizes: the sandbox UC-03 lumbar-MRI PA questionnaire. It MUST equal the
+// recognizes: the sandbox lumbar-MRI PA questionnaire. It MUST equal the
 // substrate's dtr.LumbarMRICanonical / crd.QuestionnaireCanonicalLumbarMRI so the
 // SDK fills exactly the questionnaire the sandbox payer returns. FillQuestionnaire
 // FAILS LOUDLY on any other canonical (it is a sandbox-targeted stub, not a general
@@ -29,8 +29,8 @@ const (
 )
 
 // ClinicalContext is the provider-LOCAL clinical data FillQuestionnaire answers
-// from. Ported standalone from internal/dtr.ClinicalContext (the sandbox UC-03
-// fields). The *Ref fields are carried for parity with the substrate struct even
+// from. Ported standalone from internal/dtr.ClinicalContext (the sandbox
+// auto-approval fields). The *Ref fields are carried for parity with the substrate struct even
 // though the auto information-origin extension no longer emits a sourceReference
 // (DTR 2.0.1 source="auto" carries only the source sub-extension).
 type ClinicalContext struct {
@@ -46,8 +46,8 @@ type ClinicalContext struct {
 	HighDisability                           bool
 	HighDisabilityRef                        string
 	// PatientReported signals that a functional-status item must be patient-reported
-	// (UC-07). When set, FillQuestionnaire emits the patient-reported-required=true
-	// trigger item, matching the substrate's AutoFill.
+	// (patient portal attestation flow). When set, FillQuestionnaire emits the
+	// patient-reported-required=true trigger item, matching the substrate's AutoFill.
 	PatientReported bool
 }
 
@@ -95,7 +95,7 @@ func ParseQuestionnaireURL(data []byte) (string, error) {
 	return *probe.URL, nil
 }
 
-// FillQuestionnaire fills the sandbox UC-03 DTR questionnaire into a conformant
+// FillQuestionnaire fills the sandbox DTR questionnaire into a conformant
 // QuestionnaireResponse (answers + provider-LOCAL information-origin attribution),
 // matching internal/dtr.AutoFill's wire output. SANDBOX-TARGETED STUB (DEF): NOT a
 // general SDC engine — it handles the sandbox questionnaire's known items. It MUST
@@ -160,19 +160,19 @@ func answerFor(linkID string, cc ClinicalContext) (fhir.QuestionnaireResponseIte
 	case "prior-imaging":
 		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(cc.PriorImaging)}, true
 	case "prior-surgery":
-		// Trigger flag (UC-04): present ONLY when positive; a negative finding is OMITTED.
+		// Trigger flag (prior-surgery path): present ONLY when positive; a negative finding is OMITTED.
 		if !cc.PriorSurgery {
 			return fhir.QuestionnaireResponseItemAnswer{}, false
 		}
 		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(true)}, true
 	case "high-disability":
-		// Trigger flag (UC-06): present ONLY when positive.
+		// Trigger flag (high-disability path): present ONLY when positive.
 		if !cc.HighDisability {
 			return fhir.QuestionnaireResponseItemAnswer{}, false
 		}
 		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(true)}, true
 	case "patient-reported-required":
-		// Trigger flag (UC-07): present ONLY when positive.
+		// Trigger flag (patient attestation path): present ONLY when positive.
 		if !cc.PatientReported {
 			return fhir.QuestionnaireResponseItemAnswer{}, false
 		}
@@ -222,7 +222,7 @@ func dtrQRContextExtensions(qc QRContext) []fhir.Extension {
 	}
 }
 
-// sandboxLumbarQuestionnaireBytes holds the precomputed sandbox UC-03 lumbar-MRI
+// sandboxLumbarQuestionnaireBytes holds the precomputed sandbox lumbar-MRI
 // questionnaire bytes. Computed once at package init and served as fresh copies by
 // SandboxLumbarQuestionnaire. The fixture is a fixed, compile-time-known struct, so
 // json.Marshal cannot fail — a failure would be a programmer error and panics (matching
@@ -262,9 +262,9 @@ func init() {
 				Text:   strPtr("High disability index flag?"),
 			},
 			{
-				// UC-07 trigger flag: when true, the functional-status-oswestry item must
-				// be patient-attested. Absent / false means no patient-authorship leg is
-				// needed (UC-03/04/06 paths are unchanged).
+				// Patient attestation trigger flag: when true, the functional-status-oswestry
+				// item must be patient-attested. Absent / false means no patient-authorship
+				// leg is needed (auto-approval and clinician-attestation paths are unchanged).
 				LinkId: "patient-reported-required",
 				Type:   fhir.QuestionnaireItemTypeBoolean,
 				Text:   strPtr("Patient-reported functional status required?"),
@@ -284,7 +284,7 @@ func init() {
 }
 
 // SandboxLumbarQuestionnaire returns the FHIR Questionnaire JSON for the sandbox
-// UC-03 lumbar-MRI PA questionnaire. SANDBOX fixture — exported so reference
+// lumbar-MRI PA questionnaire. SANDBOX fixture — exported so reference
 // adjudicators (tests, feedsmoke, the quickstart) can serve the sandbox PA flow; a
 // real payer serves its own questionnaires from its Adjudicator. The bytes are
 // byte-identical to dtr.QuestionnaireFor(crd.QuestionnaireCanonicalLumbarMRI)
@@ -377,9 +377,9 @@ func BuildManualAttestedItem(linkID, answer string, att Attestation) ([]byte, er
 // round-trips on fields the Go FHIR model may not capture.
 // SetQuestionnaireResponseID sets the top-level id on a QuestionnaireResponse JSON
 // so it can be the EXACT target of a Provenance reference ("QuestionnaireResponse/
-// <id>"). The UC-06 amended QR is the supplemental evidence; giving it a stable id
-// lets the payer resolve the Provenance target to this resource, not just any QR
-// (FR-32 attribution).
+// <id>"). An amended QR carrying clinician-entered supplemental evidence gets a
+// stable id so the payer resolves the Provenance target to this resource, not just
+// any QR (FR-32 attribution).
 func SetQuestionnaireResponseID(qrJSON []byte, id string) ([]byte, error) {
 	var qrMap map[string]json.RawMessage
 	if err := json.Unmarshal(qrJSON, &qrMap); err != nil {

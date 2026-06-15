@@ -177,3 +177,58 @@ func TestBuildEligibilityResponse(t *testing.T) {
 		t.Errorf("non-deterministic output:\n  call1=%s\n  call2=%s", b3, b4)
 	}
 }
+
+// TestBuildPatientAccessCapabilityStatement_Shape verifies the SDK-promoted
+// CMS-0057 CapabilityStatement has the required FHIR shape (FR-37): kind=instance,
+// status=active, at least one rest.resource of type ExplanationOfBenefit with a
+// supportedProfile and both read+search interactions. Wire-identity with the
+// internal/fhirmap shim is proven in test/sdkparity/capabilitystatement_parity_test.go.
+func TestBuildPatientAccessCapabilityStatement_Shape(t *testing.T) {
+	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	b, err := BuildPatientAccessCapabilityStatement(at)
+	if err != nil {
+		t.Fatalf("BuildPatientAccessCapabilityStatement: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["resourceType"] != "CapabilityStatement" {
+		t.Errorf("resourceType = %v, want CapabilityStatement", m["resourceType"])
+	}
+	if m["status"] != "active" {
+		t.Errorf("status = %v, want active", m["status"])
+	}
+	if m["kind"] != "instance" {
+		t.Errorf("kind = %v, want instance", m["kind"])
+	}
+	if m["date"] != "2026-06-15T00:00:00Z" {
+		t.Errorf("date = %v, want 2026-06-15T00:00:00Z", m["date"])
+	}
+	rests, _ := m["rest"].([]any)
+	if len(rests) == 0 {
+		t.Fatal("rest array is empty")
+	}
+	rest0, _ := rests[0].(map[string]any)
+	resources, _ := rest0["resource"].([]any)
+	if len(resources) == 0 {
+		t.Fatal("rest[0].resource array is empty")
+	}
+	res0, _ := resources[0].(map[string]any)
+	if res0["type"] != "ExplanationOfBenefit" {
+		t.Errorf("rest[0].resource[0].type = %v, want ExplanationOfBenefit", res0["type"])
+	}
+	profiles, _ := res0["supportedProfile"].([]any)
+	if len(profiles) == 0 {
+		t.Error("rest[0].resource[0].supportedProfile is empty")
+	}
+	interactions, _ := res0["interaction"].([]any)
+	if len(interactions) != 2 {
+		t.Errorf("want 2 interactions (read+search-type), got %d", len(interactions))
+	}
+	// Determinism: same input → byte-identical output.
+	b2, _ := BuildPatientAccessCapabilityStatement(at)
+	if string(b) != string(b2) {
+		t.Error("BuildPatientAccessCapabilityStatement is non-deterministic")
+	}
+}

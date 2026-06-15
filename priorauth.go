@@ -18,7 +18,7 @@ import (
 // outcome, AND the order being prior-authed (procedure + diagnosis). By design,
 // the values that drive the outcome are visible inputs — the order details
 // and the clinical context are both supplied here, never hardcoded inside RunPriorAuth.
-// SandboxUC03Order + SandboxUC03Context provide the UC-03 MBR-COVERED→approved values.
+// SandboxUC03Order + SandboxUC03Context provide the MBR-COVERED→approved values.
 type PriorAuthRequest struct {
 	Member string
 	DOB    string
@@ -32,7 +32,7 @@ type PriorAuthRequest struct {
 	DiagnosisICD10   string
 }
 
-// SandboxUC03Context returns the ClinicalContext that drives the sandbox UC-03
+// SandboxUC03Context returns the ClinicalContext that drives the sandbox
 // MBR-COVERED path to "approved": 6 weeks of conservative therapy (≥6), prior
 // imaging present, no neuro deficit. These mirror the substrate's MBR-COVERED
 // clinical fixture (internal/gateway holderdata) so the SDK fills the questionnaire
@@ -52,7 +52,7 @@ func SandboxUC03Context() ClinicalContext {
 }
 
 // SandboxUC04Context drives the sandbox MBR-UC04 path to PENDED on exchange-1: the
-// UC-03 approved answers PLUS PriorSurgery=true, which the payer pends awaiting an
+// auto-approval answers PLUS PriorSurgery=true, which the payer pends awaiting an
 // operative DiagnosticReport. weeks=6 means it APPROVES once that report is attached
 // via the ClaimUpdate. Mirrors the substrate MBR-UC04 fixture (internal/gateway/holderdata.go).
 func SandboxUC04Context() ClinicalContext {
@@ -89,13 +89,13 @@ func SandboxContextFor(memberID string) (ClinicalContext, bool) {
 	}
 }
 
-// SandboxUC03Order returns the UC-03 sandbox order: a lumbar-spine MRI without
+// SandboxUC03Order returns the sandbox prior-auth order: a lumbar-spine MRI without
 // contrast (CPT 72148 / ICD-10-CM M51.16), the order that requires PA in the sandbox.
 func SandboxUC03Order() (cpt, display, icd10 string) {
 	return "72148", "MRI lumbar spine w/o contrast", "M51.16"
 }
 
-// RunPriorAuth runs a full UC-03 prior-authorization through the substrate — the
+// RunPriorAuth runs a full prior-authorization through the substrate — the
 // CRD→DTR→PAS orchestrator — and returns the outcome. It drives three sealed
 // round-trips, each via runLeg (the RunEligibility sealed-leg template):
 //
@@ -201,7 +201,7 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: parse claim response: %w", err)
 	}
 	if result.Outcome == "pended" {
-		// Fill the serializable resume handle from this leg's context (UC-04): the
+		// Fill the serializable resume handle from this leg's context: the
 		// submit correlation the ClaimUpdate.related[] references, the bound subject,
 		// and the submit QR/SR the update re-includes unchanged.
 		result.Resume = &PriorAuthResume{
@@ -353,11 +353,11 @@ func (id Identity) runLegWithCorr(ctx context.Context, c *http.Client, ep Endpoi
 	return plaintext, nil
 }
 
-// SupplementalReport is the NEW clinical evidence an amend attaches (UC-04), plus its
-// FR-32 provenance facts. ProvenanceAgent is REQUIRED: the payer REJECTS supplemental
-// data without Provenance, so ResumePriorAuth validates it BEFORE sealing and fails
-// with a clear error — the dev meets FR-32 as a named precondition, not a cryptic
-// three-legs-deep payer rejection.
+// SupplementalReport is the NEW clinical evidence a ClaimUpdate amendment attaches,
+// plus its FR-32 provenance facts. ProvenanceAgent is REQUIRED: the payer REJECTS
+// supplemental data without Provenance, so ResumePriorAuth validates it BEFORE
+// sealing and fails with a clear error — the dev meets FR-32 as a named
+// precondition, not a cryptic three-legs-deep payer rejection.
 type SupplementalReport struct {
 	ReportID        string // the DiagnosticReport id (e.g. "dr-uc04-operative")
 	CPT             string // procedure code (e.g. "72148")
@@ -366,8 +366,8 @@ type SupplementalReport struct {
 }
 
 // SandboxUC04Report returns the operative DiagnosticReport + provenance facts that
-// drive MBR-UC04's pend to "approved" (the UC-04 analog of SandboxUC03Context). Mirrors
-// the substrate fixture (SupplementalReport("MBR-UC04") → fhirmap.BuildDiagnosticReport).
+// drive MBR-UC04's pend to "approved". Mirrors the substrate fixture
+// (SupplementalReport("MBR-UC04") → fhirmap.BuildDiagnosticReport).
 func SandboxUC04Report() SupplementalReport {
 	return SupplementalReport{
 		ReportID:        "dr-uc04-operative",
@@ -377,7 +377,7 @@ func SandboxUC04Report() SupplementalReport {
 	}
 }
 
-// ResumePriorAuth drives the UC-04 exchange-2 ClaimUpdate from a pended PA's resume
+// ResumePriorAuth drives the exchange-2 ClaimUpdate from a pended PA's resume
 // handle: validate supp (ProvenanceAgent present → else error, no wire) → build the
 // operative DiagnosticReport + Provenance → BuildClaimUpdateBundle (reusing the submit
 // QR/SR unchanged, related[] → the original submit correlation, FR-21) → ONE sealed

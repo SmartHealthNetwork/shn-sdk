@@ -183,7 +183,7 @@ func deniedQRJSON() []byte {
 	return approvedQRJSON(4)
 }
 
-// TestSandboxAdjudicate_UC03Approved: the UC-03 autofilled QR (6 weeks,
+// TestSandboxAdjudicate_UC03Approved: the autofilled QR (6 weeks,
 // hasDR=true) → PASApproved with non-empty PreAuthRef/ValidUntil.
 func TestSandboxAdjudicate_UC03Approved(t *testing.T) {
 	qr, err := FillQuestionnaire(SandboxLumbarQuestionnaire(), SandboxUC03Context(), QRContext{

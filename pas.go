@@ -15,12 +15,12 @@ type PriorAuthResult struct {
 	PreAuthRef string // set when approved
 	ValidUntil string // set when approved
 
-	// NeededItems + Resume are set when Outcome=="pended" (UC-04): the supplemental
+	// NeededItems + Resume are set when Outcome=="pended": the supplemental
 	// items the payer's Task enumerates, and a serializable handle to ResumePriorAuth.
 	NeededItems []NeededItem
 	Resume      *PriorAuthResume
 
-	// Denial is set when Outcome=="denied" (UC-08): the FR-22 denial content.
+	// Denial is set when Outcome=="denied": the FR-22 denial content.
 	Denial *Denial
 }
 
@@ -42,7 +42,7 @@ type Denial struct {
 	AppealNote []string // ClaimResponse.processNote[].text (repeatable)
 }
 
-// PriorAuthResume is a SERIALIZABLE handle to resume a pended PA (UC-04). It JSON
+// PriorAuthResume is a SERIALIZABLE handle to resume a pended prior auth. It JSON
 // round-trips and carries NO live state — a real integration persists it across the
 // hours-or-days gap between pend and amend. The fields are exactly what the exchange-2
 // ClaimUpdate needs: the original submit correlation the Claim.related[] references
@@ -239,9 +239,9 @@ func BuildClaimBundle(qrJSON, serviceRequestJSON []byte, patientRef, coverageRef
 // Provenance.policy (a uri — the base-FHIR-correct slot for "patient consent",
 // NOT Provenance.entity which marks derived-from inputs) and the PurposeOfUse via
 // Provenance.reason. policyRef ("Consent/<id>") and purposeOfUse are omitted when
-// empty. Used by the UC-05 facility to make the disclosure provably consent-anchored.
-// Promoted from internal/pas.BuildProvenanceWithPolicy; parity-tested in
-// test/sdkparity/pas_provenance_parity_test.go.
+// empty. Used by an external facility to make the disclosure provably consent-anchored
+// in a federated-query prior-auth flow. Promoted from internal/pas.BuildProvenanceWithPolicy;
+// parity-tested in test/sdkparity/pas_provenance_parity_test.go.
 func BuildProvenanceWithPolicy(targetRef, agentWho, policyRef, purposeOfUse string, recorded time.Time) ([]byte, error) {
 	prov := fhir.Provenance{
 		Target:   []fhir.Reference{{Reference: strPtr(targetRef)}},
@@ -267,8 +267,9 @@ func BuildProvenanceWithPolicy(targetRef, agentWho, policyRef, purposeOfUse stri
 }
 
 // BuildProvenance builds a Provenance attributing supplemental data to its source
-// (FR-32) — the no-policy form UC-04 uses. Reimplements internal/pas.BuildProvenance
-// standalone; test/sdkparity asserts byte-identity. recorded is injected (deterministic).
+// (FR-32) — the no-policy form used for local supplemental evidence (no consent URI).
+// Reimplements internal/pas.BuildProvenance standalone; test/sdkparity asserts
+// byte-identity. recorded is injected (deterministic).
 func BuildProvenance(targetRef, agentWho string, recorded time.Time) ([]byte, error) {
 	return BuildProvenanceWithPolicy(targetRef, agentWho, "", "", recorded)
 }
@@ -341,9 +342,10 @@ func buildPASUpdateClaim(patientRef, coverageRef, correlationID, originalCorrela
 // BuildClaimUpdateBundle assembles the exchange-2 ClaimUpdate amendment (FR-21): a
 // collection Bundle with a Claim (related[] → the original claim by correlation
 // identifier) + QR + SR + the supplemental DiagnosticReport + Provenance (FR-32).
-// Reimplements internal/pas.BuildClaimUpdateBundle standalone for the UC-04 shape
-// (diagnosticReportJSON non-nil); test/sdkparity asserts byte-identity. created drives
-// the deterministic Bundle timestamp/ids (inject vecClock for goldens).
+// Reimplements internal/pas.BuildClaimUpdateBundle standalone
+// (diagnosticReportJSON non-nil for prior-auth-with-supplemental-evidence paths);
+// test/sdkparity asserts byte-identity. created drives the deterministic Bundle
+// timestamp/ids (inject vecClock for goldens).
 func BuildClaimUpdateBundle(qrJSON, srJSON, diagnosticReportJSON, provenanceJSON []byte, patientRef, coverageRef, correlationID, originalCorrelationID string, created time.Time) ([]byte, error) {
 	claimJSON, err := buildPASUpdateClaim(patientRef, coverageRef, correlationID, originalCorrelationID, created)
 	if err != nil {
