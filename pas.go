@@ -235,20 +235,42 @@ func BuildClaimBundle(qrJSON, serviceRequestJSON []byte, patientRef, coverageRef
 	return pasInjectResourceType(raw, "Bundle")
 }
 
-// BuildProvenance builds a Provenance attributing supplemental data to its source
-// (FR-32) — the no-policy form UC-04 uses. Reimplements internal/pas.BuildProvenance
-// standalone; test/sdkparity asserts byte-identity. recorded is injected (deterministic).
-func BuildProvenance(targetRef, agentWho string, recorded time.Time) ([]byte, error) {
+// BuildProvenanceWithPolicy additionally cites the authorizing policy via
+// Provenance.policy (a uri — the base-FHIR-correct slot for "patient consent",
+// NOT Provenance.entity which marks derived-from inputs) and the PurposeOfUse via
+// Provenance.reason. policyRef ("Consent/<id>") and purposeOfUse are omitted when
+// empty. Used by the UC-05 facility to make the disclosure provably consent-anchored.
+// Promoted from internal/pas.BuildProvenanceWithPolicy; parity-tested in
+// test/sdkparity/pas_provenance_parity_test.go.
+func BuildProvenanceWithPolicy(targetRef, agentWho, policyRef, purposeOfUse string, recorded time.Time) ([]byte, error) {
 	prov := fhir.Provenance{
 		Target:   []fhir.Reference{{Reference: strPtr(targetRef)}},
 		Recorded: recorded.UTC().Format(time.RFC3339),
 		Agent:    []fhir.ProvenanceAgent{{Who: fhir.Reference{Reference: strPtr(agentWho)}}},
+	}
+	if policyRef != "" {
+		prov.Policy = []string{policyRef}
+	}
+	if purposeOfUse != "" {
+		prov.Reason = []fhir.CodeableConcept{{
+			Coding: []fhir.Coding{{
+				System: strPtr("http://terminology.hl7.org/CodeSystem/v3-ActReason"),
+				Code:   strPtr(purposeOfUse),
+			}},
+		}}
 	}
 	raw, err := json.Marshal(prov)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: marshal Provenance: %w", err)
 	}
 	return pasInjectResourceType(raw, "Provenance")
+}
+
+// BuildProvenance builds a Provenance attributing supplemental data to its source
+// (FR-32) — the no-policy form UC-04 uses. Reimplements internal/pas.BuildProvenance
+// standalone; test/sdkparity asserts byte-identity. recorded is injected (deterministic).
+func BuildProvenance(targetRef, agentWho string, recorded time.Time) ([]byte, error) {
+	return BuildProvenanceWithPolicy(targetRef, agentWho, "", "", recorded)
 }
 
 // buildPASUpdateClaim constructs the FHIR Claim for an UPDATE bundle: identical to

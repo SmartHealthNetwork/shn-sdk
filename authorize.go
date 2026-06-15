@@ -127,18 +127,11 @@ func verifyToken(t Token, pub ed25519.PublicKey, now time.Time) error {
 	return nil
 }
 
-// VerifyBound checks signature+expiry AND binds the token to exactly this
-// operation/frame/correlation/holder/subject. Pass empty string to skip a
-// particular check — EXCEPT wantPayloadHash, which is STRICT: every envelope leg
-// binds a payload (AI-2), so an empty want or empty token hash is rejected. This
-// stops a validly-signed token from being lifted into a DIFFERENT envelope,
-// operation, correlation, holder, patient, or PAYLOAD and replayed (H1/AI-2).
-// Ported from internal/authz.VerifyBound; the SDK verifies what the substrate
-// signs (test/sdkparity/token_parity_test.go).
-func VerifyBound(t Token, authzPub ed25519.PublicKey, now time.Time, wantFrame, wantOp, wantCorr, wantHolder, wantSubject, wantPayloadHash string) error {
-	if err := verifyToken(t, authzPub, now); err != nil {
-		return err
-	}
+// sdkVerifyBindings asserts the token's frame/operation/correlation/holder/subject
+// match the exchange it arrived in (empty want = skip that check). Shared by
+// VerifyBound and VerifyBoundNoPayload so the binding set cannot drift between the
+// envelope and non-envelope verifiers. Mirrors internal/authz.verifyBindings.
+func sdkVerifyBindings(t Token, wantFrame, wantOp, wantCorr, wantHolder, wantSubject string) error {
 	if wantFrame != "" && t.Frame != wantFrame {
 		return errors.New("shnsdk: token frame mismatch")
 	}
@@ -154,11 +147,50 @@ func VerifyBound(t Token, authzPub ed25519.PublicKey, now time.Time, wantFrame, 
 	if wantSubject != "" && t.Subject != wantSubject {
 		return errors.New("shnsdk: subject mismatch")
 	}
+	return nil
+}
+
+// VerifyBound checks signature+expiry AND binds the token to exactly this
+// operation/frame/correlation/holder/subject. Pass empty string to skip a
+// particular check — EXCEPT wantPayloadHash, which is STRICT: every envelope leg
+// binds a payload (AI-2), so an empty want or empty token hash is rejected. This
+// stops a validly-signed token from being lifted into a DIFFERENT envelope,
+// operation, correlation, holder, patient, or PAYLOAD and replayed (H1/AI-2).
+// Ported from internal/authz.VerifyBound; the SDK verifies what the substrate
+// signs (test/sdkparity/token_parity_test.go).
+func VerifyBound(t Token, authzPub ed25519.PublicKey, now time.Time, wantFrame, wantOp, wantCorr, wantHolder, wantSubject, wantPayloadHash string) error {
+	if err := verifyToken(t, authzPub, now); err != nil {
+		return err
+	}
+	if err := sdkVerifyBindings(t, wantFrame, wantOp, wantCorr, wantHolder, wantSubject); err != nil {
+		return err
+	}
 	// PayloadHash is STRICT — every envelope leg binds a payload, so an empty want
 	// or an empty token hash is a misuse/unprotected call, not a skip (AI-2). Mirrors
 	// internal/authz.VerifyBound.
 	if wantPayloadHash == "" || t.PayloadHash == "" || t.PayloadHash != wantPayloadHash {
 		return errors.New("shnsdk: payload hash mismatch")
+	}
+	return nil
+}
+
+// VerifyBoundNoPayload is the verifier for the ONE non-envelope operation
+// (patient-access-read): a direct REST bearer read that rides no sealed envelope
+// and therefore carries NO payload hash (the OPA policy forbids one on that op).
+// It performs every binding check VerifyBound does EXCEPT the payload-hash check,
+// and instead asserts the token carries NO hash — so an envelope-bound token (which
+// always carries a hash) can never be replayed onto the bearer read path (AI-2).
+// Use VerifyBound (strict payload) for every sealed-envelope leg; use this ONLY for
+// patient-access-read. Ported from internal/authz.VerifyBoundNoPayload.
+func VerifyBoundNoPayload(t Token, pub ed25519.PublicKey, now time.Time, wantFrame, wantOp, wantCorr, wantHolder, wantSubject string) error {
+	if t.PayloadHash != "" {
+		return errors.New("shnsdk: payload hash present on non-envelope token")
+	}
+	if err := verifyToken(t, pub, now); err != nil {
+		return err
+	}
+	if err := sdkVerifyBindings(t, wantFrame, wantOp, wantCorr, wantHolder, wantSubject); err != nil {
+		return err
 	}
 	return nil
 }

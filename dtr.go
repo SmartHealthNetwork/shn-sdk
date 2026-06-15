@@ -3,6 +3,7 @@ package shnsdk
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
@@ -297,3 +298,251 @@ func SandboxLumbarQuestionnaire() []byte {
 
 func intPtr(i int) *int    { return &i }
 func boolPtr(b bool) *bool { return &b }
+
+// ClinicianAttestationExt is the attestation extension URL placed on a manually-
+// entered QuestionnaireResponse.item (FR-16): clinician NPI + attestation text +
+// date. It accompanies the FR-17 information-origin source="clinician" attribution.
+const ClinicianAttestationExt = "http://smarthealth.network/fhir/StructureDefinition/clinician-attestation"
+
+// Attestation is the clinician's attestation captured on a manual entry (FR-16).
+type Attestation struct {
+	NPI  string
+	Text string
+	When string // YYYY-MM-DD
+}
+
+// clinicianOriginExtension builds the FR-17 information-origin extension for a
+// manually-entered clinician item. The clinician enters the value by hand (it was
+// never auto-populated), so the DTR 2.0.1 informationOrigins code is "manual"
+// (not "override", which means auto-populated-then-changed); dtrx-1 requires an
+// author when source is "manual" or "override".
+// practitionerRef is the Practitioner reference (e.g. "Practitioner/{NPI}").
+func clinicianOriginExtension(practitionerRef string) fhir.Extension {
+	sub := []fhir.Extension{
+		{Url: "source", ValueCode: strPtr("manual")},
+		// dtrx-1: author required when source="manual". The author sub-extension
+		// is a complex extension (nested url="reference") per DTR 2.0.1 Extension.author.
+		{Url: "author", Extension: []fhir.Extension{
+			{Url: "reference", ValueString: strPtr(practitionerRef)},
+		}},
+	}
+	return fhir.Extension{
+		Url:       informationOriginExt,
+		Extension: sub,
+	}
+}
+
+// BuildManualAttestedItem returns the JSON of a single QuestionnaireResponseItem
+// for a linkId answered by a clinician (FR-16/17). The item carries:
+//   - a valueString answer of answer,
+//   - the FR-17 information-origin extension with source="manual" + author=Practitioner/{NPI}
+//     (the clinician hand-enters the value; dtrx-1 requires author),
+//   - the clinician attestation extension (ClinicianAttestationExt) with the
+//     NPI, attestation text, and date from att.
+func BuildManualAttestedItem(linkID, answer string, att Attestation) ([]byte, error) {
+	attestExt := fhir.Extension{
+		Url: ClinicianAttestationExt,
+		Extension: []fhir.Extension{
+			{Url: "npi", ValueString: strPtr(att.NPI)},
+			{Url: "text", ValueString: strPtr(att.Text)},
+			{Url: "date", ValueDate: strPtr(att.When)},
+		},
+	}
+	// FR-17 attribution rides on the ANSWER (DTR 2.0.1 context = item.answer).
+	// clinician-attestation stays at item level (its declared context).
+	// source="manual" is the DTR code for hand-entered data ("clinician" is not in
+	// the informationOrigins value set; "override" would imply auto-then-changed).
+	item := fhir.QuestionnaireResponseItem{
+		LinkId: linkID,
+		Answer: []fhir.QuestionnaireResponseItemAnswer{
+			{
+				ValueString: strPtr(answer),
+				Extension:   []fhir.Extension{clinicianOriginExtension("Practitioner/" + att.NPI)},
+			},
+		},
+		Extension: []fhir.Extension{attestExt},
+	}
+	raw, err := json.Marshal(item)
+	if err != nil {
+		return nil, fmt.Errorf("dtr: marshal manual attested item %q: %w", linkID, err)
+	}
+	return raw, nil
+}
+
+// AmendQRWithItem appends a single QuestionnaireResponseItem (itemJSON) to the
+// item array of a QuestionnaireResponse (qrJSON) and returns the re-marshalled
+// QR. The operation preserves all other QR fields intact by operating at the
+// JSON level: the QR is unmarshalled into a map of raw JSON values, the item
+// array is extended, and the map is re-marshalled. This avoids lossy struct
+// round-trips on fields the Go FHIR model may not capture.
+// SetQuestionnaireResponseID sets the top-level id on a QuestionnaireResponse JSON
+// so it can be the EXACT target of a Provenance reference ("QuestionnaireResponse/
+// <id>"). The UC-06 amended QR is the supplemental evidence; giving it a stable id
+// lets the payer resolve the Provenance target to this resource, not just any QR
+// (FR-32 attribution).
+func SetQuestionnaireResponseID(qrJSON []byte, id string) ([]byte, error) {
+	var qrMap map[string]json.RawMessage
+	if err := json.Unmarshal(qrJSON, &qrMap); err != nil {
+		return nil, fmt.Errorf("dtr: set qr id: unmarshal qr: %w", err)
+	}
+	idRaw, err := json.Marshal(id)
+	if err != nil {
+		return nil, fmt.Errorf("dtr: set qr id: marshal id: %w", err)
+	}
+	qrMap["id"] = json.RawMessage(idRaw)
+	raw, err := json.Marshal(qrMap)
+	if err != nil {
+		return nil, fmt.Errorf("dtr: set qr id: marshal qr: %w", err)
+	}
+	return raw, nil
+}
+
+func AmendQRWithItem(qrJSON, itemJSON []byte) ([]byte, error) {
+	// Unmarshal QR into a map preserving all fields as raw JSON.
+	var qrMap map[string]json.RawMessage
+	if err := json.Unmarshal(qrJSON, &qrMap); err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: unmarshal qr: %w", err)
+	}
+
+	// Unmarshal the existing item array (may be absent / null).
+	var items []json.RawMessage
+	if existing, ok := qrMap["item"]; ok && string(existing) != "null" {
+		if err := json.Unmarshal(existing, &items); err != nil {
+			return nil, fmt.Errorf("dtr: amend qr: unmarshal items: %w", err)
+		}
+	}
+
+	// Append the new item.
+	items = append(items, json.RawMessage(itemJSON))
+
+	// Re-marshal the items array and put it back.
+	itemsRaw, err := json.Marshal(items)
+	if err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: marshal items: %w", err)
+	}
+	qrMap["item"] = json.RawMessage(itemsRaw)
+
+	// Re-marshal the full QR.
+	raw, err := json.Marshal(qrMap)
+	if err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: marshal qr: %w", err)
+	}
+	return raw, nil
+}
+
+// QRSignatureExt is the standard FHIR/SDC extension carrying a Signature for a
+// QuestionnaireResponse item — the conformant mechanism for a PATIENT attesting
+// "these are my own responses" (FR-27): Signature.type Author's Signature, who =
+// the Patient, when = timestamp. DTR's Standard Questionnaire derives from US Core
+// QR + these CDex signature elements.
+const QRSignatureExt = "http://hl7.org/fhir/StructureDefinition/questionnaireresponse-signature"
+
+const (
+	signatureTypeSystem    = "urn:iso-astm:E1762-95:2013"
+	signatureAuthorCode    = "1.2.840.10065.1.12.1.1" // Author's Signature
+	signatureAuthorDisplay = "Author's Signature"
+)
+
+// patientAttestedItemJSON is a minimal QR item carrying the patient's answer, the
+// information-origin source="patient" attribution (FR-17), and the standard
+// questionnaireresponse-signature (Author's Signature, who=Patient) — the patient
+// attestation (FR-27). A custom struct keeps the Signature value[x] clean.
+type patientAttestedItemJSON struct {
+	LinkId    string                 `json:"linkId"`
+	Answer    []patientAnswerJSON    `json:"answer"`
+	Extension []patientItemExtension `json:"extension"`
+}
+type patientAnswerJSON struct {
+	ValueString string                 `json:"valueString"`
+	Extension   []patientItemExtension `json:"extension,omitempty"`
+}
+type patientItemExtension struct {
+	URL            string                `json:"url"`
+	Extension      []originSubExtension  `json:"extension,omitempty"`
+	ValueSignature *patientSignatureJSON `json:"valueSignature,omitempty"`
+}
+type originSubExtension struct {
+	URL         string               `json:"url"`
+	ValueCode   string               `json:"valueCode,omitempty"`
+	ValueDate   string               `json:"valueDate,omitempty"`
+	ValueString string               `json:"valueString,omitempty"`
+	Extension   []originSubExtension `json:"extension,omitempty"`
+}
+type patientSignatureJSON struct {
+	Type []patientSigCoding `json:"type"`
+	When string             `json:"when"`
+	Who  patientSigWho      `json:"who"`
+	Data string             `json:"data"`
+}
+type patientSigCoding struct {
+	System  string `json:"system"`
+	Code    string `json:"code"`
+	Display string `json:"display"`
+}
+type patientSigWho struct {
+	Reference string `json:"reference"`
+}
+
+// BuildPatientAttestedItem builds the patient-authored, attested QR item: the
+// answer, an information-origin source="manual" + author=Patient/{patientRef} extension
+// (FR-17; the patient enters the value by hand → DTR 2.0.1 code "manual", dtrx-1 requires author),
+// and the standard questionnaireresponse-signature (Author's Signature, who=patientRef,
+// when=when). data is a demo identity-token stub (IAL2 proofing is DEF-9).
+func BuildPatientAttestedItem(linkID, answer, patientRef, when string) ([]byte, error) {
+	// FR-17 attribution rides on the ANSWER (DTR 2.0.1 context = item.answer).
+	// source="manual" is the DTR code for hand-entered data ("patient" is not in
+	// the informationOrigins value set; "override" would imply auto-then-changed).
+	// dtrx-1: author required when source="manual".
+	// questionnaireresponse-signature stays at item level (its declared context).
+	item := patientAttestedItemJSON{
+		LinkId: linkID,
+		Answer: []patientAnswerJSON{{
+			ValueString: answer,
+			Extension: []patientItemExtension{
+				{
+					URL: informationOriginExt,
+					Extension: []originSubExtension{
+						{URL: "source", ValueCode: "manual"},
+						{URL: "author", Extension: []originSubExtension{{URL: "reference", ValueString: patientRef}}},
+					},
+				},
+			},
+		}},
+		Extension: []patientItemExtension{
+			{
+				URL: QRSignatureExt,
+				ValueSignature: &patientSignatureJSON{
+					Type: []patientSigCoding{{System: signatureTypeSystem, Code: signatureAuthorCode, Display: signatureAuthorDisplay}},
+					When: when + "T00:00:00Z",
+					Who:  patientSigWho{Reference: patientRef},
+					// Demo identity-token stub (DEF-9: IAL2 proofing deferred). base64 "patient-attest".
+					Data: "cGF0aWVudC1hdHRlc3Q=",
+				},
+			},
+		},
+	}
+	return json.Marshal(item)
+}
+
+// ValidatePatientAnswer checks that a patient-authored answer conforms to the
+// known constraint for its Questionnaire item, BEFORE the Trust surface signs it.
+// The Oswestry Disability Index (functional-status-oswestry) is a 0–100 integer
+// percentage. An item with no known rule is rejected: the patient-authorship
+// signer must not attest an item whose constraint it cannot enforce. Registering a
+// new patient item means adding its rule here (additive). Full value-set/profile
+// binding across all resources is the deferred FR-36 IG-validation slice.
+func ValidatePatientAnswer(linkID, answer string) error {
+	switch linkID {
+	case "functional-status-oswestry":
+		n, err := strconv.Atoi(answer)
+		if err != nil {
+			return fmt.Errorf("patient answer %q for %s is not an integer", answer, linkID)
+		}
+		if n < 0 || n > 100 {
+			return fmt.Errorf("patient answer %d for %s is out of range [0,100]", n, linkID)
+		}
+		return nil
+	default:
+		return fmt.Errorf("no attestation rule for patient item %q", linkID)
+	}
+}

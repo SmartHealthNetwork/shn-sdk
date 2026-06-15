@@ -9,6 +9,51 @@ import (
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
 
+const (
+	// systemLOINC is the LOINC code system URI.
+	// Mirrors internal/fhirmap.systemLOINC (consent.go).
+	systemLOINC = "http://loinc.org"
+
+	// systemUSCoreDocClass is the US Core DocumentReference category code system.
+	// Mirrors internal/fhirmap.systemUSCoreDocClass (documentreference.go).
+	systemUSCoreDocClass = "http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category"
+
+	// docRefDateUC05 is the fixed instant for the UC-05 operative DocumentReference
+	// (matches the operative DiagnosticReport effectiveDateTime date — 2026-05-15).
+	// FHIR DocumentReference.date is an instant type, so a full ISO 8601 timestamp is
+	// required. recordClinicalDate truncates to YYYY-MM-DD for InRange comparison
+	// (FR-24). Fixed value keeps the golden byte-deterministic (FR-35/FR-39).
+	// Mirrors internal/fhirmap.docRefDateUC05 (documentreference.go).
+	docRefDateUC05 = "2026-05-15T00:00:00Z"
+
+	// systemCARC is the X12 Claim Adjustment Reason Codes system (PDex PPA denial
+	// reason binding). CARC 50 = "non-covered… not deemed a 'medical necessity'."
+	// Mirrors internal/fhirmap.systemCARC (eob.go).
+	systemCARC = "https://x12.org/codes/claim-adjustment-reason-codes"
+
+	// systemPDexAdjudication is the PDex Adjudication Discriminator code system.
+	// Mirrors internal/fhirmap.systemPDexAdjudication (eob.go).
+	systemPDexAdjudication = "http://hl7.org/fhir/us/davinci-pdex/CodeSystem/PDexAdjudicationDiscriminator"
+
+	// systemPAProcedureCPT reuses the package CPT system const (order.go).
+	// Mirrors internal/fhirmap.systemPAProcedureCPT (eob.go).
+	systemPAProcedureCPT = systemCPT
+
+	// systemAdjudication is the standard FHIR adjudication codesystem; "submitted"
+	// is in the PDex "adjudicationamounttype" slice binding (PDexAdjudication VS).
+	// Mirrors internal/fhirmap.systemAdjudication (eob.go).
+	systemAdjudication = "http://terminology.hl7.org/CodeSystem/adjudication"
+
+	// EOBAppealNote is the appeal-rights text carried on the EOB.processNote so the
+	// patient surface (PHG) renders the appeal window FROM the FHIR resource (FR-28),
+	// not from a bespoke UI string. The 30-day window matches the provider-facing
+	// PAS ClaimResponse processNote. Exported so a test can assert the patient view
+	// is data-driven (it equals THIS text, not a generic constant).
+	// Mirrors internal/fhirmap.EOBAppealNote (eob.go).
+	EOBAppealNote = "Appeal window: 30 days from the date of this determination. " +
+		"A peer-to-peer review with the medical director may be requested before filing a formal appeal."
+)
+
 // BuildEligibilityRequest constructs a FHIR R4 CoverageEligibilityRequest for the
 // member, ordering NPI, and date of service (now). Returns FHIR JSON. PORTED
 // standalone from internal/fhirmap.BuildEligibilityRequest with the SAME field
@@ -161,3 +206,199 @@ func BuildDiagnosticReport(id, patientRef, cptCode, display string) ([]byte, err
 }
 
 func strPtr(s string) *string { return &s }
+
+// BuildDocumentReference builds a base-R4 DocumentReference for the operative
+// report disclosed by the external facility (UC-05). type = LOINC 28570-0
+// (Procedure note); category = clinical-note; content.attachment.url references
+// the companion DiagnosticReport. drRef is "DiagnosticReport/<id>".
+//
+// NOTE: no meta.profile is set — the US Core DocumentReference Type value set
+// requires LOINC codes, which the IG-enabled HAPI does not load, causing
+// validation failures. Base-R4 conformance is the pinned posture here; US Core
+// profile pinning for DocumentReference is a tracked fast-follow (same posture
+// as DiagnosticReport, ClaimBundle, etc. in Slice 1/2).
+//
+// Promoted verbatim from internal/fhirmap.BuildDocumentReference (E3b1); parity
+// proven by test/sdkparity/fhirmap_builders_parity_test.go (byte-equal). FR-36
+// boundary guard: no fhircodes value-set is referenced — terminology-agnostic.
+func BuildDocumentReference(id, patientRef, drRef string) ([]byte, error) {
+	date := docRefDateUC05
+	dr := fhir.DocumentReference{
+		Id:     strPtr(id),
+		Status: fhir.DocumentReferenceStatusCurrent,
+		Type: &fhir.CodeableConcept{
+			Coding: []fhir.Coding{{System: strPtr(systemLOINC), Code: strPtr("28570-0"), Display: strPtr("Procedure note")}},
+		},
+		Category: []fhir.CodeableConcept{
+			{Coding: []fhir.Coding{{System: strPtr(systemUSCoreDocClass), Code: strPtr("clinical-note"), Display: strPtr("Clinical Note")}}},
+		},
+		Subject: &fhir.Reference{Reference: strPtr(patientRef)},
+		// Date is the creation/indexing instant of the document — used for FR-24
+		// range filtering (recordClinicalDate reads this field). Fixed to match the
+		// operative DiagnosticReport effectiveDateTime (2026-05-15, FR-35/FR-39).
+		Date: &date,
+		Content: []fhir.DocumentReferenceContent{
+			{Attachment: fhir.Attachment{
+				ContentType: strPtr("application/fhir+json"),
+				Url:         strPtr(drRef),
+				Title:       strPtr("Operative report — lumbar microdiscectomy"),
+			}},
+		},
+	}
+	// fhir.DocumentReference.MarshalJSON injects "resourceType":"DocumentReference"
+	// automatically (confirmed in samply v0.3.2).
+	return json.Marshal(dr)
+}
+
+// PADecision selects the adjudication shape of a PDex PA decision EOB.
+// Promoted verbatim from internal/fhirmap.PADecision (E3b1).
+type PADecision int
+
+const (
+	PADecisionApproved PADecision = iota
+	PADecisionDenied
+)
+
+// eobJSON and its supporting types are package-local structs for the PDex PA
+// decision ExplanationOfBenefit wire shape. Promoted verbatim from
+// internal/fhirmap/eob.go (E3b1).
+type eobJSON struct {
+	ResourceType string             `json:"resourceType"`
+	Id           string             `json:"id"`
+	Status       string             `json:"status"`
+	Type         eobCodeableConcept `json:"type"`
+	Use          string             `json:"use"`
+	Patient      eobReference       `json:"patient"`
+	PreAuthRef   []string           `json:"preAuthRef,omitempty"`
+	Created      string             `json:"created"`
+	Insurer      eobReference       `json:"insurer"`
+	Provider     eobReference       `json:"provider"`
+	Outcome      string             `json:"outcome"`
+	Insurance    []eobInsurance     `json:"insurance"`
+	Item         []eobItem          `json:"item"`
+	ProcessNote  []eobProcessNote   `json:"processNote,omitempty"`
+}
+
+type eobProcessNote struct {
+	Number int    `json:"number"`
+	Type   string `json:"type"`
+	Text   string `json:"text"`
+}
+
+type eobInsurance struct {
+	Focal    bool         `json:"focal"`
+	Coverage eobReference `json:"coverage"`
+}
+
+type eobItem struct {
+	Sequence         int                `json:"sequence"`
+	ProductOrService eobCodeableConcept `json:"productOrService"`
+	Adjudication     []eobAdjudication  `json:"adjudication"`
+}
+
+type eobAdjudication struct {
+	Category eobCodeableConcept  `json:"category"`
+	Reason   *eobCodeableConcept `json:"reason,omitempty"`
+	Amount   *eobMoney           `json:"amount,omitempty"`
+}
+
+type eobMoney struct {
+	Value    json.Number `json:"value"`
+	Currency string      `json:"currency"`
+}
+
+type eobCodeableConcept struct {
+	Coding []eobCoding `json:"coding,omitempty"`
+	Text   string      `json:"text,omitempty"`
+}
+type eobCoding struct {
+	System  string `json:"system,omitempty"`
+	Code    string `json:"code,omitempty"`
+	Display string `json:"display,omitempty"`
+}
+type eobReference struct {
+	Reference string `json:"reference,omitempty"`
+}
+
+// BuildPADecisionEOB builds the Da Vinci PDex Prior Authorization (PPA)
+// ExplanationOfBenefit for a PA decision (FR-28): use=preauthorization,
+// outcome=complete. The item adjudication shape branches on decision:
+//   - PADecisionDenied: the denialreason adjudication slice carrying CARC 50 (not
+//     medically necessary) + the appeal-window/peer-to-peer processNote (authNumber
+//     ignored — a denial has no authorization).
+//   - PADecisionApproved: a "submitted" adjudication (standard adjudication
+//     CodeSystem, in the PDexAdjudication binding) with no Reason/no denialreason,
+//     and the authorization number on EOB.preAuthRef so the patient surface (PHG)
+//     renders the approved auth from the FHIR resource (no appeal processNote).
+//
+// Validated base-R4 + curated terminology; the PDex profile pin is the tracked
+// fast-follow (no meta.profile, per the UC-05 posture).
+//
+// Promoted verbatim from internal/fhirmap.BuildPADecisionEOB (E3b1); parity
+// proven by test/sdkparity/fhirmap_builders_parity_test.go (byte-equal, both
+// branches). FR-36 boundary guard: no fhircodes value-set referenced —
+// terminology-agnostic (codes come in as params / package-local system* URI consts).
+// PADecisionEOBParams groups the inputs to BuildPADecisionEOB — a struct rather than
+// seven positional args (five of them same-typed strings, easy to transpose) so the
+// public call site is readable and the param set can grow without a breaking change.
+type PADecisionEOBParams struct {
+	ID          string
+	PatientRef  string
+	CoverageRef string
+	CPTCode     string
+	Decision    PADecision
+	AuthNumber  string
+	Created     time.Time
+}
+
+func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
+	id, patientRef, coverageRef, cptCode, decision, authNumber, created :=
+		p.ID, p.PatientRef, p.CoverageRef, p.CPTCode, p.Decision, p.AuthNumber, p.Created
+	eob := eobJSON{
+		ResourceType: "ExplanationOfBenefit",
+		Id:           id,
+		Status:       "active",
+		Type:         eobCodeableConcept{Coding: []eobCoding{{System: "http://terminology.hl7.org/CodeSystem/claim-type", Code: "professional"}}},
+		Use:          "preauthorization",
+		Patient:      eobReference{Reference: patientRef},
+		Created:      created.UTC().Format(time.RFC3339),
+		Insurer:      eobReference{Reference: "Organization/payer"},
+		Provider:     eobReference{Reference: "Practitioner/reviewer-uc08"},
+		Outcome:      "complete",
+		Insurance:    []eobInsurance{{Focal: true, Coverage: eobReference{Reference: coverageRef}}},
+		Item: []eobItem{{
+			Sequence:         1,
+			ProductOrService: eobCodeableConcept{Coding: []eobCoding{{System: systemPAProcedureCPT, Code: cptCode, Display: "MRI lumbar spine w/o contrast"}}},
+		}},
+	}
+	switch decision {
+	case PADecisionApproved:
+		// Approval: the PDex "adjudicationamounttype" adjudication slice — category
+		// "submitted" (standard adjudication codesystem, in the PDexAdjudication
+		// binding) with the slice-required amount. No denialreason / no CARC; this is a
+		// conformant approved PA decision (validated against pdex-priorauthorization).
+		// The amount is 0 USD — a pre-authorization carries no adjudicated dollar
+		// figure; the slice mandates the element's presence, so 0 is the deliberate
+		// "not applicable to a pre-auth" placeholder, not a real payment amount.
+		eob.Item[0].Adjudication = []eobAdjudication{{
+			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemAdjudication, Code: "submitted", Display: "Submitted Amount"}}},
+			Amount:   &eobMoney{Value: "0", Currency: "USD"},
+		}}
+		// Carry the authorization number ON the resource as EOB.preAuthRef (the FHIR
+		// field for a pre-authorization reference number — a plain string, no
+		// terminology), so the patient surface renders the approved auth from the EOB
+		// (FR-28). No processNote on an approval (no appeal/peer-to-peer applies).
+		if authNumber != "" {
+			eob.PreAuthRef = []string{authNumber}
+		}
+	default: // PADecisionDenied
+		eob.Item[0].Adjudication = []eobAdjudication{{
+			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemPDexAdjudication, Code: "denialreason"}}},
+			Reason:   &eobCodeableConcept{Coding: []eobCoding{{System: systemCARC, Code: "50", Display: "These are non-covered services because this is not deemed a 'medical necessity' by the payer"}}},
+		}}
+		// FR-28: the appeal window + peer-to-peer instruction travel ON the FHIR
+		// resource so the patient surface renders them from the EOB, not a UI string.
+		eob.ProcessNote = []eobProcessNote{{Number: 1, Type: "print", Text: EOBAppealNote}}
+	}
+	return json.Marshal(eob)
+}
