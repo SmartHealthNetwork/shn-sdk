@@ -104,17 +104,7 @@ commands:
 `)
 }
 
-// manifest is the public registration snippet written by keygen: the holder id,
-// role, base URL, and std-base64 public keys. It is safe to share (no private
-// keys) and feeds the registrar/portal admission.
-type manifest struct {
-	ID      string `json:"id"`
-	Role    string `json:"role"`
-	EncPub  string `json:"encPub"`
-	SignPub string `json:"signPub"`
-	BaseURL string `json:"baseURL"`
-}
-
+// File name constants for the registration bundle written by keygen/register.
 const (
 	signKeyFile  = "sign.key" // base64 ed25519 private key (64B seed||pub)
 	encKeyFile   = "enc.key"  // base64 X25519 private key (32B)
@@ -152,34 +142,10 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 }
 
 // writeIdentity writes the private signing/encryption keys (0600) and the public
-// manifest snippet to dir.
+// manifest snippet to dir. Delegates to the canonical shnsdk.WriteBundle so the
+// on-disk format is owned by the SDK (producer and consumers share one type).
 func writeIdentity(dir string, id shnsdk.Identity, role, baseURL string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create out dir: %w", err)
-	}
-	sign := base64.StdEncoding.EncodeToString(id.SignPriv)
-	enc := base64.StdEncoding.EncodeToString(id.EncPriv[:])
-	if err := os.WriteFile(filepath.Join(dir, signKeyFile), []byte(sign), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", signKeyFile, err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, encKeyFile), []byte(enc), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", encKeyFile, err)
-	}
-	man := manifest{
-		ID:      id.HolderID,
-		Role:    role,
-		EncPub:  base64.StdEncoding.EncodeToString(id.EncPub[:]),
-		SignPub: base64.StdEncoding.EncodeToString(id.SignPub),
-		BaseURL: baseURL,
-	}
-	mb, err := json.MarshalIndent(man, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal manifest: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, manifestFile), append(mb, '\n'), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", manifestFile, err)
-	}
-	return nil
+	return shnsdk.WriteBundle(dir, id, role, baseURL)
 }
 
 // loadIdentity reconstructs an Identity from the private key files written by
@@ -399,14 +365,14 @@ func cmdEligibility(args []string, stdout, stderr io.Writer) int {
 }
 
 // readManifest loads the public manifest snippet from dir.
-func readManifest(dir string) (manifest, error) {
+func readManifest(dir string) (shnsdk.Manifest, error) {
 	mb, err := os.ReadFile(filepath.Join(dir, manifestFile))
 	if err != nil {
-		return manifest{}, err
+		return shnsdk.Manifest{}, err
 	}
-	var man manifest
+	var man shnsdk.Manifest
 	if err := json.Unmarshal(mb, &man); err != nil {
-		return manifest{}, err
+		return shnsdk.Manifest{}, err
 	}
 	return man, nil
 }

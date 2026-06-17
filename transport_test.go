@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -191,5 +192,21 @@ func TestNewClient(t *testing.T) {
 	}
 	if c.Timeout == 0 {
 		t.Error("expected non-zero Timeout on client returned by NewClient")
+	}
+}
+
+func TestPostRaw_SendsExactBytes(t *testing.T) {
+	raw := []byte("{\"a\":1}\n  not-json-after") // deliberately NOT what json.Marshal would produce
+	var got []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	if err := PostRaw(context.Background(), srv.Client(), srv.URL, raw, nil, map[string]string{"X-H": "v"}); err != nil {
+		t.Fatalf("PostRaw: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("server got %q, want exact %q", got, raw)
 	}
 }

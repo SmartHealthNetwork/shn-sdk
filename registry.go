@@ -6,14 +6,14 @@ import (
 	"sync"
 )
 
-// RegistryEntry describes a substrate participant — a payer, provider, or
-// facility — as held in the runtime peer cache. It is DISTINCT from the feed
-// wire DTO Holder (string-keyed, base64-encoded, json-tagged): RegistryEntry is
-// the decoded, in-memory peer-cache entry keyed by id, carrying the keys as
-// usable values.
+// RegistryEntry describes a substrate participant (see Role for the allowed
+// values) as held in the runtime peer cache. It is DISTINCT from the feed wire
+// DTO Holder (string-keyed, base64-encoded, json-tagged): RegistryEntry is the
+// decoded, in-memory peer-cache entry keyed by id, carrying the keys as usable
+// values.
 type RegistryEntry struct {
 	ID      string
-	Role    string            // "provider" | "payer" | "facility" (used for role-based routing)
+	Role    string            // "provider" | "payer" | "facility" | "phg" | "partner" (role-based routing / audit-append trust)
 	EncPub  *[32]byte         // X25519 public key for envelope encryption
 	SignPub ed25519.PublicKey // Ed25519 public key for signature verification
 	BaseURL string

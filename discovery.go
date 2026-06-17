@@ -19,11 +19,18 @@ type Discovery struct {
 	// older consumer ignores it; does NOT bump wireProtocolVersion (same
 	// precedent as ExpectedPriorAuth in DiscoveryPersona). No embedded key
 	// (no drift). Producer: internal/accountsvc/discovery.go.
-	HubTransportKeyURL string               `json:"hubTransportKeyURL"`
-	SandboxResponders  []DiscoveryResponder `json:"sandboxResponders"`
-	Operations         []DiscoveryOp        `json:"operations"`
-	SandboxPersonas    []DiscoveryPersona   `json:"sandboxPersonas"`
-	Docs               string               `json:"docs"`
+	HubTransportKeyURL string `json:"hubTransportKeyURL"`
+	// FHIRValidateURL is the FHIR $validate endpoint the gateway uses for
+	// per-message operation-level validation (FR-36). ADDITIVE optional field —
+	// an older consumer ignores it; does NOT bump wireProtocolVersion. A
+	// zero-config gateway image MUST use this URL so it validates against our
+	// published profiles without any extra env. Empty ⇒ not advertised.
+	// Producer: internal/accountsvc/discovery.go.
+	FHIRValidateURL   string               `json:"fhirValidateURL,omitempty"`
+	SandboxResponders []DiscoveryResponder `json:"sandboxResponders"`
+	Operations        []DiscoveryOp        `json:"operations"`
+	SandboxPersonas   []DiscoveryPersona   `json:"sandboxPersonas"`
+	Docs              string               `json:"docs"`
 }
 
 type DiscoveryEndpoints struct {
@@ -32,6 +39,9 @@ type DiscoveryEndpoints struct {
 	Registrar     string `json:"registrar"`
 	PatientAccess string `json:"patientAccess"`
 	Accounts      string `json:"accounts"`
+	Consent       string `json:"consent,omitempty"`
+	Audit         string `json:"audit,omitempty"`
+	PHG           string `json:"phg,omitempty"`
 }
 
 type DiscoveryResponder struct {

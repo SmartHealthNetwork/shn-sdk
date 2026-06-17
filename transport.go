@@ -15,10 +15,11 @@ import (
 	"time"
 )
 
-// StatusError is returned by PostJSON when the server responds with a non-2xx
-// status, so callers can distinguish a DENIAL (e.g. a 403 authorization/consent
-// refusal) from a transport failure (a Do error, which is a plain wrapped error).
-// Code is the HTTP status; Body is the (truncated) response body.
+// StatusError is returned when the server responds with a non-2xx status (by
+// PostRaw, and transitively PostJSON), so callers can distinguish a DENIAL
+// (e.g. a 403 authorization/consent refusal) from a transport failure (a Do
+// error, which is a plain wrapped error). Code is the HTTP status; Body is the
+// (truncated) response body.
 type StatusError struct {
 	Code int
 	Body string
@@ -50,22 +51,16 @@ func NewClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
-// PostJSON marshals body to JSON, POSTs it to url using client (falling back to
-// http.DefaultClient), applies the given headers plus Content-Type:
-// application/json. If out is non-nil and the response is 2xx, the response body
-// is unmarshalled into out. A non-2xx status causes an error carrying the status
-// code and response body text.
-func PostJSON(ctx context.Context, client *http.Client, url string, body any, out any, headers map[string]string) error {
+// PostRaw POSTs the EXACT bytes raw to url (no marshalling), applying headers plus
+// Content-Type: application/json. If out is non-nil and the response is 2xx, the body
+// is unmarshalled into out. Non-2xx → *StatusError. Use this (not PostJSON) whenever
+// the request body is bound to a signature: the bytes hashed by the caller MUST equal
+// the bytes sent, and PostJSON re-marshals internally.
+func PostRaw(ctx context.Context, client *http.Client, url string, raw []byte, out any, headers map[string]string) error {
 	if client == nil {
 		client = http.DefaultClient
 	}
-
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("shnsdk: marshal request body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(encoded))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
 		return fmt.Errorf("shnsdk: build request: %w", err)
 	}
@@ -73,27 +68,35 @@ func PostJSON(ctx context.Context, client *http.Client, url string, body any, ou
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("shnsdk: do request: %w", err)
 	}
 	defer resp.Body.Close()
-
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
 	if err != nil {
 		return fmt.Errorf("shnsdk: read response body: %w", err)
 	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &StatusError{Code: resp.StatusCode, Body: string(respBody)}
 	}
-
 	if out != nil {
 		if err := json.Unmarshal(respBody, out); err != nil {
 			return fmt.Errorf("shnsdk: unmarshal response body: %w", err)
 		}
 	}
-
 	return nil
+}
+
+// PostJSON marshals body to JSON, POSTs it to url using client (falling back to
+// http.DefaultClient), applies the given headers plus Content-Type:
+// application/json. If out is non-nil and the response is 2xx, the response body
+// is unmarshalled into out. A non-2xx status causes an error carrying the status
+// code and response body text.
+func PostJSON(ctx context.Context, client *http.Client, url string, body any, out any, headers map[string]string) error {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("shnsdk: marshal request body: %w", err)
+	}
+	return PostRaw(ctx, client, url, encoded, out, headers)
 }

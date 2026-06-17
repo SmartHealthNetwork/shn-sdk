@@ -3,7 +3,9 @@ package shnsdk
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +15,7 @@ import (
 // Assertion is a holder's signed identity claim toward an audience (transport
 // identity, FR-3, distinct from per-operation authority — AI-11). Single-sourced
 // in the SDK: the json tags
-// (holderId/audience/issuedAt/expiry/jti/sig), the signing payload, and the
+// (holderId/audience/issuedAt/expiry/jti/bh/sig), the signing payload, and the
 // verifier-enforced bounds live in the SDK so it is wire-identical WITHOUT
 // importing internal/. The cross-module parity tests
 // (test/sdkparity/assertion_parity_test.go,
@@ -29,7 +31,14 @@ type Assertion struct {
 	// verifiers enforce one-time-use on it, so it is stamped BEFORE signing (covered
 	// by the signature). A captured assertion cannot be replayed with a swapped jti.
 	JTI string `json:"jti"`
-	Sig []byte `json:"sig"`
+	// BodyHash, when set, is hex(sha256(request-body)) stamped BEFORE signing so it
+	// is covered by Sig — a body-bound guard recomputes it from the received body and
+	// rejects on mismatch (a captured assertion cannot be replayed against a different
+	// body). omitempty keeps an unset value out of the signed bytes, so non-bound
+	// callers and parity vectors are byte-identical (the verifier does not inspect bh;
+	// only a body-bound guard does).
+	BodyHash string `json:"bh,omitempty"`
+	Sig      []byte `json:"sig"`
 }
 
 // MaxAssertionTTL and MaxClockSkew are verifier-enforced bounds on a holder
@@ -53,18 +62,13 @@ func assertionSigningPayload(a Assertion) []byte {
 	return b
 }
 
-// IssueAssertion creates a signed assertion valid for ttl from issuedAt. Ported
-// verbatim from internal/holderauth.Issue: a fresh random jti is stamped BEFORE
-// signing so it is covered by the signature (a replay guard at the verifier
-// cannot be defeated by swapping in a fresh jti). Returns the raw Assertion
-// struct; most holders should use Identity.Assertion, which wraps this and
-// returns the ready-to-send base64 X-Holder-Assertion header value.
-func IssueAssertion(holderID, audience string, priv ed25519.PrivateKey, issuedAt time.Time, ttl time.Duration) Assertion {
+func issueAssertion(holderID, audience string, priv ed25519.PrivateKey, issuedAt time.Time, ttl time.Duration, bodyHash string) Assertion {
 	a := Assertion{
 		HolderID: holderID,
 		Audience: audience,
 		IssuedAt: issuedAt,
 		Expiry:   issuedAt.Add(ttl),
+		BodyHash: bodyHash,
 	}
 	var jb [16]byte
 	if _, err := rand.Read(jb[:]); err != nil {
@@ -77,9 +81,28 @@ func IssueAssertion(holderID, audience string, priv ed25519.PrivateKey, issuedAt
 	return a
 }
 
+// IssueAssertion creates a signed assertion valid for ttl from issuedAt. Ported
+// verbatim from internal/holderauth.Issue: a fresh random jti is stamped BEFORE
+// signing so it is covered by the signature (a replay guard at the verifier
+// cannot be defeated by swapping in a fresh jti). Returns the raw Assertion
+// struct; most holders should use Identity.Assertion, which wraps this and
+// returns the ready-to-send base64 X-Holder-Assertion header value.
+func IssueAssertion(holderID, audience string, priv ed25519.PrivateKey, issuedAt time.Time, ttl time.Duration) Assertion {
+	return issueAssertion(holderID, audience, priv, issuedAt, ttl, "")
+}
+
+// IssueAssertionForBody is IssueAssertion plus a signature-covered bh = hex(sha256(body)).
+// body MUST be the exact bytes that will be sent on the wire (use shnsdk.PostRaw, not
+// PostJSON, so the sent bytes are these bytes — not a re-marshal).
+func IssueAssertionForBody(holderID, audience string, priv ed25519.PrivateKey, issuedAt time.Time, ttl time.Duration, body []byte) Assertion {
+	sum := sha256.Sum256(body)
+	return issueAssertion(holderID, audience, priv, issuedAt, ttl, hex.EncodeToString(sum[:]))
+}
+
 // VerifyAssertion checks the signature, audience, and expiry against the holder's
 // public key. Ported verbatim from internal/holderauth.Verify (error strings
-// carry the shnsdk: public-surface prefix).
+// carry the shnsdk: public-surface prefix). VerifyAssertion does not inspect
+// BodyHash — only a body-bound guard does.
 func VerifyAssertion(a Assertion, expectedAudience string, pub ed25519.PublicKey, now time.Time) error {
 	if len(a.Sig) == 0 || !ed25519.Verify(pub, assertionSigningPayload(a), a.Sig) {
 		return errors.New("shnsdk: invalid signature")
@@ -128,6 +151,24 @@ func (id Identity) Assertion(audience string, now time.Time, ttl time.Duration) 
 		ttl = MaxAssertionTTL
 	}
 	a := IssueAssertion(id.HolderID, audience, id.SignPriv, now, ttl)
+	b, err := json.Marshal(a)
+	if err != nil {
+		return "", fmt.Errorf("shnsdk: marshal assertion: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(b), nil
+}
+
+// AssertionForBody is Assertion plus a signature-covered body hash (bh = hex(sha256(body))).
+// body MUST be the exact bytes POSTed (pair with shnsdk.PostRaw). Returns the base64
+// X-Holder-Assertion header value.
+func (id Identity) AssertionForBody(audience string, now time.Time, ttl time.Duration, body []byte) (string, error) {
+	if len(id.SignPriv) != ed25519.PrivateKeySize {
+		return "", errors.New("shnsdk: identity has no valid signing key")
+	}
+	if ttl > MaxAssertionTTL {
+		ttl = MaxAssertionTTL
+	}
+	a := IssueAssertionForBody(id.HolderID, audience, id.SignPriv, now, ttl, body)
 	b, err := json.Marshal(a)
 	if err != nil {
 		return "", fmt.Errorf("shnsdk: marshal assertion: %w", err)

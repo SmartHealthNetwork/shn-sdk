@@ -1012,7 +1012,7 @@ state: the Hub sends it on every forward unconditionally.
 ## 7. Worked example — eligibility round-trip (UC-01)
 
 This example mirrors the canonical `gateway.roundTrip` + `authorize` sequence in
-`internal/gateway/gateway.go`.
+`gateway/engine/gateway.go`.
 
 ### Actors and frames
 
@@ -1544,7 +1544,7 @@ must conform to it.
   full UC-01 eligibility round-trip (`-mode eligibility`, the default) **and** the
   UC-03 prior-auth round-trip (`-mode pa`) against the live substrate by delegating to
   the public SDK (`shnsdk.RunEligibility` / `shnsdk.RunPriorAuth`), without importing
-  `internal/gateway` on the originate path. Covered and not-covered branches +
+  the gateway engine (`gateway/engine`) on the originate path. Covered and not-covered branches +
   approved PA, AuditEvent verified. The §10 deploy round-trip runs all three against
   the public sandbox on every substrate deploy.
 

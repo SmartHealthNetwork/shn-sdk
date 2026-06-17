@@ -2,8 +2,12 @@ package shnsdk
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -90,5 +94,40 @@ func TestAssertionNoSigningKey(t *testing.T) {
 	id := Identity{HolderID: "x"}
 	if _, err := id.Assertion("hub", time.Now(), time.Hour); err == nil {
 		t.Error("expected error for identity without signing key")
+	}
+}
+
+func TestIssueAssertionForBody_SignedAndVerifies(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Unix(1_700_000_000, 0)
+	body := []byte(`{"pci":"P1","purpose":"TREAT"}`)
+	a := IssueAssertionForBody("authz", "consent", priv, now, time.Hour, body)
+
+	if a.BodyHash == "" {
+		t.Fatal("BodyHash not stamped")
+	}
+	sum := sha256.Sum256(body)
+	if a.BodyHash != hex.EncodeToString(sum[:]) {
+		t.Fatalf("BodyHash = %q, want sha256 hex of body", a.BodyHash)
+	}
+	if err := VerifyAssertion(a, "consent", pub, now); err != nil {
+		t.Fatalf("verify body-bound assertion: %v", err)
+	}
+	a.BodyHash = "deadbeef"
+	if err := VerifyAssertion(a, "consent", pub, now); err == nil {
+		t.Fatal("expected sig failure after mutating BodyHash")
+	}
+}
+
+func TestIssueAssertion_EmptyBodyHashIsByteIdentical(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Unix(1_700_000_000, 0)
+	a := IssueAssertion("h", "aud", priv, now, time.Hour)
+	if a.BodyHash != "" {
+		t.Fatalf("unbound assertion stamped a BodyHash %q", a.BodyHash)
+	}
+	b, _ := json.Marshal(a)
+	if strings.Contains(string(b), `"bh"`) {
+		t.Fatalf("empty BodyHash leaked into JSON: %s", b)
 	}
 }

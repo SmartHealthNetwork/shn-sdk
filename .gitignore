@@ -1,0 +1,2 @@
+# Built CLI binary (go build ./cmd/shn emits ./shn here) — never commit build artifacts.
+/shn

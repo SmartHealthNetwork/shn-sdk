@@ -47,7 +47,7 @@ func TestKeygen_WritesRoundTrippableKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
-	var man manifest
+	var man shnsdk.Manifest
 	if err := json.Unmarshal(mb, &man); err != nil {
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
