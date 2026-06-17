@@ -1,7 +1,7 @@
 # shn-sdk — SHN participant SDK (Go)
 
 A dependency-light Go SDK for participating in the **SHN prior-authorization
-substrate** (CMS 2026 FHIR Connectathon 7: Da Vinci CRD+DTR+PAS, PDex). It implements
+substrate** (Da Vinci CRD+DTR+PAS, PDex — the SHN Prior Authorization workstream). It implements
 the participant wire protocol — holder identity, per-operation authorization, sealed
 envelopes, and FHIR eligibility — so a Go participant integrates without running the
 Smart Gateway binary.

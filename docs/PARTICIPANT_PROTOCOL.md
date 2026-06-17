@@ -4,7 +4,7 @@
 without running the Smart Gateway binary. Every claim in this document is verified
 against the substrate source code. Field names and endpoint paths are exact.
 
-**Scope:** Preview substrate — CMS 2026 FHIR Connectathon 7 (Da Vinci CRD+DTR+PAS,
+**Scope:** Preview substrate — the SHN Prior Authorization workstream (Da Vinci CRD+DTR+PAS,
 PDex) topology. Do not use this in a production deployment.
 
 ---
@@ -281,8 +281,8 @@ to the registry on the same poll cycle.
 **What a partner does today:**
 
 1. Obtain the Trust admin credential (out-of-band from the Trust operator — today a
-   shared `adminPub`/signing key from the provisioning bundle; OAuth 2.1 self-serve
-   client registration is the next sub-slice, replacing this step).
+   shared `adminPub`/signing key from the provisioning bundle; OAuth 2.1-style self-serve
+   client registration is delivered via the Accounts service — see §2.3a below).
 2. Generate X25519 and Ed25519 key pairs for your holder.
 3. `POST /register` with your public keys, role, and gateway `baseURL` (public https — see the baseURL requirements above).
 4. Within ~3 seconds (one poll cycle), Hub and Authorization Framework will route to
@@ -925,8 +925,7 @@ record and returning it to the originator. A mis-constructed response causes the
 Hub to return 502 to the originator.
 
 **Originator-only participants** (those that only send, never receive) do not need
-to serve this endpoint. Inbound-receiver support is listed in §9 as a tracked
-next sub-slice for external participants.
+to serve this endpoint. A responder/inbound surface is available today via the public SDK (`shnsdk.Responder` — see `SANDBOX.md` §3c); originator-only participants do not need to serve this endpoint.
 
 ### 6.2a Inbound transport authentication (`X-Hub-Assertion`)
 
@@ -1009,7 +1008,7 @@ state: the Hub sends it on every forward unconditionally.
 
 ---
 
-## 7. Worked example — eligibility round-trip (UC-01)
+## 7. Worked example — eligibility round-trip
 
 This example mirrors the canonical `gateway.roundTrip` + `authorize` sequence in
 `gateway/engine/gateway.go`.
@@ -1195,7 +1194,7 @@ parse the `covered`/`not-covered` disposition.
 
 ---
 
-## 7a. Prior-authorization (UC-03 — CRD → DTR → PAS)
+## 7a. Prior-authorization — CRD → DTR → PAS
 
 Prior-authorization is **three substrate legs in sequence**, each an independent
 originate round-trip exactly like the eligibility leg in §7 (resolve → seal →
@@ -1286,7 +1285,7 @@ leg. The clinical answers that drive the outcome are dev-visible inputs to
 
 ---
 
-## 7b. Prior-authorization — pended → amend (UC-04) and denied (UC-08)
+## 7b. Prior-authorization — pended → amend, and denied
 
 UC-04 and UC-08 extend the §7a CRD→DTR→PAS three-leg sequence with new outcomes
 on the PAS leg and, for UC-04, a second exchange. Authority is evaluated per leg
@@ -1548,14 +1547,13 @@ must conform to it.
   approved PA, AuditEvent verified. The §10 deploy round-trip runs all three against
   the public sandbox on every substrate deploy.
 
-### Tracked next sub-slices
+### What's coming next
 
 | Feature | Notes |
 |---|---|
 | **Push-notify on admission** | Hub + authz poll today (~3-second cycle); push-notify is the tracked fast-follow |
-| **Public/cloud sandbox** | The separated topology on managed infra for external partners to run against without a local stack |
-| **Holder/Hub documentation CapabilityStatements** (FR-37) | Machine-readable capability declarations for provider and Hub roles |
-| **Trust-issued PCI** (AI-5 goal state) | Today: deterministic hash (demo only); goal: unguessable Trust-minted PCI |
+| **Per-role CapabilityStatements** (FR-37) | Machine-readable capability declarations for provider and Hub roles |
+| **Trust-issued PCI** | Today: deterministic hash (demo only); goal: unguessable Trust-minted PCI |
 | **Distributed replay cache** | Today: single-Hub in-process guard; goal: shared cache for horizontal scale |
 | **Audit reader access control** | Today: audit chain is open; goal: role-gated reads |
 

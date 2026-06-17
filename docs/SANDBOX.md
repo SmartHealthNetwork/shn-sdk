@@ -147,7 +147,7 @@ shn eligibility --name acme-7f3a \
 
 ---
 
-## 3a. Prior-authorization (UC-03)
+## 3a. Prior-authorization (the CRD → DTR → PAS chain)
 
 Once eligibility conforms, run a **prior-authorization** — the full Da Vinci
 CRD→DTR→PAS leg sequence — for the covered persona. `shn priorauth` resolves the
