@@ -472,7 +472,16 @@ func (r *Responder) handleDTR(w http.ResponseWriter, plaintext []byte) handlerRe
 		respondErr(w, http.StatusBadRequest, "unknown questionnaire canonical")
 		return handlerResult{}
 	}
-	return handlerResult{payload: questionnaireJSON}
+	// §6.2: uniform leg shape — wrap the bare Questionnaire into a one-entry
+	// $questionnaire-package collection Bundle (byte-identical to the substrate
+	// gateway's buildQuestionnairePackage; test/sdkparity asserts parity). The
+	// consumer (RunPriorAuth) extracts the bare Questionnaire on the far side.
+	pkg, err := BuildQuestionnairePackage(questionnaireJSON)
+	if err != nil {
+		respondErr(w, http.StatusInternalServerError, "build questionnaire package failed")
+		return handlerResult{}
+	}
+	return handlerResult{payload: pkg}
 }
 
 // bindBundleSubject enforces PAS bundle-internal patient consistency (H2/H3,

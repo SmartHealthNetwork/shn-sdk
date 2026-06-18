@@ -75,6 +75,60 @@ func BuildQuestionnaireFetch(canonical string) ([]byte, error) {
 	return json.Marshal(QuestionnaireFetchRequest{Canonical: canonical})
 }
 
+// BuildQuestionnairePackage wraps a bare FHIR Questionnaire into a one-entry Da Vinci
+// $questionnaire-package collection Bundle — the SDK responder's UNIFORM DTR-fetch wire
+// shape (§6.2). It is byte-identical to the substrate's
+// gateway/engine.buildQuestionnairePackage (test/sdkparity asserts byte-parity): the
+// canonical bytes are json.Marshal of map[string]any{"resourceType":"Bundle",
+// "type":"collection","entry":[{"fullUrl":<url>,"resource":<questionnaire>}]} (Go sorts
+// map keys, so the wire is {"entry":[{"fullUrl":<url>,"resource":<q>}],"resourceType":
+// "Bundle","type":"collection"}). A FHIR collection Bundle requires every entry to carry a
+// fullUrl (IG-HAPI $validate enforces it); the Questionnaire's canonical url is the entry
+// identity. The sandbox payer carries no dependent Libraries/ValueSets, so this wrap is
+// honestly deps-free; a real partner's package carries them.
+func BuildQuestionnairePackage(questionnaire []byte) ([]byte, error) {
+	url, err := ParseQuestionnaireURL(questionnaire) // validates resourceType + non-empty url
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: BuildQuestionnairePackage: %w", err)
+	}
+	pkg := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "collection",
+		"entry": []map[string]any{
+			{"fullUrl": url, "resource": json.RawMessage(questionnaire)},
+		},
+	}
+	return json.Marshal(pkg)
+}
+
+// ExtractQuestionnaireFromPackage pulls the first Questionnaire entry out of a Da Vinci
+// $questionnaire-package response Bundle, returning its bytes VERBATIM. STRICT and
+// package-ONLY: the SDK consumer expects the uniform package shape (§6.2), so a bare
+// Questionnaire — which has no entry array — naturally yields no Questionnaire entry and
+// errors. There is NO dual-shape tolerance branch by design (full-uniform contract).
+func ExtractQuestionnaireFromPackage(data []byte) ([]byte, error) {
+	var bundle struct {
+		Entry []struct {
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		return nil, fmt.Errorf("shnsdk: parse $questionnaire-package bundle: %w", err)
+	}
+	for _, e := range bundle.Entry {
+		var probe struct {
+			ResourceType string `json:"resourceType"`
+		}
+		if err := json.Unmarshal(e.Resource, &probe); err != nil {
+			continue
+		}
+		if probe.ResourceType == "Questionnaire" {
+			return e.Resource, nil
+		}
+	}
+	return nil, fmt.Errorf("shnsdk: $questionnaire-package response contains no Questionnaire")
+}
+
 // ParseQuestionnaireURL returns the url field from a marshalled FHIR Questionnaire.
 // Ported standalone from internal/dtr.ParseQuestionnaireURL: errors if the
 // resourceType is not "Questionnaire" or the url is absent/empty.

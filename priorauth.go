@@ -159,7 +159,14 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: %w", err)
 	}
-	fetchedURL, err := ParseQuestionnaireURL(dtrResp)
+	// §6.2: the DTR-fetch leg responds with a $questionnaire-package collection Bundle;
+	// extract the bare Questionnaire (strict, package-only — no dual-shape tolerance)
+	// before the F5 canonical check + auto-fill.
+	questionnaireJSON, err := ExtractQuestionnaireFromPackage(dtrResp)
+	if err != nil {
+		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: %w", err)
+	}
+	fetchedURL, err := ParseQuestionnaireURL(questionnaireJSON)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: parse questionnaire url: %w", err)
 	}
@@ -168,7 +175,7 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		// the CRD card advertised, else the payer swapped questionnaires under us.
 		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: fetched questionnaire %q != advertised canonical %q", fetchedURL, canonical)
 	}
-	qrJSON, err := FillQuestionnaire(dtrResp, req.Clinical, QRContext{
+	qrJSON, err := FillQuestionnaire(questionnaireJSON, req.Clinical, QRContext{
 		PatientRef:  patientRef,
 		CoverageRef: coverageRef,
 		OrderRef:    "ServiceRequest/sr-" + req.Member,

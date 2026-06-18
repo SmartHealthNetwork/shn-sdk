@@ -94,13 +94,19 @@ func (f *paFakeSubstrate) payloadFor(txType string, reqPlain []byte) []byte {
 		return []byte(`{"cards":[{"summary":"PA verdict","indicator":"info",` +
 			`"extension":{"shnPaRequired":` + boolStr(f.paRequired) + canon + `}}]}`)
 	case "dtr-questionnaire-fetch":
-		// The lumbar-MRI questionnaire the SDK FillQuestionnaire recognizes. Minimal
-		// items mirroring the sandbox questionnaire's link ids.
-		return []byte(`{"resourceType":"Questionnaire","url":"` + SupportedQuestionnaireCanonical + `",` +
+		// §6.2: uniform leg shape — the substrate returns a $questionnaire-package
+		// collection Bundle wrapping the lumbar-MRI questionnaire the SDK
+		// FillQuestionnaire recognizes. RunPriorAuth extracts the bare Questionnaire.
+		q := []byte(`{"resourceType":"Questionnaire","url":"` + SupportedQuestionnaireCanonical + `",` +
 			`"status":"active","item":[` +
 			`{"linkId":"conservative-therapy-weeks","type":"integer"},` +
 			`{"linkId":"neuro-deficit","type":"boolean"},` +
 			`{"linkId":"prior-imaging","type":"boolean"}]}`)
+		pkg, err := BuildQuestionnairePackage(q)
+		if err != nil {
+			panic("priorauth fake: wrap questionnaire package: " + err.Error())
+		}
+		return pkg
 	case "pas-claim":
 		return []byte(`{"resourceType":"ClaimResponse","status":"active","type":{"coding":[{"code":"professional"}]},` +
 			`"use":"preauthorization","patient":{"reference":"Patient/X"},"created":"` +

@@ -192,11 +192,18 @@ func (f *fakeSandbox) payloadFor(txType string, reqPlain []byte) []byte {
 		return []byte(`{"cards":[{"summary":"PA verdict","indicator":"info",` +
 			`"extension":{"shnPaRequired":true,"questionnaireCanonical":"` + shnsdk.SupportedQuestionnaireCanonical + `"}}]}`)
 	case "dtr-questionnaire-fetch":
-		return []byte(`{"resourceType":"Questionnaire","url":"` + shnsdk.SupportedQuestionnaireCanonical + `",` +
+		// §6.2: uniform leg shape — the substrate returns a $questionnaire-package
+		// collection Bundle; RunPriorAuth extracts the bare Questionnaire.
+		q := []byte(`{"resourceType":"Questionnaire","url":"` + shnsdk.SupportedQuestionnaireCanonical + `",` +
 			`"status":"active","item":[` +
 			`{"linkId":"conservative-therapy-weeks","type":"integer"},` +
 			`{"linkId":"neuro-deficit","type":"boolean"},` +
 			`{"linkId":"prior-imaging","type":"boolean"}]}`)
+		pkg, err := shnsdk.BuildQuestionnairePackage(q)
+		if err != nil {
+			panic("doctor fake: wrap questionnaire package: " + err.Error())
+		}
+		return pkg
 	case "pas-claim":
 		if f.paPended {
 			return []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +

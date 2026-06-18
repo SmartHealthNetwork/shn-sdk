@@ -219,3 +219,86 @@ func TestSandboxLumbarQuestionnaire_DeterministicBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildQuestionnairePackage_ByteShape pins the canonical $questionnaire-package
+// wire shape (§6.2): json.Marshal sorts map keys, so the bytes are
+// {"entry":[{"fullUrl":<url>,"resource":<q>}],"resourceType":"Bundle","type":"collection"}.
+// The fullUrl (the Questionnaire's canonical url) is required by a FHIR collection Bundle.
+// This MUST stay byte-identical to the substrate gateway's buildQuestionnairePackage
+// (test/sdkparity enforces cross-module parity).
+func TestBuildQuestionnairePackage_ByteShape(t *testing.T) {
+	q := []byte(`{"resourceType":"Questionnaire","url":"u"}`)
+	pkg, err := BuildQuestionnairePackage(q)
+	if err != nil {
+		t.Fatalf("BuildQuestionnairePackage: %v", err)
+	}
+	want := `{"entry":[{"fullUrl":"u","resource":{"resourceType":"Questionnaire","url":"u"}}],"resourceType":"Bundle","type":"collection"}`
+	if string(pkg) != want {
+		t.Errorf("package wire drift:\n got=%s\nwant=%s", pkg, want)
+	}
+}
+
+// TestBuildQuestionnairePackage_InvalidJSON: a non-JSON questionnaire is rejected with
+// an error (never a malformed package).
+func TestBuildQuestionnairePackage_InvalidJSON(t *testing.T) {
+	pkg, err := BuildQuestionnairePackage([]byte("not json"))
+	if err == nil {
+		t.Fatalf("BuildQuestionnairePackage accepted invalid json; want an error")
+	}
+	if pkg != nil {
+		t.Errorf("BuildQuestionnairePackage returned non-nil package (%q) on invalid json", pkg)
+	}
+}
+
+// TestBuildAndExtractQuestionnairePackage_RoundTrip: wrap then extract returns the
+// Questionnaire bytes verbatim.
+func TestBuildAndExtractQuestionnairePackage_RoundTrip(t *testing.T) {
+	q := SandboxLumbarQuestionnaire()
+	pkg, err := BuildQuestionnairePackage(q)
+	if err != nil {
+		t.Fatalf("BuildQuestionnairePackage: %v", err)
+	}
+	got, err := ExtractQuestionnaireFromPackage(pkg)
+	if err != nil {
+		t.Fatalf("ExtractQuestionnaireFromPackage: %v", err)
+	}
+	if string(got) != string(q) {
+		t.Errorf("round-trip drift:\n got=%s\nwant=%s", got, q)
+	}
+}
+
+// TestExtractQuestionnaireFromPackage_NoQuestionnaire: a package whose entries contain
+// no Questionnaire errors with the strict, package-only message.
+func TestExtractQuestionnaireFromPackage_NoQuestionnaire(t *testing.T) {
+	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Library"}}]}`)
+	got, err := ExtractQuestionnaireFromPackage(pkg)
+	if err == nil {
+		t.Fatalf("ExtractQuestionnaireFromPackage accepted a Questionnaire-free package; want an error")
+	}
+	if got != nil {
+		t.Errorf("ExtractQuestionnaireFromPackage returned non-nil (%q) when no Questionnaire present", got)
+	}
+	if !strings.Contains(err.Error(), "$questionnaire-package response contains no Questionnaire") {
+		t.Errorf("error %q does not name the strict no-Questionnaire failure", err)
+	}
+}
+
+// TestExtractQuestionnaireFromPackage_BareQuestionnaireRejected: STRICT package-only —
+// a bare Questionnaire (no entry array) is NOT tolerated; it errors (no dual-shape
+// fallback). This is the full-uniform contract (§6.2).
+func TestExtractQuestionnaireFromPackage_BareQuestionnaireRejected(t *testing.T) {
+	got, err := ExtractQuestionnaireFromPackage(SandboxLumbarQuestionnaire())
+	if err == nil {
+		t.Fatalf("ExtractQuestionnaireFromPackage accepted a bare Questionnaire; full-uniform requires a package")
+	}
+	if got != nil {
+		t.Errorf("ExtractQuestionnaireFromPackage returned non-nil (%q) on a bare Questionnaire", got)
+	}
+}
+
+// TestExtractQuestionnaireFromPackage_Garbage: malformed JSON errors (never a panic).
+func TestExtractQuestionnaireFromPackage_Garbage(t *testing.T) {
+	if _, err := ExtractQuestionnaireFromPackage([]byte("not json")); err == nil {
+		t.Fatalf("ExtractQuestionnaireFromPackage accepted garbage json; want an error")
+	}
+}

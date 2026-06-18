@@ -1243,7 +1243,7 @@ func TestResponder_DTR(t *testing.T) {
 	adj := &sandboxTestAdjudicator{now: h.now}
 	_, srv := h.makeResponderSrv(t, responderIdent, adj)
 
-	t.Run("happy path → questionnaire round-trips", func(t *testing.T) {
+	t.Run("happy path → $questionnaire-package round-trips", func(t *testing.T) {
 		fetchPayload, err := BuildQuestionnaireFetch(QuestionnaireCanonicalLumbarMRI)
 		if err != nil {
 			t.Fatalf("BuildQuestionnaireFetch: %v", err)
@@ -1255,7 +1255,13 @@ func TestResponder_DTR(t *testing.T) {
 			t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
 		}
 		plaintext := h.openResponse(t, body)
-		url, err := ParseQuestionnaireURL(plaintext)
+		// §6.2: the responder now emits a $questionnaire-package collection Bundle;
+		// the bare Questionnaire is extracted on the far side.
+		questionnaireJSON, err := ExtractQuestionnaireFromPackage(plaintext)
+		if err != nil {
+			t.Fatalf("ExtractQuestionnaireFromPackage: %v; body: %s", err, plaintext)
+		}
+		url, err := ParseQuestionnaireURL(questionnaireJSON)
 		if err != nil {
 			t.Fatalf("ParseQuestionnaireURL: %v", err)
 		}
