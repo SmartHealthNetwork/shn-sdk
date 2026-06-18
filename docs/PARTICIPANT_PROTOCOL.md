@@ -4,8 +4,10 @@
 without running the Smart Gateway binary. Every claim in this document is verified
 against the substrate source code. Field names and endpoint paths are exact.
 
-**Scope:** Preview substrate — the SHN Prior Authorization workstream (Da Vinci CRD+DTR+PAS,
-PDex) topology. Do not use this in a production deployment.
+**Scope:** Preview substrate. This document specifies the **general participant wire contract**
+(identity, per-operation authorization, sealed envelopes, payload-blind routing); the worked flows
+are the first workflow delivered on it, Prior Authorization (Da Vinci CRD+DTR+PAS, PDex). Do not
+use this in a production deployment.
 
 ---
 

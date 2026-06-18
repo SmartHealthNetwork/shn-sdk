@@ -1,8 +1,9 @@
 # SHN Sandbox — Getting Started
 
 **Audience:** developers building a participant (provider/payer/facility) against the
-SHN prior-authorization substrate. This is the **Discover → Register → Build → Run →
-Validate** path, with the exact `shn` commands per step.
+SHN substrate — the secure exchange router for healthcare data. This is the
+**Discover → Register → Build → Run → Validate** path, with the exact `shn` commands
+per step. The sandbox's first end-to-end workflow is prior authorization.
 
 > **Prefer a browser?** The developer portal at `https://developers.shn-preview.org`
 > shows the live sandbox descriptor, your registered clients, and the exact commands.
