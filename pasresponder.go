@@ -337,9 +337,10 @@ func parseSandboxAdjudicationInputs(qrJSON []byte) (weeks int, attested, priorSu
 				} `json:"extension"`
 			} `json:"extension"`
 			Answer []struct {
-				ValueInteger *int    `json:"valueInteger"`
-				ValueBoolean *bool   `json:"valueBoolean"`
-				ValueString  *string `json:"valueString"`
+				ValueInteger *int     `json:"valueInteger"`
+				ValueDecimal *float64 `json:"valueDecimal"`
+				ValueBoolean *bool    `json:"valueBoolean"`
+				ValueString  *string  `json:"valueString"`
 			} `json:"answer"`
 		} `json:"item"`
 	}
@@ -349,8 +350,15 @@ func parseSandboxAdjudicationInputs(qrJSON []byte) (weeks int, attested, priorSu
 	for _, it := range qr.Item {
 		switch it.LinkId {
 		case "conservative-therapy-weeks":
-			if len(it.Answer) > 0 && it.Answer[0].ValueInteger != nil {
-				weeks = *it.Answer[0].ValueInteger
+			// Accept valueInteger (managed FillQuestionnaire) OR valueDecimal (the operated
+			// $populate engine — HAPI emits a CQL numeric as valueDecimal regardless of item
+			// type; spike 2026-06-19). Whole-number weeks, so int(decimal) is exact.
+			if len(it.Answer) > 0 {
+				if it.Answer[0].ValueInteger != nil {
+					weeks = *it.Answer[0].ValueInteger
+				} else if it.Answer[0].ValueDecimal != nil {
+					weeks = int(*it.Answer[0].ValueDecimal)
+				}
 			}
 		case "prior-surgery":
 			if len(it.Answer) > 0 && it.Answer[0].ValueBoolean != nil {

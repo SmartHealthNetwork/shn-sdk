@@ -337,3 +337,26 @@ func TestBuildDeniedResponse_RoundTrip(t *testing.T) {
 		t.Errorf("Rationale = %q, want %q", res.Denial.Rationale, rationale)
 	}
 }
+
+// TestSandboxAdjudicate_AcceptsDecimalWeeks: the operated $populate engine emits the weeks as
+// valueDecimal (HAPI maps a CQL numeric to valueDecimal). The parser must read it identically
+// to valueInteger — without this, native weeks defaults to 0 and a 6-week approval wrongly denies.
+func TestSandboxAdjudicate_AcceptsDecimalWeeks(t *testing.T) {
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","item":[{"linkId":"conservative-therapy-weeks","answer":[{"valueDecimal":6}]}]}`)
+	dec, err := SandboxAdjudicate(qr, true, testNow, nil)
+	if err != nil {
+		t.Fatalf("SandboxAdjudicate: %v", err)
+	}
+	if dec.Outcome != PASApproved {
+		t.Fatalf("decimal weeks=6 → %v, want PASApproved", dec.Outcome)
+	}
+	// And a sub-threshold decimal denies.
+	qr4 := []byte(`{"resourceType":"QuestionnaireResponse","item":[{"linkId":"conservative-therapy-weeks","answer":[{"valueDecimal":4}]}]}`)
+	dec4, err := SandboxAdjudicate(qr4, true, testNow, nil)
+	if err != nil {
+		t.Fatalf("SandboxAdjudicate(4): %v", err)
+	}
+	if dec4.Outcome != PASDenied {
+		t.Fatalf("decimal weeks=4 → %v, want PASDenied", dec4.Outcome)
+	}
+}

@@ -302,3 +302,24 @@ func TestExtractQuestionnaireFromPackage_Garbage(t *testing.T) {
 		t.Fatalf("ExtractQuestionnaireFromPackage accepted garbage json; want an error")
 	}
 }
+
+// TestSandboxLumbarQuestionnaire_IsCQLBacked: the sandbox questionnaire carries the
+// cqf-library + per-item initialExpression extensions so a real operated $populate engine
+// can populate it (the managed FillQuestionnaire ignores these and fills by linkId).
+func TestSandboxLumbarQuestionnaire_IsCQLBacked(t *testing.T) {
+	s := string(SandboxLumbarQuestionnaire())
+	for _, want := range []string{
+		"cqf-library",
+		"Library/LumbarMRICQL",
+		"sdc-questionnaire-launchContext",
+		"sdc-questionnaire-initialExpression",
+		"ConservativeTherapyWeeks",
+		"PriorSurgery",
+		"HighDisability",
+		"PatientReportedRequired",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("questionnaire missing %q:\n%s", want, s)
+		}
+	}
+}

@@ -283,47 +283,93 @@ func dtrQRContextExtensions(qc QRContext) []fhir.Extension {
 // the substrate's dtr.QuestionnaireFor panic posture).
 var sandboxLumbarQuestionnaireBytes []byte
 
+// cqlLibraryCanonical is the operated-CQL-engine Library the questionnaire's cqf-library points at.
+// MUST MATCH internal/fhirseed (Library.url) — drift → CR can't resolve the Library → smoke red.
+const cqlLibraryCanonical = "http://smarthealth.network/fhir/Library/LumbarMRICQL"
+
+// cqlQuestionnaireExtensions builds the questionnaire-level SDC extensions for CQL-backed
+// population: cqf-library → the operated CQL Library + two launchContext declarations
+// (patient, coverage) the operated $populate engine binds. Byte-parallel with internal/dtr.
+func cqlQuestionnaireExtensions() []fhir.Extension {
+	lc := func(code, typ string) fhir.Extension {
+		return fhir.Extension{
+			Url: "http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-launchContext",
+			Extension: []fhir.Extension{
+				{Url: "name", ValueCoding: &fhir.Coding{System: strPtr("http://hl7.org/fhir/uv/sdc/CodeSystem/launchContext"), Code: strPtr(code)}},
+				{Url: "type", ValueCode: strPtr(typ)},
+			},
+		}
+	}
+	// Only "patient" — the SDC launchContext value set has no "coverage" code, and no CQL
+	// define retrieves Coverage. The CQL's `context Patient` binds from this.
+	return []fhir.Extension{
+		{Url: "http://hl7.org/fhir/StructureDefinition/cqf-library", ValueCanonical: strPtr(cqlLibraryCanonical)},
+		lc("patient", "Patient"),
+	}
+}
+
+// initialExpression builds the per-item SDC initialExpression (text/cql) referencing a define in
+// the LumbarMRICQL Library.
+func initialExpression(define string) []fhir.Extension {
+	return []fhir.Extension{{
+		Url:             "http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-initialExpression",
+		ValueExpression: &fhir.Expression{Language: "text/cql", Expression: strPtr(define)},
+	}}
+}
+
 func init() {
 	q := fhir.Questionnaire{
 		Id:      strPtr("pa-lumbar-mri"),
 		Url:     strPtr(QuestionnaireCanonicalLumbarMRI),
 		Version: strPtr("1.0.0"),
 		Status:  fhir.PublicationStatusActive,
+		// CQL-backed DTR questionnaire (operated $populate engine populates each item from the
+		// LumbarMRICQL Library; FillQuestionnaire ignores these extensions and fills by linkId).
+		// Byte-parallel with internal/dtr.QuestionnaireFor.
+		Extension: cqlQuestionnaireExtensions(),
 		Item: []fhir.QuestionnaireItem{
 			{
-				LinkId: "conservative-therapy-weeks",
-				Type:   fhir.QuestionnaireItemTypeInteger,
-				Text:   strPtr("Weeks of conservative therapy completed"),
+				LinkId:    "conservative-therapy-weeks",
+				Type:      fhir.QuestionnaireItemTypeInteger,
+				Text:      strPtr("Weeks of conservative therapy completed"),
+				Extension: initialExpression("ConservativeTherapyWeeks"),
 			},
 			{
-				LinkId: "neuro-deficit",
-				Type:   fhir.QuestionnaireItemTypeBoolean,
-				Text:   strPtr("Progressive neurological deficit present?"),
+				LinkId:    "neuro-deficit",
+				Type:      fhir.QuestionnaireItemTypeBoolean,
+				Text:      strPtr("Progressive neurological deficit present?"),
+				Extension: initialExpression("NeuroDeficit"),
 			},
 			{
-				LinkId: "prior-imaging",
-				Type:   fhir.QuestionnaireItemTypeBoolean,
-				Text:   strPtr("Prior imaging performed?"),
+				LinkId:    "prior-imaging",
+				Type:      fhir.QuestionnaireItemTypeBoolean,
+				Text:      strPtr("Prior imaging performed?"),
+				Extension: initialExpression("PriorImaging"),
 			},
 			{
-				LinkId: "prior-surgery",
-				Type:   fhir.QuestionnaireItemTypeBoolean,
-				Text:   strPtr("Prior lumbar surgery?"),
+				LinkId:    "prior-surgery",
+				Type:      fhir.QuestionnaireItemTypeBoolean,
+				Text:      strPtr("Prior lumbar surgery?"),
+				Extension: initialExpression("PriorSurgery"),
 			},
 			{
-				LinkId: "high-disability",
-				Type:   fhir.QuestionnaireItemTypeBoolean,
-				Text:   strPtr("High disability index flag?"),
+				LinkId:    "high-disability",
+				Type:      fhir.QuestionnaireItemTypeBoolean,
+				Text:      strPtr("High disability index flag?"),
+				Extension: initialExpression("HighDisability"),
 			},
 			{
 				// Patient attestation trigger flag: when true, the functional-status-oswestry
 				// item must be patient-attested. Absent / false means no patient-authorship
 				// leg is needed (auto-approval and clinician-attestation paths are unchanged).
-				LinkId: "patient-reported-required",
-				Type:   fhir.QuestionnaireItemTypeBoolean,
-				Text:   strPtr("Patient-reported functional status required?"),
+				LinkId:    "patient-reported-required",
+				Type:      fhir.QuestionnaireItemTypeBoolean,
+				Text:      strPtr("Patient-reported functional status required?"),
+				Extension: initialExpression("PatientReportedRequired"),
 			},
 			{
+				// No initialExpression — clinician/patient attestation (filled by the
+				// attestation resume flow, not the operated engine).
 				LinkId: "functional-status-oswestry",
 				Type:   fhir.QuestionnaireItemTypeText,
 				Text:   strPtr("Oswestry disability index (clinician-attested)"),
