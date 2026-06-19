@@ -1210,7 +1210,7 @@ request leg and `payer-coverage` on the response leg.
 | Leg | `transactionType` | Request `operation` | Response `operation` | What it does |
 |---|---|---|---|---|
 | **CRD** | `crd-order-select` | `crd-order-select` | `crd-cards` | Provider proposes the order (ServiceRequest + Coverage); payer returns CDS cards. If **no PA is required** the round-trip is **terminal here** — DTR/PAS never run. |
-| **DTR** | `dtr-questionnaire-fetch` | `dtr-questionnaire-fetch` | `dtr-questionnaire` | Provider fetches the questionnaire the CRD card advertised (by canonical URL), then fills it **locally** from its own clinical data. |
+| **DTR** | `dtr-questionnaire-fetch` | `dtr-questionnaire-fetch` | `dtr-questionnaire` | Provider fetches the questionnaire the CRD card advertised (by canonical URL); the response is a Da Vinci `$questionnaire-package` collection Bundle (the questionnaire plus its dependent Libraries/ValueSets) — extract the Questionnaire, then fill it **locally** from its own clinical data. |
 | **PAS** | `pas-claim` | `pas-submit` | `pas-response` | Provider submits the Claim bundle (the filled QuestionnaireResponse + ServiceRequest); payer adjudicates and returns a ClaimResponse. |
 
 Two guards a conformant client MUST honour:
@@ -1270,8 +1270,9 @@ paRequired, canon = ParseCards(crdResp)          # paRequired==false ⇒ no-pa-r
 # LEG 2 — DTR
 dtrReq   = BuildQuestionnaireFetch(canon)
 dtrResp  ← route(dtr-questionnaire-fetch / dtr-questionnaire-fetch → dtr-questionnaire, dtrReq)
-url      = ParseQuestionnaireURL(dtrResp)        # MUST equal canon (canonical-substitution guard)
-qrJSON   = FillQuestionnaire(dtrResp, clinical, qrContext)   # fill LOCALLY from your data
+qJSON    = ExtractQuestionnaireFromPackage(dtrResp)  # DTR-fetch returns a $questionnaire-package Bundle
+url      = ParseQuestionnaireURL(qJSON)          # MUST equal canon (canonical-substitution guard)
+qrJSON   = FillQuestionnaire(qJSON, clinical, qrContext)     # fill LOCALLY from your data
 
 # LEG 3 — PAS
 bundle   = BuildClaimBundle(qrJSON, srJSON, "Patient/MBR-COVERED", "Coverage/MBR-COVERED", corrID, now)
@@ -1466,6 +1467,19 @@ must conform to it.
 
 ### Changelog
 
+- **2026-06-18 — DTR-fetch returns a `$questionnaire-package`.** The `dtr-questionnaire-fetch`
+  response is now a Da Vinci `$questionnaire-package` collection Bundle (the Questionnaire plus its
+  dependent Libraries/ValueSets), not a bare Questionnaire — so the questionnaire's CQL/value-set
+  dependencies survive the wire. New exports `BuildQuestionnairePackage` /
+  `ExtractQuestionnaireFromPackage`; `Responder` wraps the Questionnaire into a package and
+  `RunPriorAuth` extracts it before the canonical-substitution check + auto-fill. A manual
+  leg-by-leg client MUST call `ExtractQuestionnaireFromPackage(dtrResp)` before
+  `ParseQuestionnaireURL`/`FillQuestionnaire`. The sandbox lumbar-MRI questionnaire is also
+  CQL-backed (a `cqf-library` extension + a per-item SDC `initialExpression`), so an operated SDC
+  `Questionnaire/$populate` CQL engine can populate it; `FillQuestionnaire` ignores those extensions
+  and fills by `linkId`, so the managed `QuestionnaireResponse` is byte-unchanged. `SandboxAdjudicate`
+  accepts `valueInteger` **or** `valueDecimal` for `conservative-therapy-weeks` (a `$populate` engine
+  emits a CQL numeric as `valueDecimal`).
 - **2026-06-13 — PA-chain responder available.** `Adjudicator` grows three new methods —
   `OrderSelect(cpt string) (paRequired bool, questionnaireCanonical string)`,
   `Questionnaire(canonical string) (questionnaireJSON []byte, ok bool)`, and
