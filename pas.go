@@ -493,6 +493,7 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 					URL       string `json:"url"`
 					Extension []struct {
 						URL                  string `json:"url"`
+						ValueString          string `json:"valueString"`
 						ValueCodeableConcept *struct {
 							Coding []struct {
 								Code string `json:"code"`
@@ -509,6 +510,9 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 
 	// Denial: navigate item[].adjudication[].extension[reviewAction].extension[reviewActionCode]
 	// .valueCodeableConcept.coding[].code == "A3".
+	// Also collect the "number" sub-extension (real Da Vinci RI preAuthRef placement):
+	// item[].adjudication[].extension[reviewAction].extension[url="number"].valueString.
+	var reviewActionPreAuthRef string
 	for _, it := range probe.Item {
 		for _, adj := range it.Adjudication {
 			for _, ext := range adj.Extension {
@@ -516,25 +520,35 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 					continue
 				}
 				for _, sub := range ext.Extension {
-					if sub.URL != reviewActionCodeExtURL || sub.ValueCodeableConcept == nil {
-						continue
-					}
-					for _, c := range sub.ValueCodeableConcept.Coding {
-						if c.Code == reviewActionDeniedCode {
-							notes := make([]string, 0, len(probe.ProcessNote))
-							for _, n := range probe.ProcessNote {
-								if n.Text != "" {
-									notes = append(notes, n.Text)
+					switch sub.URL {
+					case reviewActionCodeExtURL:
+						if sub.ValueCodeableConcept == nil {
+							continue
+						}
+						for _, c := range sub.ValueCodeableConcept.Coding {
+							if c.Code == reviewActionDeniedCode {
+								notes := make([]string, 0, len(probe.ProcessNote))
+								for _, n := range probe.ProcessNote {
+									if n.Text != "" {
+										notes = append(notes, n.Text)
+									}
 								}
+								return PriorAuthResult{
+									Outcome: "denied",
+									Denial: &Denial{
+										ReasonCode: reviewActionDeniedCode,
+										Rationale:  probe.Disposition,
+										AppealNote: notes,
+									},
+								}, nil
 							}
-							return PriorAuthResult{
-								Outcome: "denied",
-								Denial: &Denial{
-									ReasonCode: reviewActionDeniedCode,
-									Rationale:  probe.Disposition,
-									AppealNote: notes,
-								},
-							}, nil
+						}
+					case "number":
+						// Real Da Vinci PAS RIs place the auth number in the reviewAction
+						// "number" sub-extension rather than the top-level preAuthRef field
+						// (FINDINGS-br-payer.md). Take the first non-empty value seen.
+						if reviewActionPreAuthRef == "" && sub.ValueString != "" {
+							reviewActionPreAuthRef = sub.ValueString
 						}
 					}
 				}
@@ -542,13 +556,18 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 		}
 	}
 
-	// Approved: explicit preAuthRef + outcome complete.
-	if probe.Outcome == "complete" && probe.PreAuthRef != "" {
+	// Approved: explicit preAuthRef (top-level SHN convention) OR reviewAction "number"
+	// sub-extension (real Da Vinci RI convention) + outcome complete.
+	preAuthRef := probe.PreAuthRef
+	if preAuthRef == "" {
+		preAuthRef = reviewActionPreAuthRef
+	}
+	if probe.Outcome == "complete" && preAuthRef != "" {
 		validUntil := ""
 		if probe.PreAuthPeriod != nil {
 			validUntil = probe.PreAuthPeriod.End
 		}
-		return PriorAuthResult{Outcome: "approved", PreAuthRef: probe.PreAuthRef, ValidUntil: validUntil}, nil
+		return PriorAuthResult{Outcome: "approved", PreAuthRef: preAuthRef, ValidUntil: validUntil}, nil
 	}
 
 	// Anything else is ambiguous — fail loud rather than guess.

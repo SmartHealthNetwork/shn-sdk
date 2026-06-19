@@ -60,29 +60,74 @@ func TestBuildCards(t *testing.T) {
 	const canon = QuestionnaireCanonicalLumbarMRI
 
 	// PA-required branch.
-	b, err := BuildCards(true, canon)
+	b, err := BuildCards(CardCoverage{Covered: "covered", PANeeded: "auth-needed", Questionnaires: []string{canon}})
 	if err != nil {
-		t.Fatalf("BuildCards(true): %v", err)
+		t.Fatalf("BuildCards(pa-required): %v", err)
 	}
-	pa, gotCanon, err := ParseCards(b)
+	cov, err := ParseCards(b)
 	if err != nil {
 		t.Fatalf("ParseCards(pa-required): %v", err)
 	}
-	if !pa || gotCanon != canon {
-		t.Errorf("pa-required round-trip = (%v,%q), want (true,%q)", pa, gotCanon, canon)
+	if !cov.PARequired() || !cov.NeedsDTR() || cov.Questionnaires[0] != canon {
+		t.Errorf("pa-required round-trip = %+v, want PA-required carrying %q", cov, canon)
 	}
 
 	// No-PA branch.
-	b, err = BuildCards(false, "")
+	b, err = BuildCards(CardCoverage{Covered: "covered", PANeeded: "no-auth"})
 	if err != nil {
-		t.Fatalf("BuildCards(false): %v", err)
+		t.Fatalf("BuildCards(no-pa): %v", err)
 	}
-	pa, gotCanon, err = ParseCards(b)
+	cov, err = ParseCards(b)
 	if err != nil {
 		t.Fatalf("ParseCards(no-pa): %v", err)
 	}
-	if pa || gotCanon != "" {
-		t.Errorf("no-pa round-trip = (%v,%q), want (false,\"\")", pa, gotCanon)
+	if cov.PARequired() || cov.NeedsDTR() {
+		t.Errorf("no-pa round-trip = %+v, want not PA-required, no questionnaire", cov)
+	}
+}
+
+// TestCardCoverageRoundTrip verifies BuildCards→ParseCards preserves the widened
+// CardCoverage fields and that the PA-required/NeedsDTR predicates read them.
+func TestCardCoverageRoundTrip(t *testing.T) {
+	in := CardCoverage{Covered: "covered", PANeeded: "auth-needed",
+		Questionnaires: []string{"http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"}}
+	cardsJSON, err := BuildCards(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseCards(cardsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Covered != "covered" || !got.PARequired() || !got.NeedsDTR() {
+		t.Fatalf("round-trip lost fields: %+v", got)
+	}
+}
+
+// TestCardCoverageNotCovered verifies the not-covered/no-auth projection round-trips
+// and is not PA-required.
+func TestCardCoverageNotCovered(t *testing.T) {
+	cardsJSON, err := BuildCards(CardCoverage{Covered: "not-covered", PANeeded: "no-auth"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseCards(cardsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Covered != "not-covered" || got.PARequired() {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// TestStripCanonicalVersion verifies the trailing |version is stripped and a bare
+// canonical is left unchanged.
+func TestStripCanonicalVersion(t *testing.T) {
+	if StripCanonicalVersion("http://x/Q|1.0.0") != "http://x/Q" {
+		t.Fatal("strip |version")
+	}
+	if StripCanonicalVersion("http://x/Q") != "http://x/Q" {
+		t.Fatal("bare unchanged")
 	}
 }
 
@@ -191,25 +236,25 @@ func TestParseCoverageBeneficiary(t *testing.T) {
 
 // TestParseCards covers both branches + the zero-card error path.
 func TestParseCards(t *testing.T) {
-	paReq := []byte(`{"cards":[{"summary":"Prior authorization required","indicator":"warning","extension":{"shnPaRequired":true,"questionnaireCanonical":"http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"}}]}`)
-	pa, canon, err := ParseCards(paReq)
+	paReq := []byte(`{"cards":[{"summary":"Prior authorization required","indicator":"warning","extension":{"covered":"covered","paNeeded":"auth-needed","questionnaires":["http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"]}}]}`)
+	cov, err := ParseCards(paReq)
 	if err != nil {
 		t.Fatalf("ParseCards(pa-required): %v", err)
 	}
-	if !pa || canon != "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri" {
-		t.Errorf("pa-required parse = (%v,%q), want (true, the canonical)", pa, canon)
+	if !cov.PARequired() || !cov.NeedsDTR() || cov.Questionnaires[0] != "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri" {
+		t.Errorf("pa-required parse = %+v, want PA-required carrying the canonical", cov)
 	}
 
-	noPA := []byte(`{"cards":[{"summary":"No prior authorization required","indicator":"info","extension":{"shnPaRequired":false}}]}`)
-	pa, canon, err = ParseCards(noPA)
+	noPA := []byte(`{"cards":[{"summary":"No prior authorization required","indicator":"info","extension":{"covered":"covered","paNeeded":"no-auth"}}]}`)
+	cov, err = ParseCards(noPA)
 	if err != nil {
 		t.Fatalf("ParseCards(no-pa): %v", err)
 	}
-	if pa || canon != "" {
-		t.Errorf("no-pa parse = (%v,%q), want (false, \"\")", pa, canon)
+	if cov.PARequired() || cov.NeedsDTR() {
+		t.Errorf("no-pa parse = %+v, want not PA-required, no questionnaire", cov)
 	}
 
-	if _, _, err := ParseCards([]byte(`{"cards":[]}`)); err == nil {
+	if _, err := ParseCards([]byte(`{"cards":[]}`)); err == nil {
 		t.Error("ParseCards should reject a zero-card response")
 	}
 }

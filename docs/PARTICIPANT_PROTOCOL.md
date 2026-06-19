@@ -1265,7 +1265,8 @@ covJSON = BuildCoverage("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
 # LEG 1 — CRD
 crdReq            = BuildOrderSelectRequest(srJSON, covJSON, "Patient/MBR-COVERED")
 crdResp           ← route(crd-order-select / crd-order-select → crd-cards, crdReq)
-paRequired, canon = ParseCards(crdResp)          # paRequired==false ⇒ no-pa-required, STOP
+cov               = ParseCards(crdResp)          # cov: CardCoverage. !cov.PARequired() ⇒ no-pa STOP; cov.Covered=="not-covered" ⇒ STOP
+canon             = cov.Questionnaires[0]        # DTR canonical (present when cov.NeedsDTR())
 
 # LEG 2 — DTR
 dtrReq   = BuildQuestionnaireFetch(canon)

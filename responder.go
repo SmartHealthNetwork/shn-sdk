@@ -450,7 +450,13 @@ func (r *Responder) handleCRD(w http.ResponseWriter, plaintext []byte, tok Token
 	}
 
 	paRequired, canonical := r.cfg.Adjudicator.OrderSelect(cpt)
-	cardsJSON, err := BuildCards(paRequired, canonical)
+	cov := CardCoverage{Covered: "covered"}
+	if paRequired {
+		cov.PANeeded, cov.Questionnaires = "auth-needed", []string{canonical}
+	} else {
+		cov.PANeeded = "no-auth"
+	}
+	cardsJSON, err := BuildCards(cov)
 	if err != nil {
 		respondErr(w, http.StatusInternalServerError, "build cards failed")
 		return handlerResult{}

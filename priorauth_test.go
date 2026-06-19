@@ -87,12 +87,13 @@ func (f *paFakeSubstrate) payloadFor(txType string, reqPlain []byte) []byte {
 		if f.malformCards {
 			return []byte("this is not json cards {{{")
 		}
-		canon := ""
+		ext := `"covered":"covered","paNeeded":"no-auth"`
 		if f.paRequired {
-			canon = `,"questionnaireCanonical":"` + SupportedQuestionnaireCanonical + `"`
+			ext = `"covered":"covered","paNeeded":"auth-needed",` +
+				`"questionnaires":["` + SupportedQuestionnaireCanonical + `"]`
 		}
 		return []byte(`{"cards":[{"summary":"PA verdict","indicator":"info",` +
-			`"extension":{"shnPaRequired":` + boolStr(f.paRequired) + canon + `}}]}`)
+			`"extension":{` + ext + `}}]}`)
 	case "dtr-questionnaire-fetch":
 		// §6.2: uniform leg shape — the substrate returns a $questionnaire-package
 		// collection Bundle wrapping the lumbar-MRI questionnaire the SDK
@@ -115,13 +116,6 @@ func (f *paFakeSubstrate) payloadFor(txType string, reqPlain []byte) []byte {
 			`"preAuthPeriod":{"end":"2026-12-31"}}`)
 	}
 	return []byte(`{}`)
-}
-
-func boolStr(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
 }
 
 // routeHandler mimics the Hub+payer for the PA legs: open the request, look up the

@@ -1182,15 +1182,15 @@ func TestResponder_CRD(t *testing.T) {
 			t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
 		}
 		plaintext := h.openResponse(t, body)
-		paRequired, canonical, err := ParseCards(plaintext)
+		cov, err := ParseCards(plaintext)
 		if err != nil {
 			t.Fatalf("ParseCards: %v", err)
 		}
-		if !paRequired {
-			t.Error("paRequired = false, want true")
+		if !cov.PARequired() {
+			t.Error("PARequired() = false, want true")
 		}
-		if canonical != QuestionnaireCanonicalLumbarMRI {
-			t.Errorf("canonical = %q, want %q", canonical, QuestionnaireCanonicalLumbarMRI)
+		if !cov.NeedsDTR() || cov.Questionnaires[0] != QuestionnaireCanonicalLumbarMRI {
+			t.Errorf("questionnaires = %v, want [%q]", cov.Questionnaires, QuestionnaireCanonicalLumbarMRI)
 		}
 	})
 

@@ -140,14 +140,18 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: %w", err)
 	}
-	paRequired, canonical, err := ParseCards(crdResp)
+	cov, err := ParseCards(crdResp)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: parse cards: %w", err)
 	}
-	if !paRequired {
+	if !cov.PARequired() {
 		// No PA needed for this order — terminal, short-circuit (no DTR/PAS legs).
 		return PriorAuthResult{Outcome: "no-pa-required"}, nil
 	}
+	if !cov.NeedsDTR() {
+		return PriorAuthResult{}, fmt.Errorf("shnsdk: PA-required card carried no questionnaire")
+	}
+	canonical := StripCanonicalVersion(cov.Questionnaires[0])
 
 	// LEG 2 — DTR questionnaire fetch + local auto-fill.
 	dtrReq, err := BuildQuestionnaireFetch(canonical)

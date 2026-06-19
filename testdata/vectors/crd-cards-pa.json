@@ -1,1 +1,1 @@
-{"cards":[{"summary":"Prior authorization required","indicator":"warning","extension":{"shnPaRequired":true,"questionnaireCanonical":"http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"}}]}
+{"cards":[{"summary":"Prior authorization required","indicator":"warning","extension":{"covered":"covered","paNeeded":"auth-needed","questionnaires":["http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"]}}]}

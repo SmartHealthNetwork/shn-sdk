@@ -187,10 +187,10 @@ func (f *fakeSandbox) payloadFor(txType string, reqPlain []byte) []byte {
 			`"insurance":[{"coverage":{"reference":"Coverage/X"},"inforce":false}]}`)
 	case "crd-order-select":
 		if f.paNotRequired {
-			return []byte(`{"cards":[{"summary":"no PA","indicator":"info","extension":{"shnPaRequired":false}}]}`)
+			return []byte(`{"cards":[{"summary":"no PA","indicator":"info","extension":{"covered":"covered","paNeeded":"no-auth"}}]}`)
 		}
 		return []byte(`{"cards":[{"summary":"PA verdict","indicator":"info",` +
-			`"extension":{"shnPaRequired":true,"questionnaireCanonical":"` + shnsdk.SupportedQuestionnaireCanonical + `"}}]}`)
+			`"extension":{"covered":"covered","paNeeded":"auth-needed","questionnaires":["` + shnsdk.SupportedQuestionnaireCanonical + `"]}}]}`)
 	case "dtr-questionnaire-fetch":
 		// §6.2: uniform leg shape — the substrate returns a $questionnaire-package
 		// collection Bundle; RunPriorAuth extracts the bare Questionnaire.

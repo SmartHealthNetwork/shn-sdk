@@ -122,6 +122,25 @@ func TestParseClaimResponse_Approved(t *testing.T) {
 	}
 }
 
+// TestParseClaimResponse_DeniedWithNumberStaysDenied is the rejection row for the
+// reviewAction `number` preAuthRef fallback (added for real Da Vinci RIs like br-payer
+// that carry the auth number there rather than in top-level preAuthRef): an A3 denial
+// that ALSO carries a `number` sub-extension must STILL read as denied — the number
+// must never flip a denial to approved (the A3 branch returns before the approved gate).
+func TestParseClaimResponse_DeniedWithNumberStaysDenied(t *testing.T) {
+	cr := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","use":"preauthorization","item":[{"adjudication":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction","extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode","valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/306","code":"A3"}]}},{"url":"number","valueString":"SHOULD-NOT-BECOME-PREAUTHREF"}]}]}]}]}`)
+	res, err := ParseClaimResponse(cr)
+	if err != nil {
+		t.Fatalf("ParseClaimResponse: %v", err)
+	}
+	if res.Outcome != "denied" {
+		t.Fatalf("Outcome = %q, want denied (A3 must win over the number fallback)", res.Outcome)
+	}
+	if res.PreAuthRef != "" {
+		t.Errorf("PreAuthRef = %q, want empty (a denial issues no auth number)", res.PreAuthRef)
+	}
+}
+
 // TestParseClaimResponse_NonApproved: an AMBIGUOUS bare ClaimResponse — one that is
 // neither approved (no preAuthRef) nor explicitly denied (no reviewActionCode A3) —
 // fails loud with an error, NOT a wrong Outcome. Absence of a preAuthRef alone is not

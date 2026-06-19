@@ -3,6 +3,7 @@ package shnsdk
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // QuestionnaireCanonicalLumbarMRI is the canonical URL for the lumbar MRI PA
@@ -30,19 +31,44 @@ type OrderSelectRequest struct {
 	} `json:"prefetch"`
 }
 
-// cardExtension carries SHN-specific PA verdict fields in a CDS Hooks card. Ported
-// standalone from internal/crd.CardExtension (same json tags, same omitempty).
-type cardExtension struct {
-	SHNPARequired          bool   `json:"shnPaRequired"`
-	QuestionnaireCanonical string `json:"questionnaireCanonical,omitempty"`
+// Canonical CardCoverage value-space constants (the Da Vinci CRD STU 2.1 split shape
+// the type is frozen to). These name the wire codes so producers/consumers/normalizers
+// reference one source of truth instead of bare string literals.
+const (
+	CoveredCovered      = "covered"     // Covered: service is covered
+	CoveredNotCovered   = "not-covered" // Covered: service is not covered (originator stops)
+	CoveredConditional  = "conditional" // Covered: coverage is conditional
+	PANeededNoAuth      = "no-auth"     // PANeeded: no prior auth required
+	PANeededAuthNeeded  = "auth-needed" // PANeeded: prior auth required
+	PANeededSatisfied   = "satisfied"   // PANeeded: PA already satisfied (SatisfiedPaID set)
+	PANeededPerformPA   = "performpa"   // PANeeded: provider must perform PA now
+	PANeededConditional = "conditional" // PANeeded: PA requirement is conditional
+)
+
+// CardCoverage is the faithful-minimal projection of the Da Vinci CRD coverage-information
+// system action (frozen to the STU 2.1 split shape). Cosmetic fields dropped.
+type CardCoverage struct {
+	Covered        string   `json:"covered"`                  // covered | not-covered | conditional
+	PANeeded       string   `json:"paNeeded,omitempty"`       // no-auth | auth-needed | satisfied | performpa | conditional
+	Questionnaires []string `json:"questionnaires,omitempty"` // 0..* canonical(Questionnaire)
+	SatisfiedPaID  string   `json:"satisfiedPaId,omitempty"`  // present iff PANeeded == "satisfied"
 }
+
+// PARequired reports whether the coverage-information requires the provider to obtain
+// prior authorization (auth-needed or performpa).
+func (c CardCoverage) PARequired() bool {
+	return c.PANeeded == PANeededAuthNeeded || c.PANeeded == PANeededPerformPA
+}
+
+// NeedsDTR reports whether the card advertises at least one DTR questionnaire to gather.
+func (c CardCoverage) NeedsDTR() bool { return len(c.Questionnaires) > 0 }
 
 // card is a single CDS Hooks suggestion card. Ported from internal/crd.Card.
 type card struct {
-	Summary   string        `json:"summary"`
-	Indicator string        `json:"indicator"`
-	Detail    string        `json:"detail,omitempty"`
-	Extension cardExtension `json:"extension"`
+	Summary   string       `json:"summary"`
+	Indicator string       `json:"indicator"`
+	Detail    string       `json:"detail,omitempty"`
+	Extension CardCoverage `json:"extension"`
 }
 
 // cardsResponse is the CDS Hooks response envelope. Ported from internal/crd.CardsResponse.
@@ -85,47 +111,44 @@ func ParseOrderSelectRequest(data []byte) (OrderSelectRequest, error) {
 	return req, nil
 }
 
-// BuildCards constructs a CDS Hooks CardsResponse JSON for the given PA verdict.
-// The PA-required-per-CPT policy belongs to the partner's Adjudicator; only the card
-// SHAPE is protocol. When paRequired is true, the card carries a "warning" indicator
-// and the given questionnaireCanonical in the SHN extension. When false, an "info"
-// card is returned. Byte parity with internal/crd.BuildCards for equivalent verdicts
-// is proven by test/sdkparity/crd_parity_test.go.
-func BuildCards(paRequired bool, questionnaireCanonical string) ([]byte, error) {
-	var c card
-	if paRequired {
-		c = card{
-			Summary:   "Prior authorization required",
-			Indicator: "warning",
-			Extension: cardExtension{
-				SHNPARequired:          true,
-				QuestionnaireCanonical: questionnaireCanonical,
-			},
-		}
-	} else {
-		c = card{
-			Summary:   "No prior authorization required",
-			Indicator: "info",
-			Extension: cardExtension{
-				SHNPARequired: false,
-			},
-		}
+// BuildCards constructs a CDS Hooks CardsResponse JSON carrying the given coverage
+// projection. The PA-required-per-CPT policy belongs to the partner's Adjudicator; only
+// the card SHAPE is protocol. The summary/indicator are derived from the coverage:
+// not-covered → "warning"; PA-required → "warning"; otherwise → "info". Byte parity with
+// internal/crd.BuildCards for equivalent coverage is proven by
+// test/sdkparity/crd_parity_test.go.
+func BuildCards(cov CardCoverage) ([]byte, error) {
+	c := card{Extension: cov}
+	switch {
+	case cov.Covered == CoveredNotCovered:
+		c.Summary, c.Indicator = "Service not covered", "warning"
+	case cov.PARequired():
+		c.Summary, c.Indicator = "Prior authorization required", "warning"
+	default:
+		c.Summary, c.Indicator = "No prior authorization required", "info"
 	}
 	return json.Marshal(cardsResponse{Cards: []card{c}})
 }
 
-// ParseCards parses the CRD cards response: whether PA is required + the DTR
-// questionnaire canonical to fetch. Reimplements internal/crd.ParseCards standalone,
-// reading the first card's SHN extension (the substrate emits exactly one card). It
-// errors if the response carries zero cards.
-func ParseCards(data []byte) (paRequired bool, questionnaireCanonical string, err error) {
+// ParseCards parses the CRD cards response, returning the first card's coverage
+// projection (the substrate emits exactly one card). It errors if the response carries
+// zero cards. Reimplements internal/crd.ParseCards standalone.
+func ParseCards(data []byte) (CardCoverage, error) {
 	var resp cardsResponse
-	if err = json.Unmarshal(data, &resp); err != nil {
-		return false, "", err
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return CardCoverage{}, err
 	}
 	if len(resp.Cards) == 0 {
-		return false, "", fmt.Errorf("shnsdk: CardsResponse must contain at least one card")
+		return CardCoverage{}, fmt.Errorf("shnsdk: CardsResponse must contain at least one card")
 	}
-	ext := resp.Cards[0].Extension
-	return ext.SHNPARequired, ext.QuestionnaireCanonical, nil
+	return resp.Cards[0].Extension, nil
+}
+
+// StripCanonicalVersion drops a trailing |version from a FHIR canonical URL, leaving the
+// bare canonical. A canonical with no version is returned unchanged.
+func StripCanonicalVersion(canonical string) string {
+	if i := strings.IndexByte(canonical, '|'); i >= 0 {
+		return canonical[:i]
+	}
+	return canonical
 }

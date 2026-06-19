@@ -85,13 +85,13 @@ func TestVectorOrderSelectReproduce(t *testing.T) {
 		t.Errorf("order-select not reproduced byte-for-byte:\n got=%s\nwant=%s", got, want)
 	}
 
-	// And the SDK parses the canonical PA-required cards vector → (true, canonical).
-	pa, canon, err := ParseCards(readVector(t, dir, "crd-cards-pa.json"))
+	// And the SDK parses the canonical PA-required cards vector → PA-required + a questionnaire.
+	cardCov, err := ParseCards(readVector(t, dir, "crd-cards-pa.json"))
 	if err != nil {
 		t.Fatalf("ParseCards(crd-cards-pa): %v", err)
 	}
-	if !pa || canon == "" {
-		t.Errorf("crd-cards-pa = (%v,%q), want (true, a canonical)", pa, canon)
+	if !cardCov.PARequired() || !cardCov.NeedsDTR() {
+		t.Errorf("crd-cards-pa = %+v, want PA-required carrying a questionnaire", cardCov)
 	}
 }
 
