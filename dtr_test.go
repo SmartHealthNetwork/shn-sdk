@@ -311,7 +311,6 @@ func TestSandboxLumbarQuestionnaire_IsCQLBacked(t *testing.T) {
 	for _, want := range []string{
 		"cqf-library",
 		"Library/LumbarMRICQL",
-		"sdc-questionnaire-launchContext",
 		"sdc-questionnaire-initialExpression",
 		"ConservativeTherapyWeeks",
 		"PriorSurgery",
@@ -321,5 +320,11 @@ func TestSandboxLumbarQuestionnaire_IsCQLBacked(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Fatalf("questionnaire missing %q:\n%s", want, s)
 		}
+	}
+	// NO launchContext — the SDC launchContext CodeSystem is unresolvable by the US-Core runtime
+	// egress validator (it errors on the unknown code system); the engine binds the CQL Patient
+	// context from the $populate subject parameter instead.
+	if strings.Contains(s, "launchContext") {
+		t.Fatalf("questionnaire must NOT carry launchContext (US-Core egress-validator unfriendly):\n%s", s)
 	}
 }

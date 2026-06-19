@@ -287,24 +287,17 @@ var sandboxLumbarQuestionnaireBytes []byte
 // MUST MATCH internal/fhirseed (Library.url) — drift → CR can't resolve the Library → smoke red.
 const cqlLibraryCanonical = "http://smarthealth.network/fhir/Library/LumbarMRICQL"
 
-// cqlQuestionnaireExtensions builds the questionnaire-level SDC extensions for CQL-backed
-// population: cqf-library → the operated CQL Library + two launchContext declarations
-// (patient, coverage) the operated $populate engine binds. Byte-parallel with internal/dtr.
+// cqlQuestionnaireExtensions builds the questionnaire-level SDC extension for CQL-backed
+// population: cqf-library → the operated CQL Library. Byte-parallel with internal/dtr.
+//
+// NO launchContext: the operated $populate engine binds the CQL `context Patient` from the
+// `subject` parameter (validated against HAPI CR — population works with subject alone). The SDC
+// launchContext CodeSystem is also unresolvable by the US-Core runtime egress validator (it errors
+// on the unknown code system) — so omitting it keeps the questionnaire egress-validatable without
+// entangling the validator role with SDC. Declaring launchContext is a deferred realism item.
 func cqlQuestionnaireExtensions() []fhir.Extension {
-	lc := func(code, typ string) fhir.Extension {
-		return fhir.Extension{
-			Url: "http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-launchContext",
-			Extension: []fhir.Extension{
-				{Url: "name", ValueCoding: &fhir.Coding{System: strPtr("http://hl7.org/fhir/uv/sdc/CodeSystem/launchContext"), Code: strPtr(code)}},
-				{Url: "type", ValueCode: strPtr(typ)},
-			},
-		}
-	}
-	// Only "patient" — the SDC launchContext value set has no "coverage" code, and no CQL
-	// define retrieves Coverage. The CQL's `context Patient` binds from this.
 	return []fhir.Extension{
 		{Url: "http://hl7.org/fhir/StructureDefinition/cqf-library", ValueCanonical: strPtr(cqlLibraryCanonical)},
-		lc("patient", "Patient"),
 	}
 }
 
