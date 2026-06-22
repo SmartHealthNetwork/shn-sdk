@@ -64,8 +64,19 @@ type QRContext struct {
 
 // QuestionnaireFetchRequest is the request body for fetching a Questionnaire by
 // canonical URL. Ported standalone from internal/dtr.QuestionnaireFetchRequest.
+//
+// Coverage is OPTIONAL: when a Da Vinci $questionnaire-package ingress carried a
+// `coverage` parameter (the provider's Coverage resource, e.g. with a contained
+// cms-payer Organization), the gateway carries that resource VERBATIM through this leg
+// so the native-forward rebuild can re-emit it as the payer-required `coverage`
+// parameter (a real Da Vinci payer 400s "The 'coverage' parameter is required (min=1)"
+// otherwise). It is NEVER fabricated at the payer edge — only carried through
+// (non-aggregation). The `omitempty` is load-bearing: when Coverage is nil the marshal
+// is byte-identical to the canonical-only request, so BuildQuestionnaireFetch and the
+// 8-scenario demo originator (which set no coverage) are unaffected (test/sdkparity).
 type QuestionnaireFetchRequest struct {
-	Canonical string `json:"canonical"`
+	Canonical string          `json:"canonical"`
+	Coverage  json.RawMessage `json:"coverage,omitempty"`
 }
 
 // BuildQuestionnaireFetch builds the DTR questionnaire-fetch request bytes for a
