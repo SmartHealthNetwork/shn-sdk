@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
 
 // QuestionnaireCanonicalLumbarMRI is the canonical URL for the lumbar MRI PA
@@ -91,6 +93,184 @@ func BuildOrderSelectRequest(serviceRequestJSON, coverageJSON []byte, patientID 
 	}
 	req.Prefetch.Coverage = json.RawMessage(coverageJSON)
 	return json.Marshal(req)
+}
+
+// conformantCDSBundle is a FHIR collection Bundle carrying the draft orders inline
+// (one entry per draft order). The conformant CRD order-select request models
+// context.draftOrders as a FHIR Bundle (vs the minimized request's bare resource
+// array), exactly as the payer-side conformant bind (gateway conformantCRDBind) and
+// a real br-payer expect.
+type conformantCDSBundle struct {
+	ResourceType string                  `json:"resourceType"`
+	Type         string                  `json:"type"`
+	Entry        []conformantBundleEntry `json:"entry"`
+}
+
+type conformantBundleEntry struct {
+	FullURL  string          `json:"fullUrl"`
+	Resource json.RawMessage `json:"resource"`
+}
+
+// conformantOrderSelectContext is the conformant CDS Hooks order-select context: a
+// FHIR Bundle of draft orders plus the userId/patientId/selections a real CDS client
+// sends. Distinct from the minimized OrderSelectContext (bare draftOrders array).
+type conformantOrderSelectContext struct {
+	UserID      string              `json:"userId"`
+	PatientID   string              `json:"patientId"`
+	DraftOrders conformantCDSBundle `json:"draftOrders"`
+	Selections  []string            `json:"selections"`
+}
+
+// conformantOrderSelectRequest is the full conformant CDS Hooks order-select request
+// (the shape gateway conformantCRDBind accepts and a real br-payer adjudicates):
+// hook/hookInstance/fhirServer + the conformant context + the Coverage prefetch.
+type conformantOrderSelectRequest struct {
+	Hook         string                       `json:"hook"`
+	HookInstance string                       `json:"hookInstance"`
+	FHIRServer   string                       `json:"fhirServer"`
+	Context      conformantOrderSelectContext `json:"context"`
+	Prefetch     struct {
+		Coverage json.RawMessage `json:"coverage"`
+	} `json:"prefetch"`
+}
+
+// Deterministic conformant-CRD demo-context constants. These are fixed (no time/random)
+// so the builder reproduces the conformant golden byte-for-byte. The order ids are local to
+// the request (the SR is wrapped fullUrl urn:uuid:<id> and selected by ServiceRequest/<id>).
+const (
+	conformantCRDHookInstance = "convergence-crd-hi-1"
+	conformantCRDFHIRServer   = "https://provider.example/fhir"
+	conformantCRDUserID       = "Practitioner/p1"
+	conformantCRDOrderID      = "sr1"
+
+	// Conformant Coverage + contained cms-payer Organization (CMS-0057). The CMS payer
+	// identifier system is the HL7 OID for US health-plan/payer identifiers; value "00001"
+	// is CMS's well-known plan id. These are fixed (deterministic) and match the conformant
+	// golden + the existing conformant goldens.
+	conformantCoverageID    = "c1"
+	conformantPayerOrgID    = "cms-payer"
+	conformantPayerOrgName  = "Centers for Medicare and Medicaid Services"
+	conformantPayerOrgValue = "00001"
+	systemCMSPayerID        = "urn:oid:2.16.840.1.113883.6.300"
+)
+
+// BuildConformantOrderSelectRequest builds the CONFORMANT CRD order-select request bytes
+// (the conformant target): hook "order-select", context.draftOrders a FHIR collection
+// Bundle whose single entry is the ServiceRequest (id sr1, fullUrl urn:uuid:sr1),
+// context.patientId the bare member, context.selections referencing the SR, and
+// prefetch.coverage the (payer-bearing) Coverage. This is the conformant sibling of the
+// minimized BuildOrderSelectRequest (which stays untouched); the gateway's
+// conformantCRDBind accepts this shape and a real br-payer adjudicates it. Deterministic
+// (no time/random). The SR keeps its US Core meta.profile (US Core resolves clean
+// against the US-Core-only validator).
+func BuildConformantOrderSelectRequest(serviceRequestJSON, coverageJSON []byte, patientID string) ([]byte, error) {
+	// Inject the local order id into the SR (the minimized BuildServiceRequest emits no
+	// id; the conformant Bundle entry needs a stable id to wrap+select).
+	srWithID, err := withResourceID(serviceRequestJSON, conformantCRDOrderID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant CRD: %w", err)
+	}
+	req := conformantOrderSelectRequest{
+		Hook:         "order-select",
+		HookInstance: conformantCRDHookInstance,
+		FHIRServer:   conformantCRDFHIRServer,
+		Context: conformantOrderSelectContext{
+			UserID: conformantCRDUserID,
+			// CDS Hooks context.patientId is the BARE patient id (not a Patient/ ref);
+			// the gateway bind trims the prefix either way, but the conformant shape +
+			// a real CDS client send it bare.
+			PatientID: strings.TrimPrefix(patientID, "Patient/"),
+			DraftOrders: conformantCDSBundle{
+				ResourceType: "Bundle",
+				Type:         "collection",
+				Entry: []conformantBundleEntry{{
+					FullURL:  "urn:uuid:" + conformantCRDOrderID,
+					Resource: json.RawMessage(srWithID),
+				}},
+			},
+			Selections: []string{"ServiceRequest/" + conformantCRDOrderID},
+		},
+	}
+	req.Prefetch.Coverage = json.RawMessage(coverageJSON)
+	return json.Marshal(req)
+}
+
+// withResourceID returns the FHIR resource JSON with its top-level "id" set to id,
+// preserving every other field verbatim. Deterministic.
+func withResourceID(resourceJSON []byte, id string) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(resourceJSON, &m); err != nil {
+		return nil, fmt.Errorf("inject id: %w", err)
+	}
+	idJSON, err := json.Marshal(id)
+	if err != nil {
+		return nil, err
+	}
+	m["id"] = idJSON
+	return json.Marshal(m)
+}
+
+// BuildCoverageWithPayer builds the CONFORMANT Coverage: the same us-core-coverage shape
+// as BuildCoverage (status active, beneficiary, self relationship, MB-type identifier
+// carrying coverageRef, US Core meta.profile — all KEPT) but additionally carries (a) a
+// stable id "c1" and (b) a CONTAINED cms-payer Organization (the CMS payer identifier
+// urn:oid:2.16.840.1.113883.6.300 value "00001"), with payor referencing it (#cms-payer).
+// This is the additive conformant variant of BuildCoverage (which is byte-parity-locked and
+// stays untouched); a production-conformant CRD (CMS-0057) names the payer Organization,
+// and the contained Org $validates clean. Deterministic.
+func BuildCoverageWithPayer(patientRef, coverageRef string) ([]byte, error) {
+	cov := fhir.Coverage{
+		Id:          strPtr(conformantCoverageID),
+		Meta:        &fhir.Meta{Profile: []string{profileUSCoreCoverage}},
+		Status:      fhir.FinancialResourceStatusCodesActive,
+		Beneficiary: fhir.Reference{Reference: strPtr(patientRef)},
+		Payor:       []fhir.Reference{{Reference: strPtr("#" + conformantPayerOrgID)}},
+		Relationship: &fhir.CodeableConcept{
+			Coding: []fhir.Coding{{
+				System: strPtr(systemSubscriberRelationship),
+				Code:   strPtr("self"),
+			}},
+		},
+		Identifier: []fhir.Identifier{{
+			Type: &fhir.CodeableConcept{
+				Coding: []fhir.Coding{{
+					System: strPtr(systemV2Identifier),
+					Code:   strPtr("MB"),
+				}},
+			},
+			System: strPtr("urn:shn:coverage"),
+			Value:  strPtr(coverageRef),
+		}},
+	}
+	covJSON, err := json.Marshal(cov)
+	if err != nil {
+		return nil, err
+	}
+	// fhir.Coverage has no Contained field; splice the contained cms-payer Organization
+	// in (the only field the typed model lacks). Deterministic re-marshal; the test
+	// canonicalizes so key order is immaterial.
+	org := fhir.Organization{
+		Id:   strPtr(conformantPayerOrgID),
+		Name: strPtr(conformantPayerOrgName),
+		Identifier: []fhir.Identifier{{
+			System: strPtr(systemCMSPayerID),
+			Value:  strPtr(conformantPayerOrgValue),
+		}},
+	}
+	orgJSON, err := json.Marshal(org)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(covJSON, &m); err != nil {
+		return nil, err
+	}
+	containedJSON, err := json.Marshal([]json.RawMessage{json.RawMessage(orgJSON)})
+	if err != nil {
+		return nil, err
+	}
+	m["contained"] = containedJSON
+	return json.Marshal(m)
 }
 
 // ParseOrderSelectRequest deserializes an order-select CDS Hooks request. It errors if

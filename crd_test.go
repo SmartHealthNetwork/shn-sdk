@@ -2,8 +2,67 @@ package shnsdk
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
+	"reflect"
 	"testing"
 )
+
+// readConformantGolden reads a conformant golden from the platform testdata (../testdata). These
+// goldens live in the monorepo and are ABSENT in the standalone published SDK module, so a test that
+// byte-matches them SKIPS there — the builder↔golden contract is a monorepo gate, not a published-
+// module one (the published module still compiles + runs its construction/validation tests). In the
+// monorepo the golden is present and the byte-match runs.
+func readConformantGolden(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile("../testdata/golden/conformant/" + name)
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Skipf("conformant golden %q lives in the monorepo (../testdata); skipped in the standalone SDK module", name)
+	}
+	if err != nil {
+		t.Fatalf("read conformant golden %q: %v", name, err)
+	}
+	return b
+}
+
+// jsonEqual canonicalizes both byte slices (Unmarshal → reflect.DeepEqual on the
+// resulting maps, which is order-insensitive for JSON objects) and reports whether
+// they are semantically equal. On mismatch the caller prints both sides.
+func jsonEqual(t *testing.T, got, want []byte) bool {
+	t.Helper()
+	var g, w interface{}
+	if err := json.Unmarshal(got, &g); err != nil {
+		t.Fatalf("jsonEqual: unmarshal got: %v", err)
+	}
+	if err := json.Unmarshal(want, &w); err != nil {
+		t.Fatalf("jsonEqual: unmarshal want: %v", err)
+	}
+	return reflect.DeepEqual(g, w)
+}
+
+// TestBuildConformantOrderSelectRequest_MatchesGolden: the SDK builder reproduces the
+// demo-persona conformant CRD request
+// (testdata/golden/conformant/crd-order-select-request.json) byte-for-byte (canonical
+// JSON). This is the byte-match oracle for the conformant CRD originator.
+func TestBuildConformantOrderSelectRequest_MatchesGolden(t *testing.T) {
+	want := readConformantGolden(t, "crd-order-select-request.json")
+	srJSON, err := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	covJSON, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildCoverageWithPayer: %v", err)
+	}
+	got, err := BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildConformantOrderSelectRequest: %v", err)
+	}
+	if !jsonEqual(t, got, want) {
+		t.Fatalf("conformant CRD request drift:\n got: %s\nwant: %s", got, want)
+	}
+}
 
 // TestParseOrderSelectRequest_RoundTrip verifies that ParseOrderSelectRequest
 // recovers the patientID, draft-order SR, and Coverage from BuildOrderSelectRequest

@@ -3,6 +3,7 @@ package shnsdk
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
@@ -64,6 +65,13 @@ type PriorAuthResume struct {
 // "ServiceRequest/sr-x" elsewhere in the bundle resolves to this entry. Ported
 // byte-for-byte from internal/pas.bundleBaseURL.
 const pasBundleBaseURL = "https://shn.example/fhir"
+
+// pasBundleIdentifierSystem is the Bundle.identifier.system stamped on every PAS
+// Bundle this package builds (submit, conformant submit, update). Promoted from the
+// repeated literal once a sibling builder (BuildConformantClaimBundle) landed a third
+// use (a prior review deferral). The value is identical to the prior literal, so the
+// byte-parity-locked builders stay byte-identical.
+const pasBundleIdentifierSystem = "urn:shn:pas:bundle"
 
 // pasFullURLFor returns the resolvable fullUrl for a bundle entry resource, derived
 // from its resourceType + id. Errors if either is missing. Ported standalone from
@@ -219,7 +227,7 @@ func BuildClaimBundle(qrJSON, serviceRequestJSON []byte, patientRef, coverageRef
 
 	bundle := fhir.Bundle{
 		Type:       fhir.BundleTypeCollection,
-		Identifier: &fhir.Identifier{System: strPtr("urn:shn:pas:bundle"), Value: strPtr(correlationID)},
+		Identifier: &fhir.Identifier{System: strPtr(pasBundleIdentifierSystem), Value: strPtr(correlationID)},
 		Timestamp:  strPtr(created.UTC().Format(time.RFC3339)),
 		Entry: []fhir.BundleEntry{
 			{FullUrl: strPtr(claimURL), Resource: json.RawMessage(claimJSON)},
@@ -233,6 +241,335 @@ func BuildClaimBundle(qrJSON, serviceRequestJSON []byte, patientRef, coverageRef
 		return nil, fmt.Errorf("shnsdk: marshal bundle: %w", err)
 	}
 	return pasInjectResourceType(raw, "Bundle")
+}
+
+// Conformant $submit fixed (deterministic) resource ids. The LEAN conformant Claim
+// Bundle (BuildConformantClaimBundle) uses these so the bundle-local references are
+// stable + internally consistent. Demo-persona only — no br-payer foreign seed.
+const (
+	conformantPASClaimID          = "convergence-claim"
+	conformantPASServiceRequestID = "convergence-sr"
+	conformantPASCoverageID       = "convergence-coverage"
+	conformantPASQRID             = "convergence-qr"
+
+	// Conformant amended re-POST fixed ids (BuildConformantClaimUpdateBundle). These are
+	// additive — the submit ids above are UNCHANGED (sdkparity-locked).
+	conformantPASClaimUpdateID = "convergence-claim-update"
+	conformantPASUpdateQRID    = "convergence-qr-amended"
+	conformantPASDRID          = "convergence-dr-operative"
+	conformantPASProvID        = "convergence-prov"
+
+	// extReqService is the Da Vinci PAS extension naming the ServiceRequest the Claim
+	// item requests. The conformant Claim carries it (the minimized buildPASClaim does
+	// not); it is an EXTENSION URL (not a meta.profile), so it $validates clean against
+	// the US-Core-only validator.
+	extReqService = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService"
+
+	// extQRContext is the Da Vinci DTR QuestionnaireResponse-level extension whose
+	// valueReference points at the Coverage / ServiceRequest the QR was completed in
+	// (FillQuestionnaire emits one per ref). BuildConformantClaimBundle rewrites these to
+	// the bundle-local Coverage/SR ids so the builder owns them. MUST match dtr.qrContextExt.
+	extQRContext = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context"
+)
+
+// ConformantClaimInputs are the inputs the conformant $submit builder needs from the
+// Originator: the answered DTR QuestionnaireResponse + the order ServiceRequest (both
+// already demo-persona-bound), the patient/coverage references, the correlation id, and
+// the injected clock. The lean bundle uses a contained payor Org (no referenced
+// Practitioner). Created drives the deterministic Bundle timestamp/Claim.created.
+type ConformantClaimInputs struct {
+	QR          []byte
+	SR          []byte
+	PatientRef  string
+	CoverageRef string
+	Corr        string
+	Created     time.Time
+}
+
+// BuildConformantClaimBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
+// Da Vinci $submit Claim Bundle (the conformant target) — the conformant sibling of the
+// minimized BuildClaimBundle (which stays untouched). The entry set is exactly what the
+// payer-side parseConformantPASSubjects (gateway/engine/pas_native.go) + the sandbox
+// adjudicator + `make validate` require, with NO br-payer foreign seed:
+//
+//	Claim (use preauthorization; item[].productOrService = CPT 72148 + extension-requestedService
+//	      → the ServiceRequest; insurer = generic Organization/payer),
+//	Patient (minimal, id = the bound member),
+//	Coverage (contained cms-payer Org, payor → #cms-payer, beneficiary → member),
+//	ServiceRequest (the passed SR — CPT 72148, ICD-10 M51.16),
+//	QuestionnaireResponse (the passed answered QR — id convergence-qr).
+//
+// meta.profile: the PAS $submit bundle + EVERY entry carry NO meta.profile (a Da
+// Vinci profile is an ERROR-severity $validate fail against the US-Core-only validator;
+// even the US Core meta.profile on the Coverage/SR is stripped in the PAS context). This
+// DIFFERS from the CRD builder, which KEEPS US Core meta.profile. The Claim's insurer stays
+// the generic Organization/payer (NOT a named br-payer insurer). Deterministic (no
+// time.Now/random); the QR/SR/refs are demo-persona-derived by the caller.
+func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
+	// --- Claim: reuse the byte-parity-locked buildPASClaim, then post-process to carry
+	// the conformant CPT 72148 (buildPASClaim natively emits X12 1365 "Medical Care") +
+	// the extension-requestedService → ServiceRequest. The id is overridden to the stable
+	// conformant id. ---
+	claimJSON, err := buildPASClaim(in.PatientRef, in.CoverageRef, in.Corr, in.Created)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: build claim: %w", err)
+	}
+	srRef := "ServiceRequest/" + conformantPASServiceRequestID
+	claimJSON, err = conformantizePASClaim(claimJSON, srRef)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: conformantize claim: %w", err)
+	}
+
+	// --- Coverage: reuse BuildCoverageWithPayer (contained cms-payer Org), restamp the id
+	// to the bundle-local conformant id, and STRIP meta.profile (PAS context). ---
+	coverageJSON, err := BuildCoverageWithPayer(in.PatientRef, in.CoverageRef)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: build coverage: %w", err)
+	}
+	coverageJSON, err = withResourceID(coverageJSON, conformantPASCoverageID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: id coverage: %w", err)
+	}
+	coverageJSON, err = stripMetaProfile(coverageJSON)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: strip coverage meta: %w", err)
+	}
+
+	// --- ServiceRequest: the passed demo-persona SR — stamp the conformant id (so the
+	// Claim's requestedService + the QR's qr-context resolve to it) + strip meta.profile. ---
+	srJSON, err := withResourceID(in.SR, conformantPASServiceRequestID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: id sr: %w", err)
+	}
+	srJSON, err = stripMetaProfile(srJSON)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: strip sr meta: %w", err)
+	}
+
+	// --- Patient: minimal — id only (the bind tolerates a bare Patient; no foreign
+	// demographics). resourceType + id is enough for the three-way bind to resolve. ---
+	patientID := strings.TrimPrefix(in.PatientRef, "Patient/")
+	patientJSON, err := json.Marshal(map[string]string{"resourceType": "Patient", "id": patientID})
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: build patient: %w", err)
+	}
+
+	// --- QuestionnaireResponse: the passed answered QR — stamp the conformant id (the raw
+	// FillQuestionnaire QR carries none) AND rewrite its qr-context refs to the bundle-local
+	// Coverage/SR ids the builder just stamped. The builder OWNS these refs (mirroring how it
+	// owns the SR/Coverage ids): a caller's QRContext CoverageRef/OrderRef need NOT match —
+	// otherwise a mismatched QR would emit dangling qr-context refs parseConformantPASSubjects
+	// does not catch (it binds QR.subject, never qr-context), surfacing only later at validate /
+	// a real br-payer. ---
+	qrJSON, err := withResourceID(in.QR, conformantPASQRID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: id qr: %w", err)
+	}
+	qrJSON, err = rewriteQRContextRefs(qrJSON, "Coverage/"+conformantPASCoverageID, srRef)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: rewrite qr-context: %w", err)
+	}
+
+	// Derive resolvable absolute fullUrls (FHIR bdl-7 / AI-11), mirror BuildClaimBundle.
+	entryFor := func(resourceJSON []byte) (fhir.BundleEntry, error) {
+		u, err := pasFullURLFor(resourceJSON)
+		if err != nil {
+			return fhir.BundleEntry{}, err
+		}
+		return fhir.BundleEntry{FullUrl: strPtr(u), Resource: json.RawMessage(resourceJSON)}, nil
+	}
+	entries := make([]fhir.BundleEntry, 0, 5)
+	for _, rj := range [][]byte{claimJSON, patientJSON, coverageJSON, srJSON, qrJSON} {
+		e, err := entryFor(rj)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+
+	bundle := fhir.Bundle{
+		Type:       fhir.BundleTypeCollection,
+		Identifier: &fhir.Identifier{System: strPtr(pasBundleIdentifierSystem), Value: strPtr(in.Corr)},
+		Timestamp:  strPtr(in.Created.UTC().Format(time.RFC3339)),
+		Entry:      entries,
+	}
+	raw, err := json.Marshal(bundle)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: marshal bundle: %w", err)
+	}
+	return pasInjectResourceType(raw, "Bundle")
+}
+
+// conformantizePASClaim takes buildPASClaim's output and (1) overrides item[0].
+// productOrService to the conformant CPT 72148 (buildPASClaim natively puts X12 1365
+// "Medical Care" there — see buildPASClaim's comment), (2) adds the Da Vinci PAS
+// extension-requestedService → the ServiceRequest on item[0], and (3) restamps the id to
+// the stable conformant id. The Claim's category (X12 1365), insurer (generic
+// Organization/payer), and all other fields stay buildPASClaim's. Deterministic.
+func conformantizePASClaim(claimJSON []byte, serviceRequestRef string) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(claimJSON, &m); err != nil {
+		return nil, fmt.Errorf("parse claim: %w", err)
+	}
+	// Restamp id.
+	idJSON, _ := json.Marshal(conformantPASClaimID)
+	m["id"] = idJSON
+
+	// Override item[0].productOrService → CPT 72148 + add extension-requestedService.
+	// Guard the missing-item case BEFORE unmarshal so a nil m["item"] yields a
+	// self-explanatory error rather than the opaque "unexpected end of JSON input"
+	// EOF (unreachable in practice — buildPASClaim always emits an item — but a
+	// public-SDK robustness nicety).
+	if len(m["item"]) == 0 {
+		return nil, fmt.Errorf("claim has no item to conformantize")
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(m["item"], &items); err != nil {
+		return nil, fmt.Errorf("parse claim.item: %w", err)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("claim has no item to conformantize")
+	}
+	cpt := fhir.CodeableConcept{Coding: []fhir.Coding{{
+		System:  strPtr(systemCPT),
+		Code:    strPtr("72148"),
+		Display: strPtr("MRI lumbar spine w/o contrast"),
+	}}}
+	cptJSON, err := json.Marshal(cpt)
+	if err != nil {
+		return nil, err
+	}
+	items[0]["productOrService"] = cptJSON
+	reqExt := []map[string]any{{
+		"url":            extReqService,
+		"valueReference": map[string]string{"reference": serviceRequestRef},
+	}}
+	reqExtJSON, err := json.Marshal(reqExt)
+	if err != nil {
+		return nil, err
+	}
+	items[0]["extension"] = reqExtJSON
+	itemsJSON, err := json.Marshal(items)
+	if err != nil {
+		return nil, err
+	}
+	m["item"] = itemsJSON
+	return json.Marshal(m)
+}
+
+// stripMetaProfile removes meta.profile from a FHIR resource JSON (deleting an
+// empty meta object entirely), leaving every other field verbatim. The PAS $submit
+// bundle declares NO meta.profile on any SHN-produced entry (a Da Vinci profile
+// is an ERROR-severity $validate fail, and the US-Core-only validator can't resolve PAS
+// profiles; even US Core profiles are dropped in the PAS context for a uniform "no
+// profile declared" $submit). Deterministic.
+func stripMetaProfile(resourceJSON []byte) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(resourceJSON, &m); err != nil {
+		return nil, fmt.Errorf("parse resource: %w", err)
+	}
+	metaRaw, ok := m["meta"]
+	if !ok {
+		return resourceJSON, nil // no meta at all
+	}
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		return nil, fmt.Errorf("parse meta: %w", err)
+	}
+	delete(meta, "profile")
+	if len(meta) == 0 {
+		delete(m, "meta")
+	} else {
+		mj, err := json.Marshal(meta)
+		if err != nil {
+			return nil, err
+		}
+		m["meta"] = mj
+	}
+	return json.Marshal(m)
+}
+
+// rewriteQRContextRefs rewrites the QuestionnaireResponse's top-level qr-context
+// extension valueReferences so the Coverage-typed qr-context points at coverageRef and
+// the ServiceRequest-typed qr-context points at srRef — matching each qr-context
+// extension by the resourceType PREFIX of its existing valueReference.reference (a ref
+// starting "Coverage/" → coverageRef; one starting "ServiceRequest/" → srRef). This makes
+// BuildConformantClaimBundle SELF-CONSISTENT: the QR's qr-context refs resolve to the
+// bundle-local Coverage/SR regardless of what the caller put in the QR (closing the
+// dangling-ref hazard parseConformantPASSubjects does not catch). Other extensions
+// (e.g. intendedUse) and all other fields are left verbatim. Deterministic.
+func rewriteQRContextRefs(qrJSON []byte, coverageRef, srRef string) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(qrJSON, &m); err != nil {
+		return nil, fmt.Errorf("parse QR: %w", err)
+	}
+	extRaw, ok := m["extension"]
+	if !ok {
+		return qrJSON, nil // no extensions — nothing to rewrite
+	}
+	var exts []map[string]json.RawMessage
+	if err := json.Unmarshal(extRaw, &exts); err != nil {
+		return nil, fmt.Errorf("parse QR.extension: %w", err)
+	}
+	for _, ext := range exts {
+		var url string
+		if err := json.Unmarshal(ext["url"], &url); err != nil {
+			continue // non-string url — leave it alone
+		}
+		if url != extQRContext {
+			continue
+		}
+		vrRaw, ok := ext["valueReference"]
+		if !ok {
+			continue
+		}
+		var vr struct {
+			Reference string `json:"reference"`
+		}
+		if err := json.Unmarshal(vrRaw, &vr); err != nil {
+			continue
+		}
+		var want string
+		switch {
+		case strings.HasPrefix(vr.Reference, "Coverage/"):
+			want = coverageRef
+		case strings.HasPrefix(vr.Reference, "ServiceRequest/"):
+			want = srRef
+		default:
+			continue // a qr-context ref we don't own — leave it verbatim
+		}
+		vrJSON, err := json.Marshal(map[string]string{"reference": want})
+		if err != nil {
+			return nil, err
+		}
+		ext["valueReference"] = vrJSON
+	}
+	extJSON, err := json.Marshal(exts)
+	if err != nil {
+		return nil, err
+	}
+	m["extension"] = extJSON
+	return json.Marshal(m)
+}
+
+// rewriteProvenanceTarget replaces the Provenance.target with a single reference to wantTarget
+// (the bundle-local supplemental resource: DiagnosticReport/<id> for the DR variant, else
+// QuestionnaireResponse/<id>). The conformant update builder restamps the supplemental resource's
+// id to a stable bundle-local id, so a caller's Provenance — built against the PRE-restamp id —
+// must be re-pointed here or it dangles (the FR-32 inbound gate resolves the target by id). Agent,
+// policy, recorded and every other field are left verbatim (BuildProvenance emits a single-target
+// Provenance, so replacing target is faithful). Deterministic.
+func rewriteProvenanceTarget(provJSON []byte, wantTarget string) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(provJSON, &m); err != nil {
+		return nil, fmt.Errorf("parse provenance: %w", err)
+	}
+	targetJSON, err := json.Marshal([]map[string]string{{"reference": wantTarget}})
+	if err != nil {
+		return nil, err
+	}
+	m["target"] = targetJSON
+	return json.Marshal(m)
 }
 
 // BuildProvenanceWithPolicy additionally cites the authorizing policy via
@@ -402,13 +739,188 @@ func BuildClaimUpdateBundle(qrJSON, srJSON, diagnosticReportJSON, provenanceJSON
 	}
 	bundle := fhir.Bundle{
 		Type:       fhir.BundleTypeCollection,
-		Identifier: &fhir.Identifier{System: strPtr("urn:shn:pas:bundle"), Value: strPtr(correlationID)},
+		Identifier: &fhir.Identifier{System: strPtr(pasBundleIdentifierSystem), Value: strPtr(correlationID)},
 		Timestamp:  strPtr(created.UTC().Format(time.RFC3339)),
 		Entry:      entries,
 	}
 	raw, err := json.Marshal(bundle)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: marshal update bundle: %w", err)
+	}
+	return pasInjectResourceType(raw, "Bundle")
+}
+
+// ConformantClaimUpdateInputs are the inputs the conformant amended re-POST builder needs from
+// the Originator. QR is the answered amended QuestionnaireResponse; SR is the order
+// ServiceRequest; Provenance is REQUIRED (FR-32 — the inbound gate 403s if absent);
+// DiagnosticReport is optional (nil on QR-targeted paths). Corr is this amendment's
+// correlation; OriginalCorr is the original submit's correlation (→ Claim.related[0]). Created
+// drives the deterministic Bundle timestamp/Claim.created. Demo-persona only — no br-payer
+// foreign seed.
+type ConformantClaimUpdateInputs struct {
+	QR               []byte
+	SR               []byte
+	PatientRef       string
+	CoverageRef      string
+	Provenance       []byte // FR-32 — REQUIRED (the inbound gate 403s if absent)
+	DiagnosticReport []byte // optional — nil on QR-targeted paths
+	Corr             string // this amendment's correlation
+	OriginalCorr     string // → Claim.related[0].claim.identifier.value
+	Created          time.Time
+}
+
+// BuildConformantClaimUpdateBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
+// Da Vinci amended re-POST Claim Bundle — the conformant update sibling of BuildConformantClaimBundle
+// (which stays untouched). It carries the conformant $submit lean shape PLUS:
+//   - Claim.related[prior] referencing the original submit correlation (FR-21)
+//   - a Provenance entry (FR-32 — REQUIRED)
+//   - an optional DiagnosticReport entry (present when DiagnosticReport != nil)
+//
+// Entry order: Claim, Patient, Coverage, ServiceRequest, QuestionnaireResponse,
+// DiagnosticReport (when present), Provenance.
+//
+// meta.profile: NO meta.profile on any entry (identical to BuildConformantClaimBundle).
+// Deterministic (no time.Now/random); caller injects Created.
+// The minimized BuildClaimUpdateBundle/buildPASUpdateClaim are UNTOUCHED (sdkparity-locked).
+func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, error) {
+	// --- Claim: reuse buildPASUpdateClaim (emits related[] by OriginalCorr), then
+	// conformantize (CPT 72148 + extension-requestedService) and restamp id to the
+	// update-specific conformant id. ---
+	claimJSON, err := buildPASUpdateClaim(in.PatientRef, in.CoverageRef, in.Corr, in.OriginalCorr, in.Created)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: build claim: %w", err)
+	}
+	srRef := "ServiceRequest/" + conformantPASServiceRequestID
+	claimJSON, err = conformantizePASClaim(claimJSON, srRef)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: conformantize claim: %w", err)
+	}
+	// conformantizePASClaim stamps id to conformantPASClaimID ("convergence-claim");
+	// the update bundle uses conformantPASClaimUpdateID ("convergence-claim-update").
+	claimJSON, err = withResourceID(claimJSON, conformantPASClaimUpdateID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: id claim update: %w", err)
+	}
+
+	// --- Coverage: identical to the submit builder. ---
+	coverageJSON, err := BuildCoverageWithPayer(in.PatientRef, in.CoverageRef)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: build coverage: %w", err)
+	}
+	coverageJSON, err = withResourceID(coverageJSON, conformantPASCoverageID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: id coverage: %w", err)
+	}
+	coverageJSON, err = stripMetaProfile(coverageJSON)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: strip coverage meta: %w", err)
+	}
+
+	// --- ServiceRequest: identical to the submit builder. ---
+	srJSON, err := withResourceID(in.SR, conformantPASServiceRequestID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: id sr: %w", err)
+	}
+	srJSON, err = stripMetaProfile(srJSON)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: strip sr meta: %w", err)
+	}
+
+	// --- Patient: minimal — identical to the submit builder. ---
+	patientID := strings.TrimPrefix(in.PatientRef, "Patient/")
+	patientJSON, err := json.Marshal(map[string]string{"resourceType": "Patient", "id": patientID})
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: build patient: %w", err)
+	}
+
+	// --- QuestionnaireResponse: stamp the update-specific QR id + rewrite qr-context refs
+	// (same dangling-ref rationale as the submit builder — parseConformantPASSubjects binds
+	// QR.subject, never qr-context, so the builder owns the bundle-local refs). ---
+	qrJSON, err := withResourceID(in.QR, conformantPASUpdateQRID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: id qr: %w", err)
+	}
+	qrJSON, err = rewriteQRContextRefs(qrJSON, "Coverage/"+conformantPASCoverageID, srRef)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: rewrite qr-context: %w", err)
+	}
+
+	// --- Provenance (FR-32 — REQUIRED): stamp stable id, strip meta.profile, AND rewrite its
+	// target to the bundle-local supplemental resource id. The builder restamps the supplemental
+	// resource (the DR, or in the QR-targeted variant the amended QR) to a stable bundle-local id,
+	// so a caller's Provenance — which targets the PRE-restamp id (e.g. the SoR DiagnosticReport id
+	// or the per-UC QR id) — would otherwise DANGLE and the FR-32 inbound gate (engine payer) would
+	// 403 "Provenance does not target the supplemental data". rewriteProvenanceTarget makes the
+	// builder SELF-CONSISTENT — the same dangling-ref-hazard close as rewriteQRContextRefs for
+	// qr-context (the builder OWNS the bundle-local refs). ---
+	provJSON, err := withResourceID(in.Provenance, conformantPASProvID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: id provenance: %w", err)
+	}
+	provJSON, err = stripMetaProfile(provJSON)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: strip provenance meta: %w", err)
+	}
+	wantTarget := "QuestionnaireResponse/" + conformantPASUpdateQRID
+	if in.DiagnosticReport != nil {
+		wantTarget = "DiagnosticReport/" + conformantPASDRID
+	}
+	provJSON, err = rewriteProvenanceTarget(provJSON, wantTarget)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: rewrite provenance target: %w", err)
+	}
+
+	// Derive resolvable absolute fullUrls (FHIR bdl-7 / AI-11), mirror BuildClaimBundle;
+	// entry order: Claim, Patient, Coverage, SR, QR, [DR,] Provenance.
+	entryFor := func(resourceJSON []byte) (fhir.BundleEntry, error) {
+		u, err := pasFullURLFor(resourceJSON)
+		if err != nil {
+			return fhir.BundleEntry{}, err
+		}
+		return fhir.BundleEntry{FullUrl: strPtr(u), Resource: json.RawMessage(resourceJSON)}, nil
+	}
+	entries := make([]fhir.BundleEntry, 0, 7)
+	for _, rj := range [][]byte{claimJSON, patientJSON, coverageJSON, srJSON, qrJSON} {
+		e, err := entryFor(rj)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+
+	// DiagnosticReport entry is optional (nil on QR-targeted paths).
+	if in.DiagnosticReport != nil {
+		drJSON, err := withResourceID(in.DiagnosticReport, conformantPASDRID)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: id dr: %w", err)
+		}
+		drJSON, err = stripMetaProfile(drJSON)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: strip dr meta: %w", err)
+		}
+		e, err := entryFor(drJSON)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+
+	// Provenance is always last.
+	provEntry, err := entryFor(provJSON)
+	if err != nil {
+		return nil, err
+	}
+	entries = append(entries, provEntry)
+
+	bundle := fhir.Bundle{
+		Type:       fhir.BundleTypeCollection,
+		Identifier: &fhir.Identifier{System: strPtr(pasBundleIdentifierSystem), Value: strPtr(in.Corr)},
+		Timestamp:  strPtr(in.Created.UTC().Format(time.RFC3339)),
+		Entry:      entries,
+	}
+	raw, err := json.Marshal(bundle)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: marshal bundle: %w", err)
 	}
 	return pasInjectResourceType(raw, "Bundle")
 }
