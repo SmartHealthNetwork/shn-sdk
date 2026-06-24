@@ -54,8 +54,9 @@ type ResponderConfig struct {
 // adjudicate, seal-then-authorize the response leg (AI-2), respond
 // synchronously.
 type Responder struct {
-	cfg ResponderConfig
-	jti *ReplayGuard
+	cfg    ResponderConfig
+	jti    *ReplayGuard
+	ledger *pendedLedger
 }
 
 // responderReqOp pins each TransactionType to the request operation the inbound
@@ -66,7 +67,10 @@ type Responder struct {
 // does not import the private gateway engine.
 var responderReqOp = map[string]string{
 	"coverage-eligibility":    "eligibility-inquiry",
+	"crd-order-select":        "crd-order-select",
 	"dtr-questionnaire-fetch": "dtr-questionnaire-fetch",
+	"pas-claim":               "pas-submit",
+	"pas-claim-update":        "pas-update-submit",
 }
 
 // NewResponder validates cfg, defaults Clock and Client, and returns a ready
@@ -106,7 +110,7 @@ func NewResponder(cfg ResponderConfig) (*Responder, error) {
 	if cfg.Client == nil {
 		cfg.Client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Responder{cfg: cfg, jti: NewReplayGuard(MaxAssertionTTL, 1<<16)}, nil
+	return &Responder{cfg: cfg, jti: NewReplayGuard(MaxAssertionTTL, 1<<16), ledger: newPendedLedger()}, nil
 }
 
 // Handler returns a ServeMux with exactly POST /substrate/inbound wired to
@@ -121,7 +125,7 @@ func (r *Responder) Handler() http.Handler {
 // payload nil → the handler already wrote an error response (pipeline does nothing).
 // commit runs AFTER the response leg seals + authorizes successfully (the ledger
 // state mutation — pend record / update finalize — must not happen until the
-// answer is actually produced: review-fixes-6 #1). rollback runs if the pipeline
+// answer is actually produced). rollback runs if the pipeline
 // FAILS after the handler claimed ledger state (release a claimed update so the
 // provider can retry). Both are nil for handlers that touch no ledger state.
 type handlerResult struct {
@@ -241,14 +245,20 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	//    payload nil → the handler already wrote an error response (pipeline does
 	//    nothing). payload non-nil (contract: builders always return non-empty slices
 	//    on success) → proceed to seal+authorize. commit/rollback manage ledger state
-	//    transitions that must not happen until the response leg succeeds (review-fixes-6 #1).
+	//    transitions that must not happen until the response leg succeeds.
 	var res handlerResult
 
 	switch env.Metadata.TransactionType {
 	case "coverage-eligibility":
 		res = r.handleEligibility(w, plaintext, tok, corr, now)
+	case "crd-order-select":
+		res = r.handleCRD(w, plaintext)
 	case "dtr-questionnaire-fetch":
 		res = r.handleDTR(w, plaintext)
+	case "pas-claim":
+		res = r.handlePASSubmit(w, plaintext, tok, corr, now)
+	case "pas-claim-update":
+		res = r.handlePASUpdate(w, plaintext, tok, corr, now)
 	default:
 		// Defensive: step 5 already rejects unknowns via responderReqOp, but
 		// this hardens against a future responderReqOp edit.
@@ -324,9 +334,9 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Commit ledger state (pend record / finalize) AFTER seal+authorize succeed and
-	// BEFORE writing the 200 — mirrors gateway review-fixes-6 #1 ordering across the
-	// handler/pipeline split. The residual write-after-commit gap is the same
-	// deferred-outbox gap the gateway documents.
+	// BEFORE writing the 200 — the same commit-after-seal ordering the gateway uses
+	// across the handler/pipeline split. The residual write-after-commit gap is the
+	// same deferred-outbox gap the gateway documents.
 	if res.commit != nil {
 		res.commit()
 	}
@@ -343,8 +353,14 @@ func responseOp(txType string) string {
 	switch txType {
 	case "coverage-eligibility":
 		return "eligibility-response"
+	case "crd-order-select":
+		return "crd-cards"
 	case "dtr-questionnaire-fetch":
 		return "dtr-questionnaire"
+	case "pas-claim":
+		return "pas-response"
+	case "pas-claim-update":
+		return "pas-update-response"
 	default:
 		return ""
 	}
