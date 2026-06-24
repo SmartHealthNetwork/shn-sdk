@@ -1447,7 +1447,7 @@ applicable IG profiles. The substrate enforces a **two-gate** posture:
 | `crd-order-select` | Da Vinci CRD `CDSHooksRequest` / `CDSHooksResponse` |
 | `dtr-questionnaire-fetch` | Da Vinci DTR `Questionnaire` |
 | `pas-claim` / `pas-claim-update` | Da Vinci PAS `Claim` bundle / `ClaimResponse` bundle |
-| `federated-query` | FHIR search bundle (`DiagnosticReport`, `Provenance`) — US Core |
+| `federated-query` | Da Vinci CDex `cdex-task-data-request` `Task` (request) / completed CDex `Task` whose `output` contains a US-Core searchset `Bundle` (`DiagnosticReport`/`DocumentReference`, `Provenance`) (response) — CDex + HRex + US Core |
 | `patient-dtr` | Da Vinci DTR `QuestionnaireResponse` |
 
 ### 8.3 Terminology
@@ -1469,6 +1469,27 @@ must conform to it.
 
 ### Changelog
 
+- **2026-06-24 — `federated-query` is now Da Vinci CDex (Task-Based Approach).** UC-05's federated
+  external retrieval moved from a bespoke FHIR `Parameters` query to **Da Vinci CDex** (Clinical Data
+  Exchange). The **request** is a `Task` conforming to `cdex-task-data-request`
+  (`http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-task-data-request`): `status=requested`,
+  `intent=order`, `code=data-request-query` (cdex-temp), `for=Patient/<member>`, `authoredOn`, `requester`
+  (the data-consumer), `owner` (the data-source facility), EXACTLY ONE hrex-temp `data-query` input — a
+  `valueString` FHIR RESTful query `<Type>?patient=Patient/<m>&date=ge<start>&date=le<end>` — and a
+  `purpose-of-use` input (cdex-temp, `valueCodeableConcept` TREAT). The **response** is the **same Task
+  transitioned** to `status=completed`: it RETAINS the request `input` and adds an `output` → a `contained`
+  US-Core searchset `Bundle` (the `DiagnosticReport` + `DocumentReference` + a source `Provenance`),
+  FHIR-validated against CDex. Per CDex invariant **cdex-9** a Task Data Request carries EXACTLY ONE
+  data-query, so the two document types UC-05 names federate as **two CDex legs — one Task per named type**.
+  New exports `BuildCDexTaskDataRequest(patientRef, resourceType, start, end, CDexTaskMeta)`,
+  `ParseCDexTaskDataRequest(taskJSON)` (the narrowness validator), `BuildCDexQueryResult(requestTaskJSON,
+  searchsetBundle)` (the completed-Task wrapper), `ExtractCDexEvidence(taskJSON)`, and
+  `CDexTaskMeta{AuthoredOn, Requester, Owner}`; the shared `BuildRecordsBundle` / `AllowedTypes` US-Core
+  searchset assembler is unchanged. The bespoke `BuildQuery` / `ParseQuery` / `ExtractOperativeEvidence`
+  are **REMOVED** (breaking). The substrate is unchanged: the `federated-query` op names, the
+  `consentRef`/`custodian` consent gate (§4–§5), payload-blind routing, and non-aggregation are the same —
+  only the leg CONTENT became CDex; the purpose-of-use in the Task is partner-asserted and NOT load-bearing
+  for authorization (the substrate re-checks consent).
 - **2026-06-18 — DTR-fetch returns a `$questionnaire-package`.** The `dtr-questionnaire-fetch`
   response is now a Da Vinci `$questionnaire-package` collection Bundle (the Questionnaire plus its
   dependent Libraries/ValueSets), not a bare Questionnaire — so the questionnaire's CQL/value-set
