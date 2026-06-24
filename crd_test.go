@@ -64,39 +64,6 @@ func TestBuildConformantOrderSelectRequest_MatchesGolden(t *testing.T) {
 	}
 }
 
-// TestParseOrderSelectRequest_RoundTrip verifies that ParseOrderSelectRequest
-// recovers the patientID, draft-order SR, and Coverage from BuildOrderSelectRequest
-// output.
-func TestParseOrderSelectRequest_RoundTrip(t *testing.T) {
-	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-1"}`)
-	cov := []byte(`{"resourceType":"Coverage","id":"cov-1"}`)
-	const patientRef = "Patient/MBR-COVERED"
-
-	b, err := BuildOrderSelectRequest(sr, cov, patientRef)
-	if err != nil {
-		t.Fatalf("BuildOrderSelectRequest: %v", err)
-	}
-	req, err := ParseOrderSelectRequest(b)
-	if err != nil {
-		t.Fatalf("ParseOrderSelectRequest: %v", err)
-	}
-	if req.Hook != "order-select" {
-		t.Errorf("hook = %q, want order-select", req.Hook)
-	}
-	if req.Context.PatientID != patientRef {
-		t.Errorf("patientId = %q, want %q", req.Context.PatientID, patientRef)
-	}
-	if len(req.Context.DraftOrders) != 1 {
-		t.Fatalf("draftOrders len = %d, want 1", len(req.Context.DraftOrders))
-	}
-	if string(req.Context.DraftOrders[0]) != string(sr) {
-		t.Errorf("draftOrders[0] = %s, want %s", req.Context.DraftOrders[0], sr)
-	}
-	if string(req.Prefetch.Coverage) != string(cov) {
-		t.Errorf("prefetch.coverage = %s, want %s", req.Prefetch.Coverage, cov)
-	}
-}
-
 // TestParseOrderSelectRequest_Rejects verifies the two invalid inputs are rejected.
 func TestParseOrderSelectRequest_Rejects(t *testing.T) {
 	// Empty draft orders.
@@ -187,46 +154,6 @@ func TestStripCanonicalVersion(t *testing.T) {
 	}
 	if StripCanonicalVersion("http://x/Q") != "http://x/Q" {
 		t.Fatal("bare unchanged")
-	}
-}
-
-// TestBuildOrderSelectRequest_Shape verifies the CRD order-select request carries the
-// fixed hook, the patientId + the ServiceRequest as the sole draft order, and the
-// Coverage in prefetch — embedded VERBATIM (FR-14 minimum-necessary).
-func TestBuildOrderSelectRequest_Shape(t *testing.T) {
-	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-1"}`)
-	cov := []byte(`{"resourceType":"Coverage","id":"cov-1"}`)
-	const patientRef = "Patient/MBR-COVERED"
-
-	b, err := BuildOrderSelectRequest(sr, cov, patientRef)
-	if err != nil {
-		t.Fatalf("BuildOrderSelectRequest: %v", err)
-	}
-
-	var got struct {
-		Hook    string `json:"hook"`
-		Context struct {
-			PatientID   string            `json:"patientId"`
-			DraftOrders []json.RawMessage `json:"draftOrders"`
-		} `json:"context"`
-		Prefetch struct {
-			Coverage json.RawMessage `json:"coverage"`
-		} `json:"prefetch"`
-	}
-	if err := json.Unmarshal(b, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got.Hook != "order-select" {
-		t.Errorf("hook = %q, want order-select", got.Hook)
-	}
-	if got.Context.PatientID != patientRef {
-		t.Errorf("patientId = %q, want %q", got.Context.PatientID, patientRef)
-	}
-	if len(got.Context.DraftOrders) != 1 || string(got.Context.DraftOrders[0]) != string(sr) {
-		t.Errorf("draftOrders = %v, want exactly the SR verbatim", got.Context.DraftOrders)
-	}
-	if string(got.Prefetch.Coverage) != string(cov) {
-		t.Errorf("prefetch.coverage = %s, want %s", got.Prefetch.Coverage, cov)
 	}
 }
 

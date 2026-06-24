@@ -128,9 +128,9 @@ func pasInjectResourceType(raw []byte, rt string) ([]byte, error) {
 
 // buildPASClaim constructs a FHIR Claim JSON for a preauthorization request.
 // Ported byte-for-byte from internal/pas.buildClaim (related is nil for the initial
-// submit bundle BuildClaimBundle emits; the X12 1365 service-type coding on
-// Claim.item carries the licensed binding target, the actual procedure stays on the
-// referenced ServiceRequest — see internal/pas for the binding rationale).
+// submit bundle; the conformant builder BuildConformantClaimBundle reuses it. The X12
+// 1365 service-type coding on Claim.item carries the licensed binding target, the actual
+// procedure stays on the referenced ServiceRequest — see internal/pas for the binding rationale).
 func buildPASClaim(patientRef, coverageRef, correlationID string, created time.Time) ([]byte, error) {
 	claim := fhir.Claim{
 		Id:     strPtr("claim-" + correlationID),
@@ -186,63 +186,6 @@ func buildPASClaim(patientRef, coverageRef, correlationID string, created time.T
 	return pasInjectResourceType(raw, "Claim")
 }
 
-// BuildClaimBundle builds the PAS claim Bundle bytes. Reimplements
-// internal/pas.BuildClaimBundle standalone; test/sdkparity asserts byte-identity.
-// created drives the deterministic Bundle timestamp/ids (inject vecClock for goldens).
-//
-// The bundle is a FHIR Bundle (type "collection") with EXACTLY three entries —
-// Claim (use preauthorization; patient + insurance carried as references INSIDE the
-// Claim), the QuestionnaireResponse, and the ServiceRequest.
-func BuildClaimBundle(qrJSON, serviceRequestJSON []byte, patientRef, coverageRef, correlationID string, created time.Time) ([]byte, error) {
-	// Build the Claim resource (no related[] for initial submit bundles).
-	claimJSON, err := buildPASClaim(patientRef, coverageRef, correlationID, created)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: build claim: %w", err)
-	}
-
-	// Ensure QR and SR carry ids (fallbacks are correlationID-scoped) so that
-	// pasFullURLFor can derive resolvable absolute URLs.
-	qrJSON, err = pasEnsureID(qrJSON, "qr-"+correlationID)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: ensureID qr: %w", err)
-	}
-	serviceRequestJSON, err = pasEnsureID(serviceRequestJSON, "sr-"+correlationID)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: ensureID sr: %w", err)
-	}
-
-	// Derive resolvable absolute fullUrls (FHIR bdl-7 / AI-11).
-	claimURL, err := pasFullURLFor(claimJSON)
-	if err != nil {
-		return nil, err
-	}
-	qrURL, err := pasFullURLFor(qrJSON)
-	if err != nil {
-		return nil, err
-	}
-	srURL, err := pasFullURLFor(serviceRequestJSON)
-	if err != nil {
-		return nil, err
-	}
-
-	bundle := fhir.Bundle{
-		Type:       fhir.BundleTypeCollection,
-		Identifier: &fhir.Identifier{System: strPtr(pasBundleIdentifierSystem), Value: strPtr(correlationID)},
-		Timestamp:  strPtr(created.UTC().Format(time.RFC3339)),
-		Entry: []fhir.BundleEntry{
-			{FullUrl: strPtr(claimURL), Resource: json.RawMessage(claimJSON)},
-			{FullUrl: strPtr(qrURL), Resource: json.RawMessage(qrJSON)},
-			{FullUrl: strPtr(srURL), Resource: json.RawMessage(serviceRequestJSON)},
-		},
-	}
-
-	raw, err := json.Marshal(bundle)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: marshal bundle: %w", err)
-	}
-	return pasInjectResourceType(raw, "Bundle")
-}
-
 // Conformant $submit fixed (deterministic) resource ids. The LEAN conformant Claim
 // Bundle (BuildConformantClaimBundle) uses these so the bundle-local references are
 // stable + internally consistent. Demo-persona only — no br-payer foreign seed.
@@ -252,8 +195,7 @@ const (
 	conformantPASCoverageID       = "convergence-coverage"
 	conformantPASQRID             = "convergence-qr"
 
-	// Conformant amended re-POST fixed ids (BuildConformantClaimUpdateBundle). These are
-	// additive — the submit ids above are UNCHANGED (sdkparity-locked).
+	// Conformant amended re-POST fixed ids (BuildConformantClaimUpdateBundle).
 	conformantPASClaimUpdateID = "convergence-claim-update"
 	conformantPASUpdateQRID    = "convergence-qr-amended"
 	conformantPASDRID          = "convergence-dr-operative"
@@ -287,8 +229,8 @@ type ConformantClaimInputs struct {
 }
 
 // BuildConformantClaimBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
-// Da Vinci $submit Claim Bundle (the conformant target) — the conformant sibling of the
-// minimized BuildClaimBundle (which stays untouched). The entry set is exactly what the
+// Da Vinci $submit Claim Bundle — the only PA $submit contract (the minimized
+// BuildClaimBundle has been removed). The entry set is exactly what the
 // payer-side parseConformantPASSubjects (gateway/engine/pas_native.go) + the sandbox
 // adjudicator + `make validate` require, with NO br-payer foreign seed:
 //
@@ -676,80 +618,6 @@ func buildPASUpdateClaim(patientRef, coverageRef, correlationID, originalCorrela
 	return pasInjectResourceType(raw, "Claim")
 }
 
-// BuildClaimUpdateBundle assembles the exchange-2 ClaimUpdate amendment (FR-21): a
-// collection Bundle with a Claim (related[] → the original claim by correlation
-// identifier) + QR + SR + the supplemental DiagnosticReport + Provenance (FR-32).
-// Reimplements internal/pas.BuildClaimUpdateBundle standalone
-// (diagnosticReportJSON non-nil for prior-auth-with-supplemental-evidence paths);
-// test/sdkparity asserts byte-identity. created drives the deterministic Bundle
-// timestamp/ids (inject vecClock for goldens).
-func BuildClaimUpdateBundle(qrJSON, srJSON, diagnosticReportJSON, provenanceJSON []byte, patientRef, coverageRef, correlationID, originalCorrelationID string, created time.Time) ([]byte, error) {
-	claimJSON, err := buildPASUpdateClaim(patientRef, coverageRef, correlationID, originalCorrelationID, created)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: build update claim: %w", err)
-	}
-	qrJSON, err = pasEnsureID(qrJSON, "qr-"+correlationID)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: ensureID qr: %w", err)
-	}
-	srJSON, err = pasEnsureID(srJSON, "sr-"+correlationID)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: ensureID sr: %w", err)
-	}
-	claimURL, err := pasFullURLFor(claimJSON)
-	if err != nil {
-		return nil, err
-	}
-	qrURL, err := pasFullURLFor(qrJSON)
-	if err != nil {
-		return nil, err
-	}
-	srURL, err := pasFullURLFor(srJSON)
-	if err != nil {
-		return nil, err
-	}
-	entries := []fhir.BundleEntry{
-		{FullUrl: strPtr(claimURL), Resource: json.RawMessage(claimJSON)},
-		{FullUrl: strPtr(qrURL), Resource: json.RawMessage(qrJSON)},
-		{FullUrl: strPtr(srURL), Resource: json.RawMessage(srJSON)},
-	}
-	if diagnosticReportJSON != nil {
-		drURL, err := pasFullURLFor(diagnosticReportJSON)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, fhir.BundleEntry{
-			FullUrl:  strPtr(drURL),
-			Resource: json.RawMessage(diagnosticReportJSON),
-		})
-	}
-	if provenanceJSON != nil {
-		provJSON, err := pasEnsureID(provenanceJSON, "prov-"+correlationID)
-		if err != nil {
-			return nil, fmt.Errorf("shnsdk: ensureID prov: %w", err)
-		}
-		provURL, err := pasFullURLFor(provJSON)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, fhir.BundleEntry{
-			FullUrl:  strPtr(provURL),
-			Resource: json.RawMessage(provJSON),
-		})
-	}
-	bundle := fhir.Bundle{
-		Type:       fhir.BundleTypeCollection,
-		Identifier: &fhir.Identifier{System: strPtr(pasBundleIdentifierSystem), Value: strPtr(correlationID)},
-		Timestamp:  strPtr(created.UTC().Format(time.RFC3339)),
-		Entry:      entries,
-	}
-	raw, err := json.Marshal(bundle)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: marshal update bundle: %w", err)
-	}
-	return pasInjectResourceType(raw, "Bundle")
-}
-
 // ConformantClaimUpdateInputs are the inputs the conformant amended re-POST builder needs from
 // the Originator. QR is the answered amended QuestionnaireResponse; SR is the order
 // ServiceRequest; Provenance is REQUIRED (FR-32 — the inbound gate 403s if absent);
@@ -780,8 +648,9 @@ type ConformantClaimUpdateInputs struct {
 // DiagnosticReport (when present), Provenance.
 //
 // meta.profile: NO meta.profile on any entry (identical to BuildConformantClaimBundle).
-// Deterministic (no time.Now/random); caller injects Created.
-// The minimized BuildClaimUpdateBundle/buildPASUpdateClaim are UNTOUCHED (sdkparity-locked).
+// Deterministic (no time.Now/random); caller injects Created. It reuses the
+// byte-parity-locked buildPASUpdateClaim helper (the minimized BuildClaimUpdateBundle
+// public builder has been removed — this is the sole PA-update builder).
 func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, error) {
 	// --- Claim: reuse buildPASUpdateClaim (emits related[] by OriginalCorr), then
 	// conformantize (CPT 72148 + extension-requestedService) and restamp id to the
@@ -1058,7 +927,7 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 					case "number":
 						// Real Da Vinci PAS RIs place the auth number in the reviewAction
 						// "number" sub-extension rather than the top-level preAuthRef field
-						// (FINDINGS-br-payer.md). Take the first non-empty value seen.
+						// (observed in real RI output). Take the first non-empty value seen.
 						if reviewActionPreAuthRef == "" && sub.ValueString != "" {
 							reviewActionPreAuthRef = sub.ValueString
 						}

@@ -78,23 +78,6 @@ type cardsResponse struct {
 	Cards []card `json:"cards"`
 }
 
-// BuildOrderSelectRequest builds the CRD order-select request bytes. Reimplements
-// internal/crd.BuildOrderSelectRequest standalone (no internal/ import); only the
-// ServiceRequest and Coverage are included (FR-14 minimum-necessary), embedded
-// verbatim as json.RawMessage. test/sdkparity asserts byte-identity with the substrate
-// for the same inputs.
-func BuildOrderSelectRequest(serviceRequestJSON, coverageJSON []byte, patientID string) ([]byte, error) {
-	req := OrderSelectRequest{
-		Hook: "order-select",
-		Context: OrderSelectContext{
-			PatientID:   patientID,
-			DraftOrders: []json.RawMessage{json.RawMessage(serviceRequestJSON)},
-		},
-	}
-	req.Prefetch.Coverage = json.RawMessage(coverageJSON)
-	return json.Marshal(req)
-}
-
 // conformantCDSBundle is a FHIR collection Bundle carrying the draft orders inline
 // (one entry per draft order). The conformant CRD order-select request models
 // context.draftOrders as a FHIR Bundle (vs the minimized request's bare resource
@@ -158,9 +141,9 @@ const (
 // (the conformant target): hook "order-select", context.draftOrders a FHIR collection
 // Bundle whose single entry is the ServiceRequest (id sr1, fullUrl urn:uuid:sr1),
 // context.patientId the bare member, context.selections referencing the SR, and
-// prefetch.coverage the (payer-bearing) Coverage. This is the conformant sibling of the
-// minimized BuildOrderSelectRequest (which stays untouched); the gateway's
-// conformantCRDBind accepts this shape and a real br-payer adjudicates it. Deterministic
+// prefetch.coverage the (payer-bearing) Coverage. This is the converged CRD order-select
+// request shape (the minimized BuildOrderSelectRequest has been removed — this is the sole CRD request shape);
+// the gateway's conformantCRDBind accepts this shape and a real br-payer adjudicates it. Deterministic
 // (no time/random). The SR keeps its US Core meta.profile (US Core resolves clean
 // against the US-Core-only validator).
 func BuildConformantOrderSelectRequest(serviceRequestJSON, coverageJSON []byte, patientID string) ([]byte, error) {

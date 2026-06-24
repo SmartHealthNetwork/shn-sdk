@@ -67,34 +67,6 @@ func TestVectorCERReproduce(t *testing.T) {
 	}
 }
 
-// TestVectorOrderSelectReproduce: the CRD order-select request is byte-deterministic
-// (SR + Coverage embedded verbatim, no clock), so the SDK's BuildOrderSelectRequest
-// must REPRODUCE the vector byte-for-byte from the same SR/Coverage/patientID. The SR
-// and Coverage are carried as their own vectors so the SDK can rebuild without
-// importing the substrate's fhirmap.
-func TestVectorOrderSelectReproduce(t *testing.T) {
-	dir := vectorsDir(t)
-	want := readVector(t, dir, "order-select.json")
-	sr := readVector(t, dir, "order-select-sr.json")
-	cov := readVector(t, dir, "order-select-coverage.json")
-	got, err := BuildOrderSelectRequest(sr, cov, "Patient/MBR-COVERED")
-	if err != nil {
-		t.Fatalf("BuildOrderSelectRequest: %v", err)
-	}
-	if string(got) != string(want) {
-		t.Errorf("order-select not reproduced byte-for-byte:\n got=%s\nwant=%s", got, want)
-	}
-
-	// And the SDK parses the canonical PA-required cards vector → PA-required + a questionnaire.
-	cardCov, err := ParseCards(readVector(t, dir, "crd-cards-pa.json"))
-	if err != nil {
-		t.Fatalf("ParseCards(crd-cards-pa): %v", err)
-	}
-	if !cardCov.PARequired() || !cardCov.NeedsDTR() {
-		t.Errorf("crd-cards-pa = %+v, want PA-required carrying a questionnaire", cardCov)
-	}
-}
-
 // TestVectorFillQuestionnaireReproduce: the filled DTR QuestionnaireResponse is
 // byte-deterministic under the fixed clock + the MBR-COVERED cc/qc, so the SDK's
 // FillQuestionnaire must REPRODUCE the QR vector byte-for-byte from the questionnaire
@@ -128,25 +100,6 @@ func TestVectorFillQuestionnaireReproduce(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Errorf("QR not reproduced byte-for-byte:\n got=%s\nwant=%s", got, want)
-	}
-}
-
-// TestVectorClaimBundleReproduce: the PAS claim Bundle is byte-deterministic under the
-// fixed clock + the MBR-COVERED inputs, so the SDK's BuildClaimBundle must REPRODUCE the
-// vector byte-for-byte from the QR (questionnaireresponse.json) + SR (order-select-sr.json)
-// INPUT vectors. This is the headline PAS parity, standalone: a substrate PAS reads
-// exactly the claim bundle the SDK builds.
-func TestVectorClaimBundleReproduce(t *testing.T) {
-	dir := vectorsDir(t)
-	want := readVector(t, dir, "claim-bundle.json")
-	qr := readVector(t, dir, "questionnaireresponse.json")
-	sr := readVector(t, dir, "order-select-sr.json")
-	got, err := BuildClaimBundle(qr, sr, "Patient/MBR-COVERED", "Coverage/MBR-COVERED", "golden-corr", vecClock)
-	if err != nil {
-		t.Fatalf("BuildClaimBundle: %v", err)
-	}
-	if string(got) != string(want) {
-		t.Errorf("claim-bundle not reproduced byte-for-byte:\n got=%s\nwant=%s", got, want)
 	}
 }
 
@@ -343,24 +296,6 @@ func TestVectorProvenanceReproduce(t *testing.T) {
 	}
 	if !bytesEqual(want, got) {
 		t.Fatalf("Provenance vector drift:\n want: %s\n got:  %s", want, got)
-	}
-}
-
-// TestVectorClaimUpdateReproduce: the SDK rebuilds the pended→amend ClaimUpdate from the
-// emitted QR/SR/DR/Provenance input vectors (decoupled from SandboxUC04Context).
-func TestVectorClaimUpdateReproduce(t *testing.T) {
-	dir := vectorsDir(t)
-	want := readVector(t, dir, "claimupdate-bundle-uc04.json")
-	qr := readVector(t, dir, "questionnaireresponse-uc04.json")
-	sr := readVector(t, dir, "servicerequest-uc04.json")
-	dr := readVector(t, dir, "diagnosticreport-uc04.json")
-	prov := readVector(t, dir, "provenance-uc04.json")
-	got, err := BuildClaimUpdateBundle(qr, sr, dr, prov, "Patient/MBR-UC04", "Coverage/MBR-UC04", "golden-corr-update", "golden-corr", vecClock)
-	if err != nil {
-		t.Fatalf("BuildClaimUpdateBundle: %v", err)
-	}
-	if !bytesEqual(want, got) {
-		t.Fatalf("ClaimUpdate vector drift:\n want: %s\n got:  %s", want, got)
 	}
 }
 

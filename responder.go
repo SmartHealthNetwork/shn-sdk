@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -55,9 +54,8 @@ type ResponderConfig struct {
 // adjudicate, seal-then-authorize the response leg (AI-2), respond
 // synchronously.
 type Responder struct {
-	cfg    ResponderConfig
-	jti    *ReplayGuard
-	ledger *pendedLedger
+	cfg ResponderConfig
+	jti *ReplayGuard
 }
 
 // responderReqOp pins each TransactionType to the request operation the inbound
@@ -68,10 +66,7 @@ type Responder struct {
 // does not import the private gateway engine.
 var responderReqOp = map[string]string{
 	"coverage-eligibility":    "eligibility-inquiry",
-	"crd-order-select":        "crd-order-select",
 	"dtr-questionnaire-fetch": "dtr-questionnaire-fetch",
-	"pas-claim":               "pas-submit",
-	"pas-claim-update":        "pas-update-submit",
 }
 
 // NewResponder validates cfg, defaults Clock and Client, and returns a ready
@@ -111,7 +106,7 @@ func NewResponder(cfg ResponderConfig) (*Responder, error) {
 	if cfg.Client == nil {
 		cfg.Client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Responder{cfg: cfg, jti: NewReplayGuard(MaxAssertionTTL, 1<<16), ledger: newPendedLedger()}, nil
+	return &Responder{cfg: cfg, jti: NewReplayGuard(MaxAssertionTTL, 1<<16)}, nil
 }
 
 // Handler returns a ServeMux with exactly POST /substrate/inbound wired to
@@ -252,14 +247,8 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	switch env.Metadata.TransactionType {
 	case "coverage-eligibility":
 		res = r.handleEligibility(w, plaintext, tok, corr, now)
-	case "crd-order-select":
-		res = r.handleCRD(w, plaintext, tok, corr)
 	case "dtr-questionnaire-fetch":
 		res = r.handleDTR(w, plaintext)
-	case "pas-claim":
-		res = r.handlePASSubmit(w, plaintext, tok, corr, now)
-	case "pas-claim-update":
-		res = r.handlePASUpdate(w, plaintext, tok, corr, now)
 	default:
 		// Defensive: step 5 already rejects unknowns via responderReqOp, but
 		// this hardens against a future responderReqOp edit.
@@ -354,14 +343,8 @@ func responseOp(txType string) string {
 	switch txType {
 	case "coverage-eligibility":
 		return "eligibility-response"
-	case "crd-order-select":
-		return "crd-cards"
 	case "dtr-questionnaire-fetch":
 		return "dtr-questionnaire"
-	case "pas-claim":
-		return "pas-response"
-	case "pas-claim-update":
-		return "pas-update-response"
 	default:
 		return ""
 	}
@@ -404,68 +387,6 @@ func (r *Responder) handleEligibility(w http.ResponseWriter, plaintext []byte, t
 	return handlerResult{payload: crrJSON}
 }
 
-// handleCRD implements the crd-order-select handler. Mirrors payer.go
-// handleCRDInbound guard order and error strings, minus the two documented
-// divergences (no ResolvePatient/PCI binding, no $validate).
-func (r *Responder) handleCRD(w http.ResponseWriter, plaintext []byte, tok Token, corr string) handlerResult {
-	osReq, err := ParseOrderSelectRequest(plaintext)
-	if err != nil {
-		respondErr(w, http.StatusBadRequest, "parse order-select failed")
-		return handlerResult{}
-	}
-
-	// Index 0 is guaranteed by ParseOrderSelectRequest.
-	srJSON := []byte(osReq.Context.DraftOrders[0])
-
-	// Parse SR subject; on failure, gate returns "parse order-select failed"
-	// (mirrors gateway which wraps both SR and Coverage parse errors the same way).
-	srSubjectRef, err := ParseServiceRequestSubject(srJSON)
-	if err != nil {
-		respondErr(w, http.StatusBadRequest, "parse order-select failed")
-		return handlerResult{}
-	}
-	covBeneRef, err := ParseCoverageBeneficiary([]byte(osReq.Prefetch.Coverage))
-	if err != nil {
-		respondErr(w, http.StatusBadRequest, "parse order-select failed")
-		return handlerResult{}
-	}
-
-	// H2: 3-way member consistency — SR subject, Coverage beneficiary, context.patientId
-	// all must reference the same patient (bare member, "Patient/" stripped).
-	srMember := strings.TrimPrefix(srSubjectRef, "Patient/")
-	covMember := strings.TrimPrefix(covBeneRef, "Patient/")
-	ctxMember := strings.TrimPrefix(osReq.Context.PatientID, "Patient/")
-	if srMember != covMember || srMember != ctxMember {
-		respondErr(w, http.StatusBadRequest, "inconsistent patient in order-select")
-		return handlerResult{}
-	}
-
-	// NOTE — divergence from the substrate gateway, by design: the gateway
-	// resolves srMember to a PCI via ResolvePatient and rejects when pci != tok.Subject.
-	// The SDK responder has no patient registry; that defense-in-depth layer is
-	// structurally unavailable here (same rationale as the eligibility NOTE above).
-
-	cpt, err := ParseServiceRequestCPT(srJSON)
-	if err != nil {
-		respondErr(w, http.StatusBadRequest, "parse CPT failed")
-		return handlerResult{}
-	}
-
-	paRequired, canonical := r.cfg.Adjudicator.OrderSelect(cpt)
-	cov := CardCoverage{Covered: "covered"}
-	if paRequired {
-		cov.PANeeded, cov.Questionnaires = "auth-needed", []string{canonical}
-	} else {
-		cov.PANeeded = "no-auth"
-	}
-	cardsJSON, err := BuildCards(cov)
-	if err != nil {
-		respondErr(w, http.StatusInternalServerError, "build cards failed")
-		return handlerResult{}
-	}
-	return handlerResult{payload: cardsJSON}
-}
-
 // handleDTR implements the dtr-questionnaire-fetch handler. Mirrors payer.go
 // handleDTRInbound guard order and error strings, minus the $validate divergence.
 func (r *Responder) handleDTR(w http.ResponseWriter, plaintext []byte) handlerResult {
@@ -490,199 +411,4 @@ func (r *Responder) handleDTR(w http.ResponseWriter, plaintext []byte) handlerRe
 		return handlerResult{}
 	}
 	return handlerResult{payload: pkg}
-}
-
-// bindBundleSubject enforces PAS bundle-internal patient consistency (H2/H3,
-// FR-32 §5): the Claim patient, the SR, the QR, and (when present) the
-// DiagnosticReport must all reference the SAME patient. The QR subject is
-// REQUIRED — a subjectless QR could approve a Claim for a different patient.
-// Returns (0,"") on success or (HTTP status, message) to write.
-//
-// NOTE — divergence from the substrate gateway: the gateway additionally
-// resolves cb.ClaimPatient against the patient registry (ResolvePatient) and
-// rejects when pci != tok.Subject. The SDK responder has no patient registry;
-// that defense-in-depth layer is structurally unavailable here (same rationale
-// as the eligibility/CRD NOTE above). ALL bundle-internal consistency checks
-// ARE enforced.
-func bindBundleSubject(cb ClaimBundle) (status int, msg string) {
-	member := strings.TrimPrefix(cb.ClaimPatient, "Patient/")
-	if cb.QRSubject == "" {
-		return http.StatusForbidden, "PAS bundle QuestionnaireResponse missing subject"
-	}
-	if strings.TrimPrefix(cb.SRSubject, "Patient/") != member {
-		return http.StatusForbidden, "inconsistent patient in PAS bundle"
-	}
-	if strings.TrimPrefix(cb.QRSubject, "Patient/") != member {
-		return http.StatusForbidden, "inconsistent patient in PAS bundle"
-	}
-	if cb.HasDiagnosticReport && strings.TrimPrefix(cb.DiagnosticReportSubject, "Patient/") != member {
-		return http.StatusForbidden, "inconsistent patient in PAS bundle"
-	}
-	return 0, ""
-}
-
-// handlePASSubmit implements the pas-claim handler (FR-21). Mirrors payer.go
-// handlePASInbound guard order and error strings, minus the documented divergences.
-// On pend: the ledger record is deferred to commit (runs only after seal+authorize
-// succeed), faithful to gateway review-fixes-6 #1 across the handler/pipeline split.
-func (r *Responder) handlePASSubmit(w http.ResponseWriter, plaintext []byte, tok Token, corr string, now time.Time) handlerResult {
-	cb, err := ParseClaimBundle(plaintext)
-	if err != nil {
-		respondErr(w, http.StatusBadRequest, "parse bundle failed")
-		return handlerResult{}
-	}
-
-	if status, msg := bindBundleSubject(cb); status != 0 {
-		respondErr(w, status, msg)
-		return handlerResult{}
-	}
-
-	dec, err := r.cfg.Adjudicator.PriorAuth(cb.QRJSON, cb.HasDiagnosticReport)
-	if err != nil {
-		respondErr(w, http.StatusUnprocessableEntity, err.Error())
-		return handlerResult{}
-	}
-
-	switch dec.Outcome {
-	case PASPended:
-		pendedJSON, err := BuildPendedResponse(cb.ClaimPatient, corr, dec.NeededItems, now)
-		if err != nil {
-			respondErr(w, http.StatusInternalServerError, "build pended response failed")
-			return handlerResult{}
-		}
-		// Ledger ordering — commit records the pend AFTER seal+authorize succeed,
-		// faithful to gateway review-fixes-6 #1: a response-leg failure (502) leaves
-		// no orphan pended entry. No rollback needed: record is the acquiring step (no
-		// prior claimed state to undo). The provider retries and gets a fresh pended
-		// response (record is idempotent on the same subject+corr key).
-		subject := tok.Subject
-		return handlerResult{
-			payload: pendedJSON,
-			commit:  func() { r.ledger.record(subject, corr) },
-		}
-
-	case PASApproved:
-		crJSON, err := BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, cb.ClaimPatient, corr, now)
-		if err != nil {
-			respondErr(w, http.StatusInternalServerError, "build claim response failed")
-			return handlerResult{}
-		}
-		return handlerResult{payload: crJSON}
-
-	default: // PASDenied
-		rationale := dec.DenyReason
-		if rationale == "" {
-			rationale = "Conservative therapy of at least 6 weeks is not documented (4 weeks on record); request does not meet the payer's medical-necessity policy for advanced lumbar imaging."
-		}
-		denJSON, err := BuildDeniedResponse(cb.ClaimPatient, corr, rationale, now)
-		if err != nil {
-			respondErr(w, http.StatusInternalServerError, "build denied response failed")
-			return handlerResult{}
-		}
-		return handlerResult{payload: denJSON}
-	}
-}
-
-// handlePASUpdate implements the pas-claim-update handler (FR-21). Mirrors
-// payer.go handlePASUpdateInbound guard order and error strings exactly, minus
-// the documented divergences.
-//
-// Ledger ordering: finalize runs in commit (after seal+authorize succeed); a
-// response-leg failure runs rollback (release), restoring gateway review-fixes-6 #1
-// across the handler/pipeline split — no stranded-approved claim.
-func (r *Responder) handlePASUpdate(w http.ResponseWriter, plaintext []byte, tok Token, corr string, now time.Time) handlerResult {
-	cb, err := ParseClaimBundle(plaintext)
-	if err != nil {
-		respondErr(w, http.StatusBadRequest, "parse bundle failed")
-		return handlerResult{}
-	}
-
-	// Bind subject across the WHOLE bundle BEFORE the pend lock (mirrors gateway:
-	// wrong-subject token is rejected 403 before the atomic ledger is touched).
-	if status, msg := bindBundleSubject(cb); status != 0 {
-		respondErr(w, status, msg)
-		return handlerResult{}
-	}
-
-	// FR-21: RelatedClaim (Claim.related) is required for a ClaimUpdate.
-	if cb.RelatedClaim == "" {
-		respondErr(w, http.StatusForbidden, "ClaimUpdate missing original-claim reference (Claim.related)")
-		return handlerResult{}
-	}
-
-	// ATOMIC test-and-set: only one update can be in flight for a given pended claim.
-	// RelatedClaim is the original submit's correlation id (Claim.related[0].claim.identifier.value)
-	// — the invisible coupling that lets the update find the pend the submit recorded.
-	if !r.ledger.begin(tok.Subject, cb.RelatedClaim) {
-		// begin() failed — no claim was acquired; nothing to release.
-		respondErr(w, http.StatusConflict, "ClaimUpdate references no pending claim available for this patient")
-		return handlerResult{}
-	}
-
-	// claimed: release the just-begun claim on any guard-failure return below.
-	fail := func(status int, msg string) handlerResult {
-		r.ledger.release(tok.Subject, cb.RelatedClaim)
-		respondErr(w, status, msg)
-		return handlerResult{}
-	}
-
-	// FR-32: a ClaimUpdate MUST carry Provenance attributing the supplemental data.
-	if cb.ProvenanceJSON == nil {
-		return fail(http.StatusForbidden, "ClaimUpdate missing Provenance")
-	}
-	if len(cb.ProvenanceAgents) == 0 {
-		return fail(http.StatusForbidden, "ClaimUpdate Provenance missing agent")
-	}
-
-	// Provenance must target the EXACT supplemental resource in this bundle.
-	var wantTarget string
-	if cb.HasDiagnosticReport {
-		if cb.DiagnosticReportID == "" {
-			return fail(http.StatusForbidden, "supplemental DiagnosticReport missing id")
-		}
-		wantTarget = "DiagnosticReport/" + cb.DiagnosticReportID
-	} else {
-		if cb.QRID == "" {
-			return fail(http.StatusForbidden, "supplemental QuestionnaireResponse missing id")
-		}
-		wantTarget = "QuestionnaireResponse/" + cb.QRID
-	}
-	targeted := false
-	for _, ref := range cb.ProvenanceTargets {
-		if ref == wantTarget {
-			targeted = true
-			break
-		}
-	}
-	if !targeted {
-		return fail(http.StatusForbidden, "ClaimUpdate Provenance does not target the supplemental data")
-	}
-
-	dec, err := r.cfg.Adjudicator.PriorAuth(cb.QRJSON, cb.HasDiagnosticReport)
-	if err != nil {
-		return fail(http.StatusUnprocessableEntity, err.Error())
-	}
-	if dec.Outcome != PASApproved {
-		// Still insufficient: release returns the claim to pended so a later,
-		// complete amendment can still transition it.
-		return fail(http.StatusUnprocessableEntity, "amendment still insufficient")
-	}
-
-	crJSON, err := BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, cb.ClaimPatient, corr, now)
-	if err != nil {
-		return fail(http.StatusInternalServerError, "build claim response failed")
-	}
-
-	// Return commit+rollback so the pipeline controls the finalize/release timing.
-	// commit: finalize runs AFTER seal+authorize succeed (review-fixes-6 #1) —
-	//   the claim is removed only when the response is actually produced.
-	// rollback: a response-leg failure (seal/authorize/encode error) releases the
-	//   claim back to pended so the provider can retry — no stranded-approved claim.
-	subject := tok.Subject
-	relatedClaim := cb.RelatedClaim
-	return handlerResult{
-		payload:  crJSON,
-		commit:   func() { r.ledger.finalize(subject, relatedClaim) },
-		rollback: func() { r.ledger.release(subject, relatedClaim) },
-	}
 }

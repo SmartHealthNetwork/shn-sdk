@@ -56,7 +56,8 @@ type fakeSandbox struct {
 }
 
 // paResponseOp mirrors hubsvc.responseOp: the response-leg op keyed by the request
-// envelope's TransactionType, for the PA legs (CRD→DTR→PAS) plus eligibility.
+// envelope's TransactionType, for the PA legs (CRD→DTR→PAS) plus eligibility. RunPriorAuth
+// drives the conformant -native legs (the minimized leg names were deleted in convergence Phase C).
 var paResponseOp = map[string]string{
 	"coverage-eligibility":    "eligibility-response",
 	"crd-order-select":        "crd-cards",

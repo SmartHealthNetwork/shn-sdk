@@ -99,10 +99,10 @@ func SandboxUC03Order() (cpt, display, icd10 string) {
 // CRD→DTR→PAS orchestrator — and returns the outcome. It drives three sealed
 // round-trips, each via runLeg (the RunEligibility sealed-leg template):
 //
-//	LEG 1 CRD  provider-tpo/crd-order-select        → payer-coverage/crd-cards
+//	LEG 1 CRD  provider-tpo/crd-order-select → payer-coverage/crd-cards
 //	           (no-PA-required short-circuits here; DTR/PAS never run)
 //	LEG 2 DTR  provider-tpo/dtr-questionnaire-fetch → payer-coverage/dtr-questionnaire
-//	LEG 3 PAS  provider-tpo/pas-submit              → payer-coverage/pas-response
+//	LEG 3 PAS  provider-tpo/pas-claim → payer-coverage/pas-response
 //
 // The order (procedure/diagnosis) and the clinical answers come from req — dev-visible
 // inputs, never conjured here. Every error is leg-attributed
@@ -130,8 +130,9 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: build coverage: %w", err)
 	}
 
-	// LEG 1 — CRD order-select.
-	crdReq, err := BuildOrderSelectRequest(srJSON, covJSON, patientRef)
+	// LEG 1 — CRD order-select (the conformant crd-order-select leg; the
+	// minimized crd-order-select leg/op have been removed — this is the only CRD contract).
+	crdReq, err := BuildConformantOrderSelectRequest(srJSON, covJSON, patientRef)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: build order-select request: %w", err)
 	}
@@ -195,13 +196,22 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: generate claim correlation id: %w", err)
 	}
 	pasCorr := hex.EncodeToString(pasCorrRaw[:])
-	bundleJSON, err := BuildClaimBundle(qrJSON, srJSON, patientRef, coverageRef, pasCorr, id.now())
+	bundleJSON, err := BuildConformantClaimBundle(ConformantClaimInputs{
+		QR:          qrJSON,
+		SR:          srJSON,
+		PatientRef:  patientRef,
+		CoverageRef: coverageRef,
+		Corr:        pasCorr,
+		Created:     id.now(),
+	})
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: build claim bundle: %w", err)
 	}
 	// Pass pasCorr as the envelope correlationID so the payer ledger keys the
 	// pended claim on the same value the ClaimUpdate's Claim.related references
-	// (pasCorr). The substrate's own originate path does the same.
+	// (pasCorr). The substrate's own originate path does the same. The conformant
+	// pas-claim leg/op are the only PA-submit contract (the minimized
+	// pas-claim leg + pas-submit op have been removed).
 	pasResp, err := id.runLegWithCorr(ctx, c, ep, payer, pci,
 		"pas-claim", "pas-submit", "pas-response", pasCorr, bundleJSON)
 	if err != nil {
@@ -390,8 +400,8 @@ func SandboxUC04Report() SupplementalReport {
 
 // ResumePriorAuth drives the exchange-2 ClaimUpdate from a pended PA's resume
 // handle: validate supp (ProvenanceAgent present → else error, no wire) → build the
-// operative DiagnosticReport + Provenance → BuildClaimUpdateBundle (reusing the submit
-// QR/SR unchanged, related[] → the original submit correlation, FR-21) → ONE sealed
+// operative DiagnosticReport + Provenance → BuildConformantClaimUpdateBundle (reusing the
+// submit QR/SR unchanged, related[] → the original submit correlation, FR-21) → ONE sealed
 // round-trip via runLeg under pas-claim-update / pas-update-submit / pas-update-response
 // → parse the response. The outcome set is approved | pended | denied: the payer can
 // release an INSUFFICIENT amendment back to PENDED (with a still-usable Resume), so
@@ -424,12 +434,23 @@ func (id Identity) ResumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 	}
 	updateCorr := hex.EncodeToString(corrRaw[:])
 
-	bundleJSON, err := BuildClaimUpdateBundle(resume.QRJSON, resume.SRJSON, drJSON, provJSON,
-		resume.PatientRef, resume.CoverageRef, updateCorr, resume.OriginalCorrelationID, id.now())
+	bundleJSON, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
+		QR:               resume.QRJSON,
+		SR:               resume.SRJSON,
+		PatientRef:       resume.PatientRef,
+		CoverageRef:      resume.CoverageRef,
+		Provenance:       provJSON,
+		DiagnosticReport: drJSON,
+		Corr:             updateCorr,
+		OriginalCorr:     resume.OriginalCorrelationID,
+		Created:          id.now(),
+	})
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: build claim update bundle: %w", err)
 	}
 
+	// The conformant pas-claim-update leg/op are the only PA-update contract
+	// (the minimized pas-claim-update leg + pas-update-submit op have been removed).
 	updResp, err := id.runLeg(ctx, c, ep, payer, resume.SubjectPCI,
 		"pas-claim-update", "pas-update-submit", "pas-update-response", bundleJSON)
 	if err != nil {

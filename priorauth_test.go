@@ -42,7 +42,8 @@ type paFakeSubstrate struct {
 }
 
 // responseOpFor mirrors hubsvc.responseOp: the op the response-leg token is pinned
-// to, keyed by the request envelope's TransactionType.
+// to, keyed by the request envelope's TransactionType. RunPriorAuth drives the conformant
+// -native legs (the minimized leg names were deleted in convergence Phase C).
 var paResponseOp = map[string]string{
 	"coverage-eligibility":    "eligibility-response",
 	"crd-order-select":        "crd-cards",
