@@ -98,37 +98,53 @@ func BuildCoverage(patientRef, coverageRef string) ([]byte, error) {
 	return json.Marshal(cov)
 }
 
-// ParseServiceRequestCPT extracts the CPT code from a ServiceRequest JSON
-// (code.coding[0] with system http://www.ama-assn.org/go/cpt).
-// It errors if the resourceType is not ServiceRequest or the CPT coding is absent.
-// PORTED standalone from internal/fhirmap.ParseServiceRequestCPT; byte/behavior parity
-// proven by test/sdkparity/crd_parity_test.go.
-func ParseServiceRequestCPT(data []byte) (string, error) {
+// ParseServiceRequestProcedure extracts the CPT code AND its display from a
+// ServiceRequest JSON (the first code.coding[] with the CPT system
+// http://www.ama-assn.org/go/cpt). display is "" when that coding carries no display
+// (display is optional in FHIR). It errors if the resourceType is not ServiceRequest
+// or the CPT coding is absent. The display lets a responder source the PA-decision
+// EOB's productOrService.display from the ACTUAL service (FR-28) rather than a
+// hardcoded value. ParseServiceRequestCPT delegates to it. Ported standalone;
+// behavior parity proven by test/sdkparity/crd_parity_test.go.
+func ParseServiceRequestProcedure(data []byte) (code, display string, err error) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if probe.ResourceType != "ServiceRequest" {
-		return "", fmt.Errorf("shnsdk: expected ServiceRequest, got %q", probe.ResourceType)
+		return "", "", fmt.Errorf("shnsdk: expected ServiceRequest, got %q", probe.ResourceType)
 	}
 
 	var sr fhir.ServiceRequest
 	if err := json.Unmarshal(data, &sr); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if sr.Code == nil || len(sr.Code.Coding) == 0 {
-		return "", fmt.Errorf("shnsdk: ServiceRequest missing code.coding")
+		return "", "", fmt.Errorf("shnsdk: ServiceRequest missing code.coding")
 	}
 	for _, c := range sr.Code.Coding {
 		if c.System != nil && *c.System == systemCPT {
 			if c.Code != nil {
-				return *c.Code, nil
+				d := ""
+				if c.Display != nil {
+					d = *c.Display
+				}
+				return *c.Code, d, nil
 			}
 		}
 	}
-	return "", fmt.Errorf("shnsdk: ServiceRequest has no CPT coding (system %q)", systemCPT)
+	return "", "", fmt.Errorf("shnsdk: ServiceRequest has no CPT coding (system %q)", systemCPT)
+}
+
+// ParseServiceRequestCPT extracts the CPT code from a ServiceRequest JSON
+// (code.coding[0] with system http://www.ama-assn.org/go/cpt).
+// It errors if the resourceType is not ServiceRequest or the CPT coding is absent.
+// Delegates to ParseServiceRequestProcedure (which also recovers the display).
+func ParseServiceRequestCPT(data []byte) (string, error) {
+	code, _, err := ParseServiceRequestProcedure(data)
+	return code, err
 }
 
 // ParseServiceRequestSubject extracts subject.reference from a ServiceRequest JSON

@@ -178,6 +178,43 @@ func TestParseServiceRequestCPT(t *testing.T) {
 	}
 }
 
+// TestParseServiceRequestProcedure verifies the code+display sibling recovers BOTH
+// the CPT code and its display, that ParseServiceRequestCPT (which now delegates to
+// it) is unchanged, and that a wrong resourceType is rejected. The display sources
+// the PA-decision EOB's productOrService.display from the ACTUAL service (FR-28).
+func TestParseServiceRequestProcedure(t *testing.T) {
+	sr, err := BuildServiceRequest("29881", "Arthroscopy, knee, surgical, with meniscectomy", "M23.2", "Patient/p")
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	code, display, err := ParseServiceRequestProcedure(sr)
+	if err != nil {
+		t.Fatalf("ParseServiceRequestProcedure: %v", err)
+	}
+	if code != "29881" || display != "Arthroscopy, knee, surgical, with meniscectomy" {
+		t.Fatalf("got (%q,%q), want (29881, knee)", code, display)
+	}
+	// Old API unchanged.
+	c, err := ParseServiceRequestCPT(sr)
+	if err != nil || c != "29881" {
+		t.Fatalf("ParseServiceRequestCPT regressed: %q %v", c, err)
+	}
+	if _, _, err := ParseServiceRequestProcedure([]byte(`{"resourceType":"Coverage"}`)); err == nil {
+		t.Error("ParseServiceRequestProcedure must reject wrong resourceType")
+	}
+	// A CPT coding with a code but NO display recovers the code with display == "".
+	noDisplay := `{"resourceType":"ServiceRequest","status":"draft","intent":"order",` +
+		`"code":{"coding":[{"system":"` + systemCPT + `","code":"72148"}]},` +
+		`"subject":{"reference":"Patient/p"}}`
+	code, display, err = ParseServiceRequestProcedure([]byte(noDisplay))
+	if err != nil {
+		t.Fatalf("ParseServiceRequestProcedure(no-display): %v", err)
+	}
+	if code != "72148" || display != "" {
+		t.Fatalf("no-display coding: got (%q,%q), want (72148, \"\")", code, display)
+	}
+}
+
 // TestParseServiceRequestSubject verifies that ParseServiceRequestSubject extracts
 // the subject reference from BuildServiceRequest output and rejects wrong resourceType.
 func TestParseServiceRequestSubject(t *testing.T) {

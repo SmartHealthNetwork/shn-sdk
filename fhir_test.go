@@ -1,10 +1,32 @@
 package shnsdk
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 	"time"
 )
+
+// TestBuildPADecisionEOB_DisplayFromParam (DEF-14, FR-28): the EOB's
+// productOrService display is whatever CPTDisplay the caller passes (sourced from the
+// request's ServiceRequest), NOT a hardcoded persona string. Guards against a
+// regression to the old fixed "MRI lumbar spine w/o contrast" literal.
+func TestBuildPADecisionEOB_DisplayFromParam(t *testing.T) {
+	b, err := BuildPADecisionEOB(PADecisionEOBParams{
+		ID: "e1", PatientRef: "Patient/p", CoverageRef: "Coverage/p",
+		CPTCode: "29881", CPTDisplay: "Arthroscopy, knee, surgical, with meniscectomy",
+		Decision: PADecisionApproved, AuthNumber: "A1", Created: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("BuildPADecisionEOB: %v", err)
+	}
+	if bytes.Contains(b, []byte("MRI lumbar spine w/o contrast")) {
+		t.Fatal("DEF-14 regression: builder still emits the hardcoded lumbar display")
+	}
+	if !bytes.Contains(b, []byte("Arthroscopy, knee, surgical, with meniscectomy")) {
+		t.Fatal("builder must emit the passed CPTDisplay")
+	}
+}
 
 // TestBuildEligibilityRequest_Shape checks the CoverageEligibilityRequest the SDK
 // emits has the field shapes the substrate expects (resourceType, status, purpose,

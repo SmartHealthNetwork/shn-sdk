@@ -341,13 +341,21 @@ type eobReference struct {
 // branches). FR-36 boundary guard: no fhircodes value-set referenced —
 // terminology-agnostic (codes come in as params / package-local system* URI consts).
 // PADecisionEOBParams groups the inputs to BuildPADecisionEOB — a struct rather than
-// seven positional args (five of them same-typed strings, easy to transpose) so the
-// public call site is readable and the param set can grow without a breaking change.
+// positional args (most of them same-typed strings, easy to transpose) so the public
+// call site is readable and the param set can grow without a breaking change.
+//
+// CPTDisplay is the human-readable service description rendered on the EOB's
+// item[].productOrService.coding[].display (FR-28). It is sourced from the request's
+// ServiceRequest (ParseServiceRequestProcedure) so the patient surface shows the
+// ACTUAL ordered service, not a fixed string. Adding it is non-breaking ONLY for KEYED
+// struct literals (PADecisionEOBParams{ID: …, CPTCode: …, CPTDisplay: …}); always
+// construct this struct with keyed fields.
 type PADecisionEOBParams struct {
 	ID          string
 	PatientRef  string
 	CoverageRef string
 	CPTCode     string
+	CPTDisplay  string
 	Decision    PADecision
 	AuthNumber  string
 	Created     time.Time
@@ -397,8 +405,8 @@ func BuildPatientAccessCapabilityStatement(created time.Time) ([]byte, error) {
 }
 
 func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
-	id, patientRef, coverageRef, cptCode, decision, authNumber, created :=
-		p.ID, p.PatientRef, p.CoverageRef, p.CPTCode, p.Decision, p.AuthNumber, p.Created
+	id, patientRef, coverageRef, cptCode, cptDisplay, decision, authNumber, created :=
+		p.ID, p.PatientRef, p.CoverageRef, p.CPTCode, p.CPTDisplay, p.Decision, p.AuthNumber, p.Created
 	eob := eobJSON{
 		ResourceType: "ExplanationOfBenefit",
 		Id:           id,
@@ -413,7 +421,7 @@ func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
 		Insurance:    []eobInsurance{{Focal: true, Coverage: eobReference{Reference: coverageRef}}},
 		Item: []eobItem{{
 			Sequence:         1,
-			ProductOrService: eobCodeableConcept{Coding: []eobCoding{{System: systemPAProcedureCPT, Code: cptCode, Display: "MRI lumbar spine w/o contrast"}}},
+			ProductOrService: eobCodeableConcept{Coding: []eobCoding{{System: systemPAProcedureCPT, Code: cptCode, Display: cptDisplay}}},
 		}},
 	}
 	switch decision {

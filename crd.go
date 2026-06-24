@@ -260,6 +260,9 @@ func BuildCoverageWithPayer(patientRef, coverageRef string) ([]byte, error) {
 // the hook field is not "order-select" or if there are no draft orders. Ported
 // standalone from internal/crd.ParseOrderSelectRequest with identical error semantics
 // (test/sdkparity/crd_parity_test.go).
+//
+// Deprecated: no production callers remain; retained for API stability and slated for
+// removal at the next breaking shn-sdk major. New code should not depend on it.
 func ParseOrderSelectRequest(data []byte) (OrderSelectRequest, error) {
 	var req OrderSelectRequest
 	if err := json.Unmarshal(data, &req); err != nil {
