@@ -1263,7 +1263,7 @@ srJSON  = BuildServiceRequest(cpt, display, icd10, "Patient/MBR-COVERED")
 covJSON = BuildCoverage("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
 
 # LEG 1 — CRD
-crdReq            = BuildOrderSelectRequest(srJSON, covJSON, "Patient/MBR-COVERED")
+crdReq            = BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-COVERED")
 crdResp           ← route(crd-order-select / crd-order-select → crd-cards, crdReq)
 cov               = ParseCards(crdResp)          # cov: CardCoverage. !cov.PARequired() ⇒ no-pa STOP; cov.Covered=="not-covered" ⇒ STOP
 canon             = cov.Questionnaires[0]        # DTR canonical (present when cov.NeedsDTR())
@@ -1276,7 +1276,7 @@ url      = ParseQuestionnaireURL(qJSON)          # MUST equal canon (canonical-s
 qrJSON   = FillQuestionnaire(qJSON, clinical, qrContext)     # fill LOCALLY from your data
 
 # LEG 3 — PAS
-bundle   = BuildClaimBundle(qrJSON, srJSON, "Patient/MBR-COVERED", "Coverage/MBR-COVERED", corrID, now)
+bundle   = BuildConformantClaimBundle(ConformantClaimInputs{QR: qrJSON, SR: srJSON, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", Corr: corrID, Created: now})
 pasResp  ← route(pas-claim / pas-submit → pas-response, bundle)
 result   = ParseClaimResponse(pasResp)           # → {Outcome, PreAuthRef, ValidUntil}
 ```
@@ -1371,9 +1371,10 @@ drJSON   = BuildDiagnosticReport(reportID, patientRef, cptCode, display)
 provJSON = BuildProvenance("DiagnosticReport/"+reportID, provenanceAgent, now)
 
 # Build the update bundle (Claim.related[] → originalCorrelationID, FR-21):
-updateBundle = BuildClaimUpdateBundle(
-    qrJSON, srJSON, drJSON, provJSON,
-    patientRef, coverageRef, updateCorrID, originalCorrID, now)
+updateBundle = BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
+    QR: qrJSON, SR: srJSON, DiagnosticReport: drJSON, Provenance: provJSON,
+    PatientRef: patientRef, CoverageRef: coverageRef,
+    Corr: updateCorrID, OriginalCorr: originalCorrID, Created: now})
 
 # Route as pas-claim-update (single originate round-trip, §7):
 updResp ← route(pas-claim-update / pas-update-submit → pas-update-response, updateBundle)
@@ -1513,7 +1514,7 @@ must conform to it.
   canonical-substitution guards), the `PriorAuthResult` outcome vocabulary
   (`approved`/`no-pa-required` initially; `pended`/`denied` added since — §7a.2), and the
   manual leg-by-leg path via the exported SDK builders
-  (`BuildOrderSelectRequest`→`ParseCards`→`BuildQuestionnaireFetch`→`ParseQuestionnaireURL`→`FillQuestionnaire`→`BuildClaimBundle`→`ParseClaimResponse`)
+  (`BuildConformantOrderSelectRequest`→`ParseCards`→`BuildQuestionnaireFetch`→`ParseQuestionnaireURL`→`FillQuestionnaire`→`BuildConformantClaimBundle`→`ParseClaimResponse`)
   as the escape hatch beyond the one-call `shnsdk.Identity.RunPriorAuth`. `shn priorauth`
   runs it; `shn doctor` now also validates it. See `docs/SANDBOX.md` §3a.
 - **2026-06-10 — Discovery descriptor (FR-37).** Added §1a: `GET {accounts}/discovery`
