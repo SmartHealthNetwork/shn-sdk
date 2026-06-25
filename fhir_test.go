@@ -254,3 +254,56 @@ func TestBuildPatientAccessCapabilityStatement_Shape(t *testing.T) {
 		t.Error("BuildPatientAccessCapabilityStatement is non-deterministic")
 	}
 }
+
+// TestBuildPADecisionEOB_ProcedureSystem (DEF-14): the EOB's
+// item[].productOrService.coding[].system must carry the order's ACTUAL procedure
+// system (HCPCS, CPT, etc.) rather than being hardcoded to CPT. An empty
+// ProcedureSystem defaults to CPT for backward-compatibility.
+func TestBuildPADecisionEOB_ProcedureSystem(t *testing.T) {
+	created := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	base := PADecisionEOBParams{
+		ID: "eob-x", PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED",
+		CPTCode: "L8000", CPTDisplay: "Breast prosthesis, mastectomy bra",
+		Decision: PADecisionApproved, AuthNumber: "PA-1", Created: created,
+	}
+
+	t.Run("explicit HCPCS system flows to productOrService.coding.system", func(t *testing.T) {
+		p := base
+		p.ProcedureSystem = "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+		got := eobProcedureSystem(t, p)
+		if got != "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets" {
+			t.Fatalf("EOB procedure system = %q, want HCPCS", got)
+		}
+	})
+	t.Run("empty ProcedureSystem defaults to CPT (backward-compatible)", func(t *testing.T) {
+		got := eobProcedureSystem(t, base) // ProcedureSystem unset
+		if got != "http://www.ama-assn.org/go/cpt" {
+			t.Fatalf("EOB procedure system = %q, want CPT default", got)
+		}
+	})
+}
+
+// eobProcedureSystem builds the EOB and returns item[0].productOrService.coding[0].system.
+func eobProcedureSystem(t *testing.T, p PADecisionEOBParams) string {
+	t.Helper()
+	raw, err := BuildPADecisionEOB(p)
+	if err != nil {
+		t.Fatalf("BuildPADecisionEOB: %v", err)
+	}
+	var eob struct {
+		Item []struct {
+			ProductOrService struct {
+				Coding []struct {
+					System string `json:"system"`
+				} `json:"coding"`
+			} `json:"productOrService"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(raw, &eob); err != nil {
+		t.Fatalf("unmarshal EOB: %v", err)
+	}
+	if len(eob.Item) == 0 || len(eob.Item[0].ProductOrService.Coding) == 0 {
+		t.Fatalf("EOB has no productOrService coding: %s", raw)
+	}
+	return eob.Item[0].ProductOrService.Coding[0].System
+}

@@ -15,6 +15,10 @@ import (
 const (
 	systemCPT   = "http://www.ama-assn.org/go/cpt"
 	systemICD10 = "http://hl7.org/fhir/sid/icd-10-cm"
+	// systemHCPCS is the HCPCS Level II procedure code system. PINNED EXACTLY to the
+	// payer wire value: http:// (not https://) is load-bearing for the exact-match
+	// allowlist below. FR-36: this is the only HCPCS system the EOB validates against.
+	systemHCPCS = "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
 
 	// US Core 6.1.0 profiles pinned via meta.profile (the substrate's resources
 	// genuinely conform; a plain non-IG validator strips meta.profile). These match
@@ -136,6 +140,49 @@ func ParseServiceRequestProcedure(data []byte) (code, display string, err error)
 		}
 	}
 	return "", "", fmt.Errorf("shnsdk: ServiceRequest has no CPT coding (system %q)", systemCPT)
+}
+
+// ParseServiceRequestProductCoding extracts the {system, code, display} of the
+// order's procedure coding from a ServiceRequest JSON — the first code.coding[]
+// whose system is one of the two known procedure systems (AMA-CPT or HCPCS Level II).
+// It returns that coding's system so the PA-decision EOB's productOrService coding
+// is the ACTUAL ordered system (a HCPCS order yields a HCPCS-system EOB, not a
+// CPT-locked one). display is "" when the coding carries none. It errors if the
+// resourceType is not ServiceRequest or no {CPT,HCPCS} coding is present — an
+// unrecognized system is an honest no-coding (FR-36 allowlist), never a wrong EOB.
+// This is the EOB de-personalization source (FR-28); ParseServiceRequestProcedure
+// (CPT-only {code,display}) and ParseServiceRequestCPT (CPT-only code) remain the
+// distinct CPT-specific tools.
+func ParseServiceRequestProductCoding(data []byte) (system, code, display string, err error) {
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return "", "", "", err
+	}
+	if probe.ResourceType != "ServiceRequest" {
+		return "", "", "", fmt.Errorf("shnsdk: expected ServiceRequest, got %q", probe.ResourceType)
+	}
+	var sr fhir.ServiceRequest
+	if err := json.Unmarshal(data, &sr); err != nil {
+		return "", "", "", err
+	}
+	if sr.Code == nil || len(sr.Code.Coding) == 0 {
+		return "", "", "", fmt.Errorf("shnsdk: ServiceRequest missing code.coding")
+	}
+	for _, c := range sr.Code.Coding {
+		if c.System == nil || c.Code == nil {
+			continue
+		}
+		if *c.System == systemCPT || *c.System == systemHCPCS {
+			d := ""
+			if c.Display != nil {
+				d = *c.Display
+			}
+			return *c.System, *c.Code, d, nil
+		}
+	}
+	return "", "", "", fmt.Errorf("shnsdk: ServiceRequest has no {CPT,HCPCS} procedure coding")
 }
 
 // ParseServiceRequestCPT extracts the CPT code from a ServiceRequest JSON

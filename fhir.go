@@ -356,9 +356,14 @@ type PADecisionEOBParams struct {
 	CoverageRef string
 	CPTCode     string
 	CPTDisplay  string
-	Decision    PADecision
-	AuthNumber  string
-	Created     time.Time
+	// ProcedureSystem is the system URI of item[].productOrService.coding (FR-28).
+	// Empty defaults to AMA-CPT (systemPAProcedureCPT) — so existing keyed callers are
+	// byte-identical. Set it (from ParseServiceRequestProductCoding) to carry the order's
+	// ACTUAL system (e.g. HCPCS) so a HCPCS order yields a HCPCS-system EOB, not a CPT-locked one.
+	ProcedureSystem string
+	Decision        PADecision
+	AuthNumber      string
+	Created         time.Time
 }
 
 // BuildPatientAccessCapabilityStatement returns the CMS-0057/PDex Patient Access
@@ -407,6 +412,10 @@ func BuildPatientAccessCapabilityStatement(created time.Time) ([]byte, error) {
 func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
 	id, patientRef, coverageRef, cptCode, cptDisplay, decision, authNumber, created :=
 		p.ID, p.PatientRef, p.CoverageRef, p.CPTCode, p.CPTDisplay, p.Decision, p.AuthNumber, p.Created
+	procedureSystem := p.ProcedureSystem
+	if procedureSystem == "" {
+		procedureSystem = systemPAProcedureCPT // backward-compatible default
+	}
 	eob := eobJSON{
 		ResourceType: "ExplanationOfBenefit",
 		Id:           id,
@@ -421,7 +430,7 @@ func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
 		Insurance:    []eobInsurance{{Focal: true, Coverage: eobReference{Reference: coverageRef}}},
 		Item: []eobItem{{
 			Sequence:         1,
-			ProductOrService: eobCodeableConcept{Coding: []eobCoding{{System: systemPAProcedureCPT, Code: cptCode, Display: cptDisplay}}},
+			ProductOrService: eobCodeableConcept{Coding: []eobCoding{{System: procedureSystem, Code: cptCode, Display: cptDisplay}}},
 		}},
 	}
 	switch decision {
