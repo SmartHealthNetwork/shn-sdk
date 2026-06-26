@@ -56,6 +56,10 @@ func (r *Responder) handleCRD(w http.ResponseWriter, plaintext []byte) handlerRe
 		return handlerResult{}
 	}
 
+	// SCOPE BOUNDARY: the SDK Responder is CPT-only by design. HCPCS personas are
+	// handled by the gateway/sandbox path, not here. Do not route a HCPCS persona
+	// through this Responder without generalizing this parse to
+	// ParseServiceRequestProductCoding — it would 400 here.
 	cpt, err := ParseServiceRequestCPT(srJSON)
 	if err != nil {
 		respondErr(w, http.StatusBadRequest, "parse CPT failed")

@@ -186,41 +186,51 @@ func parseSandboxAdjudicationInputs(qrJSON []byte) (weeks int, attested, priorSu
 	return weeks, attested, priorSurgery, highDisability, patientReportedRequired, patientAttested, nil
 }
 
-// BuildClaimResponse builds a FHIR ClaimResponse with outcome "complete",
-// use "preauthorization", the preAuthRef, preAuthPeriod ending validUntil,
-// patient ref, and identifier carrying correlationID.
+// BuildClaimResponse builds a Da Vinci PAS APPROVED ClaimResponse (FR-22).
+// It self-declares profile-claimresponse and carries the A1 reviewAction
+// (Certified in Total) on item.adjudication — the conformant approved shape
+// that the runtime PAS validator (FR-36) enforces at egress.
+// Custom-marshalled (mirroring the denied A3 path) so the CodeableConcept-valued
+// reviewAction extension serialises cleanly.
 //
-// PORTED-standalone: internal/pas.BuildClaimResponse (:518–550).
+// PORTED-standalone: internal/pas.BuildClaimResponse.
 func BuildClaimResponse(preAuthRef, validUntil, patientRef, correlationID string, created time.Time) ([]byte, error) {
-	cr := fhir.ClaimResponse{
-		Status: fhir.FinancialResourceStatusCodesActive,
-		Type: fhir.CodeableConcept{
-			Coding: []fhir.Coding{{
-				System: strPtr("http://terminology.hl7.org/CodeSystem/claim-type"),
-				Code:   strPtr("professional"),
+	cr := pasApprovedCR{
+		ResourceType: "ClaimResponse",
+		Meta:         &pasClaimResponseMeta{Profile: []string{pasProfileClaimResponse}},
+		Status:       "active",
+		Type:         pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/claim-type", Code: "professional"}}},
+		Use:          "preauthorization",
+		Patient:      pasDeniedReference{Reference: patientRef},
+		Created:      created.UTC().Format(time.RFC3339),
+		Insurer:      pasDeniedReference{Reference: "Organization/payer"},
+		Outcome:      "complete",
+		Identifier:   []pasDeniedIdentifier{{System: "urn:shn:correlation", Value: correlationID}},
+		Item: []pasDeniedItem{{
+			ItemSequence: 1,
+			// PAS 2.0.1 declares extension-reviewAction's context as item.adjudication
+			// (not .item) — it rides on the adjudication. A1 = "Certified in Total"
+			// (approved); X12 306 system (tx.fhir.org returns not-found for the licensed
+			// X12 codesystem — curated code, allowlisted offline like the denied A3).
+			Adjudication: []pasDeniedAdj{{
+				Category: pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/adjudication", Code: "submitted"}}},
+				Extension: []pasReviewActionExt{{
+					URL: pasReviewActionExtURL,
+					Extension: []pasReviewActionSubExt{{
+						URL: pasReviewActionCodeExtURL,
+						ValueCodeableConcept: &pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{
+							System: pasSystemX12ReviewAction, Code: "A1", Display: "Certified in Total",
+						}}},
+					}},
+				}},
 			}},
-		},
-		Use:     fhir.UsePreauthorization,
-		Patient: fhir.Reference{Reference: strPtr(patientRef)},
-		Created: created.UTC().Format(time.RFC3339),
-		Insurer: fhir.Reference{Reference: strPtr("Organization/payer")},
-		Outcome: fhir.ClaimProcessingCodesComplete,
-		Identifier: []fhir.Identifier{{
-			System: strPtr("urn:shn:correlation"),
-			Value:  strPtr(correlationID),
 		}},
 	}
 	if preAuthRef != "" {
-		cr.PreAuthRef = strPtr(preAuthRef)
-		cr.PreAuthPeriod = &fhir.Period{
-			End: strPtr(validUntil),
-		}
+		cr.PreAuthRef = preAuthRef
+		cr.PreAuthPeriod = &pasApprovedPreAuthPeriod{End: validUntil}
 	}
-	raw, err := json.Marshal(cr)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: marshal ClaimResponse: %w", err)
-	}
-	return pasInjectResourceType(raw, "ClaimResponse")
+	return json.Marshal(cr)
 }
 
 // BuildPendedResponse builds the exchange-1 PENDED response (FR-20): a
@@ -234,6 +244,7 @@ func BuildClaimResponse(preAuthRef, validUntil, patientRef, correlationID string
 // PORTED-standalone: internal/pas.BuildPendedResponse (:617–669).
 func BuildPendedResponse(patientRef, correlationID string, needed []string, created time.Time) ([]byte, error) {
 	cr := fhir.ClaimResponse{
+		Meta:   &fhir.Meta{Profile: []string{pasProfileClaimResponse}},
 		Id:     strPtr("claim-response-" + correlationID),
 		Status: fhir.FinancialResourceStatusCodesActive,
 		Type: fhir.CodeableConcept{
@@ -361,6 +372,7 @@ func buildPASTask(patientRef, correlationID string, needed []string, created tim
 // PORTED-standalone: internal/pas.claimResponseDeniedJSON (:958).
 type pasDeniedCR struct {
 	ResourceType string                   `json:"resourceType"`
+	Meta         *pasClaimResponseMeta    `json:"meta,omitempty"`
 	Status       string                   `json:"status"`
 	Type         pasDeniedCodeableConcept `json:"type"`
 	Use          string                   `json:"use"`
@@ -416,10 +428,44 @@ type pasDeniedIdentifier struct {
 	System string `json:"system"`
 	Value  string `json:"value"`
 }
+type pasClaimResponseMeta struct {
+	Profile []string `json:"profile,omitempty"`
+}
+
+// pasApprovedCR is the Da Vinci PAS APPROVED ClaimResponse:
+// outcome=complete, meta.profile=profile-claimresponse, the reviewAction A1
+// (Certified in Total) on item.adjudication, and the preAuthRef/preAuthPeriod
+// carrying the authorization number + expiry. Custom-marshalled (like the denied
+// twin) so the CodeableConcept-valued reviewAction extension serialises cleanly.
+//
+// PORTED-standalone: internal/pas.claimResponseApprovedJSON.
+type pasApprovedCR struct {
+	ResourceType  string                    `json:"resourceType"`
+	Meta          *pasClaimResponseMeta     `json:"meta,omitempty"`
+	Status        string                    `json:"status"`
+	Type          pasDeniedCodeableConcept  `json:"type"`
+	Use           string                    `json:"use"`
+	Patient       pasDeniedReference        `json:"patient"`
+	Created       string                    `json:"created"`
+	Insurer       pasDeniedReference        `json:"insurer"`
+	Outcome       string                    `json:"outcome"`
+	Identifier    []pasDeniedIdentifier     `json:"identifier"`
+	PreAuthRef    string                    `json:"preAuthRef,omitempty"`
+	PreAuthPeriod *pasApprovedPreAuthPeriod `json:"preAuthPeriod,omitempty"`
+	Item          []pasDeniedItem           `json:"item"`
+}
+
+type pasApprovedPreAuthPeriod struct {
+	End string `json:"end,omitempty"`
+}
 
 const (
+	// pasProfileClaimResponse is the Da Vinci PAS 2.0.1 ClaimResponse profile (see
+	// the internal twin profilePASClaimResponse).
+	pasProfileClaimResponse = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"
 	// pasSystemX12ReviewAction is the X12 278 review-action code system used by
-	// the Da Vinci PAS reviewAction extension. A3 = "Not Certified" (denied).
+	// the Da Vinci PAS reviewAction extension. A1 = "Certified in Total"
+	// (approved), A3 = "Not Certified" (denied).
 	// PORTED-standalone: internal/pas.systemX12ReviewAction.
 	pasSystemX12ReviewAction = "https://codesystem.x12.org/005010/306"
 	// pasReviewActionExtURL is the Da Vinci PAS reviewAction extension URL.
@@ -438,6 +484,7 @@ const (
 func BuildDeniedResponse(patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
 	cr := pasDeniedCR{
 		ResourceType: "ClaimResponse",
+		Meta:         &pasClaimResponseMeta{Profile: []string{pasProfileClaimResponse}},
 		Status:       "active",
 		Type:         pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/claim-type", Code: "professional"}}},
 		Use:          "preauthorization",
