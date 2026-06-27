@@ -113,6 +113,7 @@ type conformantOrderSelectRequest struct {
 	FHIRServer   string                       `json:"fhirServer"`
 	Context      conformantOrderSelectContext `json:"context"`
 	Prefetch     struct {
+		Patient  json.RawMessage `json:"patient,omitempty"`
 		Coverage json.RawMessage `json:"coverage"`
 	} `json:"prefetch"`
 }
@@ -174,6 +175,19 @@ func BuildConformantOrderSelectRequest(serviceRequestJSON, coverageJSON []byte, 
 			Selections: []string{"ServiceRequest/" + conformantCRDOrderID},
 		},
 	}
+	// A real CDS client supplies the patient it holds; SHN is config-only with no
+	// queryable fhirServer, so the patient MUST be inline (else a real Da Vinci payer
+	// like br-payer tries to fetch Patient/{id} from fhirServer and 412s). br-payer
+	// accepts an id-only Patient (captured). The id is the BARE member (no Patient/).
+	// The fake fhirServer (conformantCRDFHIRServer) is INTENTIONALLY left as-is: the
+	// inline patient makes that URL dead, and SHN has nothing real to fetch from. Do
+	// NOT "fix" it into a resolvable endpoint — that re-introduces the 412.
+	bareID := strings.TrimPrefix(patientID, "Patient/")
+	patientJSON, err := json.Marshal(map[string]string{"resourceType": "Patient", "id": bareID})
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant CRD patient prefetch: %w", err)
+	}
+	req.Prefetch.Patient = json.RawMessage(patientJSON)
 	req.Prefetch.Coverage = json.RawMessage(coverageJSON)
 	return json.Marshal(req)
 }

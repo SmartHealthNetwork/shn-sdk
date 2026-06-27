@@ -257,6 +257,39 @@ func TestParseCoverageBeneficiary(t *testing.T) {
 	}
 }
 
+func TestBuildConformantOrderSelectRequest_PatientPrefetch(t *testing.T) {
+	sr, err := BuildServiceRequest("72100", "X-ray lumbar spine", "M51.16", "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildCoverageWithPayer: %v", err)
+	}
+	reqJSON, err := BuildConformantOrderSelectRequest(sr, cov, "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildConformantOrderSelectRequest: %v", err)
+	}
+	var req struct {
+		Prefetch struct {
+			Patient json.RawMessage `json:"patient"`
+		} `json:"prefetch"`
+	}
+	if err := json.Unmarshal(reqJSON, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var p struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+	}
+	if err := json.Unmarshal(req.Prefetch.Patient, &p); err != nil {
+		t.Fatalf("prefetch.patient missing/invalid: %v (%s)", err, req.Prefetch.Patient)
+	}
+	if p.ResourceType != "Patient" || p.ID != "MBR-COVERED" {
+		t.Fatalf("prefetch.patient = %+v, want Patient/MBR-COVERED (id bare, no Patient/ prefix)", p)
+	}
+}
+
 // TestParseCards covers both branches + the zero-card error path.
 func TestParseCards(t *testing.T) {
 	paReq := []byte(`{"cards":[{"summary":"Prior authorization required","indicator":"warning","extension":{"covered":"covered","paNeeded":"auth-needed","questionnaires":["http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"]}}]}`)
