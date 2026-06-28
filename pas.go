@@ -259,6 +259,18 @@ type ConformantClaimInputs struct {
 	// code (the verdict CQL never fires). CRD is unaffected (it resolves contained fragments).
 	// Takes precedence over ContainedInsurer when both set. Default false = sandbox byte-identical.
 	PayerOrgEntry bool
+	// InfoChanged (single-shot resolve discriminator): when true the submit Claim's item[*]
+	// carries the Da Vinci PAS infoChanged item extension ({"url": pasInfoChangedExtensionURL,
+	// "valueCode": "changed"} — the SAME shape setPriorClaimReferenceAndInfoChanged appends on the
+	// composite UPDATE Claim). It is the gateway payer-side POLL DISCRIMINATOR, not a verdict input:
+	// the payer gate polls the timer-resolved terminal A1 (GET ClaimResponse/{id}) when the order is
+	// a single-shot ServiceRequest signalling "resolve to terminal" via this extension, instead of
+	// returning the A4 pend for a composite amendment leg. On a FRESH submit (no Claim.related[prior],
+	// which this builder never emits) infoChanged is benign on br-payer — its re-evaluation path is
+	// gated on a prior claim, absent here — so br-payer still does A4→timer→A1. Default false →
+	// byte-identical to every existing caller. NO prior-claim ref is added (this is a submit, not an
+	// update).
+	InfoChanged bool
 }
 
 // BuildConformantClaimBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
@@ -320,6 +332,16 @@ func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
 		claimJSON, err = containInsurer(claimJSON)
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant submit: contain insurer: %w", err)
+		}
+	}
+	// Single-shot resolve discriminator (poll discriminator, NOT a verdict input): append the PAS
+	// infoChanged item extension when requested. NO prior-claim ref is added (fresh submit) — so it
+	// stays benign on br-payer (whose re-evaluation is gated on a prior claim) while still flipping
+	// the SHN payer gate into the timer-poll lane. Default false → byte-identical.
+	if in.InfoChanged {
+		claimJSON, err = appendInfoChangedToClaimItems(claimJSON)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant submit: append infoChanged: %w", err)
 		}
 	}
 
@@ -1110,9 +1132,46 @@ func setPriorClaimReferenceAndInfoChanged(claimJSON []byte, priorClaimRef string
 	}
 	relClaim["reference"] = priorClaimRef
 
+	if err := appendInfoChangedToClaimItemsMap(claim); err != nil {
+		return nil, err
+	}
+	out, err := json.Marshal(claim)
+	if err != nil {
+		return nil, fmt.Errorf("marshal claim: %w", err)
+	}
+	return out, nil
+}
+
+// appendInfoChangedToClaimItems appends the Da Vinci PAS infoChanged item extension
+// ({"url": pasInfoChangedExtensionURL, "valueCode": "changed"}) to every Claim.item[*] of a
+// marshalled Claim JSON. It is the SINGLE source of the exact infoChanged extension shape — both
+// the composite UPDATE (setPriorClaimReferenceAndInfoChanged) and the single-shot SUBMIT
+// (BuildConformantClaimBundle InfoChanged) emit the identical element through it, so the gateway's
+// requestClaimHasInfoChanged poll discriminator fires the same way for both. Errors when the Claim
+// has no item[]. Generic-map round-trip (mirrors the other composite-lane post-processors).
+func appendInfoChangedToClaimItems(claimJSON []byte) ([]byte, error) {
+	var claim map[string]interface{}
+	if err := json.Unmarshal(claimJSON, &claim); err != nil {
+		return nil, fmt.Errorf("appendInfoChanged: unmarshal claim: %w", err)
+	}
+	if err := appendInfoChangedToClaimItemsMap(claim); err != nil {
+		return nil, err
+	}
+	out, err := json.Marshal(claim)
+	if err != nil {
+		return nil, fmt.Errorf("appendInfoChanged: marshal claim: %w", err)
+	}
+	return out, nil
+}
+
+// appendInfoChangedToClaimItemsMap mutates a decoded Claim map in place, appending the infoChanged
+// item extension to every item. Shared by the marshalled-bytes wrapper (appendInfoChangedToClaimItems,
+// the submit path) and setPriorClaimReferenceAndInfoChanged (the update path) so the extension shape
+// is defined once.
+func appendInfoChangedToClaimItemsMap(claim map[string]interface{}) error {
 	items, _ := claim["item"].([]interface{})
 	if len(items) == 0 {
-		return nil, fmt.Errorf("update claim has no item[]")
+		return fmt.Errorf("claim has no item[] to mark infoChanged")
 	}
 	for _, it := range items {
 		im, ok := it.(map[string]interface{})
@@ -1125,11 +1184,7 @@ func setPriorClaimReferenceAndInfoChanged(claimJSON []byte, priorClaimRef string
 			"valueCode": "changed",
 		})
 	}
-	out, err := json.Marshal(claim)
-	if err != nil {
-		return nil, fmt.Errorf("marshal claim: %w", err)
-	}
-	return out, nil
+	return nil
 }
 
 // buildPriorClaimEntry synthesizes the prior Claim included as a resolvable bundle ENTRY on the

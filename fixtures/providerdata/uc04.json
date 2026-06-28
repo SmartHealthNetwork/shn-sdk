@@ -1,0 +1,209 @@
+{
+  "resourceType": "Bundle",
+  "id": "providerdata-uc04",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "Patient/MBR-PD-UC04",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC04",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC04"
+          }
+        ],
+        "name": [
+          {
+            "family": "Castellano-HomeHealth"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1949-03-22"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC04"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-cms-payer",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-cms-payer",
+        "name": "Centers for Medicare & Medicaid Services",
+        "identifier": [
+          {
+            "use": "official",
+            "system": "urn:oid:2.16.840.1.113883.6.300",
+            "value": "00001"
+          }
+        ],
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/organization-role",
+                "code": "payer"
+              }
+            ]
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-cms-payer"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc04",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc04",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC04"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC04"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc04"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrpduc04-i639",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrpduc04-i639",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "I63.9",
+              "display": "Cerebral infarction, unspecified"
+            }
+          ],
+          "text": "Cerebral infarction"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC04"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrpduc04-i639"
+      }
+    },
+    {
+      "fullUrl": "ServiceRequest/sr-mbrpduc04-g0151",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "id": "sr-mbrpduc04-g0151",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
+          ]
+        },
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "G0151",
+              "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
+            }
+          ],
+          "text": "Services of a qualified physical therapist in the home health setting"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC04"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "I63.9",
+                "display": "Cerebral infarction"
+              }
+            ],
+            "text": "Cerebral infarction"
+          }
+        ],
+        "reasonReference": [
+          {
+            "reference": "Condition/cond-mbrpduc04-i639"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest/sr-mbrpduc04-g0151"
+      }
+    }
+  ]
+}
