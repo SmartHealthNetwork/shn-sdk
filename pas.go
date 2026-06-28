@@ -193,6 +193,7 @@ func buildPASClaim(patientRef, coverageRef, correlationID string, created time.T
 const (
 	conformantPASClaimID          = "convergence-claim"
 	conformantPASServiceRequestID = "convergence-sr"
+	conformantPASDeviceRequestID  = "convergence-dr"
 	conformantPASCoverageID       = "convergence-coverage"
 	conformantPASQRID             = "convergence-qr"
 
@@ -288,13 +289,16 @@ func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: build claim: %w", err)
 	}
-	srRef := "ServiceRequest/" + conformantPASServiceRequestID
+	// orderID/srRef are type-aware: a DeviceRequest gets "convergence-dr"/"DeviceRequest/convergence-dr";
+	// a ServiceRequest (baseline) gets "convergence-sr"/"ServiceRequest/convergence-sr" — byte-identical
+	// to the existing locked path.
+	orderID, srRef := orderEntryRef(in.SR)
 	claimJSON, err = conformantizePASClaim(claimJSON, srRef)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: conformantize claim: %w", err)
 	}
-	// Composite lane: override the hardcoded CPT 72148 with the SR's actual code (the
-	// composite HCPCS code, e.g. L8000) — br-payer keys PAS on Claim.item.productOrService.
+	// Composite lane: override the hardcoded CPT 72148 with the order's actual code (the
+	// composite HCPCS code, e.g. L8000 or E0431) — br-payer keys PAS on Claim.item.productOrService.
 	if in.PayerOrgEntry {
 		claimJSON, err = setClaimItemProductFromSR(claimJSON, in.SR)
 		if err != nil {
@@ -343,15 +347,17 @@ func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
 		}
 	}
 
-	// --- ServiceRequest: the passed demo-persona SR — stamp the conformant id (so the
-	// Claim's requestedService + the QR's qr-context resolve to it) + strip meta.profile. ---
-	srJSON, err := withResourceID(in.SR, conformantPASServiceRequestID)
+	// --- Order resource (ServiceRequest or DeviceRequest): stamp the type-aware conformant id
+	// (so the Claim's requestedService + the QR's qr-context resolve to it) + strip meta.profile.
+	// orderID is "convergence-sr" for a ServiceRequest (byte-identical to the locked path) and
+	// "convergence-dr" for a DeviceRequest. ---
+	srJSON, err := withResourceID(in.SR, orderID)
 	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant submit: id sr: %w", err)
+		return nil, fmt.Errorf("shnsdk: conformant submit: id order: %w", err)
 	}
 	srJSON, err = stripMetaProfile(srJSON)
 	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant submit: strip sr meta: %w", err)
+		return nil, fmt.Errorf("shnsdk: conformant submit: strip order meta: %w", err)
 	}
 
 	// --- Patient: minimal — id only (the bind tolerates a bare Patient; no foreign
@@ -686,25 +692,66 @@ func containInsurer(claimJSON []byte) ([]byte, error) {
 	return json.Marshal(m)
 }
 
-// setClaimItemProductFromSR sets the Claim's item[0].productOrService to the ServiceRequest's
-// code (the requested service). conformantizePASClaim hardcodes CPT 72148 (the sandbox lumbar
-// code) on the Claim item, but br-payer's PAS keys the PlanDefinition lookup on
+// orderEntryRef picks the conformant bundle-local id and typed reference for the order
+// resource, selecting on its resourceType. A DeviceRequest (DME/home-oxygen) uses
+// conformantPASDeviceRequestID ("convergence-dr"); any other type (ServiceRequest, the
+// baseline) uses conformantPASServiceRequestID ("convergence-sr") — keeping the SR output
+// byte-identical to the existing byte-parity-locked path.
+func orderEntryRef(order []byte) (id, ref string) {
+	var p struct {
+		ResourceType string `json:"resourceType"`
+	}
+	_ = json.Unmarshal(order, &p)
+	if p.ResourceType == "DeviceRequest" {
+		return conformantPASDeviceRequestID, "DeviceRequest/" + conformantPASDeviceRequestID
+	}
+	return conformantPASServiceRequestID, "ServiceRequest/" + conformantPASServiceRequestID
+}
+
+// setClaimItemProductFromSR sets the Claim's item[0].productOrService to the order resource's
+// requested-service code. conformantizePASClaim hardcodes CPT 72148 (the sandbox lumbar code)
+// on the Claim item, but br-payer's PAS keys the PlanDefinition lookup on
 // Claim.item.productOrService (PasSubmitService.evaluateAllItems — NOT the SR / requestedService
 // extension). The composite lane originates HCPCS codes (e.g. L8000) on the SR, so the Claim item
-// MUST carry the same code or br-payer adjudicates the wrong PlanDefinition. The extension-
-// requestedService (added by conformantizePASClaim) is preserved. Composite-only; the sandbox SR
-// is also CPT 72148 so this would be a no-op there, but it is gated on the composite flag to keep
-// the sandbox bytes provably identical.
-func setClaimItemProductFromSR(claimJSON, srJSON []byte) ([]byte, error) {
-	var sr struct {
-		Code json.RawMessage `json:"code"`
+// MUST carry the same code or br-payer adjudicates the wrong PlanDefinition.
+//
+// Order-type-aware: for a DeviceRequest the code lives in codeCodeableConcept; for a
+// ServiceRequest (and any unrecognised type) it lives in code. The extension-requestedService
+// (added by conformantizePASClaim) is preserved. Composite-only; the sandbox SR is also CPT
+// 72148 so this would be a no-op there, but it is gated on the composite flag to keep the
+// sandbox bytes provably identical.
+func setClaimItemProductFromSR(claimJSON, orderJSON []byte) ([]byte, error) {
+	var probe struct {
+		ResourceType string `json:"resourceType"`
 	}
-	if err := json.Unmarshal(srJSON, &sr); err != nil {
-		return nil, fmt.Errorf("setClaimItemProductFromSR: parse SR: %w", err)
+	_ = json.Unmarshal(orderJSON, &probe)
+
+	var cc json.RawMessage
+	switch probe.ResourceType {
+	case "DeviceRequest":
+		var dr struct {
+			Code json.RawMessage `json:"codeCodeableConcept"`
+		}
+		if err := json.Unmarshal(orderJSON, &dr); err != nil {
+			return nil, fmt.Errorf("setClaimItemProductFromSR: parse DeviceRequest: %w", err)
+		}
+		if len(dr.Code) == 0 {
+			return nil, fmt.Errorf("setClaimItemProductFromSR: DeviceRequest has no codeCodeableConcept")
+		}
+		cc = dr.Code
+	default: // ServiceRequest (and any other type)
+		var sr struct {
+			Code json.RawMessage `json:"code"`
+		}
+		if err := json.Unmarshal(orderJSON, &sr); err != nil {
+			return nil, fmt.Errorf("setClaimItemProductFromSR: parse SR: %w", err)
+		}
+		if len(sr.Code) == 0 {
+			return nil, fmt.Errorf("setClaimItemProductFromSR: SR has no code")
+		}
+		cc = sr.Code
 	}
-	if len(sr.Code) == 0 {
-		return nil, fmt.Errorf("setClaimItemProductFromSR: SR has no code")
-	}
+
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(claimJSON, &m); err != nil {
 		return nil, fmt.Errorf("setClaimItemProductFromSR: parse claim: %w", err)
@@ -716,7 +763,7 @@ func setClaimItemProductFromSR(claimJSON, srJSON []byte) ([]byte, error) {
 	if len(items) == 0 {
 		return nil, fmt.Errorf("setClaimItemProductFromSR: claim has no item")
 	}
-	items[0]["productOrService"] = sr.Code
+	items[0]["productOrService"] = cc
 	itemsJSON, err := json.Marshal(items)
 	if err != nil {
 		return nil, fmt.Errorf("setClaimItemProductFromSR: marshal items: %w", err)

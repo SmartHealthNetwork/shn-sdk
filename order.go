@@ -185,6 +185,52 @@ func ParseServiceRequestProductCoding(data []byte) (system, code, display string
 	return "", "", "", fmt.Errorf("shnsdk: ServiceRequest has no {CPT,HCPCS} procedure coding")
 }
 
+// ParseOrderProductCoding extracts {system, code, display} of the procedure/product
+// coding from a ServiceRequest (code.coding) OR a DeviceRequest (codeCodeableConcept.coding),
+// matching the first AMA-CPT or HCPCS Level II coding. Real provider orders are not all
+// ServiceRequest (DME = DeviceRequest); br-payer keys adjudication on the HCPCS code regardless
+// of order resource type. Errors on an unsupported resourceType or no {CPT,HCPCS} coding.
+func ParseOrderProductCoding(data []byte) (system, code, display string, err error) {
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return "", "", "", err
+	}
+	switch probe.ResourceType {
+	case "ServiceRequest":
+		return ParseServiceRequestProductCoding(data)
+	case "DeviceRequest":
+		var dr struct {
+			Code struct {
+				Coding []struct {
+					System  *string `json:"system"`
+					Code    *string `json:"code"`
+					Display *string `json:"display"`
+				} `json:"coding"`
+			} `json:"codeCodeableConcept"`
+		}
+		if err := json.Unmarshal(data, &dr); err != nil {
+			return "", "", "", err
+		}
+		for _, c := range dr.Code.Coding {
+			if c.System == nil || c.Code == nil {
+				continue
+			}
+			if *c.System == systemCPT || *c.System == systemHCPCS {
+				d := ""
+				if c.Display != nil {
+					d = *c.Display
+				}
+				return *c.System, *c.Code, d, nil
+			}
+		}
+		return "", "", "", fmt.Errorf("shnsdk: DeviceRequest has no {CPT,HCPCS} product coding")
+	default:
+		return "", "", "", fmt.Errorf("shnsdk: ParseOrderProductCoding expected ServiceRequest|DeviceRequest, got %q", probe.ResourceType)
+	}
+}
+
 // ParseServiceRequestCPT extracts the CPT code from a ServiceRequest JSON
 // (code.coding[0] with system http://www.ama-assn.org/go/cpt).
 // It errors if the resourceType is not ServiceRequest or the CPT coding is absent.

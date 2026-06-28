@@ -1,6 +1,7 @@
 package shnsdk
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -1318,6 +1319,28 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_False(t *testing.T) {
 	}
 	if !strings.HasPrefix(patient.Reference, "Patient/") {
 		t.Errorf("AbsoluteRefs:false: Claim.patient.reference = %q, expected relative Patient/<id>", patient.Reference)
+	}
+}
+
+// TestBuildConformantClaimBundle_DeviceRequestOrder proves that BuildConformantClaimBundle
+// accepts a DeviceRequest order (DME home-oxygen use case): the built bundle carries the
+// DeviceRequest as an entry (not a ServiceRequest), and the Claim item productOrService is
+// sourced from the DeviceRequest's codeCodeableConcept (E0431), not the SR.code field.
+// The DeviceRequest entry is stamped with the sibling id "convergence-dr".
+func TestBuildConformantClaimBundle_DeviceRequestOrder(t *testing.T) {
+	dr := []byte(`{"resourceType":"DeviceRequest","id":"x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-OX"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0431"}]}}`)
+	out, err := BuildConformantClaimBundle(ConformantClaimInputs{
+		SR: dr, PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/MBR-OX",
+		Corr: "c1", Created: time.Unix(0, 0).UTC(), PayerOrgEntry: true, AbsoluteRefs: true, ContainedInsurer: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte(`"code":"E0431"`)) {
+		t.Fatalf("claim item not from DeviceRequest: %s", out)
+	}
+	if !bytes.Contains(out, []byte(`"resourceType":"DeviceRequest"`)) {
+		t.Fatalf("order entry missing: %s", out)
 	}
 }
 

@@ -88,3 +88,15 @@ func TestParseServiceRequestProductCoding(t *testing.T) {
 		}
 	})
 }
+
+func TestParseOrderProductCoding_DeviceRequest(t *testing.T) {
+	dr := []byte(`{"resourceType":"DeviceRequest","codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0431","display":"Portable gaseous oxygen"}]}}`)
+	sys, code, disp, err := shnsdk.ParseOrderProductCoding(dr)
+	if err != nil || sys != wireHCPCS || code != "E0431" || disp != "Portable gaseous oxygen" {
+		t.Fatalf("got (%q,%q,%q,%v)", sys, code, disp, err)
+	}
+	sr := []byte(`{"resourceType":"ServiceRequest","code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI"}]}}`)
+	if sys, code, _, err := shnsdk.ParseOrderProductCoding(sr); err != nil || sys != "http://www.ama-assn.org/go/cpt" || code != "72148" {
+		t.Fatalf("SR got (%q,%q,%v)", sys, code, err)
+	}
+}
