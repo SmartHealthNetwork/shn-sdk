@@ -14,6 +14,7 @@ var expectedMember = map[string]string{
 	"uc04":       "MBR-PD-UC04",
 	"homeoxygen": "MBR-OX",
 	"uc08":       "MBR-PD-UC08",
+	"uc06":       "MBR-PD-UC06",
 }
 
 // fixtureBundle is the minimal transaction-Bundle shape the invariants assert against.
@@ -62,9 +63,9 @@ func TestProviderDataBundle_NoContractedNPI(t *testing.T) {
 }
 
 func TestProviderDataPersonas_NoDescoped(t *testing.T) {
-	// The shipped set is exactly uc04 + homeoxygen + uc08; uc02/uc03 are descoped (D-PD-2).
+	// The shipped set is exactly uc04 + homeoxygen + uc08 + uc06; uc02/uc03 are descoped (D-PD-2).
 	got := ProviderDataPersonas()
-	want := map[string]bool{"uc04": true, "homeoxygen": true, "uc08": true}
+	want := map[string]bool{"uc04": true, "homeoxygen": true, "uc08": true, "uc06": true}
 	if len(got) != len(want) {
 		t.Fatalf("ProviderDataPersonas() = %v, want exactly %v", got, want)
 	}

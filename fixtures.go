@@ -18,7 +18,7 @@ var providerDataFS embed.FS
 // ProviderDataPersonas lists the provider-data seed personas shipped for partners to load into
 // their SoR (the "seed your SoR to match" bundle). Each is a self-contained transaction Bundle.
 // Synthetic data only — no PHI. (UC-02/UC-03 are descoped, D-PD-2.)
-func ProviderDataPersonas() []string { return []string{"uc04", "homeoxygen", "uc08"} }
+func ProviderDataPersonas() []string { return []string{"uc04", "homeoxygen", "uc08", "uc06"} }
 
 // ProviderDataBundle returns a persona's transaction Bundle bytes (load into a FHIR SoR to
 // exercise the matching UC off provider data).
