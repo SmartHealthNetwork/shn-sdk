@@ -11,7 +11,9 @@ Depends only on the Go standard library, `golang.org/x/crypto`, and
 `github.com/samply/golang-fhir-models`. **It never imports substrate-internal code.**
 
 > Preview substrate — not for production deployment. The canonical, language-neutral
-> wire spec is [docs/PARTICIPANT_PROTOCOL.md](docs/PARTICIPANT_PROTOCOL.md) in this repo.
+> wire spec is [docs/PARTICIPANT_PROTOCOL.md](docs/PARTICIPANT_PROTOCOL.md) in this repo;
+> [docs/TECHNICAL_ARCHITECTURE.md](docs/TECHNICAL_ARCHITECTURE.md) is the system-level
+> overview of how the substrate routes, authorizes, seals, and audits every exchange.
 
 ## Install
 
