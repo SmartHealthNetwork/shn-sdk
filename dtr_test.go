@@ -328,3 +328,34 @@ func TestSandboxLumbarQuestionnaire_IsCQLBacked(t *testing.T) {
 		t.Fatalf("questionnaire must NOT carry launchContext (US-Core egress-validator unfriendly):\n%s", s)
 	}
 }
+
+// TestValidatePatientAnswer covers both registered patient items: the Oswestry numeric item
+// (composite/sandbox UC-07) and the HomeHealthAssessment free-text functional-status item "3.2"
+// (provider-data UC-07, the patient-authored narrative). The "3.2" rule is load-bearing: the
+// phg patient-dtr responder calls ValidatePatientAnswer as the un-bypassable AI-10 signing guard,
+// so without a "3.2" rule the provider-data UC-07 patient-dtr leg is rejected at phg.
+func TestValidatePatientAnswer(t *testing.T) {
+	// Oswestry: 0–100 integer.
+	if err := ValidatePatientAnswer("functional-status-oswestry", "42"); err != nil {
+		t.Fatalf("oswestry 42: unexpected error %v", err)
+	}
+	if err := ValidatePatientAnswer("functional-status-oswestry", "200"); err == nil {
+		t.Fatalf("oswestry 200: want out-of-range error, got nil")
+	}
+	if err := ValidatePatientAnswer("functional-status-oswestry", "not-a-number"); err == nil {
+		t.Fatalf("oswestry non-integer: want error, got nil")
+	}
+
+	// HHA "3.2": free-text functional-limitations narrative — any non-empty string is conformant.
+	if err := ValidatePatientAnswer("3.2", "I have trouble walking without help."); err != nil {
+		t.Fatalf(`HHA "3.2" non-empty narrative: unexpected error %v`, err)
+	}
+	if err := ValidatePatientAnswer("3.2", "   "); err == nil {
+		t.Fatalf(`HHA "3.2" whitespace-only: want non-empty error, got nil (the signer must not attest an empty functional-status item)`)
+	}
+
+	// An unregistered item is still rejected (the signer must not attest a constraint it can't enforce).
+	if err := ValidatePatientAnswer("unknown-item", "x"); err == nil {
+		t.Fatalf("unknown item: want 'no attestation rule' error, got nil")
+	}
+}

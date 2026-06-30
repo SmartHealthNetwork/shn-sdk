@@ -1,0 +1,112 @@
+{
+  "resourceType": "Bundle",
+  "id": "providerdata-uc01-nc",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "Patient/MBR-PD-UC01-NC",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC01-NC",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC01-NC"
+          }
+        ],
+        "name": [
+          {
+            "family": "Abara-Terminated"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1971-05-22"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC01-NC"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-cms-payer",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-cms-payer",
+        "name": "Centers for Medicare & Medicaid Services",
+        "identifier": [
+          {
+            "use": "official",
+            "system": "urn:oid:2.16.840.1.113883.6.300",
+            "value": "00001"
+          }
+        ],
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/organization-role",
+                "code": "payer"
+              }
+            ]
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-cms-payer"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc01nc",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc01nc",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "cancelled",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC01-NC"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC01-NC"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc01nc"
+      }
+    }
+  ]
+}

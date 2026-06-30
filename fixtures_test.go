@@ -15,6 +15,11 @@ var expectedMember = map[string]string{
 	"homeoxygen": "MBR-OX",
 	"uc08":       "MBR-PD-UC08",
 	"uc06":       "MBR-PD-UC06",
+	"uc01":       "MBR-PD-UC01",
+	"uc01-nc":    "MBR-PD-UC01-NC",
+	"uc07":       "MBR-PD-UC07",
+	"uc05":       "MBR-PD-UC05",
+	"uc05-nc":    "MBR-PD-UC05-NC",
 }
 
 // fixtureBundle is the minimal transaction-Bundle shape the invariants assert against.
@@ -63,9 +68,17 @@ func TestProviderDataBundle_NoContractedNPI(t *testing.T) {
 }
 
 func TestProviderDataPersonas_NoDescoped(t *testing.T) {
-	// The shipped set is exactly uc04 + homeoxygen + uc08 + uc06; uc02/uc03 are descoped (D-PD-2).
+	// The shipped set is exactly uc04 + homeoxygen + uc08 + uc06 + uc01 + uc01-nc + uc07 + uc05 + uc05-nc;
+	// uc02/uc03 are descoped (D-PD-2). uc01/uc01-nc are coverage-completion eligibility
+	// personas (SHN eligibility gap-fill; active vs terminated Coverage).
+	// uc07 is the patient-authored twin of uc06 (same G0151/M62.81; distinct member).
+	// uc05/uc05-nc are the federated-query personas (G0151 order; operative DR is facility-seeded).
 	got := ProviderDataPersonas()
-	want := map[string]bool{"uc04": true, "homeoxygen": true, "uc08": true, "uc06": true}
+	want := map[string]bool{
+		"uc04": true, "homeoxygen": true, "uc08": true, "uc06": true,
+		"uc01": true, "uc01-nc": true, "uc07": true,
+		"uc05": true, "uc05-nc": true,
+	}
 	if len(got) != len(want) {
 		t.Fatalf("ProviderDataPersonas() = %v, want exactly %v", got, want)
 	}
@@ -126,6 +139,9 @@ func TestProviderDataBundle(t *testing.T) {
 				// One-active-order invariant: exactly one status=active order (DeviceRequest or
 				// ServiceRequest). OpenOrder returns Entry[0] of DeviceRequest-then-ServiceRequest;
 				// a second active order would make the routed order non-deterministic.
+				// Eligibility-only personas (uc01/uc01-nc) carry no order by design — they
+				// exercise CoverageInforce only, not the order-dispatch path (coverage-completion,
+				// not new fidelity).
 				if r.ResourceType == "DeviceRequest" || r.ResourceType == "ServiceRequest" {
 					if r.Status == "active" {
 						activeOrders++
@@ -144,8 +160,16 @@ func TestProviderDataBundle(t *testing.T) {
 				}
 			}
 
-			if activeOrders != 1 {
-				t.Errorf("%q: found %d active orders, want exactly 1 (one-active-order invariant)", persona, activeOrders)
+			// eligibilityPersonas carry no ServiceRequest/DeviceRequest (CoverageInforce only).
+			eligibilityPersonas := map[string]bool{"uc01": true, "uc01-nc": true}
+			if eligibilityPersonas[persona] {
+				if activeOrders != 0 {
+					t.Errorf("%q: found %d active orders, want 0 (eligibility persona — no order path)", persona, activeOrders)
+				}
+			} else {
+				if activeOrders != 1 {
+					t.Errorf("%q: found %d active orders, want exactly 1 (one-active-order invariant)", persona, activeOrders)
+				}
 			}
 			if patientID == "" {
 				t.Fatalf("%q: bundle has no Patient", persona)

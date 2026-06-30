@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
@@ -644,6 +645,16 @@ func ValidatePatientAnswer(linkID, answer string) error {
 		}
 		if n < 0 || n > 100 {
 			return fmt.Errorf("patient answer %d for %s is out of range [0,100]", n, linkID)
+		}
+		return nil
+	case "3.2":
+		// HomeHealthAssessment free-text functional-status item ("Functional limitations",
+		// type text, 0-CQL) — the patient-authored narrative provider-data UC-07 attests. The
+		// conformance constraint for a free-text item is a non-empty answer: the patient-authorship
+		// signer must not attest an empty functional-status item. (The composite/sandbox UC-07 path
+		// uses functional-status-oswestry above; this rule is the provider-data HHA analog.)
+		if strings.TrimSpace(answer) == "" {
+			return fmt.Errorf("patient answer for %s (HHA functional-status) must not be empty", linkID)
 		}
 		return nil
 	default:
