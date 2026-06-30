@@ -290,6 +290,74 @@ func TestBuildConformantOrderSelectRequest_PatientPrefetch(t *testing.T) {
 	}
 }
 
+// TestBuildConformantOrderSelectRequest_SelectionResourceTypeAware verifies that
+// context.selections references the order by its ACTUAL resourceType (br-payer's
+// order-select service matches selections[] against draftOrders type-sensitively via
+// IdType.equalsIgnoreBase: ServiceRequest/x does NOT match DeviceRequest/x). A
+// ServiceRequest order stays "ServiceRequest/sr1" (regression guard); a DeviceRequest
+// order (UC-02 hospital-bed E0250) must yield "DeviceRequest/sr1" so br-payer matches
+// it and returns cards. (UC-02)
+func TestBuildConformantOrderSelectRequest_SelectionResourceTypeAware(t *testing.T) {
+	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildCoverageWithPayer: %v", err)
+	}
+	// decode pulls context.selections + the (single) draftOrders entry resourceType.
+	decode := func(t *testing.T, reqJSON []byte) (selections []string, entryType string) {
+		t.Helper()
+		var req struct {
+			Context struct {
+				Selections  []string `json:"selections"`
+				DraftOrders struct {
+					Entry []struct {
+						Resource struct {
+							ResourceType string `json:"resourceType"`
+						} `json:"resource"`
+					} `json:"entry"`
+				} `json:"draftOrders"`
+			} `json:"context"`
+		}
+		if err := json.Unmarshal(reqJSON, &req); err != nil {
+			t.Fatalf("unmarshal request: %v (%s)", err, reqJSON)
+		}
+		if len(req.Context.DraftOrders.Entry) != 1 {
+			t.Fatalf("draftOrders.entry = %d, want 1", len(req.Context.DraftOrders.Entry))
+		}
+		return req.Context.Selections, req.Context.DraftOrders.Entry[0].Resource.ResourceType
+	}
+
+	// ServiceRequest order — selection stays ServiceRequest/<id> (regression guard).
+	srJSON, err := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	srReq, err := BuildConformantOrderSelectRequest(srJSON, cov, "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildConformantOrderSelectRequest(ServiceRequest): %v", err)
+	}
+	srSel, srEntryType := decode(t, srReq)
+	if want := []string{"ServiceRequest/" + conformantCRDOrderID}; !reflect.DeepEqual(srSel, want) {
+		t.Errorf("ServiceRequest selections = %v, want %v", srSel, want)
+	}
+	if srEntryType != "ServiceRequest" {
+		t.Errorf("ServiceRequest draftOrders entry resourceType = %q, want ServiceRequest", srEntryType)
+	}
+
+	// DeviceRequest order (UC-02 hospital-bed E0250) — selection must be DeviceRequest/<id>.
+	drJSON := []byte(`{"resourceType":"DeviceRequest","status":"draft","intent":"order","codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0250"}]},"subject":{"reference":"Patient/x"}}`)
+	drReq, err := BuildConformantOrderSelectRequest(drJSON, cov, "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatalf("BuildConformantOrderSelectRequest(DeviceRequest): %v", err)
+	}
+	drSel, drEntryType := decode(t, drReq)
+	if want := []string{"DeviceRequest/" + conformantCRDOrderID}; !reflect.DeepEqual(drSel, want) {
+		t.Errorf("DeviceRequest selections = %v, want %v", drSel, want)
+	}
+	if drEntryType != "DeviceRequest" {
+		t.Errorf("DeviceRequest draftOrders entry resourceType = %q, want DeviceRequest", drEntryType)
+	}
+}
+
 // TestParseCards covers both branches + the zero-card error path.
 func TestParseCards(t *testing.T) {
 	paReq := []byte(`{"cards":[{"summary":"Prior authorization required","indicator":"warning","extension":{"covered":"covered","paNeeded":"auth-needed","questionnaires":["http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"]}}]}`)

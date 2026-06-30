@@ -1,0 +1,313 @@
+{
+  "resourceType": "Bundle",
+  "id": "providerdata-uc03",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "Patient/MBR-PD-UC03",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC03",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC03"
+          }
+        ],
+        "name": [
+          {
+            "family": "Diallo-OxygenConcentrator"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1956-04-09"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC03"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-cms-payer",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-cms-payer",
+        "name": "Centers for Medicare & Medicaid Services",
+        "identifier": [
+          {
+            "use": "official",
+            "system": "urn:oid:2.16.840.1.113883.6.300",
+            "value": "00001"
+          }
+        ],
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/organization-role",
+                "code": "payer"
+              }
+            ]
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-cms-payer"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc03",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc03",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC03"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC03"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-cms-payer"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc03"
+      }
+    },
+    {
+      "fullUrl": "Condition/cond-mbrpduc03-j449",
+      "resource": {
+        "resourceType": "Condition",
+        "id": "cond-mbrpduc03-j449",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "clinicalStatus": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+              "code": "active",
+              "display": "Active"
+            }
+          ]
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "problem-list-item",
+                "display": "Problem List Item"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/icd-10-cm",
+              "code": "J44.9",
+              "display": "Chronic obstructive pulmonary disease, unspecified"
+            }
+          ],
+          "text": "Chronic obstructive pulmonary disease, unspecified"
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC03"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrpduc03-j449"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-mbrpduc03-pulseox",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-mbrpduc03-pulseox",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "59408-5",
+              "display": "Oxygen saturation in Arterial blood by Pulse oximetry"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC03"
+        },
+        "effectiveDateTime": "2026-06-28T12:00:00Z",
+        "valueQuantity": {
+          "value": 87,
+          "unit": "%",
+          "system": "http://unitsofmeasure.org",
+          "code": "%"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-mbrpduc03-pulseox"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-mbrpduc03-pao2",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-mbrpduc03-pao2",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "exam",
+                "display": "Exam"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "2703-7",
+              "display": "Oxygen [Partial pressure] in Arterial blood"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC03"
+        },
+        "effectiveDateTime": "2026-06-28T12:00:00Z",
+        "valueQuantity": {
+          "value": 53,
+          "unit": "mm[Hg]",
+          "system": "http://unitsofmeasure.org",
+          "code": "mm[Hg]"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-mbrpduc03-pao2"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-dme-mbrpduc03",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-dme-mbrpduc03",
+        "name": "Riverside Respiratory Supply (Non-Contracted)",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1733445566"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-dme-mbrpduc03"
+      }
+    },
+    {
+      "fullUrl": "DeviceRequest/dr-mbrpduc03-e1390",
+      "resource": {
+        "resourceType": "DeviceRequest",
+        "id": "dr-mbrpduc03-e1390",
+        "status": "active",
+        "intent": "order",
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E1390",
+              "display": "Oxygen concentrator, single delivery port"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC03"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "J44.9",
+                "display": "Chronic obstructive pulmonary disease, unspecified"
+              }
+            ],
+            "text": "Chronic obstructive pulmonary disease, unspecified"
+          }
+        ],
+        "performer": {
+          "reference": "Organization/org-dme-mbrpduc03"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-mbrpduc03-e1390"
+      }
+    }
+  ]
+}

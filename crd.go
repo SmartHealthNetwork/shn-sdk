@@ -148,11 +148,22 @@ const (
 // (no time/random). The SR keeps its US Core meta.profile (US Core resolves clean
 // against the US-Core-only validator).
 func BuildConformantOrderSelectRequest(serviceRequestJSON, coverageJSON []byte, patientID string) ([]byte, error) {
-	// Inject the local order id into the SR (the minimized BuildServiceRequest emits no
+	// Inject the local order id into the order (the minimized BuildServiceRequest emits no
 	// id; the conformant Bundle entry needs a stable id to wrap+select).
 	srWithID, err := withResourceID(serviceRequestJSON, conformantCRDOrderID)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant CRD: %w", err)
+	}
+	// context.selections must reference the order by its ACTUAL resourceType: br-payer's
+	// order-select service matches selections[] against the draftOrders entries
+	// type-sensitively (HAPI IdType.equalsIgnoreBase — "ServiceRequest/x" does NOT match a
+	// DeviceRequest/x order, yielding 0 cards). A ServiceRequest order stays
+	// "ServiceRequest/<id>"; a DeviceRequest order (UC-02 hospital-bed E0250) selects
+	// "DeviceRequest/<id>". Fall back to "ServiceRequest" if the order has no parseable
+	// resourceType so existing callers never regress. Deterministic. (UC-02)
+	orderResourceType, _ := extractResourceTypeAndID(serviceRequestJSON)
+	if orderResourceType == "" {
+		orderResourceType = "ServiceRequest"
 	}
 	req := conformantOrderSelectRequest{
 		Hook:         "order-select",
@@ -172,7 +183,7 @@ func BuildConformantOrderSelectRequest(serviceRequestJSON, coverageJSON []byte, 
 					Resource: json.RawMessage(srWithID),
 				}},
 			},
-			Selections: []string{"ServiceRequest/" + conformantCRDOrderID},
+			Selections: []string{orderResourceType + "/" + conformantCRDOrderID},
 		},
 	}
 	// A real CDS client supplies the patient it holds; SHN is config-only with no

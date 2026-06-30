@@ -17,9 +17,17 @@ var providerDataFS embed.FS
 
 // ProviderDataPersonas lists the provider-data seed personas shipped for partners to load into
 // their SoR (the "seed your SoR to match" bundle). Each is a self-contained transaction Bundle.
-// Synthetic data only — no PHI. (UC-02/UC-03 are descoped, D-PD-2.)
+// Synthetic data only — no PHI. uc02 is the HospitalBeds persona:
+// a seeded E0250 hospital-bed DeviceRequest carrying a LOAD-BEARING reasonCode (M62.81) — br-payer
+// keys Documentation Required on exists(DeviceRequest.reasonCode), and HospitalBeds attaches its
+// DTR questionnaire only when Documentation Required=true, so the reasonCode is what makes UC-02's
+// order-select determination no-DTR (covered / no-PA). The reason is persona SELECTION (a real
+// hospital-bed order carries an indication), not field-tuning. uc03 is the HomeOxygenDispatch
+// analog of the homeoxygen persona on a DIFFERENT oxygen code (E1390 oxygen concentrator vs E0431):
+// a seeded oxygen-concentrator DeviceRequest + the O2 clinical observations br-payer's prepop CQL
+// auto-fills against (order-dispatch → A4 → timer A1).
 func ProviderDataPersonas() []string {
-	return []string{"uc04", "homeoxygen", "uc08", "uc06", "uc01", "uc01-nc", "uc07", "uc05", "uc05-nc"}
+	return []string{"uc02", "uc03", "uc04", "homeoxygen", "uc08", "uc06", "uc01", "uc01-nc", "uc07", "uc05", "uc05-nc"}
 }
 
 // ProviderDataBundle returns a persona's transaction Bundle bytes (load into a FHIR SoR to

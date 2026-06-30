@@ -9,8 +9,10 @@ import (
 
 // expectedMember pins each provider-data persona to the canonical member id (Patient.id) the
 // gateway's sceneMember resolves to (provider-data values). A collision or a wrong member would
-// break OpenOrder routing (OpenOrder is keyed on member). UC-02/UC-03 are descoped (D-PD-2).
+// break OpenOrder routing (OpenOrder is keyed on member).
 var expectedMember = map[string]string{
+	"uc02":       "MBR-PD-UC02",
+	"uc03":       "MBR-PD-UC03",
 	"uc04":       "MBR-PD-UC04",
 	"homeoxygen": "MBR-OX",
 	"uc08":       "MBR-PD-UC08",
@@ -68,14 +70,18 @@ func TestProviderDataBundle_NoContractedNPI(t *testing.T) {
 }
 
 func TestProviderDataPersonas_NoDescoped(t *testing.T) {
-	// The shipped set is exactly uc04 + homeoxygen + uc08 + uc06 + uc01 + uc01-nc + uc07 + uc05 + uc05-nc;
-	// uc02/uc03 are descoped (D-PD-2). uc01/uc01-nc are coverage-completion eligibility
-	// personas (SHN eligibility gap-fill; active vs terminated Coverage).
+	// The shipped set is exactly uc02 + uc03 + uc04 + homeoxygen + uc08 + uc06 + uc01 + uc01-nc + uc07 + uc05 + uc05-nc.
+	// With uc03 shipped there are NO descoped provider-data personas left. uc02 is the HospitalBeds
+	// persona (E0250 DeviceRequest + LOAD-BEARING M62.81 reasonCode → order-select covered / no-PA / no-DTR).
+	// uc03 is the HomeOxygenDispatch analog of homeoxygen on a different oxygen code (E1390 oxygen
+	// concentrator + O2 obs → order-dispatch → A4 → timer A1).
+	// uc01/uc01-nc are coverage-completion eligibility personas (SHN eligibility gap-fill;
+	// active vs terminated Coverage).
 	// uc07 is the patient-authored twin of uc06 (same G0151/M62.81; distinct member).
 	// uc05/uc05-nc are the federated-query personas (G0151 order; operative DR is facility-seeded).
 	got := ProviderDataPersonas()
 	want := map[string]bool{
-		"uc04": true, "homeoxygen": true, "uc08": true, "uc06": true,
+		"uc02": true, "uc03": true, "uc04": true, "homeoxygen": true, "uc08": true, "uc06": true,
 		"uc01": true, "uc01-nc": true, "uc07": true,
 		"uc05": true, "uc05-nc": true,
 	}
@@ -84,7 +90,7 @@ func TestProviderDataPersonas_NoDescoped(t *testing.T) {
 	}
 	for _, p := range got {
 		if !want[p] {
-			t.Errorf("ProviderDataPersonas() returned unexpected persona %q (uc02/uc03 are descoped, D-PD-2)", p)
+			t.Errorf("ProviderDataPersonas() returned unexpected persona %q (no descoped provider-data personas remain)", p)
 		}
 	}
 }
@@ -197,17 +203,17 @@ func TestProviderDataBundle(t *testing.T) {
 }
 
 // TestProviderDataBundle_UnknownPersona pins the public-API error contract: an unknown persona
-// name (a typo, or a descoped UC-02/03) returns a non-nil error naming the persona, never silent
-// empty bytes a caller might POST as an empty SoR seed.
+// name (a typo) returns a non-nil error naming the persona, never silent empty bytes a caller
+// might POST as an empty SoR seed.
 func TestProviderDataBundle_UnknownPersona(t *testing.T) {
-	raw, err := ProviderDataBundle("uc02") // descoped (D-PD-2); no fixture ships for it
+	raw, err := ProviderDataBundle("nonexistent") // a permanently-absent persona (no fixture ships for it)
 	if err == nil {
 		t.Fatalf("ProviderDataBundle(unknown persona): err = nil, want a not-found error")
 	}
 	if raw != nil {
 		t.Errorf("ProviderDataBundle(unknown persona): bytes = %q, want nil on error", raw)
 	}
-	if !strings.Contains(err.Error(), "uc02") {
+	if !strings.Contains(err.Error(), "nonexistent") {
 		t.Errorf("ProviderDataBundle(unknown persona): error %q should name the persona", err)
 	}
 }
