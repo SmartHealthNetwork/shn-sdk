@@ -20,6 +20,10 @@ type Holder struct {
 	EncPub  string `json:"encPub"`
 	SignPub string `json:"signPub"`
 	BaseURL string `json:"baseURL"`
+	// PayerIDs are the holder's operator-attested payer-identity claims (role=payer only;
+	// omitted otherwise). FeedPayerRouter indexes (system,value) → holder id for coverage-
+	// derived routing (FR-G41). Globally unique across holders (AI-G12).
+	PayerIDs []PayerIdentifier `json:"payerIds,omitempty"`
 }
 
 // EncKey decodes the holder's X25519 public key.

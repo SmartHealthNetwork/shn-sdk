@@ -1,0 +1,150 @@
+{
+  "resourceType": "Bundle",
+  "id": "providerdata-uc02-payerb",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "Patient/MBR-PD-UC02-PB",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "MBR-PD-UC02-PB",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "urn:shn:member",
+            "value": "MBR-PD-UC02-PB"
+          }
+        ],
+        "name": [
+          {
+            "family": "Bergstrom-HospitalBed-PayerB"
+          }
+        ],
+        "gender": "unknown",
+        "birthDate": "1953-09-17"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient/MBR-PD-UC02-PB"
+      }
+    },
+    {
+      "fullUrl": "Organization/org-payerb",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-payerb",
+        "name": "Second Payer (Test)",
+        "identifier": [
+          {
+            "use": "official",
+            "system": "urn:oid:2.16.840.1.113883.6.300",
+            "value": "00078"
+          }
+        ],
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/organization-role",
+                "code": "payer"
+              }
+            ]
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-payerb"
+      }
+    },
+    {
+      "fullUrl": "Coverage/cov-mbrpduc02pb",
+      "resource": {
+        "resourceType": "Coverage",
+        "id": "cov-mbrpduc02pb",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
+          ]
+        },
+        "status": "active",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
+            "system": "urn:shn:coverage",
+            "value": "MBR-PD-UC02-PB"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/MBR-PD-UC02-PB"
+        },
+        "relationship": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+              "code": "self"
+            }
+          ]
+        },
+        "payor": [
+          {
+            "reference": "Organization/org-payerb"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Coverage/cov-mbrpduc02pb"
+      }
+    },
+    {
+      "fullUrl": "DeviceRequest/dr-mbrpduc02pb-e0250",
+      "resource": {
+        "resourceType": "DeviceRequest",
+        "id": "dr-mbrpduc02pb-e0250",
+        "status": "active",
+        "intent": "order",
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0250",
+              "display": "Hospital bed fixed height with side rails and mattress"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC02-PB"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                "code": "M62.81",
+                "display": "Muscle weakness (generalized)"
+              }
+            ],
+            "text": "Generalized muscle weakness (a faithful hospital-bed indication). LOAD-BEARING reasonCode: br-payer keys Documentation Required on exists(DeviceRequest.reasonCode), and HospitalBeds attaches its DTR questionnaire only when Documentation Required=true — this reason (a real hospital-bed order carries one; persona SELECTION, not field-tuning) is what makes UC-02 no-DTR."
+          }
+        ],
+        "authoredOn": "2026-06-20"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-mbrpduc02pb-e0250"
+      }
+    }
+  ]
+}

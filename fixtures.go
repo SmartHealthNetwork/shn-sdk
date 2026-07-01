@@ -25,9 +25,17 @@ var providerDataFS embed.FS
 // hospital-bed order carries an indication), not field-tuning. uc03 is the HomeOxygenDispatch
 // analog of the homeoxygen persona on a DIFFERENT oxygen code (E1390 oxygen concentrator vs E0431):
 // a seeded oxygen-concentrator DeviceRequest + the O2 clinical observations br-payer's prepop CQL
-// auto-fills against (order-dispatch → A4 → timer A1).
+// auto-fills against (order-dispatch → A4 → timer A1). uc02-payerb is uc02's byte-identical twin
+// EXCEPT its Coverage.payor names a SECOND payer identity (urn:oid:2.16.840.1.113883.6.300|00078,
+// member MBR-PD-UC02-PB) — it exists solely so a partner (or the SHN provider-data FHIR tenant)
+// can seed a genuinely multi-payer SoR for the coverage-derived payer-routing proof (FR-G40); it
+// carries NO NPI, so the R-8 contracted-NPI honesty fence is vacuously satisfied. It is NOT driven
+// by any live UC scenario (no console/scenario wiring reads MBR-PD-UC02-PB) — the hermetic
+// two-payer routing proof (gateway/engine/payerrouting_test.go) is a separate, engine-local fixture
+// and does not depend on this bundle at all; this one is for a REAL FHIR-SoR-backed multi-payer
+// demonstration (multi-payer partner onboarding), seeded but otherwise inert today.
 func ProviderDataPersonas() []string {
-	return []string{"uc02", "uc03", "uc04", "homeoxygen", "uc08", "uc06", "uc01", "uc01-nc", "uc07", "uc05", "uc05-nc"}
+	return []string{"uc02", "uc02-payerb", "uc03", "uc04", "homeoxygen", "uc08", "uc06", "uc01", "uc01-nc", "uc07", "uc05", "uc05-nc"}
 }
 
 // ProviderDataBundle returns a persona's transaction Bundle bytes (load into a FHIR SoR to

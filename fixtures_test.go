@@ -11,17 +11,18 @@ import (
 // gateway's sceneMember resolves to (provider-data values). A collision or a wrong member would
 // break OpenOrder routing (OpenOrder is keyed on member).
 var expectedMember = map[string]string{
-	"uc02":       "MBR-PD-UC02",
-	"uc03":       "MBR-PD-UC03",
-	"uc04":       "MBR-PD-UC04",
-	"homeoxygen": "MBR-OX",
-	"uc08":       "MBR-PD-UC08",
-	"uc06":       "MBR-PD-UC06",
-	"uc01":       "MBR-PD-UC01",
-	"uc01-nc":    "MBR-PD-UC01-NC",
-	"uc07":       "MBR-PD-UC07",
-	"uc05":       "MBR-PD-UC05",
-	"uc05-nc":    "MBR-PD-UC05-NC",
+	"uc02":        "MBR-PD-UC02",
+	"uc02-payerb": "MBR-PD-UC02-PB",
+	"uc03":        "MBR-PD-UC03",
+	"uc04":        "MBR-PD-UC04",
+	"homeoxygen":  "MBR-OX",
+	"uc08":        "MBR-PD-UC08",
+	"uc06":        "MBR-PD-UC06",
+	"uc01":        "MBR-PD-UC01",
+	"uc01-nc":     "MBR-PD-UC01-NC",
+	"uc07":        "MBR-PD-UC07",
+	"uc05":        "MBR-PD-UC05",
+	"uc05-nc":     "MBR-PD-UC05-NC",
 }
 
 // fixtureBundle is the minimal transaction-Bundle shape the invariants assert against.
@@ -70,9 +71,13 @@ func TestProviderDataBundle_NoContractedNPI(t *testing.T) {
 }
 
 func TestProviderDataPersonas_NoDescoped(t *testing.T) {
-	// The shipped set is exactly uc02 + uc03 + uc04 + homeoxygen + uc08 + uc06 + uc01 + uc01-nc + uc07 + uc05 + uc05-nc.
+	// The shipped set is exactly uc02 + uc02-payerb + uc03 + uc04 + homeoxygen + uc08 + uc06 + uc01 +
+	// uc01-nc + uc07 + uc05 + uc05-nc.
 	// With uc03 shipped there are NO descoped provider-data personas left. uc02 is the HospitalBeds
 	// persona (E0250 DeviceRequest + LOAD-BEARING M62.81 reasonCode → order-select covered / no-PA / no-DTR).
+	// uc02-payerb is uc02's SECOND-PAYER twin (Coverage.payor names urn:oid:...300|00078, member
+	// MBR-PD-UC02-PB) — a seeded, otherwise-inert multi-payer SoR fixture (FR-G40); no live UC
+	// scenario drives it.
 	// uc03 is the HomeOxygenDispatch analog of homeoxygen on a different oxygen code (E1390 oxygen
 	// concentrator + O2 obs → order-dispatch → A4 → timer A1).
 	// uc01/uc01-nc are coverage-completion eligibility personas (SHN eligibility gap-fill;
@@ -81,7 +86,7 @@ func TestProviderDataPersonas_NoDescoped(t *testing.T) {
 	// uc05/uc05-nc are the federated-query personas (G0151 order; operative DR is facility-seeded).
 	got := ProviderDataPersonas()
 	want := map[string]bool{
-		"uc02": true, "uc03": true, "uc04": true, "homeoxygen": true, "uc08": true, "uc06": true,
+		"uc02": true, "uc02-payerb": true, "uc03": true, "uc04": true, "homeoxygen": true, "uc08": true, "uc06": true,
 		"uc01": true, "uc01-nc": true, "uc07": true,
 		"uc05": true, "uc05-nc": true,
 	}

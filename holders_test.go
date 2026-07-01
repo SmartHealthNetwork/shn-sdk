@@ -2,9 +2,12 @@ package shnsdk
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -223,4 +226,30 @@ func TestNewFeedEncResolver(t *testing.T) {
 			t.Errorf("call 3: key mismatch: got %v want %v", *got2, keyB)
 		}
 	})
+}
+
+func TestHolderPayerIDsRoundTrip(t *testing.T) {
+	h := Holder{
+		ID: "acme-payer", Role: "payer", EncPub: "ZW5j", SignPub: "c2ln", BaseURL: "https://acme.example",
+		PayerIDs: []PayerIdentifier{{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078"}},
+	}
+	b, err := json.Marshal(h)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"payerIds":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00078"}]`) {
+		t.Fatalf("payerIds not emitted in canonical shape: %s", b)
+	}
+	var got Holder
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(got.PayerIDs, h.PayerIDs) {
+		t.Fatalf("round-trip payerIds: got %+v want %+v", got.PayerIDs, h.PayerIDs)
+	}
+	// A holder with no payer-ids omits the field entirely (omitempty — provider/facility/phg).
+	bare, _ := json.Marshal(Holder{ID: "p", Role: "provider"})
+	if strings.Contains(string(bare), "payerIds") {
+		t.Fatalf("bare holder must omit payerIds: %s", bare)
+	}
 }
