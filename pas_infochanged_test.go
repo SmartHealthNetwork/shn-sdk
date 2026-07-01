@@ -24,6 +24,7 @@ func infoChangedTestInputs(infoChanged bool) ConformantClaimInputs {
 		Corr:        "corr-infochanged-0001",
 		Created:     fixedInfoChangedClock,
 		InfoChanged: infoChanged,
+		Payer:       CMSPayerIdentity,
 	}
 }
 

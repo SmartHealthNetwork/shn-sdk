@@ -16,7 +16,7 @@ func demoConformantOrderSelect(t *testing.T) []byte {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	covJSON, err := BuildCoverageWithPayer(patientRef, coverageRef)
+	covJSON, err := BuildCoverageWithPayer(patientRef, coverageRef, CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -55,6 +55,7 @@ func demoConformantClaim(t *testing.T) []byte {
 		CoverageRef: coverageRef,
 		Corr:        "corr-claim-demo-1",
 		Created:     time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC),
+		Payer:       CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)

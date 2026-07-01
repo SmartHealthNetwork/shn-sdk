@@ -12,6 +12,7 @@ func TestBuildConformantOrderDispatchRequest(t *testing.T) {
 	out, err := BuildConformantOrderDispatchRequest(OrderDispatchInputs{
 		PatientID: "MBR-OX", OrderRef: "DeviceRequest/dr-ox", PerformerRef: "Organization/dme-1",
 		DeviceRequest: drJSON, Supplier: orgJSON, Coverage: covJSON, PatientRef: "Patient/MBR-OX",
+		Payer: CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -271,6 +271,11 @@ type ConformantClaimInputs struct {
 	// byte-identical to every existing caller. NO prior-claim ref is added (this is a submit, not an
 	// update).
 	InfoChanged bool
+	// Payer is the payer Organization identifier (system|value) emitted on the payer
+	// Organization (contained or bundle-entry, depending on PayerOrgEntry/ContainedInsurer)
+	// and on the Coverage built via BuildCoverageWithPayer. Pass the identity read from the
+	// patient's Coverage, or shnsdk.CMSPayerIdentity for the conformance payer.
+	Payer PayerIdentifier
 }
 
 // BuildConformantClaimBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
@@ -329,7 +334,7 @@ func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
 			return nil, fmt.Errorf("shnsdk: conformant submit: repoint insurer to entry: %w", err)
 		}
 	case in.ContainedInsurer:
-		claimJSON, err = containInsurer(claimJSON)
+		claimJSON, err = containInsurer(claimJSON, in.Payer)
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant submit: contain insurer: %w", err)
 		}
@@ -347,7 +352,7 @@ func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
 
 	// --- Coverage: reuse BuildCoverageWithPayer (contained cms-payer Org), restamp the id
 	// to the bundle-local conformant id, and STRIP meta.profile (PAS context). ---
-	coverageJSON, err := BuildCoverageWithPayer(in.PatientRef, in.CoverageRef)
+	coverageJSON, err := BuildCoverageWithPayer(in.PatientRef, in.CoverageRef, in.Payer)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: build coverage: %w", err)
 	}
@@ -430,7 +435,7 @@ func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
 	// which absolutizeBundleRefs (when AbsoluteRefs) makes Coverage.payor/Claim.insurer match.
 	var payerOrgJSON []byte
 	if in.PayerOrgEntry {
-		payerOrgJSON, err = buildPayerOrgResource()
+		payerOrgJSON, err = buildPayerOrgResource(in.Payer)
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant submit: build payer org entry: %w", err)
 		}
@@ -652,14 +657,13 @@ func rewriteProvenanceTarget(provJSON []byte, wantTarget string) ([]byte, error)
 // containInsurer rewrites a conformant Claim JSON so the Claim's insurer references a
 // CONTAINED #cms-payer Organization — making the reference resolvable by real payers that
 // validate bundle-internal refs (e.g. real br-payer 400s "Organization/payer not found").
-// Mirrors BuildCoverageWithPayer's contained-org splice: the same four constants
-// (conformantPayerOrgID, conformantPayerOrgName, systemCMSPayerID, conformantPayerOrgValue)
-// produce an identical Organization shape, ensuring the Claim's contained payer and the
-// Coverage's contained payer are consistent.
+// Mirrors BuildCoverageWithPayer's contained-org splice: the identifier system|value come
+// from payer (the cosmetic id/name stay conformantPayerOrgID/conformantPayerOrgName),
+// ensuring the Claim's contained payer and the Coverage's contained payer are consistent.
 //
 // If the Claim already has a "contained" array (not typical) the new org is appended.
 // Every other field is left verbatim. Deterministic.
-func containInsurer(claimJSON []byte) ([]byte, error) {
+func containInsurer(claimJSON []byte, payer PayerIdentifier) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(claimJSON, &m); err != nil {
 		return nil, fmt.Errorf("containInsurer: parse claim: %w", err)
@@ -670,8 +674,8 @@ func containInsurer(claimJSON []byte) ([]byte, error) {
 		Id:   strPtr(conformantPayerOrgID),
 		Name: strPtr(conformantPayerOrgName),
 		Identifier: []fhir.Identifier{{
-			System: strPtr(systemCMSPayerID),
-			Value:  strPtr(conformantPayerOrgValue),
+			System: strPtr(payer.System),
+			Value:  strPtr(payer.Value),
 		}},
 	}
 	orgJSON, err := json.Marshal(org)
@@ -797,14 +801,15 @@ func setClaimItemProductFromSR(claimJSON, orderJSON []byte) ([]byte, error) {
 // buildPayerOrgResource returns the standalone cms-payer Organization JSON (the same identity
 // BuildCoverageWithPayer/containInsurer splice as contained, but as a top-level resource for a
 // bundle ENTRY). The composite lane lifts the payer org out of contained into an entry because
-// br-payer's PAS payor resolution (findInBundle) reads bundle entries only.
-func buildPayerOrgResource() ([]byte, error) {
+// br-payer's PAS payor resolution (findInBundle) reads bundle entries only. The identifier
+// system|value come from payer; the cosmetic id/name stay conformantPayerOrgID/Name.
+func buildPayerOrgResource(payer PayerIdentifier) ([]byte, error) {
 	org := fhir.Organization{
 		Id:   strPtr(conformantPayerOrgID),
 		Name: strPtr(conformantPayerOrgName),
 		Identifier: []fhir.Identifier{{
-			System: strPtr(systemCMSPayerID),
-			Value:  strPtr(conformantPayerOrgValue),
+			System: strPtr(payer.System),
+			Value:  strPtr(payer.Value),
 		}},
 	}
 	orgJSON, err := json.Marshal(org)
@@ -1260,6 +1265,10 @@ type ConformantClaimUpdateInputs struct {
 	// of the update resolves the payor (findInBundle, entries only). Composite-only; precedence
 	// over ContainedInsurer.
 	PayerOrgEntry bool
+	// Payer is the payer Organization identifier (system|value) — same semantics as
+	// ConformantClaimInputs.Payer. Pass the identity read from the patient's Coverage,
+	// or shnsdk.CMSPayerIdentity for the conformance payer.
+	Payer PayerIdentifier
 }
 
 // BuildConformantClaimUpdateBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
@@ -1312,7 +1321,7 @@ func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, e
 			return nil, fmt.Errorf("shnsdk: conformant update: repoint insurer to entry: %w", err)
 		}
 	case in.ContainedInsurer:
-		claimJSON, err = containInsurer(claimJSON)
+		claimJSON, err = containInsurer(claimJSON, in.Payer)
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant update: contain insurer: %w", err)
 		}
@@ -1333,7 +1342,7 @@ func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, e
 	}
 
 	// --- Coverage: identical to the submit builder. ---
-	coverageJSON, err := BuildCoverageWithPayer(in.PatientRef, in.CoverageRef)
+	coverageJSON, err := BuildCoverageWithPayer(in.PatientRef, in.CoverageRef, in.Payer)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: build coverage: %w", err)
 	}
@@ -1422,7 +1431,7 @@ func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, e
 	// Composite lane: add the cms-payer Organization as a resolvable bundle ENTRY so the
 	// repointed Coverage.payor/Claim.insurer resolve (br-payer findInBundle, entries only).
 	if in.PayerOrgEntry {
-		payerOrgJSON, err := buildPayerOrgResource()
+		payerOrgJSON, err := buildPayerOrgResource(in.Payer)
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant update: build payer org entry: %w", err)
 		}

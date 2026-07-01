@@ -51,7 +51,7 @@ func TestBuildConformantOrderSelectRequest_MatchesGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	covJSON, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+	covJSON, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED", CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestBuildConformantOrderSelectRequest_PatientPrefetch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED", CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestBuildConformantOrderSelectRequest_PatientPrefetch(t *testing.T) {
 // order (UC-02 hospital-bed E0250) must yield "DeviceRequest/sr1" so br-payer matches
 // it and returns cards. (UC-02)
 func TestBuildConformantOrderSelectRequest_SelectionResourceTypeAware(t *testing.T) {
-	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED", CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}

@@ -203,6 +203,7 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		CoverageRef: coverageRef,
 		Corr:        pasCorr,
 		Created:     id.now(),
+		Payer:       CMSPayerIdentity,
 	})
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: build claim bundle: %w", err)
@@ -444,6 +445,7 @@ func (id Identity) ResumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 		Corr:             updateCorr,
 		OriginalCorr:     resume.OriginalCorrelationID,
 		Created:          id.now(),
+		Payer:            CMSPayerIdentity,
 	})
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: build claim update bundle: %w", err)

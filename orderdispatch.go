@@ -41,6 +41,10 @@ type OrderDispatchInputs struct {
 	// resolves from that same Bundle entry (br-payer requires a resolved payor Organization
 	// carrying a valid identifier; inline Coverage.payor.identifier is NOT honored).
 	Coverage []byte
+	// Payer is the payer Organization identifier (system|value) emitted on the external
+	// payer Organization the coverage prefetch Bundle resolves payor to. Pass the identity
+	// read from the patient's Coverage, or shnsdk.CMSPayerIdentity for the conformance payer.
+	Payer PayerIdentifier
 }
 
 // conformantOrderDispatchContext is the CDS Hooks context for an order-dispatch hook
@@ -101,9 +105,10 @@ func BuildConformantOrderDispatchRequest(in OrderDispatchInputs) ([]byte, error)
 	// to resolve to an Organization carrying a VALID identifier (an inline Coverage.payor.identifier
 	// is NOT honored; a #contained payer is not resolved by the dispatch payor gate). So the bundle
 	// carries TWO entries: the Coverage with an EXTERNAL payor ref, and the payer Organization it
-	// points to (CMS, payor-id urn:oid:2.16.840.1.113883.6.300 = 00001). Verified live against
-	// br-payer a8bece4 ("Coverage ... lacks valid payer identifier" without the external payer Org).
-	covBundle, err := buildCoverageBundleWithPayer(in.Coverage)
+	// points to (its identifier is the `payer` argument — e.g. the conformance payer
+	// urn:oid:2.16.840.1.113883.6.300|00001). Verified live against br-payer a8bece4
+	// ("Coverage ... lacks valid payer identifier" without the external payer Org).
+	covBundle, err := buildCoverageBundleWithPayer(in.Coverage, in.Payer)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: order-dispatch: coverage bundle: %w", err)
 	}
@@ -170,10 +175,10 @@ func collectionEntry(resourceJSON []byte) conformantBundleEntry {
 
 // buildCoverageBundleWithPayer builds the coverage prefetch Bundle for order-dispatch: the
 // Coverage with its payor rewritten to an EXTERNAL reference (Organization/cms-payer) PLUS the
-// payer Organization (CMS, payor-id 00001) as a sibling entry. br-payer's dispatch payor gate
+// payer Organization (identifier from the `payer` argument) as a sibling entry. br-payer's dispatch payor gate
 // requires a resolvable external payer Org with a valid identifier (a #contained payer or an
 // inline identifier is rejected). Both entries carry "<Type>/<id>" fullUrls (collectionEntry).
-func buildCoverageBundleWithPayer(coverageJSON []byte) ([]byte, error) {
+func buildCoverageBundleWithPayer(coverageJSON []byte, payer PayerIdentifier) ([]byte, error) {
 	var cov map[string]json.RawMessage
 	if err := json.Unmarshal(coverageJSON, &cov); err != nil {
 		return nil, err
@@ -190,12 +195,12 @@ func buildCoverageBundleWithPayer(coverageJSON []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The external payer Organization with the CMS payor identifier (br-payer's payor gate reads it).
+	// The external payer Organization with the payer identifier (br-payer's payor gate reads it).
 	payerOrg, err := json.Marshal(map[string]any{
 		"resourceType": "Organization",
 		"id":           conformantPayerOrgID,
 		"name":         conformantPayerOrgName,
-		"identifier":   []map[string]string{{"system": systemCMSPayerID, "value": conformantPayerOrgValue}},
+		"identifier":   []map[string]string{{"system": payer.System, "value": payer.Value}},
 	})
 	if err != nil {
 		return nil, err

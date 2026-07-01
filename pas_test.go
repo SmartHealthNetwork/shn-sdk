@@ -41,6 +41,7 @@ func conformantSubmitInputs(t *testing.T) ConformantClaimInputs {
 		CoverageRef: "Coverage/" + conformantPASCoverageID,
 		Corr:        "convergence-pas-submit-0001",
 		Created:     created,
+		Payer:       CMSPayerIdentity,
 	}
 }
 
@@ -543,6 +544,7 @@ func conformantUpdateInputsFromGolden(t *testing.T) ConformantClaimUpdateInputs 
 		Corr:             "convergence-pas-update-0001",
 		OriginalCorr:     "convergence-pas-submit-0001",
 		Created:          created,
+		Payer:            CMSPayerIdentity,
 	}
 }
 
@@ -1332,6 +1334,7 @@ func TestBuildConformantClaimBundle_DeviceRequestOrder(t *testing.T) {
 	out, err := BuildConformantClaimBundle(ConformantClaimInputs{
 		SR: dr, PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/MBR-OX",
 		Corr: "c1", Created: time.Unix(0, 0).UTC(), PayerOrgEntry: true, AbsoluteRefs: true, ContainedInsurer: true,
+		Payer: CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatal(err)

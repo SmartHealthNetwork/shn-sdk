@@ -221,12 +221,12 @@ func withResourceID(resourceJSON []byte, id string) ([]byte, error) {
 // BuildCoverageWithPayer builds the CONFORMANT Coverage: the same us-core-coverage shape
 // as BuildCoverage (status active, beneficiary, self relationship, MB-type identifier
 // carrying coverageRef, US Core meta.profile — all KEPT) but additionally carries (a) a
-// stable id "c1" and (b) a CONTAINED cms-payer Organization (the CMS payer identifier
-// urn:oid:2.16.840.1.113883.6.300 value "00001"), with payor referencing it (#cms-payer).
-// This is the additive conformant variant of BuildCoverage (which is byte-parity-locked and
-// stays untouched); a production-conformant CRD (CMS-0057) names the payer Organization,
-// and the contained Org $validates clean. Deterministic.
-func BuildCoverageWithPayer(patientRef, coverageRef string) ([]byte, error) {
+// stable id "c1" and (b) a CONTAINED cms-payer Organization (identifier system|value taken
+// from payer), with payor referencing it (#cms-payer). This is the additive conformant
+// variant of BuildCoverage (which is byte-parity-locked and stays untouched); a
+// production-conformant CRD (CMS-0057) names the payer Organization, and the contained Org
+// $validates clean. Deterministic.
+func BuildCoverageWithPayer(patientRef, coverageRef string, payer PayerIdentifier) ([]byte, error) {
 	cov := fhir.Coverage{
 		Id:          strPtr(conformantCoverageID),
 		Meta:        &fhir.Meta{Profile: []string{profileUSCoreCoverage}},
@@ -261,8 +261,8 @@ func BuildCoverageWithPayer(patientRef, coverageRef string) ([]byte, error) {
 		Id:   strPtr(conformantPayerOrgID),
 		Name: strPtr(conformantPayerOrgName),
 		Identifier: []fhir.Identifier{{
-			System: strPtr(systemCMSPayerID),
-			Value:  strPtr(conformantPayerOrgValue),
+			System: strPtr(payer.System),
+			Value:  strPtr(payer.Value),
 		}},
 	}
 	orgJSON, err := json.Marshal(org)
