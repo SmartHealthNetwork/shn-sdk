@@ -127,15 +127,17 @@ const (
 	conformantCRDUserID       = "Practitioner/p1"
 	conformantCRDOrderID      = "sr1"
 
-	// Conformant Coverage + contained cms-payer Organization (CMS-0057). The CMS payer
-	// identifier system is the HL7 OID for US health-plan/payer identifiers; value "00001"
-	// is CMS's well-known plan id. These are fixed (deterministic) and match the conformant
-	// golden + the existing conformant goldens.
+	// Conformant Coverage + contained cms-payer Organization (CMS-0057). The system is the
+	// NAIC Company Code OID (urn:oid:2.16.840.1.113883.6.300), HL7's registered namespace
+	// for US insurance-company identifiers; value "00001" is the Da Vinci br-payer RI's
+	// first plan id — a synthetic sandbox value, not an official NAIC-assigned code. These
+	// are fixed (deterministic) and match the conformant golden + the existing conformant
+	// goldens.
 	conformantCoverageID    = "c1"
 	conformantPayerOrgID    = "cms-payer"
 	conformantPayerOrgName  = "Centers for Medicare and Medicaid Services"
 	conformantPayerOrgValue = "00001"
-	systemCMSPayerID        = "urn:oid:2.16.840.1.113883.6.300"
+	systemNAICCompanyCode   = "urn:oid:2.16.840.1.113883.6.300"
 )
 
 // BuildConformantOrderSelectRequest builds the CONFORMANT CRD order-select request bytes

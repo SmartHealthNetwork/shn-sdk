@@ -31,8 +31,8 @@ var providerDataFS embed.FS
 // can seed a genuinely multi-payer SoR for the coverage-derived payer-routing proof (FR-G40); it
 // carries NO NPI, so the R-8 contracted-NPI honesty fence is vacuously satisfied. It is NOT driven
 // by any live UC scenario (no console/scenario wiring reads MBR-PD-UC02-PB) — the hermetic
-// two-payer routing proof (gateway/engine/payerrouting_test.go) is a separate, engine-local fixture
-// and does not depend on this bundle at all; this one is for a REAL FHIR-SoR-backed multi-payer
+// two-payer routing proof is a separate, engine-local hermetic routing fixture and does not
+// depend on this bundle at all; this one is for a REAL FHIR-SoR-backed multi-payer
 // demonstration (multi-payer partner onboarding), seeded but otherwise inert today.
 func ProviderDataPersonas() []string {
 	return []string{"uc02", "uc02-payerb", "uc03", "uc04", "homeoxygen", "uc08", "uc06", "uc01", "uc01-nc", "uc07", "uc05", "uc05-nc"}

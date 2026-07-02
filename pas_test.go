@@ -767,7 +767,7 @@ func TestBuildConformantClaimBundle_ContainedInsurer_True(t *testing.T) {
 		if len(org.Identifier) == 0 {
 			t.Fatal("contained #cms-payer Organization has no identifier")
 		}
-		if got, want := org.Identifier[0].System, systemCMSPayerID; got != want {
+		if got, want := org.Identifier[0].System, systemNAICCompanyCode; got != want {
 			t.Errorf("contained payer identifier.system = %q, want %q", got, want)
 		}
 		if got, want := org.Identifier[0].Value, conformantPayerOrgValue; got != want {
@@ -847,9 +847,9 @@ func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 			if len(r.Identifier) != 1 {
 				t.Fatalf("payer org entry identifier count = %d, want 1: %s", len(r.Identifier), e.Resource)
 			}
-			if r.Identifier[0].System != systemCMSPayerID || r.Identifier[0].Value != conformantPayerOrgValue {
+			if r.Identifier[0].System != systemNAICCompanyCode || r.Identifier[0].Value != conformantPayerOrgValue {
 				t.Fatalf("payer org entry identifier = %s|%s, want %s|%s",
-					r.Identifier[0].System, r.Identifier[0].Value, systemCMSPayerID, conformantPayerOrgValue)
+					r.Identifier[0].System, r.Identifier[0].Value, systemNAICCompanyCode, conformantPayerOrgValue)
 			}
 		}
 		if r.ResourceType == "Coverage" && len(r.Payor) == 1 {
