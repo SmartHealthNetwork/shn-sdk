@@ -6,7 +6,8 @@ package main
 // (CLI-direct holder-self against the registrar, not the Accounts service).
 //
 // Dep-purity: this file uses ONLY stdlib + shnsdk + x/crypto. The Accounts API
-// client is plain net/http; the substrate's internal/ packages are never imported.
+// client (accounts.Client) is plain net/http; the substrate's internal/ packages
+// are never imported.
 
 import (
 	"bytes"
@@ -23,127 +24,8 @@ import (
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+	acct "github.com/SmartHealthNetwork/shn-sdk/accounts"
 )
-
-// accountsClient is a thin net/http client for the Accounts service API. Every call
-// sets Authorization: Bearer <token> + Content-Type: application/json, reads bodies
-// under a bound, and surfaces a non-2xx (with the server's body) as an error.
-type accountsClient struct {
-	baseURL string
-	token   string
-	client  *http.Client
-}
-
-// newAccountsClient builds a client scoped to a (trailing-slash-trimmed) base URL.
-func newAccountsClient(baseURL, token string) *accountsClient {
-	return &accountsClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		client:  http.DefaultClient,
-	}
-}
-
-// do issues an authenticated JSON request and returns the response body (bounded).
-// A transport error or non-2xx status becomes an error carrying the server's body.
-func (c *accountsClient) do(ctx context.Context, method, path string, body any) ([]byte, error) {
-	var rdr io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal request: %w", err)
-		}
-		rdr = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, rdr)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, shnsdk.MaxResponseBytes))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s %s: HTTP %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	return respBody, nil
-}
-
-// createClient is step one of two-step registration: POST /clients assigns a server
-// id for the pending client and returns it.
-func (c *accountsClient) createClient(name, role, encPub, signPub, baseURL string) (string, error) {
-	body := map[string]string{
-		"name":    name,
-		"role":    role,
-		"encPub":  encPub,
-		"signPub": signPub,
-		"baseURL": baseURL,
-	}
-	respBody, err := c.do(context.Background(), http.MethodPost, "/clients", body)
-	if err != nil {
-		return "", err
-	}
-	var out struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(respBody, &out); err != nil {
-		return "", fmt.Errorf("decode create response: %w", err)
-	}
-	if out.ID == "" {
-		return "", fmt.Errorf("create response missing id")
-	}
-	return out.ID, nil
-}
-
-// submitPoP is step two of two-step registration: POST /clients/{id}/pop forwards the
-// proof-of-possession (built over the server-assigned id) so the Accounts service can
-// register the holder with the registrar.
-func (c *accountsClient) submitPoP(id string, reg shnsdk.RegistrationRequest) error {
-	body := map[string]string{
-		"pop":     reg.Pop,
-		"encPub":  reg.EncPub,
-		"signPub": reg.SignPub,
-		"baseURL": reg.BaseURL,
-		"role":    reg.Role,
-	}
-	_, err := c.do(context.Background(), http.MethodPost, "/clients/"+id+"/pop", body)
-	return err
-}
-
-// clientRow is one row of GET /clients (the developer's registered clients).
-type clientRow struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Role      string `json:"role"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"createdAt"`
-	SignPubFp string `json:"signPubFp"`
-	EncPubFp  string `json:"encPubFp"`
-}
-
-// listClients returns the developer's clients (GET /clients).
-func (c *accountsClient) listClients() ([]clientRow, error) {
-	respBody, err := c.do(context.Background(), http.MethodGet, "/clients", nil)
-	if err != nil {
-		return nil, err
-	}
-	var rows []clientRow
-	if err := json.Unmarshal(respBody, &rows); err != nil {
-		return nil, fmt.Errorf("decode clients response: %w", err)
-	}
-	return rows, nil
-}
-
-// revokeClient revokes a client (POST /clients/{id}/revoke).
-func (c *accountsClient) revokeClient(id string) error {
-	_, err := c.do(context.Background(), http.MethodPost, "/clients/"+id+"/revoke", nil)
-	return err
-}
 
 // splitPositional pulls a single leading positional argument (e.g. the client/holder
 // id for `revoke`/`rotate`) out of args so flags may appear before or after it. If the
@@ -202,11 +84,11 @@ func cmdRegisterAccounts(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	c := newAccountsClient(*accounts, tok)
+	c := acct.NewClient(*accounts, tok)
 	encPub := base64.StdEncoding.EncodeToString(id.EncPub[:])
 	signPub := base64.StdEncoding.EncodeToString(id.SignPub)
 
-	assignedID, err := c.createClient(*name, *role, encPub, signPub, *baseURL)
+	assignedID, err := c.Create(context.Background(), *name, *role, encPub, signPub, *baseURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "shn register: %v\n", err)
 		return 1
@@ -215,7 +97,7 @@ func cmdRegisterAccounts(args []string, stdout, stderr io.Writer) int {
 	// Set the server-assigned id BEFORE building the PoP so the proof signs it.
 	id.HolderID = assignedID
 	reg := id.Registration(*role, *baseURL)
-	if err := c.submitPoP(assignedID, reg); err != nil {
+	if err := c.SubmitPoP(context.Background(), assignedID, reg); err != nil {
 		fmt.Fprintf(stderr, "shn register: %v\n", err)
 		return 1
 	}
@@ -249,7 +131,7 @@ func cmdClients(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		return notLoggedIn(stderr, *accounts)
 	}
-	rows, err := newAccountsClient(*accounts, tok).listClients()
+	rows, err := acct.NewClient(*accounts, tok).List(context.Background())
 	if err != nil {
 		fmt.Fprintf(stderr, "shn clients: %v\n", err)
 		return 1
@@ -287,7 +169,7 @@ func cmdRevoke(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		return notLoggedIn(stderr, *accounts)
 	}
-	if err := newAccountsClient(*accounts, tok).revokeClient(id); err != nil {
+	if err := acct.NewClient(*accounts, tok).Revoke(context.Background(), id); err != nil {
 		fmt.Fprintf(stderr, "shn revoke: %v\n", err)
 		return 1
 	}

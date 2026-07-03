@@ -170,6 +170,11 @@ covered, reason, err := id.RunEligibility(ctx, http.DefaultClient,
 // leg → seal+route the envelope → verify the bound response token → open → parse.
 ```
 
+## Package map
+
+- `accounts/` — developer-account sign-in (loopback PKCE) + Accounts API client —
+  shared by the `shn` CLI and the SHN Kit.
+
 ## Public API
 
 | Symbol | Purpose |

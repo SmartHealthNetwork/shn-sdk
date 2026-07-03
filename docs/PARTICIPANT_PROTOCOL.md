@@ -474,23 +474,37 @@ the head.
   chain *head*, not record content — the audit task still cannot forge a record
   (records are Hub-signed); it gains only the power to attest "the chain is this
   long, ending here."
-- **`Checkpoint` artifact** `(seq, headHash, timestamp, signatures[])` — a signed
-  high-water mark over the chain head. Its `signatures` slot is the **same additive
+- **`Checkpoint` artifact** `(seq, headHash, generation, timestamp, signatures[])` — a
+  signed high-water mark over the chain head, tagged with the store's **chain-generation
+  id** (an opaque generation id — a UUID on the Postgres path — minted once per chain
+  lifetime in `audit_chain_meta`, rotated only by a
+  reset; `omitempty` so legacy checkpoints with no generation still verify byte-identically).
+  Its `signatures` slot is the **same additive
   FROST/external-witness seam as `Record.signatures`**: `Signatures[0]` is today's
   mandatory single `audit-checkpoint` signature, and the slot is **excluded from the
   signed content**, so cosigners may append entries later without changing what
   `Signatures[0]` attests.
-- **`/verify` head assertion.** Beyond the chain-integrity and per-record signature
-  checks, `/verify` now also asserts the chain head matches the latest persisted
-  signed checkpoint (detecting tail-truncation / rollback) and reports an `anchor
-  lag` field (`headSeq − anchoredSeq`, `0` when fully anchored). `/verify` goes
-  **red** (`ok:false`, HTTP 500) if the head fails to match the checkpoint **or the
-  anchor is unreachable** — the strongest check is never skipped.
+- **`/verify` head assertion — reset-aware since 2026-07-02 (DEF-G14).** Beyond the
+  chain-integrity and per-record signature checks, `/verify` asserts the chain head
+  matches the latest persisted signed checkpoint **within the same chain generation**
+  (detecting tail-truncation / rollback, including infrastructure-level backup-restore)
+  and reports `generation`, `anchoredSeq`, `headSeq`, and `anchor lag`
+  (`headSeq − anchoredSeq`, `0` when fully anchored) on **both** the green and red
+  response. `/verify` goes **red** (`ok:false`, HTTP 500) only if a **same-generation**
+  head fails to match the checkpoint, the checkpoint's signature fails to verify, **or
+  the anchor is unreachable** — the strongest check is never skipped. A
+  **validly-signed** checkpoint whose generation differs from the store's own
+  re-anchors synchronously instead of going red — this is what lets a legitimate chain
+  reset (e.g. a demo/smoke reset) re-anchor without manual S3 surgery; a signature
+  failure is always red, never treated as a reset.
 - **Anchor.** The durable home for the checkpoint. In cloud it is a **versioned S3
   object** (`AUDIT_CHECKPOINT_S3_BUCKET` / `AUDIT_CHECKPOINT_S3_KEY` env; key defaults
   to `audit/checkpoint.json`); local/dev uses an **in-memory anchor** (restart-gap
   coverage is cloud-only, since stale restores are a cloud phenomenon). The S3
-  **version history is the audit-of-the-audit / external-witness seam**.
+  **version history is the audit-of-the-audit / external-witness seam**, and — since
+  2026-07-02 — also the forensic trail for chain-generation transitions: each
+  generation's final anchor deliberately lingers (never deleted) so an
+  out-of-band-DDL-as-reset can be correlated after the fact.
 - **Stated residual.** Records newer than the last persisted checkpoint are
   truncatable-undetected within the flush/lag window — inherent to checkpointing; the
   window is the tuning knob (and is reported as `anchor lag`). **Threat boundary:**
@@ -498,6 +512,11 @@ the head.
   compromised Audit Plane** (which holds the `audit-checkpoint` key and so could
   re-sign a shorter chain) is **DEF-5's** job — the checkpoint is the seam DEF-5
   plugs into (FROST multi-party / external witness over the same `signatures[]` slot).
+  A DDL-capable truncation that masquerades as a legitimate reset by minting a fresh
+  chain generation — an **unauthenticated generation declaration** — is **DEF-G14**;
+  mitigated by the versioned per-generation anchors above plus a live cloudsmoke
+  `/verify` probe (steady-state and post-reset) in `make smoke`, docker-gates, and
+  deploy.
 
 ---
 
