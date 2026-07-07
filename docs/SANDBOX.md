@@ -10,6 +10,11 @@ per step. The sandbox's first end-to-end workflow is prior authorization.
 > Registration (key generation) and runs stay the `shn` CLI — the portal is the
 > Discover + manage surface.
 
+> **Just want to see it run first?** The **SHN Kit** desktop app (Mac/Windows,
+> [Releases](https://github.com/SmartHealthNetwork/shn-kit)) runs the full eight-scenario
+> Prior Authorization suite locally with no Docker and no CLI — a zero-setup way to watch
+> the exchange end-to-end before you build against it here.
+
 > **First time here? Request access.** The sandbox is invite-gated: submit the
 > **Request access** form at `https://developers.shn-preview.org` (no account
 > needed). When approved you'll receive an invite email with a temporary
@@ -476,7 +481,7 @@ can tell whose problem a failure is:
 | 10 | sandbox health | discovery/authz/registrar/payer unreachable or missing (not your fault) |
 | 20 | wire version | the sandbox speaks a wire version this CLI doesn't — upgrade your SDK/CLI |
 | 30 | your registration | your client isn't in `/holders` (run `shn register`, or it was revoked) |
-| 40 | outcome | an eligibility run returned the wrong coverage |
+| 40 | outcome | an eligibility run returned the wrong coverage, or a prior-auth run returned the wrong outcome |
 
 Run a single persona with `--persona MBR-COVERED`.
 

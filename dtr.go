@@ -296,7 +296,8 @@ func dtrQRContextExtensions(qc QRContext) []fhir.Extension {
 var sandboxLumbarQuestionnaireBytes []byte
 
 // cqlLibraryCanonical is the operated-CQL-engine Library the questionnaire's cqf-library points at.
-// MUST MATCH internal/fhirseed (Library.url) — drift → CR can't resolve the Library → smoke red.
+// MUST MATCH gateway/fhirseed.SandboxLumbarLibrary's Library.url — pinned by the substrate drift
+// test TestSDKQuestionnaireCanonicalMatchesLibrary.
 const cqlLibraryCanonical = "http://smarthealth.network/fhir/Library/LumbarMRICQL"
 
 // cqlQuestionnaireExtensions builds the questionnaire-level SDC extension for CQL-backed

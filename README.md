@@ -195,6 +195,35 @@ covered, reason, err := id.RunEligibility(ctx, http.DefaultClient,
 | `BuildConformantClaimBundle(ConformantClaimInputs{QR, SR, PatientRef, CoverageRef, Corr, Created})` / `ParseClaimResponse` | PAS preauthorization submit Bundle (the conformant Da Vinci lean shape — Claim + Patient + Coverage + payor Organization + ServiceRequest + QuestionnaireResponse; `Created` drives the deterministic bundle id/timestamp) + the `ClaimResponse` parser → `PriorAuthResult` (`Outcome:"approved"` + `PreAuthRef`/`ValidUntil`). Denied (the X12 review-action code `A2` "Not Certified" that real Da Vinci PAS payers emit; the legacy `A3` is also accepted) and pended responses parse to their own outcomes; an ambiguous response returns an error, never a wrong `Outcome`. The amended re-POST sibling is `BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{…})`. |
 | `VerifyBound(tok, authzPub, now, frame, op, corr, holder, subject, payloadHash)` | Verify a token is bound to exactly this leg, INCLUDING `payloadHash = sha256hex(ciphertext)` (STRICT, AI-2) — the SDK verifies, never mints. Seal-then-authorize: seal the payload first, then authorize against its ciphertext. |
 
+**Also exported** (responder + participation helpers; see godoc and `docs/SANDBOX.md` §3c):
+`NewResponder` / `ResponderConfig` (the payer-side inbound responder handling all five
+transaction types), `ParsePayerIdentifier` (coverage-derived payer routing), `FetchHolders`
+/ `NewFeedEncResolver` (registry-feed holder + encryption-key resolution),
+`FetchHubTransportKey`, and `WriteBundle` / `LoadBundle` (registration-bundle I/O).
+
+## Accounts package (`shn-sdk/accounts`)
+
+Developer-account sign-in (loopback PKCE) and client management — the same flow the
+`shn login` / `register` / `clients` / `revoke` CLI and the SHN Kit's first-run sign-in
+drive. Import `github.com/SmartHealthNetwork/shn-sdk/accounts` to build your own sign-in
+flow instead of shelling out to the CLI.
+
+| Symbol | Purpose |
+|---|---|
+| `FetchCLIConfig(ctx, hc, accountsURL)` → `CLIConfig` | Fetch the Accounts service's OIDC issuer + public client id (`GET {accounts}/cli-config`). |
+| `FetchOIDC(ctx, hc, issuer)` → `OIDC` | Fetch the issuer's OIDC discovery document (authorize + token endpoints). |
+| `StartPKCE(hc, cfg, oidc, ports, now)` → `*PKCEFlow` | Start a loopback-redirect PKCE authorization-code flow on one of `ports`. |
+| `PKCEFlow.AuthorizeURL()` | The browser URL to open for sign-in. |
+| `PKCEFlow.Wait(ctx)` → `Tokens` | Block until the browser redirect completes; returns the id / access / refresh tokens. |
+| `PKCEFlow.Close()` | Tear down the loopback listener (also unblocks `Wait`). |
+| `Refresh(ctx, hc, tokenEndpoint, clientID, refreshToken, now)` → `Tokens` | Refresh an expired session without re-authenticating. |
+| `EmailFromIDToken(idToken)` | The signed-in developer's email from the id token (display only). |
+| `NewClient(baseURL, token)` → `*Client` | Accounts API client, authenticated with a session bearer (the id token). |
+| `Client.Create(ctx, name, role, encPub, signPub, baseURL)` → id | Register a client; returns the server-assigned holder id. |
+| `Client.SubmitPoP(ctx, id, reg)` | Submit the proof-of-possession for a pending registration. |
+| `Client.List(ctx)` → `[]ClientRow` | List the developer's registered clients. |
+| `Client.Revoke(ctx, id)` | Revoke a client by id. |
+
 ## Conformance
 
 `vectors_test.go` verifies the SDK against canonical wire-vectors in

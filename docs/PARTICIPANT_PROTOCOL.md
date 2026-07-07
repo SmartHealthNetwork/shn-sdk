@@ -24,7 +24,7 @@ The substrate consists of four cooperating components:
 
 **The Hub is payload-blind.** It reads only cleartext `Metadata`; it holds no
 X25519 private key and cannot decrypt any `ciphertext`. This property is
-structural (enforced by the Hub constructor — `internal/hubsvc`). Every routed leg
+structural (enforced by the Hub's construction). Every routed leg
 is audited before it is forwarded.
 
 **Two participation modes:**
@@ -32,18 +32,17 @@ is audited before it is forwarded.
 - **Option A** — run the SHN Smart Gateway binary. The gateway handles the
   envelope, FHIR mapping, validation, and authority flow on your behalf.
 - **Option B (this document)** — implement the substrate protocol directly. You
-  manage keys, assertions, tokens, and envelopes yourself. `tools/sampleparticipant`
-  is the reference implementation (eligibility round-trip, no Smart Gateway
-  dependency).
+  manage keys, assertions, tokens, and envelopes yourself. The public `shn-sdk`
+  (the `shnsdk` package + `shn` CLI) is the reference implementation of this path
+  (eligibility round-trip, no Smart Gateway dependency).
 
 This document is the Option-B contract.
 
 > **Go participants: use the SDK.** The supported Option-B path for Go is the public
 > participant SDK, **`github.com/SmartHealthNetwork/shn-sdk`** (`shnsdk`). It implements
 > this protocol standalone (stdlib + `golang.org/x/crypto` only) and ships the `shn`
-> CLI (keygen → register → eligibility). `tools/sampleparticipant` delegates its
-> originate path to it. This document remains the **canonical wire spec** — authoritative
-> for non-Go participants and the exact byte/field contract the SDK is verified against.
+> CLI (keygen → register → eligibility). This document remains the **canonical wire spec** —
+> authoritative for non-Go participants and the exact byte/field contract the SDK is verified against.
 
 ---
 
@@ -52,8 +51,8 @@ This document is the Option-B contract.
 A participant's **first call** is the sandbox discovery descriptor: a machine-readable
 (FR-37) document listing the live endpoints, the sandbox responder(s) you exchange
 with, and the seeded personas. It is **sufficient to drive the eligibility loop** — no
-out-of-band URL list or key file required. `shn doctor` consumes it; so does the live
-`cloudsmoke` discovery probe.
+out-of-band URL list or key file required. `shn doctor` consumes it; so does a live
+discovery probe in the deploy pipeline.
 
 ```
 GET {accounts}/discovery
@@ -125,7 +124,7 @@ the sandbox may reject (`shn doctor` exits code `20` here).
 
 ### 2.1 Holder record
 
-Every substrate participant is a **holder**. A holder record (`internal/registry`)
+Every substrate participant is a **holder**. A holder record
 carries exactly these fields:
 
 ```go
@@ -143,7 +142,7 @@ at `BaseURL + /substrate/inbound` (see §6).
 
 ### 2.2 Static admission (current)
 
-Admission is static. The operator runs `tools/bootstrap` to produce a
+Admission is static. The operator produces a
 **provisioning bundle**: a public `manifest.json` + per-process secret key files.
 
 `manifest.json` shape (all keys base64-standard-encoded):
@@ -190,7 +189,7 @@ These are **never** distributed beyond the process that needs them.
 Dynamic registration is delivered. New holders can be admitted at runtime without
 a Hub or Authorization Framework restart.
 
-**Trust-operated Registrar** (`internal/registrar`, `cmd/registrar`) exposes two
+**Trust-operated Registrar** exposes two
 endpoints:
 
 ```
@@ -290,8 +289,8 @@ to the registry on the same poll cycle.
 4. Within ~3 seconds (one poll cycle), Hub and Authorization Framework will route to
    your `baseURL` and accept assertions signed by your `signPub`.
 
-The `adminPub` field is present in every provisioning bundle produced by
-`tools/bootstrap`; regenerate the bundle if it is absent.
+The `adminPub` field is present in every provisioning bundle;
+regenerate the bundle if it is absent.
 
 ### 2.3a Self-serve registration via the Accounts service (sandbox)
 
@@ -314,7 +313,7 @@ onboarding. The admin-gated direct `POST /register` (§2.3) remains the canonica
 operator/Trust path and the authoritative wire spec for all participants — the
 Accounts service is an additive convenience layer over it.
 
-> **[OPERATOR GATE]** The full self-serve round-trip (login → register → list →
+> **Note:** The full self-serve round-trip (login → register → list →
 > revoke) is interactive (browser Cognito login) and is verified operator-side
 > after each deploy.
 
@@ -514,9 +513,8 @@ the head.
   plugs into (FROST multi-party / external witness over the same `signatures[]` slot).
   A DDL-capable truncation that masquerades as a legitimate reset by minting a fresh
   chain generation — an **unauthenticated generation declaration** — is **DEF-G14**;
-  mitigated by the versioned per-generation anchors above plus a live cloudsmoke
-  `/verify` probe (steady-state and post-reset) in `make smoke`, docker-gates, and
-  deploy.
+  mitigated by the versioned per-generation anchors above plus a live
+  `/verify` probe (steady-state and post-reset) run in the deploy pipeline.
 
 ---
 
@@ -526,7 +524,7 @@ Before calling either the Authorization Framework or the Hub, a holder must prov
 its identity by presenting a signed **holder assertion**. This is transport
 authentication — distinct from per-operation authority (§4).
 
-### 3.1 Assertion fields (`internal/holderauth`)
+### 3.1 Assertion fields
 
 ```go
 type Assertion struct {
@@ -704,7 +702,7 @@ in one direction for one correlation.
 }
 ```
 
-The `token` object is the `authz.Token` struct (`internal/authz`):
+The `token` object is the `Token` struct:
 
 ```go
 type Token struct {
@@ -751,7 +749,7 @@ Standard authority frames:
 ### 4.4 Per-leg token verification — `VerifyBound`
 
 Every receiver (and the Hub on behalf of all parties) verifies a token using
-`authz.VerifyBound` (`internal/authz`):
+`VerifyBound`:
 
 ```go
 func VerifyBound(
@@ -796,7 +794,7 @@ endpoint only if you need to refresh it without a manifest reload.
 
 ## 5. Envelope
 
-Each substrate hop is one **envelope** (`internal/envelope`): cleartext routing
+Each substrate hop is one **envelope**: cleartext routing
 metadata plus an opaque, encrypted payload.
 
 ### 5.1 Metadata fields
@@ -1031,8 +1029,8 @@ state: the Hub sends it on every forward unconditionally.
 
 ## 7. Worked example — eligibility round-trip
 
-This example mirrors the canonical `gateway.roundTrip` + `authorize` sequence in
-`gateway/engine/gateway.go`.
+This example mirrors the canonical round-trip + authorize sequence the Smart
+Gateway implements.
 
 ### Actors and frames
 
@@ -1054,7 +1052,7 @@ pci = ResolvePCI(memberID, birthDate, familyName)
      → "pci:a1b2c3d4e5f6a1b2c3d4"
 ```
 
-Note: today the PCI is derived deterministically via `internal/identity.ResolvePCI`
+Note: today the PCI is derived deterministically via `shnsdk.ResolvePCI`
 (SHA-256 over `lowercase(memberID|birthDate|familyName)`, first 16 bytes,
 `"pci:"` prefix). This is a demo scheme only. External participants must treat the
 PCI as an opaque, Trust-assigned identifier and must not re-derive it from demographics.
@@ -1561,7 +1559,7 @@ must conform to it.
   serves a machine-readable descriptor (endpoints, sandbox responders, seeded personas,
   `wireProtocolVersion`, `sandbox`/`syntheticDataOnly`). It is sufficient to drive the
   loop — keys are resolved live (payer `encPub` from `/holders`, authz pub from
-  `/pubkey`). `shn doctor` and the `cloudsmoke` live probe consume it. See
+  `/pubkey`). `shn doctor` and a live deploy probe consume it. See
   `docs/SANDBOX.md` for the getting-started path.
 - **2026-06-09 — BREAKING: authz token wire format changed (`payloadHash`).** The
   token now carries a signed `payloadHash` field — `sha256hex` (64 lowercase hex) of
@@ -1577,9 +1575,9 @@ must conform to it.
 
 ### What is implemented today (preview substrate)
 
-- **Static admission** — holders provisioned via `tools/bootstrap` manifest bundle.
+- **Static admission** — holders provisioned via an operator manifest bundle.
 - **Dynamic admission** (FR-38) — Trust-admin-gated `POST /register` (with
-  participant proof-of-possession) via the Trust-operated Registrar (`cmd/registrar`);
+  participant proof-of-possession) via the Trust-operated Registrar;
   Hub and Authorization Framework poll `GET /holders` (~3-second interval);
   `registry = manifest ∪ dynamic`, no restart required. See §2.3.
 - **Credential lifecycle** — Trust-operated `POST /revoke`, holder-initiated
@@ -1597,13 +1595,13 @@ must conform to it.
 - **Reference inbound receiver** — the Hub forwards to `POST {holder}/substrate/inbound`;
   the Smart Gateway implements this surface. An Option-B participant implementing it
   natively must follow the protocol in §6.2.
-- **`tools/sampleparticipant`** — reference Option-B implementation that runs a
-  full UC-01 eligibility round-trip (`-mode eligibility`, the default) **and** the
-  UC-03 prior-auth round-trip (`-mode pa`) against the live substrate by delegating to
-  the public SDK (`shnsdk.RunEligibility` / `shnsdk.RunPriorAuth`), without importing
-  the gateway engine (`gateway/engine`) on the originate path. Covered and not-covered branches +
-  approved PA, AuditEvent verified. The §10 deploy round-trip runs all three against
-  the public sandbox on every substrate deploy.
+- **Reference Option-B participant** — a reference implementation runs the full
+  eligibility round-trip (both the covered and not-covered branches) and the
+  prior-auth round-trips (approved, pended, and denied) against the live substrate
+  by delegating to the public SDK (`shnsdk.RunEligibility` / `shnsdk.RunPriorAuth`),
+  without importing any Smart Gateway internals on the originate path. Each run's
+  `AuditEvent` is verified. The deploy pipeline runs all of these against the public
+  sandbox on every substrate deploy.
 
 ### What's coming next
 
