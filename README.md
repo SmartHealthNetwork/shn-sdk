@@ -1,19 +1,65 @@
-# shn-sdk — SHN participant SDK (Go)
+# shn-sdk — Go SDK & CLI for Smart Health Network participants
 
-A dependency-light Go SDK for participating in the **SHN substrate** — the secure
-router for exchanging healthcare data between participants. It implements the
-participant wire protocol — holder identity, per-operation authorization, sealed
-envelopes, and FHIR payloads — so a Go participant integrates without running the
-Smart Gateway binary. The first workflow it carries end-to-end is Da Vinci prior
-authorization (CRD+DTR+PAS, PDex).
+[![Go Reference](https://pkg.go.dev/badge/github.com/SmartHealthNetwork/shn-sdk.svg)](https://pkg.go.dev/github.com/SmartHealthNetwork/shn-sdk)
+[![License](https://img.shields.io/github/license/SmartHealthNetwork/shn-sdk)](LICENSE)
+
+A dependency-light Go SDK and `shn` CLI for participating in the **Smart Health
+Network** — the secure router for exchanging healthcare data between participants. It
+implements the participant wire protocol — holder identity, per-operation
+authorization, sealed envelopes, and FHIR payloads — so a Go participant integrates
+without running the Smart Gateway binary. The first workflow it carries end-to-end is
+Da Vinci prior authorization (CRD+DTR+PAS, PDex).
 
 Depends only on the Go standard library, `golang.org/x/crypto`, and
-`github.com/samply/golang-fhir-models`. **It never imports substrate-internal code.**
+`github.com/samply/golang-fhir-models`. **It never imports SHN-internal code.**
 
-> Preview substrate — not for production deployment. The canonical, language-neutral
-> wire spec is [docs/PARTICIPANT_PROTOCOL.md](docs/PARTICIPANT_PROTOCOL.md) in this repo;
-> [docs/TECHNICAL_ARCHITECTURE.md](docs/TECHNICAL_ARCHITECTURE.md) is the system-level
-> overview of how the substrate routes, authorizes, seals, and audits every exchange.
+> **Sandbox preview — synthetic data only. Never send production PHI.** Not for
+> production deployment.
+
+## What you can test today
+
+- Register a sandbox participant client (self-serve, invite-gated).
+- Run eligibility checks against synthetic covered / not-covered members.
+- Run a full CRD → DTR → PAS prior-authorization flow.
+- Exercise the approved, pended → amended, and denied scenarios.
+- Validate your setup end-to-end with `shn doctor`.
+
+The sandbox uses synthetic data only — never send production PHI.
+
+## What this is not
+
+This is not a production connection to the Smart Health Network. It is a public
+**sandbox** SDK and CLI for exercising the participant wire protocol — holder identity,
+per-operation authorization, sealed-envelope routing, FHIR payloads, and the
+prior-authorization scenarios — against **synthetic data only**.
+
+It helps you test technical readiness for CMS-0057-style prior-authorization workflows.
+It does not by itself certify regulatory compliance: each participant remains
+responsible for its own compliance, data quality, policies, endpoints, and operational
+readiness.
+
+## How an exchange flows
+
+```
+  Provider / Partner           Smart Health Hub              Payer / Responder
+  ──────────────────           ────────────────              ─────────────────
+  build FHIR payload
+  seal + authorize   ────────▶  route sealed envelope ─────▶  open + validate
+                                verify authz + audit;         adjudicate
+                                cannot read payload
+  open + verify      ◀────────  route sealed response ◀─────  seal + authorize
+  bound response
+```
+
+The Hub routes sealed envelopes and verifies each leg's authorization metadata. It
+holds no decryption key and cannot read the payload.
+
+## Documentation map
+
+- [`docs/SANDBOX.md`](docs/SANDBOX.md) — start here: install → register → run → validate, with the exact `shn` commands.
+- [`docs/PARTICIPANT_PROTOCOL.md`](docs/PARTICIPANT_PROTOCOL.md) — the language-neutral wire protocol for direct integration.
+- [`docs/TECHNICAL_ARCHITECTURE.md`](docs/TECHNICAL_ARCHITECTURE.md) — the system architecture and security model.
+- [`testdata/vectors/README.md`](testdata/vectors/README.md) — canonical wire vectors (the SDK's hermetic conformance contract).
 
 ## Install
 
@@ -29,7 +75,7 @@ go install github.com/SmartHealthNetwork/shn-sdk/cmd/shn@latest
 
 ## Sandbox
 
-The preview substrate is live at `shn-preview.org`. The public surfaces:
+The public sandbox is live at `shn-preview.org` (synthetic data only). The public surfaces:
 
 | Service | Base URL |
 |---|---|
@@ -37,7 +83,7 @@ The preview substrate is live at `shn-preview.org`. The public surfaces:
 | Authorization Framework (`POST /authorize`) | `https://authz.shn-preview.org` |
 | Registrar (`POST /register`) | `https://registrar.shn-preview.org` |
 | FHIR / Patient Access (`GET /metadata`) | `https://fhir.shn-preview.org` |
-| Accounts / self-serve client registration | `https://accounts.shn-preview.org` |
+| Developer accounts / sandbox client registration | `https://accounts.shn-preview.org` |
 
 `accounts.shn-preview.org` is the **Accounts service** — the self-serve
 developer-onboarding control plane for client registration, Cognito-gated (browser
@@ -50,71 +96,62 @@ personas).
 Run → Validate path with the exact `shn` commands.
 
 You also need the payer's holder id + X25519 public key and the Authorization
-Framework's Ed25519 verifying key — published in the substrate's holder feed /
+Framework's Ed25519 verifying key — published in the network's holder feed /
 manifest. **Keys are generated client-side (proof-of-possession): your private keys
 never leave your process.**
 
-## Quickstart (CLI)
+## Quickstart: register a sandbox client
 
-> The holder id is passed as `--id` at `keygen` and as `--name` at `register`/`eligibility`
-> (same value, `ext-provider` below). `-out ./keys` points every command at the same key dir.
+Use this path to test the public sandbox. Registration is invite-gated and goes
+through the Accounts service; keys are generated locally and your private keys never
+leave your machine. The browser sign-in happens once and the token is cached at
+`~/.shn/credentials`.
+
+```sh
+# 1. Log in (opens a browser for sign-in; token cached at ~/.shn/credentials).
+shn login --accounts https://accounts.shn-preview.org
+
+# 2. Register a client (keys generated locally; only public keys are sent to the
+#    Accounts service). The holder id is server-assigned, e.g. acme-7f3a.
+shn register --accounts https://accounts.shn-preview.org \
+  --role provider --name acme --base-url https://acme.example -out ./keys
+
+# 3. Validate your setup end-to-end (eligibility + prior-auth round-trips).
+shn doctor --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
+
+# 4. Run a prior-authorization (CRD→DTR→PAS) yourself. Payer + endpoints are resolved
+#    from the sandbox discovery descriptor; the order + clinical context are the fixed
+#    sandbox values.
+shn priorauth --member MBR-COVERED \
+  --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
+# → outcome=approved preAuthRef=PA-… validUntil=…
+```
+
+Manage your clients with `shn clients --accounts <url>` (list) and
+`shn revoke <id> --accounts <url>` (revoke). To re-key an existing holder, `rotate` is
+a holder-self RFC 7592 path you run directly against the registrar
+(`shn rotate <id> --registrar <url>`) — it never goes through the Accounts service.
+
+## Operator registration
+
+For operator-managed deployments (not self-serve sandbox onboarding), registration is
+gated by an operator-admin credential supplied out of band. Keys are still generated
+locally; your private keys never leave your machine.
 
 ```sh
 # 1. Generate keys + a public manifest snippet (private keys stay local, 0600).
 shn keygen --id ext-provider --role provider \
   --base-url https://ext-provider.example.com -out ./keys
 
-# 2. Register (proof-of-possession). Admission is Trust-admin-gated: an operator
-#    supplies the admin assertion out of band (self-serve registration is mediated
-#    by the portal).
+# 2. Register directly against the registrar with the operator-admin assertion.
 shn register --role provider --name ext-provider \
   --base-url https://ext-provider.example.com \
   --registrar https://registrar.shn-preview.org \
   --admin-assertion "$ADMIN_ASSERTION" -out ./keys
-
-# 3. Run a coverage-eligibility round-trip through the Hub.
-shn eligibility --name ext-provider \
-  --member MBR-COVERED --dob 1975-04-02 --family Johansson \
-  --hub https://hub.shn-preview.org --authz https://authz.shn-preview.org \
-  --payer-id payer --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
-# → covered: true
-
-# 4. Run a prior-authorization (CRD→DTR→PAS) through the Hub. Payer +
-#    endpoints are resolved from the sandbox discovery descriptor; the order +
-#    clinical context are the fixed sandbox values.
-shn priorauth --member MBR-COVERED \
-  --discovery https://accounts.shn-preview.org --id ext-provider -keys ./keys
-# → outcome=approved preAuthRef=PA-… validUntil=…
 ```
 
-## Register a sandbox client (self-serve)
-
-The Accounts service (`accounts.shn-preview.org`) provides Cognito-gated self-serve
-client registration. Keys are generated client-side; your private keys never leave
-your process. The Cognito browser login happens once and the token is cached at
-`~/.shn/credentials`.
-
-```sh
-# 1. Log in (opens browser for Cognito sign-in; token cached at ~/.shn/credentials).
-shn login --accounts https://accounts.shn-preview.org
-
-# 2. Register a client (keys generated locally; public keys sent to the Accounts service).
-shn register --accounts https://accounts.shn-preview.org \
-  --role provider --name acme --base-url https://acme.example -out ./keys
-
-# 3. List your registered clients.
-shn clients --accounts https://accounts.shn-preview.org
-
-# 4. Revoke a client by id (shown in step 3).
-shn revoke acme-7f3a --accounts https://accounts.shn-preview.org
-```
-
-The `--accounts` flag routes `register`/`clients`/`revoke` through the
-Accounts service (Cognito-gated, self-serve) rather than the direct Trust-admin
-`POST /register` path. (`rotate` is a holder-self RFC 7592 path you run directly
-against the registrar — `shn rotate <id> --registrar <url>` — it never goes through
-the Accounts service.) The two paths are complementary: the Accounts service is for
-sandbox developers; the direct `POST /register` is the operator/Trust path (see
+Most sandbox developers should use the self-serve Accounts path above. The direct
+`POST /register` path is for operator-managed and non-self-serve environments (see
 [docs/PARTICIPANT_PROTOCOL.md](docs/PARTICIPANT_PROTOCOL.md) §2.3).
 
 ## Self-validate (`shn doctor`)
@@ -123,7 +160,7 @@ One command answers "am I wired up + do my eligibility AND prior-auth round-trip
 conform". It fetches the sandbox discovery descriptor and runs eligibility against the
 seeded covered/not-covered personas, then — once eligibility passes — runs a
 prior-authorization (CRD→DTR→PAS) for the persona that advertises an expected PA outcome, all using
-your OWN registered identity — no FHIR validator needed (the substrate validates
+your OWN registered identity — no FHIR validator needed (the network validates
 server-side). Eligibility is checked first; the PA leg only runs once eligibility
 conforms.
 
@@ -176,6 +213,9 @@ covered, reason, err := id.RunEligibility(ctx, http.DefaultClient,
   shared by the `shn` CLI and the SHN Kit.
 
 ## Public API
+
+Most sandbox users drive everything through the `shn` CLI (above). Use the Go API
+directly if you are building a native integration or test harness.
 
 | Symbol | Purpose |
 |---|---|

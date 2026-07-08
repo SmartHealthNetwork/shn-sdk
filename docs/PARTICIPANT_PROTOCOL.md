@@ -1,19 +1,19 @@
-# Participant Protocol — Option-B Substrate Contract
+# Participant Wire Protocol — Direct Integration Contract
 
-**Audience:** Partner engineers building a native integration with the SHN substrate
-without running the Smart Gateway binary. Every claim in this document is verified
-against the substrate source code. Field names and endpoint paths are exact.
+**Audience:** Partner engineers building a native integration with the Smart Health
+Network without running the Smart Gateway binary. The details here match the current
+public SDK and sandbox behavior; field names and endpoint paths are exact.
 
-**Scope:** Preview substrate. This document specifies the **general participant wire contract**
+**Scope:** Sandbox preview — synthetic data only. This document specifies the **general participant wire contract**
 (identity, per-operation authorization, sealed envelopes, payload-blind routing); the worked flows
-are the first workflow delivered on it, Prior Authorization (Da Vinci CRD+DTR+PAS, PDex). Do not
-use this in a production deployment.
+are the first workflow delivered on it, Prior Authorization (Da Vinci CRD+DTR+PAS, PDex). Not for
+production deployment.
 
 ---
 
 ## 1. Overview and posture
 
-The substrate consists of four cooperating components:
+The Smart Health Network consists of four cooperating components:
 
 | Component | Canonical name | Role |
 |---|---|---|
@@ -27,18 +27,18 @@ X25519 private key and cannot decrypt any `ciphertext`. This property is
 structural (enforced by the Hub's construction). Every routed leg
 is audited before it is forwarded.
 
-**Two participation modes:**
+**Two integration paths:**
 
-- **Option A** — run the SHN Smart Gateway binary. The gateway handles the
+- **Integration path A** — run the SHN Smart Gateway binary. The gateway handles the
   envelope, FHIR mapping, validation, and authority flow on your behalf.
-- **Option B (this document)** — implement the substrate protocol directly. You
-  manage keys, assertions, tokens, and envelopes yourself. The public `shn-sdk`
-  (the `shnsdk` package + `shn` CLI) is the reference implementation of this path
-  (eligibility round-trip, no Smart Gateway dependency).
+- **Integration path B (this document)** — implement the participant wire protocol
+  directly. You manage keys, assertions, tokens, and envelopes yourself. The public
+  `shn-sdk` (the `shnsdk` package + `shn` CLI) is the reference implementation of this
+  path (eligibility round-trip, no Smart Gateway dependency).
 
-This document is the Option-B contract.
+This document specifies integration path B.
 
-> **Go participants: use the SDK.** The supported Option-B path for Go is the public
+> **Go participants: use the SDK.** The supported direct-integration path for Go is the public
 > participant SDK, **`github.com/SmartHealthNetwork/shn-sdk`** (`shnsdk`). It implements
 > this protocol standalone (stdlib + `golang.org/x/crypto` only) and ships the `shn`
 > CLI (keygen → register → eligibility). This document remains the **canonical wire spec** —
@@ -49,7 +49,7 @@ This document is the Option-B contract.
 ## 1a. Discovery
 
 A participant's **first call** is the sandbox discovery descriptor: a machine-readable
-(FR-37) document listing the live endpoints, the sandbox responder(s) you exchange
+document listing the live endpoints, the sandbox responder(s) you exchange
 with, and the seeded personas. It is **sufficient to drive the eligibility loop** — no
 out-of-band URL list or key file required. `shn doctor` consumes it; so does a live
 discovery probe in the deploy pipeline.
@@ -89,7 +89,7 @@ Returns (the Accounts service, `accounts.<apex>`):
 | Field | Meaning |
 |---|---|
 | `sandbox` | Always `true` for the preview substrate. |
-| `syntheticDataOnly` | Always `true` — **synthetic personas only, never production PHI** (FR-39). |
+| `syntheticDataOnly` | Always `true` — **synthetic personas only, never production PHI**. |
 | `wireProtocolVersion` | The wire-protocol version the sandbox speaks (see below). A consumer rejects a descriptor whose version it does not support **before** running any leg. |
 | `igVersions` | Pinned IG versions the substrate validates against (server-side gate). |
 | `endpoints.{hub,authz,registrar,patientAccess}` | The live participant-facing base URLs. `hub` is where you originate a leg (`POST /route`); `authz` mints/serves tokens; `registrar` serves the holder feed; `patientAccess` is the FHIR/Patient-Access surface (`GET /metadata`). |
@@ -114,7 +114,7 @@ You resolve the two keys a UC-01 leg needs from the live endpoints:
 
 The version string gates wire compatibility. **`1.1.0`** is the current value: it is the
 **payloadHash wire** — the per-leg authorize token binds `payloadHash = sha256hex(ciphertext)`,
-verified STRICTLY in `VerifyBound` (AI-2; see §4.4). A consumer whose SDK speaks a
+verified STRICTLY in `VerifyBound` (see §4.4). A consumer whose SDK speaks a
 different version should refuse to proceed and prompt an upgrade rather than send a leg
 the sandbox may reject (`shn doctor` exits code `20` here).
 
@@ -184,7 +184,7 @@ The secrets directory (`secrets/`) holds private key files, mode `0600`:
 
 These are **never** distributed beyond the process that needs them.
 
-### 2.3 Dynamic registration (FR-38)
+### 2.3 Dynamic registration
 
 Dynamic registration is delivered. New holders can be admitted at runtime without
 a Hub or Authorization Framework restart.
@@ -454,10 +454,10 @@ separately (§4 tokens are per-leg, per-operation — see the concept mapping in
 Every lifecycle transition — `registered`, `revoked`, `deregistered`, `rotated` — is signed
 by the registrar with its own signing key (public key = the manifest `registrarPub`,
 which the Audit Plane trusts as a signer; distinct from the Audit Plane's own
-`auditSignPub`) and appended to the canonical audit chain (AI-6). A transition
+`auditSignPub`) and appended to the canonical audit chain. A transition
 that cannot be recorded does **not** stand: a failed audit append rolls the change
 back and returns 502 (fail-closed). Lifecycle audit records carry no patient
-subject (AI-5) — they are fabric events.
+subject — they are fabric events.
 
 #### 2.5.1 Signed checkpoints (tail-truncation detection) — 2026-06-10
 
@@ -483,7 +483,7 @@ the head.
   mandatory single `audit-checkpoint` signature, and the slot is **excluded from the
   signed content**, so cosigners may append entries later without changing what
   `Signatures[0]` attests.
-- **`/verify` head assertion — reset-aware since 2026-07-02 (DEF-G14).** Beyond the
+- **`/verify` head assertion — reset-aware since 2026-07-02.** Beyond the
   chain-integrity and per-record signature checks, `/verify` asserts the chain head
   matches the latest persisted signed checkpoint **within the same chain generation**
   (detecting tail-truncation / rollback, including infrastructure-level backup-restore)
@@ -509,11 +509,10 @@ the head.
   window is the tuning knob (and is reported as `anchor lag`). **Threat boundary:**
   this detects truncation by the **store or relay**. Truncation by a **fully
   compromised Audit Plane** (which holds the `audit-checkpoint` key and so could
-  re-sign a shorter chain) is **DEF-5's** job — the checkpoint is the seam DEF-5
-  plugs into (FROST multi-party / external witness over the same `signatures[]` slot).
+  re-sign a shorter chain) is not addressed by this checkpoint mechanism — it is the seam a future control
+plugs into (FROST multi-party / external witness over the same `signatures[]` slot).
   A DDL-capable truncation that masquerades as a legitimate reset by minting a fresh
-  chain generation — an **unauthenticated generation declaration** — is **DEF-G14**;
-  mitigated by the versioned per-generation anchors above plus a live
+  chain generation — an **unauthenticated generation declaration** — is mitigated by the versioned per-generation anchors above plus a live
   `/verify` probe (steady-state and post-reset) run in the deploy pipeline.
 
 ---
@@ -542,9 +541,8 @@ to `null`. Do **not** include the signature field in the signing payload. The
 `jti` **is** part of the signing payload (it is set before signing — see §3.5).
 
 **`jti` — unique per-assertion id (REQUIRED).** Every assertion carries a `jti`: a
-unique identifier, stamped before signing so the signature covers it. The substrate
-helper (`holderauth.Issue`) generates a random 16-byte `jti` (base64url, unpadded);
-an Option-B participant minting assertions by hand must do the same. An assertion
+unique identifier, stamped before signing so the signature covers it. The substrate's own assertion-issuing logic generates a random 16-byte `jti` (base64url, unpadded);
+an direct-integration participant minting assertions by hand must do the same. An assertion
 **without** a `jti` is rejected (`"holderauth: missing jti"`). This is the SMART
 `private_key_jwt` `jti` claim.
 
@@ -632,7 +630,7 @@ narrower (no standing bearer token).
 | Holder registration (`POST /register`, §2.3) | OAuth 2.0 Dynamic Client Registration (RFC 7591) — the registration body is the client-metadata shape |
 | Registration proof-of-possession (`pop`, §2.3) | A software-statement-style self-attestation of key control — but a bare Ed25519 PoP over the canonical payload, **not** a UDAP X.509 software statement |
 | Holder assertion (§3) | SMART asymmetric ("private_key_jwt") client authentication (RFC 7521 / RFC 7523): a short-lived, key-signed assertion with `aud`, `exp`, and a one-time-use `jti` |
-| Per-operation `authz` token (§4) | **NOT** an OAuth bearer access token. It is a **sender-constrained, per-operation** grant — a strict **superset** of SMART system scopes: bound to one operation, one frame, one correlation, one subject PCI, and one holder (OWD-6 / AI-11: no standing blanket capability that can be lifted or replayed across operations) |
+| Per-operation `authz` token (§4) | **NOT** an OAuth bearer access token. It is a **sender-constrained, per-operation** grant — a strict **superset** of SMART system scopes: bound to one operation, one frame, one correlation, one subject PCI, and one holder (no standing blanket capability that can be lifted or replayed across operations) |
 | Lifecycle — deregister (`DELETE /register/{id}`, §2.4) | RFC 7592 client-configuration DELETE |
 | Lifecycle — key-rotation (`PUT /register/{id}`, §2.4) | RFC 7592 client-configuration UPDATE (re-key) |
 | Lifecycle — revoke (`POST /revoke`, §2.4) | Trust-operated client revocation (no self-serve OAuth token revocation; see §9) |
@@ -670,10 +668,10 @@ in one direction for one correlation.
 |---|---|---|
 | `frame` | Yes | Authority frame; see §4.3 |
 | `operation` | Yes | Operation string; see §4.3 |
-| `subjectPCI` | Yes | Must start with `"pci:"` — the Trust-issued patient identifier (AI-5) |
+| `subjectPCI` | Yes | Must start with `"pci:"` — the Trust-issued patient identifier |
 | `correlationId` | Yes | Must be non-empty; binds the minted token to one leg |
 | `custodian` | For `federated-query-submit` only | The facility holder ID; used to resolve patient consent at the Global Person Consent service |
-| `payloadHash` | For every **envelope** op | `sha256hex` (64 lowercase hex) of the envelope **ciphertext**. **Seal the payload FIRST, then authorize** against the ciphertext (seal-then-authorize) so the minted token binds THIS payload (AI-2). Absent for the one non-envelope op, `patient-access-read` (a REST bearer read) |
+| `payloadHash` | For every **envelope** op | `sha256hex` (64 lowercase hex) of the envelope **ciphertext**. **Seal the payload FIRST, then authorize** against the ciphertext (seal-then-authorize) so the minted token binds THIS payload. Absent for the one non-envelope op, `patient-access-read` (a REST bearer read) |
 
 **Rejection cases:**
 
@@ -761,7 +759,7 @@ func VerifyBound(
     wantCorrelationID string,
     wantHolder        string,
     wantSubject       string,
-    wantPayloadHash   string,  // sha256hex(the ciphertext you received) — STRICT (AI-2)
+    wantPayloadHash   string,  // sha256hex(the ciphertext you received) — STRICT
 ) error
 ```
 
@@ -769,7 +767,7 @@ Pass an empty string to skip a particular binding check — **except
 `wantPayloadHash`, which is STRICT**: every envelope leg binds a payload, so the
 receiver recomputes `sha256hex` over the ciphertext it received and asserts it
 equals `token.payloadHash`; an empty want or an empty token hash is REJECTED. This
-makes the substrate payload-blind AND payload-AUTHENTICATED (AI-2): a payload
+makes the substrate payload-blind AND payload-AUTHENTICATED: a payload
 swapped in flight is cryptographically detected at the authorization check. On the
 **response leg**, also pass the **request** token's `subject` as `wantSubject`. A
 validly-signed token cannot be lifted into a different envelope, operation,
@@ -823,7 +821,7 @@ type Metadata struct {
 | `timestamp` | RFC 3339 UTC — must be within ±5 minutes of the Hub clock |
 | `correlationId` | Must be non-empty; must match the token's `correlationId` |
 
-**Patient identifiers never appear in Metadata** (AI-5). The subject PCI lives
+**Patient identifiers never appear in Metadata**. The subject PCI lives
 only inside the token (and therefore only in the sealed ciphertext from the
 sender's perspective; the Hub reads `authzToken` from the metadata as a string but
 verifies `token.Subject` via `VerifyBound`).
@@ -851,7 +849,7 @@ func Open(e Envelope, recipientPub, recipientPriv *[32]byte) ([]byte, error)
 
 `Seal` uses `golang.org/x/crypto/nacl/box.SealAnonymous` with `crypto/rand`.
 `Open` uses `box.OpenAnonymous`. A caller lacking the private key cannot open the
-box; this is the structural basis of payload-blind routing (AI-2).
+box; this is the structural basis of payload-blind routing.
 
 ### 5.3 Wire encoding
 
@@ -1017,7 +1015,7 @@ This is the stable error string — do not vary it.
 
 **Channel vs. authority.** The transport assertion authenticates the **channel**
 (the caller is the Hub); the bound `authzToken` inside the envelope remains the
-**authority** check (§4.4, AI-11). Both are required; neither substitutes for the
+**authority** check (§4.4). Both are required; neither substitutes for the
 other. Verify the hub assertion first, then proceed to `VerifyBound`.
 
 **Compatibility note.** A responder built before this header existed simply receives
@@ -1045,7 +1043,7 @@ Response operation: `eligibility-response`
 
 ### Step-by-step
 
-**Step 1 — Resolve the patient PCI (AI-5)**
+**Step 1 — Resolve the patient PCI**
 
 ```
 pci = ResolvePCI(memberID, birthDate, familyName)
@@ -1071,7 +1069,7 @@ correlationId = "8f3d9a1c4b7e2d5f..."
 
 Look up `acme-payer` in your local registry copy (loaded from `manifest.json`) to
 get its `EncPub`. Seal the payload **before** authorizing so the token can bind
-THIS exact ciphertext (AI-2). Build the metadata without `authzToken` for now (you
+THIS exact ciphertext. Build the metadata without `authzToken` for now (you
 will set it after the token is minted in Step 4).
 
 ```
@@ -1218,8 +1216,8 @@ parse the `covered`/`not-covered` disposition.
 Prior-authorization is **three substrate legs in sequence**, each an independent
 originate round-trip exactly like the eligibility leg in §7 (resolve → seal →
 authorize-bound → route → verify-bound → open). Authority is evaluated **per leg**: a
-fresh per-leg correlation id, a fresh `payloadHash`-bound token (AI-2), per-operation
-(no standing capability — OWD-6 / AI-11). The frame is always `provider-tpo` on the
+fresh per-leg correlation id, a fresh `payloadHash`-bound token, per-operation
+(no standing capability). The frame is always `provider-tpo` on the
 request leg and `payer-coverage` on the response leg.
 
 ### 7a.1 The leg sequence
@@ -1310,14 +1308,14 @@ leg. The clinical answers that drive the outcome are dev-visible inputs to
 
 UC-04 and UC-08 extend the §7a CRD→DTR→PAS three-leg sequence with new outcomes
 on the PAS leg and, for UC-04, a second exchange. Authority is evaluated per leg
-throughout (fresh correlation + `payloadHash`-bound token each leg, AI-2/AI-11).
+throughout (fresh correlation + `payloadHash`-bound token each leg).
 
 ### 7b.1 UC-04: exchange-1 PAS submit returns pended
 
 The initial PAS submit (§7a, leg 3) is identical for UC-04, but the payer's response
 is a **Bundle** instead of a bare `ClaimResponse`. The Bundle shape is the pended
 signal: it contains a `ClaimResponse` with `outcome=queued` and a `Task` enumerating
-the supplemental items needed for adjudication (FR-20).
+the supplemental items needed for adjudication.
 
 **Detect pended with `ParsePendedResponse`:**
 
@@ -1347,7 +1345,7 @@ Wire contract:
 | Response `operation` | `pas-update-response` |
 | Response frame | `payer-coverage` |
 
-The update Bundle payload carries (FR-21 + FR-32):
+The update Bundle payload carries :
 
 - `Claim` with `related[]` referencing the **original submit correlation identifier**
   (this binds the amendment to the pended claim; the payer rejects an update whose
@@ -1355,10 +1353,10 @@ The update Bundle payload carries (FR-21 + FR-32):
 - The **unchanged** `QuestionnaireResponse` and `ServiceRequest` from exchange-1.
 - An operative **`DiagnosticReport`** (US Core Note profile) — the new clinical
   evidence.
-- A **`Provenance`** attributing the DiagnosticReport to its source (FR-32 — the
+- A **`Provenance`** attributing the DiagnosticReport to its source (the
   payer **rejects** supplemental data without Provenance; `ResumePriorAuth` validates
   that `supp.ProvenanceAgent` is non-empty before calling any builder, so you meet
-  FR-32 as a named precondition rather than a cryptic three-legs-deep payer rejection).
+  that requirement as a named precondition rather than a cryptic three-legs-deep payer rejection).
 
 **One-call path** (`ResumePriorAuth`):
 
@@ -1369,7 +1367,7 @@ supp := shnsdk.SupplementalReport{
     ReportID:        "dr-uc04-operative",
     CPT:             "72148",
     Display:         "MRI lumbar spine w/o contrast",
-    ProvenanceAgent: "Organization/acme-7f3a",  // FR-32 required
+    ProvenanceAgent: "Organization/acme-7f3a",  // required
 }
 res, err := id.ResumePriorAuth(ctx, c, ep, payer, resume, supp)
 // res.Outcome == "approved", res.PreAuthRef != ""
@@ -1387,7 +1385,7 @@ For a non-Go participant or a Go participant that needs to inspect intermediates
 drJSON   = BuildDiagnosticReport(reportID, patientRef, cptCode, display)
 provJSON = BuildProvenance("DiagnosticReport/"+reportID, provenanceAgent, now)
 
-# Build the update bundle (Claim.related[] → originalCorrelationID, FR-21):
+# Build the update bundle (Claim.related[] → originalCorrelationID):
 updateBundle = BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
     QR: qrJSON, SR: srJSON, DiagnosticReport: drJSON, Provenance: provJSON,
     PatientRef: patientRef, CoverageRef: coverageRef,
@@ -1555,7 +1553,7 @@ must conform to it.
   (`BuildConformantOrderSelectRequest`→`ParseCards`→`BuildQuestionnaireFetch`→`ParseQuestionnaireURL`→`FillQuestionnaire`→`BuildConformantClaimBundle`→`ParseClaimResponse`)
   as the escape hatch beyond the one-call `shnsdk.Identity.RunPriorAuth`. `shn priorauth`
   runs it; `shn doctor` now also validates it. See `docs/SANDBOX.md` §3a.
-- **2026-06-10 — Discovery descriptor (FR-37).** Added §1a: `GET {accounts}/discovery`
+- **2026-06-10 — Discovery descriptor.** Added §1a: `GET {accounts}/discovery`
   serves a machine-readable descriptor (endpoints, sandbox responders, seeded personas,
   `wireProtocolVersion`, `sandbox`/`syntheticDataOnly`). It is sufficient to drive the
   loop — keys are resolved live (payer `encPub` from `/holders`, authz pub from
@@ -1566,7 +1564,7 @@ must conform to it.
   the envelope **ciphertext**. It is **REQUIRED on every envelope-borne operation**
   and **MUST be ABSENT on `patient-access-read`** (the one REST bearer read). Senders
   must **seal-then-authorize**: seal the payload first, then call `/authorize` against
-  `sha256hex(ciphertext)` so the minted token binds THIS payload (AI-2). Recipients
+  `sha256hex(ciphertext)` so the minted token binds THIS payload. Recipients
   (and the Hub per leg) **strictly verify** `sha256hex(received ciphertext) ==
   token.payloadHash` — an empty want or an empty token hash is **rejected**. This is
   breaking: a participant minting or verifying tokens the old way (no `payloadHash`)
@@ -1576,7 +1574,7 @@ must conform to it.
 ### What is implemented today (preview substrate)
 
 - **Static admission** — holders provisioned via an operator manifest bundle.
-- **Dynamic admission** (FR-38) — Trust-admin-gated `POST /register` (with
+- **Dynamic admission** — Trust-admin-gated `POST /register` (with
   participant proof-of-possession) via the Trust-operated Registrar;
   Hub and Authorization Framework poll `GET /holders` (~3-second interval);
   `registry = manifest ∪ dynamic`, no restart required. See §2.3.
@@ -1593,9 +1591,9 @@ must conform to it.
 - **Originator path** — a participant can call `POST {authz}/authorize` and
   `POST {hub}/route` to originate substrate legs.
 - **Reference inbound receiver** — the Hub forwards to `POST {holder}/substrate/inbound`;
-  the Smart Gateway implements this surface. An Option-B participant implementing it
+  the Smart Gateway implements this surface. An direct-integration participant implementing it
   natively must follow the protocol in §6.2.
-- **Reference Option-B participant** — a reference implementation runs the full
+- **Reference direct-integration participant** — a reference implementation runs the full
   eligibility round-trip (both the covered and not-covered branches) and the
   prior-auth round-trips (approved, pended, and denied) against the live substrate
   by delegating to the public SDK (`shnsdk.RunEligibility` / `shnsdk.RunPriorAuth`),
@@ -1608,7 +1606,7 @@ must conform to it.
 | Feature | Notes |
 |---|---|
 | **Push-notify on admission** | Hub + authz poll today (~3-second cycle); push-notify is the tracked fast-follow |
-| **Per-role CapabilityStatements** (FR-37) | Machine-readable capability declarations for provider and Hub roles |
+| **Per-role CapabilityStatements** | Machine-readable capability declarations for provider and Hub roles |
 | **Trust-issued PCI** | Today: deterministic hash (demo only); goal: unguessable Trust-minted PCI |
 | **Distributed replay cache** | Today: single-Hub in-process guard; goal: shared cache for horizontal scale |
 | **Audit reader access control** | Today: audit chain is open; goal: role-gated reads |

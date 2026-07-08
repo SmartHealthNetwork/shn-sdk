@@ -1,6 +1,9 @@
 # Smart Health Network — Technical Architecture
 
-The Smart Health Network (SHN) is a **federated health-data exchange substrate**. It lets
+> **Sandbox preview — synthetic data only, not for production PHI.** Public architecture
+> overview — not a security, legal, or compliance certification.
+
+The Smart Health Network (SHN) is a **federated health-data exchange network**. It lets
 independent healthcare organizations — providers, payers, and facilities — exchange FHIR
 clinical and administrative data **without any central party ever holding, reading, or
 accumulating that data**.

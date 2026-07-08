@@ -1,7 +1,8 @@
 # SHN Sandbox — Getting Started
 
-**Audience:** developers building a participant (provider/payer/facility) against the
-SHN substrate — the secure exchange router for healthcare data. This is the
+**Audience:** developers at providers, payers, facilities, HIEs, EHR/RCM vendors, and
+integration partners building a participant against the Smart Health Network — the
+secure exchange router for healthcare data. This is the
 **Discover → Register → Build → Run → Validate** path, with the exact `shn` commands
 per step. The sandbox's first end-to-end workflow is prior authorization.
 
@@ -20,9 +21,9 @@ per step. The sandbox's first end-to-end workflow is prior authorization.
 > needed). When approved you'll receive an invite email with a temporary
 > password — sign in at the portal, set your password, and continue below.
 
-> **Synthetic data only (FR-39).** The sandbox is seeded with deterministic synthetic
-> personas (Linda Johansson et al.). **Never send production PHI.** Every persona,
-> member id, and DOB below is fabricated test data.
+> **Sandbox preview — synthetic data only.** The sandbox is seeded with deterministic
+> synthetic personas (Linda Johansson et al.). **Never send production PHI.** Every
+> persona, member id, and DOB below is fabricated test data.
 
 The public sandbox is `shn-preview.org`. Substitute your own apex if you run a private
 deployment (the discovery descriptor is the source of truth for the live URLs).
@@ -56,7 +57,7 @@ Private deployment? The binaries are served by your own portal host — substitu
 
 ## 1. Discover
 
-The sandbox publishes a machine-readable discovery descriptor — the FR-37 conformance
+The sandbox publishes a machine-readable discovery descriptor — the conformance
 surface. It is **sufficient to drive the eligibility loop**: it lists the live
 endpoints, the sandbox responders (the payer you exchange with), and the seeded
 personas with their expected eligibility outcomes. No keys are embedded; you resolve
@@ -190,11 +191,11 @@ integrator can see *which* clinical facts carry the decision.
 
 ---
 
-## 3b. Per-scenario sandbox contexts — answers drive the outcome (FR-35)
+## 3b. Per-scenario sandbox contexts — answers drive the outcome
 
 The sandbox seeds **three synthetic personas** for the prior-auth scenarios. The
 **answers (the clinical context), not the member id, drive the payer's adjudication**.
-This is FR-35's approve-vs-deny-variant design: the same member identifier with a
+This is the approved / pended / denied scenario design: the same member identifier with a
 different clinical context would produce a different outcome; it is the answer values
 the sandbox payer evaluates.
 
@@ -272,7 +273,7 @@ shn priorauth resume --resume shn-resume.json \
 ```
 
 The `--provenance-agent` flag is **required** for a non-sandbox supplemental
-(FR-32: supplemental data must carry provenance attribution; the SDK rejects it
+(supplemental data must carry provenance attribution; the SDK rejects it
 before sealing if the agent is absent).
 
 ### 3b-ii. UC-08 denied flow (CLI)
@@ -286,9 +287,11 @@ shn priorauth --member MBR-UC08 --discovery https://accounts.shn-preview.org \
 # → appeal: …
 ```
 
-`reasonCode=A3` is the PAS X12 reviewActionCode for "Not Certified" (denied). The
-rationale is the payer's `ClaimResponse.disposition`; the appeal line (if present)
-is the first `processNote`. There is no `preAuthRef` on a denied response.
+`reasonCode` is the PAS X12 review-action code for the denial. The conformant Da Vinci
+code is `A2` ("Not Certified"), which real payers emit; the sandbox currently returns
+the legacy `A3`, and the SDK parser treats both as denied. The rationale is the payer's
+`ClaimResponse.disposition`; the appeal line (if present) is the first `processNote`.
+There is no `preAuthRef` on a denied response.
 
 ---
 
