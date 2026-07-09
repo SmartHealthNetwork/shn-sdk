@@ -62,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdRotate(rest, stdout, stderr)
 	case "doctor":
 		return cmdDoctor(rest, stdout, stderr)
+	case "send-test":
+		return cmdSendTest(rest, stdout, stderr)
 	case "-h", "--help", "help":
 		usage(stdout)
 		return 0
@@ -101,6 +103,7 @@ commands:
   revoke        revoke a client by id (Accounts service)
   rotate        rotate a holder's keys against the registrar (holder-self)
   doctor        self-validate against a sandbox: discovery + eligibility (wire-correctness)
+  send-test     drive a provider gateway's 8 /scenario UCs and tabulate pass/fail
 `)
 }
 

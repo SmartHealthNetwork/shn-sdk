@@ -132,6 +132,13 @@ Manage your clients with `shn clients --accounts <url>` (list) and
 a holder-self RFC 7592 path you run directly against the registrar
 (`shn rotate <id> --registrar <url>`) — it never goes through the Accounts service.
 
+Drive a gateway's prior-authorization scenarios end-to-end with
+`shn send-test --gateway <gateway-url>` — it fires all eight use cases at a
+running gateway's `/scenario` routes and tabulates pass/fail (`--json` for
+machine-readable output). Handy when you're evaluating a gateway you've stood up
+from the [`shn-gateway`](https://github.com/SmartHealthNetwork/shn-gateway)
+evaluation bundles.
+
 ## Operator registration
 
 For operator-managed deployments (not self-serve sandbox onboarding), registration is
