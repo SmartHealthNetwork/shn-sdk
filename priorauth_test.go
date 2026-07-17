@@ -1,12 +1,14 @@
 package shnsdk
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +41,13 @@ type paFakeSubstrate struct {
 	paRequired bool
 	// malformCards makes the CRD leg return non-JSON, to drive a leg-attributed error.
 	malformCards bool
+	// frameLeg, if non-empty, seals a v1 HTTP frame carrying frameStatus/frameBody
+	// as the response payload for the leg whose TransactionType equals frameLeg,
+	// instead of payloadFor's normal answer — drives the framed-app-error
+	// behavioral test on a mid-orchestration leg (e.g. PAS).
+	frameLeg    string
+	frameStatus int
+	frameBody   []byte
 }
 
 // responseOpFor mirrors hubsvc.responseOp: the op the response-leg token is pinned
@@ -147,6 +156,14 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 		}
 
 		payload := f.payloadFor(txType, reqPlain)
+		if f.frameLeg != "" && txType == f.frameLeg {
+			framed, ferr := EncodeHTTPFrame(f.frameStatus, "application/fhir+json", f.frameBody)
+			if ferr != nil {
+				http.Error(w, "frame", http.StatusInternalServerError)
+				return
+			}
+			payload = framed
+		}
 
 		respMeta := Metadata{
 			Sender:          f.payerID,
@@ -349,6 +366,43 @@ func TestResumePriorAuth_RequiresProvenance(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ProvenanceAgent") {
 		t.Errorf("error = %v, want it to name the missing ProvenanceAgent (FR-32)", err)
+	}
+}
+
+// TestRunPriorAuth_FramedAppError proves the originator side of frame
+// negotiation on a mid-orchestration leg: a frame-capable payer answering the
+// PAS leg with a framed non-2xx surfaces an *AppAnswerError (errors.As-able,
+// leg-attributed via runLegWithCorr's %w chain) carrying the verbatim payload.
+func TestRunPriorAuth_FramedAppError(t *testing.T) {
+	_, signPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen sign key: %v", err)
+	}
+	payerPub, payerPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen payer enc: %v", err)
+	}
+	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+
+	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","diagnostics":"claim rejected"}]}`)
+	f := &paFakeSubstrate{
+		signPriv: signPriv, payerEnc: payerPriv, payerPub: payerPub,
+		payerID: "payer", now: now, paRequired: true,
+		frameLeg: "pas-claim", frameStatus: 422, frameBody: oo,
+	}
+	id, ep, payer, _ := newPATestRig(t, f)
+	payer.MessageFrames = []string{"v1"}
+
+	_, err = id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, sandboxPARequest())
+	var ae *AppAnswerError
+	if !errors.As(err, &ae) {
+		t.Fatalf("RunPriorAuth error = %v, want errors.As *AppAnswerError", err)
+	}
+	if ae.Status != 422 || !bytes.Equal(ae.Body, oo) {
+		t.Fatalf("AppAnswerError = %+v, want status 422 body %s", ae, oo)
+	}
+	if !strings.Contains(err.Error(), "pas-submit") {
+		t.Errorf("error %q must still name the failing leg (pas-submit)", err.Error())
 	}
 }
 

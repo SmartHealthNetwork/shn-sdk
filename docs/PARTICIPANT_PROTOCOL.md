@@ -215,6 +215,7 @@ Body (JSON, all keys base64-standard-encoded):
   "encPub":  "<base64 X25519 32-byte public key>",
   "signPub": "<base64 Ed25519 32-byte public key>",
   "baseURL": "https://external-payer.example.com",
+  "messageFrames": ["v1"],
   "pop":     "<base64 Ed25519 signature — registration proof-of-possession>"
 }
 ```
@@ -226,6 +227,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `encPub` | Base64 X25519 public key (32 bytes raw) — envelope encryption target |
 | `signPub` | Base64 Ed25519 public key (32 bytes raw) — assertion verification |
 | `baseURL` | Where the Hub delivers inbound envelopes. Must be a publicly resolvable https URL — no userinfo, no ASCII control characters (< 0x20) — and must not redirect at /substrate/inbound (the Hub refuses redirects). Originator-only clients are never dialed but the URL must still validate. |
+| `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
 
 **Proof-of-possession (`pop`).** In addition to the Trust admin gate, the
@@ -399,6 +401,7 @@ X-Holder-Assertion: base64(json(assertion))   // holderId="external-payer", audi
   "encPub":  "<base64 X25519 32-byte public key — NEW>",
   "signPub": "<base64 Ed25519 32-byte public key — NEW>",
   "baseURL": "https://external-payer.example.com",
+  "messageFrames": ["v1"],
   "pop":     "<base64 Ed25519 signature over the canonical payload, by the NEW signPub private key>"
 }
 ```
@@ -407,8 +410,14 @@ The `pop` is the same canonical proof-of-possession as registration (§2.3): an
 Ed25519 signature over `id + "\n" + role + "\n" + encPub + "\n" + signPub + "\n" +
 baseURL`, but here signed with the **new** `signPub`'s private key (proving the
 rotator controls the key it is rotating to). **Re-key only:** `role` and `baseURL`
-in the body MUST equal the existing record — rotation rotates the two keys and
-nothing else.
+in the body MUST equal the existing record.
+
+**Rotation refreshes `messageFrames` from the submitted body** — unlike the
+operator-attested fields, the capability declaration is a property of the *current*
+build, so the registrar re-reads it from every rotate. **Include `messageFrames` on
+every rotate**, or your advertised capability silently resets to legacy (no framing);
+a codec-capable SDK/gateway build re-stamps it for you, so a library-driven rotate
+carries it automatically — hand-built rotate bodies must not drop it.
 
 Rejection cases (checks are ordered):
 
@@ -926,7 +935,9 @@ The endpoint must:
    exchange.
 3. Decrypt the ciphertext with the holder's own `EncPub`/`EncPriv` key pair.
 4. Process the FHIR payload (validate, apply business logic).
-5. Build the response payload, seal it to the **original sender's** `EncPub`.
+5. Build the response payload — your application's real answer, whether that is a
+   success body or a non-2xx application answer (an adjudication denial, a 422
+   validation reject, and so on).
 6. Construct a response `Metadata` with:
    - `sender` set to **your** holder ID
    - `recipient` set to the request envelope's `sender`
@@ -935,7 +946,23 @@ The endpoint must:
    - `authzToken` set to a JSON-encoded token minted for the **response** operation
    - `correlationId` set to the **same** `correlationId` as the request
    - `timestamp` set to current UTC in RFC 3339
-7. Return the response envelope as the HTTP response body (200 OK, `Content-Type: application/json`).
+7. Look up whether the **requester** (the request envelope's `sender`) advertises
+   message-frame support in the registry (§6.3). This decides, per exchange, whether
+   step 8 or step 9 applies — there is no configuration flag.
+8. **If the requester is frame-capable:** encode the response payload as a
+   **message frame v1** (§6.3) — carrying its real status (2xx or not) and an
+   allowlisted `Content-Type` — then seal the frame bytes to the **original
+   sender's** `EncPub`. Both success and application-failure answers travel this way
+   and are returned **200 to the Hub**; the Hub's own response code stops meaning
+   anything about the application outcome.
+9. **If the requester is not frame-capable (legacy):** seal the bare response
+   payload to the **original sender's** `EncPub`, unchanged from the pre-message-frame
+   contract — implicit `200` on success; a non-2xx application answer is not carried
+   in the envelope at all and instead surfaces to the Hub as a genuine non-2xx, which
+   the Hub relays to the requester as its generic `"hub routing failed"` failure.
+10. Return the response envelope as the HTTP response body — `200 OK,
+    Content-Type: application/json` for a frame-capable exchange (step 8); the
+    payload's own status for a legacy exchange (step 9).
 
 The Hub verifies this response envelope before writing the `"answered"` audit
 record and returning it to the originator. A mis-constructed response causes the
@@ -1022,6 +1049,100 @@ other. Verify the hub assertion first, then proceed to `VerifyBound`.
 one extra header — ignoring it is safe for continuity, but verifying it is
 **required for conformance** from this protocol version on. The header has no off
 state: the Hub sends it on every forward unconditionally.
+
+### 6.3 Message frame v1
+
+A **message frame** is how a frame-capable responder carries its real application
+answer — status, an allowlisted header, and body — as the sealed payload of a
+response leg (§6.2 steps 7–10). It is unrelated to the `authorityFrame` field on
+`Metadata` (§5.1, §4.3); this section always says "message frame" in full to keep
+the two apart.
+
+**Negotiation.** Message framing is decided **per exchange from the registry**,
+never from a per-message flag or a sniff of the bytes:
+
+- A **responder** frames its answer iff the **requester's** registry entry
+  advertises `"v1"` in its `messageFrames` capability list.
+- An **originator** decodes any payload bearing the frame magic; the recipient's
+  advertised `"v1"` governs only expectation and observability (the stale-feed
+  downgrade log below), not the decode decision. *(Hardened at final review:
+  decoding on the magic byte — rather than on the advertised capability — also
+  closes the inverse stale window, where a responder correctly frames to a
+  v1-advertising requester while the originator's view of the recipient is still
+  pre-upgrade, e.g. during re-registration or a rolling deploy; the same magic-byte
+  collision argument makes this safe.)*
+- The capability is **self-declared by the library, not hand-configured**: an
+  SDK-based (or gateway) participant on a codec-capable build stamps `"v1"` into
+  its own registry entry automatically at registration, and again on key
+  rotation. An older, already-registered participant simply has no `"v1"` entry
+  and stays on the legacy contract until it re-registers from an upgraded build.
+  There is nothing for an operator to turn on.
+
+**Stale-feed fallback.** Registry propagation is eventually consistent — an
+originator can briefly still see a responder's pre-upgrade entry. If the
+originator expects a frame (per the rule above) but the decrypted payload does
+not begin with the frame's magic byte, it treats the payload as bare legacy
+instead of rejecting it, and logs the downgrade as an observable event. This is
+safe, not a sniff: the magic byte (`0x00`) can never be the first byte of any
+bare payload this protocol carries (FHIR JSON, and every other text format in
+use, both start with a printable byte), so a bare payload can never be
+misidentified as a frame, or vice versa.
+
+**Wire layout.** The frame is the entire sealed response payload (i.e., it is
+what `Open` in §5.2 decrypts to, in place of the bare FHIR bytes):
+
+```
+byte 0        magic       0x00
+byte 1        version     0x01
+bytes 2..5    header-len  big-endian uint32 (H), capped at 64 KiB
+bytes 6..6+H  header      JSON, schema below
+rest          body        raw bytes — no additional encoding
+```
+
+**Header schema.** Every current transaction type on this protocol is HTTP-family:
+
+```json
+{
+  "status": 422,
+  "headers": {
+    "Content-Type": "application/fhir+json"
+  }
+}
+```
+
+- `status` — the application's real HTTP status, `100`–`599`. Both 2xx and
+  non-2xx answers are framed identically; there is no separate error shape.
+- `headers` — an **allowlist**, `Content-Type` only in v1. No other header
+  (hop-by-hop, cookie, or otherwise) is ever carried inside a frame.
+
+**Decoding is strict.** A decoder rejects (rather than silently degrading) on: an
+unknown version byte, a header length that overruns the payload or the 64 KiB
+cap, a non-JSON or malformed header, or an out-of-range `status`. Each of these
+is a distinct, typed decode failure. A header field outside the allowlist is
+**not** a reject: the reference decoder silently drops it and returns success
+(producers only ever emit `Content-Type`, so this never fires in practice).
+
+**Mechanical vs. application status — the rule that replaced
+`RESPONDER_RELAY_ERRORS`.** A responder returns a non-2xx status **to the Hub**
+only for a genuine exchange-machinery failure at its own edge — a bad hop
+assertion, an envelope that fails to decode, a token that fails verification, a
+replay, an unknown `transactionType`, or a failure building the response leg
+itself (seal/authorize/encode). Everything the application produced — an
+adjudication denial, a partner payer's real `400`, a `422` validation reject —
+is an application **answer**, not a machinery failure, and (for a frame-capable
+exchange) travels inside the frame with **200 to the Hub**. The Hub's generic
+`"hub routing failed"` therefore now means exactly what it says: routing failed,
+not "the far end disagreed with you."
+
+**Legacy peers see no change.** An exchange where either side is not
+frame-capable is byte-identical to the protocol's original, pre-message-frame
+contract: bare FHIR payload on the wire, implicit `200` on success, and a
+non-2xx application answer collapsing to the Hub's generic
+`"hub routing failed"` at the requester. There is no environment variable
+governing this — a prior, now-removed release-specific mechanism
+(`RESPONDER_RELAY_ERRORS`, a JSON wrapper) covered the same problem for a single
+release before message-frame negotiation replaced it; see the gateway's
+`docs/CONFIGURATION.md`.
 
 ---
 
@@ -1484,6 +1605,16 @@ must conform to it.
 
 ### Changelog
 
+- **2026-07-17 — Message frame v1: negotiated, sealed application answers (§6.2, §6.3).** A
+  frame-capable responder now carries its real application status (success or not) and body
+  inside the sealed response leg, versus the Hub's implicit `200`-on-bare-payload / generic
+  `"hub routing failed"` collapse. Negotiated per exchange from each holder's registry-advertised
+  `messageFrames` capability (self-declared automatically by a codec-capable build at
+  registration/rotation) — there is no flag and no sniffing. A pair where either side is not
+  frame-capable stays byte-identical to the original, pre-message-frame contract. This
+  **replaces** the interim, single-release `RESPONDER_RELAY_ERRORS` JSON-wrapper mechanism
+  (removed): that wrapper's `{__shnStatus,__shnBody}` shape, its flag, and the response sniff it
+  depended on are gone.
 - **2026-06-24 — `federated-query` is now Da Vinci CDex (Task-Based Approach).** UC-05's federated
   external retrieval moved from a bespoke FHIR `Parameters` query to **Da Vinci CDex** (Clinical Data
   Exchange). The **request** is a `Task` conforming to `cdex-task-data-request`

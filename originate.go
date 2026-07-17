@@ -35,6 +35,9 @@ type Payer struct {
 	// AuthzPub is the Authorization Framework's Ed25519 verifying key, used to
 	// VerifyBound the payer's response token.
 	AuthzPub ed25519.PublicKey
+	// MessageFrames are the payer's advertised sealed-frame versions from the
+	// /holders feed (Holder.MessageFrames). Empty ⇒ legacy bare payloads.
+	MessageFrames []string
 }
 
 // RunEligibility runs one coverage-eligibility round-trip through the substrate and
@@ -187,10 +190,16 @@ func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoi
 		return false, "", fmt.Errorf("shnsdk: verify response token: %w", err)
 	}
 
-	// Step 8 — decrypt the response and parse the FHIR response.
+	// Step 8 — decrypt the response, unframe it (a frame-capable payer's non-2xx
+	// APPLICATION answer surfaces as *AppAnswerError, verbatim), and parse the FHIR
+	// response.
 	plaintext, err := Open(respEnv, id.EncPub, id.EncPriv)
 	if err != nil {
 		return false, "", fmt.Errorf("shnsdk: open response envelope: %w", err)
+	}
+	plaintext, err = unframeAnswer(payer.MessageFrames, plaintext)
+	if err != nil {
+		return false, "", fmt.Errorf("shnsdk: response answer: %w", err)
 	}
 	covered, reason, err = ParseEligibilityResponse(plaintext)
 	if err != nil {

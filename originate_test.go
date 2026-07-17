@@ -1,12 +1,14 @@
 package shnsdk
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +33,11 @@ type fakeSubstrate struct {
 	// requesterEnc is the originating SDK identity's enc key, so the fake payer
 	// can seal the response back to it.
 	requesterEnc *[32]byte
+	// frameStatus, if nonzero, seals a v1 HTTP frame carrying frameStatus/frameBody
+	// as the response payload instead of the normal CoverageEligibilityResponse —
+	// drives the framed-app-error behavioral test (RunEligibility unframing).
+	frameStatus int
+	frameBody   []byte
 }
 
 // mint signs a Token the way the substrate authz framework does (Signature over
@@ -105,7 +112,16 @@ func (f *fakeSubstrate) routeHandler() http.HandlerFunc {
 			Timestamp:       f.now.UTC().Format(time.RFC3339),
 			CorrelationID:   corr,
 		}
-		respEnv, err := Seal(respMeta, []byte(crr), reqEnc)
+		payload := []byte(crr)
+		if f.frameStatus != 0 {
+			framed, ferr := EncodeHTTPFrame(f.frameStatus, "application/fhir+json", f.frameBody)
+			if ferr != nil {
+				http.Error(w, "frame", http.StatusInternalServerError)
+				return
+			}
+			payload = framed
+		}
+		respEnv, err := Seal(respMeta, payload, reqEnc)
 		if err != nil {
 			http.Error(w, "seal", http.StatusInternalServerError)
 			return
@@ -220,5 +236,60 @@ func TestRunEligibility_RejectsTamperedResponseToken(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("RunEligibility should reject a response token verified against the wrong authz key")
+	}
+}
+
+// TestRunEligibility_FramedAppError proves the originator side of frame
+// negotiation: a frame-capable payer answering a framed non-2xx surfaces an
+// *AppAnswerError (errors.As-able) carrying the verbatim payload, rather than a
+// ParseEligibilityResponse failure on the opaque frame bytes.
+func TestRunEligibility_FramedAppError(t *testing.T) {
+	signPub, signPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen sign key: %v", err)
+	}
+	payerPub, payerPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen payer enc: %v", err)
+	}
+	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+
+	id, err := GenerateIdentity("ext-provider")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	id.Clock = func() time.Time { return now }
+
+	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","diagnostics":"member not found"}]}`)
+	f := &fakeSubstrate{
+		signPriv: signPriv,
+		payerEnc: payerPriv, payerPub: payerPub,
+		payerID: "payer", now: now,
+		requesterEnc: id.EncPub,
+		frameStatus:  422,
+		frameBody:    oo,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/authorize", f.authorizeHandler)
+	authzSrv := httptest.NewServer(mux)
+	defer authzSrv.Close()
+
+	hubMux := http.NewServeMux()
+	hubMux.HandleFunc("/route", f.routeHandler())
+	hubSrv := httptest.NewServer(hubMux)
+	defer hubSrv.Close()
+
+	_, _, err = id.RunEligibility(
+		context.Background(), authzSrv.Client(),
+		Endpoints{HubURL: hubSrv.URL, AuthzURL: authzSrv.URL},
+		Payer{ID: "payer", EncPub: payerPub, AuthzPub: signPub, MessageFrames: []string{"v1"}},
+		"9999999999", "MBR-COVERED", "1975-04-02", "Johansson",
+	)
+	var ae *AppAnswerError
+	if !errors.As(err, &ae) {
+		t.Fatalf("RunEligibility error = %v, want errors.As *AppAnswerError", err)
+	}
+	if ae.Status != 422 || !bytes.Equal(ae.Body, oo) {
+		t.Fatalf("AppAnswerError = %+v, want status 422 body %s", ae, oo)
 	}
 }

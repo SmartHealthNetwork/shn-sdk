@@ -372,7 +372,9 @@ func (id Identity) runLegWithCorr(ctx context.Context, c *http.Client, ep Endpoi
 	if err != nil {
 		return nil, fmt.Errorf("open response envelope: %w", err)
 	}
-	return plaintext, nil
+	// Unframe (a frame-capable payer's non-2xx APPLICATION answer surfaces as
+	// *AppAnswerError, verbatim) — shared by every runLeg/runLegWithCorr caller.
+	return unframeAnswer(payer.MessageFrames, plaintext)
 }
 
 // SupplementalReport is the NEW clinical evidence a ClaimUpdate amendment attaches,

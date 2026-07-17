@@ -44,6 +44,11 @@ type ResponderConfig struct {
 	Adjudicator     Adjudicator
 	Clock           func() time.Time
 	Client          *http.Client
+
+	// ResolveFrames returns the advertised messageFrames for a holder id (nil/empty
+	// for unknown or legacy holders). OPTIONAL: nil means never frame (legacy-only
+	// responder) — safe default for existing constructors. See NewFeedFrameResolver.
+	ResolveFrames func(holderID string) []string
 }
 
 // Responder serves a payer holder's /substrate/inbound with the SAME pipeline
@@ -122,16 +127,29 @@ func (r *Responder) Handler() http.Handler {
 }
 
 // handlerResult is what a per-TransactionType handler returns to handleInbound.
-// payload nil → the handler already wrote an error response (pipeline does nothing).
+// Handlers no longer write errors themselves; they report the application answer
+// and let handleInbound decide how to relay it (bare legacy vs sealed v1 frame).
+//
+// Contract:
+//   - success ⇒ payload non-nil, appStatus 0 (relayed as frame(200,
+//     application/fhir+json,…) to a capable requester, bare otherwise);
+//   - app error ⇒ appStatus non-2xx + errMsg, and OPTIONALLY payload+contentType
+//     for a FHIR error body (else handleInbound builds {"error":errMsg}).
+//
 // commit runs AFTER the response leg seals + authorizes successfully (the ledger
 // state mutation — pend record / update finalize — must not happen until the
-// answer is actually produced). rollback runs if the pipeline
-// FAILS after the handler claimed ledger state (release a claimed update so the
-// provider can retry). Both are nil for handlers that touch no ledger state.
+// answer is actually produced). rollback runs if the pipeline FAILS after the
+// handler claimed ledger state (release a claimed update so the provider can
+// retry). Both are nil for handlers that touch no ledger state, and stay nil on
+// app-error results — a handler that claimed ledger state releases it before
+// returning the error.
 type handlerResult struct {
-	payload  []byte
-	commit   func()
-	rollback func()
+	payload     []byte
+	appStatus   int
+	errMsg      string
+	contentType string
+	commit      func()
+	rollback    func()
 }
 
 // respondErr writes a JSON {"error": msg} body with the given HTTP status code.
@@ -241,33 +259,69 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// 8. Dispatch per TransactionType. Each handler returns a handlerResult:
-	//    payload nil → the handler already wrote an error response (pipeline does
-	//    nothing). payload non-nil (contract: builders always return non-empty slices
-	//    on success) → proceed to seal+authorize. commit/rollback manage ledger state
-	//    transitions that must not happen until the response leg succeeds.
+	// Frame negotiation (spec 2026-07-17): frame the response leg iff the requester
+	// advertises v1 — capability is two-sided (the responder only frames to a peer
+	// that declared it can decode). nil ResolveFrames ⇒ never frame (legacy-only).
+	framed := r.cfg.ResolveFrames != nil && SupportsMessageFrameV1(r.cfg.ResolveFrames(env.Metadata.Sender))
+
+	// 8. Dispatch per TransactionType. Each handler returns a handlerResult carrying
+	//    either a success payload (appStatus 0) or an application error (appStatus
+	//    non-2xx + errMsg). commit/rollback manage ledger state transitions that must
+	//    not happen until the response leg succeeds.
 	var res handlerResult
 
 	switch env.Metadata.TransactionType {
 	case "coverage-eligibility":
-		res = r.handleEligibility(w, plaintext, tok, corr, now)
+		res = r.handleEligibility(plaintext, corr, now)
 	case "crd-order-select":
-		res = r.handleCRD(w, plaintext)
+		res = r.handleCRD(plaintext)
 	case "dtr-questionnaire-fetch":
-		res = r.handleDTR(w, plaintext)
+		res = r.handleDTR(plaintext)
 	case "pas-claim":
-		res = r.handlePASSubmit(w, plaintext, tok, corr, now)
+		res = r.handlePASSubmit(plaintext, tok, corr, now)
 	case "pas-claim-update":
-		res = r.handlePASUpdate(w, plaintext, tok, corr, now)
+		res = r.handlePASUpdate(plaintext, tok, corr, now)
 	default:
 		// Defensive: step 5 already rejects unknowns via responderReqOp, but
 		// this hardens against a future responderReqOp edit.
 		respondErr(w, http.StatusBadRequest, "unknown transaction type")
 		return
 	}
-	if res.payload == nil {
-		// Handler already wrote an error response.
+
+	// Relay decision. An application non-2xx is a real answer: a legacy requester
+	// gets it bare (byte-identical to the pre-frame contract, so the payload-blind
+	// Hub reports its generic mechanical failure); a capable requester gets it sealed
+	// as a v1 frame carrying the app status, relayed 200-to-Hub — so seal/authorize
+	// run for the framed error too (mirrors the engine's respondLegError). Success
+	// (appStatus 0, payload non-nil) is framed(200, contentType) or bare.
+	if res.appStatus != 0 && res.appStatus/100 != 2 {
+		if !framed {
+			respondErr(w, res.appStatus, res.errMsg) // pre-frame contract, byte-identical
+			return
+		}
+		if res.payload == nil {
+			res.payload, _ = json.Marshal(map[string]string{"error": res.errMsg})
+			res.contentType = "application/json"
+		}
+	} else if res.payload == nil {
+		// Defensive: a handler returned neither an answer nor an error.
 		return
+	}
+	sealPayload := res.payload
+	if framed {
+		st := res.appStatus
+		if st == 0 {
+			st = http.StatusOK
+		}
+		ct := res.contentType
+		if ct == "" {
+			ct = "application/fhir+json"
+		}
+		var ferr error
+		if sealPayload, ferr = EncodeHTTPFrame(st, ct, res.payload); ferr != nil {
+			respondErr(w, http.StatusInternalServerError, "frame encode failed")
+			return
+		}
 	}
 
 	// 9. Resolve sender enc key + seal (AI-2: seal FIRST, then authorize).
@@ -287,7 +341,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		Timestamp:       now.Format(time.RFC3339),
 		CorrelationID:   corr,
 	}
-	respEnv, err := Seal(respMeta, res.payload, senderEncPub)
+	respEnv, err := Seal(respMeta, sealPayload, senderEncPub)
 	if err != nil {
 		if res.rollback != nil {
 			res.rollback()
@@ -367,7 +421,7 @@ func responseOp(txType string) string {
 }
 
 // handleEligibility implements the coverage-eligibility handler. Returns a
-// handlerResult with payload on success or writes an error and returns handlerResult{}.
+// handlerResult with payload on success, or {appStatus,errMsg} on an app error.
 //
 // NOTE — divergence from the substrate gateway, by design: the gateway
 // additionally resolves the payload's member against its patient registry
@@ -387,35 +441,31 @@ func responseOp(txType string) string {
 // parity-pinned byte-for-byte against the substrate builder (test/sdkparity
 // fhir parity), so a conformant resource is what this code produces — it is
 // just not re-validated per request here.
-func (r *Responder) handleEligibility(w http.ResponseWriter, plaintext []byte, tok Token, corr string, now time.Time) handlerResult {
+func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Time) handlerResult {
 	member, err := ParseEligibilityRequestMember(plaintext)
 	if err != nil {
-		respondErr(w, http.StatusBadRequest, "parse member failed")
-		return handlerResult{}
+		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse member failed"}
 	}
 
 	covered, reason := r.cfg.Adjudicator.Eligibility(member)
 	crrJSON, err := BuildEligibilityResponse(corr, "Patient/"+member, covered, reason, now)
 	if err != nil {
-		respondErr(w, http.StatusInternalServerError, "build response failed")
-		return handlerResult{}
+		return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build response failed"}
 	}
 	return handlerResult{payload: crrJSON}
 }
 
 // handleDTR implements the dtr-questionnaire-fetch handler. Mirrors payer.go
 // handleDTRInbound guard order and error strings, minus the $validate divergence.
-func (r *Responder) handleDTR(w http.ResponseWriter, plaintext []byte) handlerResult {
+func (r *Responder) handleDTR(plaintext []byte) handlerResult {
 	var fetch QuestionnaireFetchRequest
 	if err := json.Unmarshal(plaintext, &fetch); err != nil {
-		respondErr(w, http.StatusBadRequest, "parse questionnaire fetch failed")
-		return handlerResult{}
+		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse questionnaire fetch failed"}
 	}
 
 	questionnaireJSON, ok := r.cfg.Adjudicator.Questionnaire(fetch.Canonical)
 	if !ok {
-		respondErr(w, http.StatusBadRequest, "unknown questionnaire canonical")
-		return handlerResult{}
+		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "unknown questionnaire canonical"}
 	}
 	// §6.2: uniform leg shape — wrap the bare Questionnaire into a one-entry
 	// $questionnaire-package collection Bundle (byte-identical to the substrate
@@ -423,8 +473,7 @@ func (r *Responder) handleDTR(w http.ResponseWriter, plaintext []byte) handlerRe
 	// consumer (RunPriorAuth) extracts the bare Questionnaire on the far side.
 	pkg, err := BuildQuestionnairePackage(questionnaireJSON)
 	if err != nil {
-		respondErr(w, http.StatusInternalServerError, "build questionnaire package failed")
-		return handlerResult{}
+		return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build questionnaire package failed"}
 	}
 	return handlerResult{payload: pkg}
 }

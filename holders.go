@@ -24,6 +24,10 @@ type Holder struct {
 	// omitted otherwise). FeedPayerRouter indexes (system,value) → holder id for coverage-
 	// derived routing (FR-G41). Globally unique across holders (AI-G12).
 	PayerIDs []PayerIdentifier `json:"payerIds,omitempty"`
+	// MessageFrames are the sealed message-frame versions this holder's build
+	// negotiates (library-self-declared at registration; "v1" = the binary
+	// status+headers+body response frame). Absent ⇒ legacy bare payloads.
+	MessageFrames []string `json:"messageFrames,omitempty"`
 }
 
 // EncKey decodes the holder's X25519 public key.
@@ -80,5 +84,22 @@ func NewFeedEncResolver(c *http.Client, registrarURL string) func(holderID strin
 			}
 		}
 		return nil, false
+	}
+}
+
+// NewFeedFrameResolver returns a ResolveFrames func backed by the live /holders
+// feed. Re-fetches per call — same deliberate simplicity as NewFeedEncResolver.
+func NewFeedFrameResolver(c *http.Client, registrarURL string) func(holderID string) []string {
+	return func(holderID string) []string {
+		hs, err := FetchHolders(context.Background(), c, registrarURL)
+		if err != nil {
+			return nil
+		}
+		for _, h := range hs {
+			if h.ID == holderID {
+				return h.MessageFrames
+			}
+		}
+		return nil
 	}
 }

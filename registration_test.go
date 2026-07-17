@@ -56,3 +56,32 @@ func TestRegistration_DistinctFieldsDoNotCollide(t *testing.T) {
 		t.Error("distinct id/role pairs produced an identical signing payload")
 	}
 }
+
+// TestRegistrationAdvertisesMessageFrames verifies Registration self-declares
+// the library's supported message-frame versions (messageFrames), and that the
+// capability token does NOT enter the frozen 5-field PoP signing payload.
+func TestRegistrationAdvertisesMessageFrames(t *testing.T) {
+	id, err := GenerateIdentity("frames-holder")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	req := id.Registration("provider", "https://gw.example.org")
+	if len(req.MessageFrames) != 1 || req.MessageFrames[0] != MessageFrameV1 {
+		t.Fatalf("Registration did not self-declare frames: %v", req.MessageFrames)
+	}
+	// The PoP payload is FROZEN at 5 fields — capability must not enter it.
+	want := registrationSigningPayload(req.ID, "provider", req.EncPub, req.SignPub, req.BaseURL)
+	if !ed25519.Verify(id.SignPub, want, mustB64(t, req.Pop)) {
+		t.Fatal("pop no longer verifies over the 5-field payload — capability leaked into the signing payload")
+	}
+}
+
+// mustB64 decodes std-base64, failing the test on error.
+func mustB64(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatalf("mustB64: %v", err)
+	}
+	return b
+}
