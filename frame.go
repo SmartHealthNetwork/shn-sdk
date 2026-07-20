@@ -127,15 +127,14 @@ func (e *AppAnswerError) Error() string {
 // unframeAnswer applies the originator side of frame negotiation to an opened
 // response payload: any payload bearing the frame magic is decoded — its body
 // (2xx) or an *AppAnswerError (non-2xx) — and a bare payload passes through
-// verbatim. Decoding is keyed on the magic byte, NOT on the payer's advertised
-// frames: 0x00 cannot begin any bare payload we carry (JSON/X12/XML/HL7v2 text),
-// so decode-on-magic never misclassifies, and it closes the inverse stale-feed
-// window (a payer that correctly frames to a v1-advertising requester while our
-// view of the payer is still pre-upgrade — dynamic re-registration, rolling
-// deploys). `frames` is retained for call-site symmetry/observability; it governs
-// expectation, not the decode decision.
-func unframeAnswer(frames []string, plaintext []byte) ([]byte, error) {
-	_ = frames
+// verbatim. Decoding is keyed solely on the magic byte, NOT on the payer's
+// advertised frames: 0x00 cannot begin any bare payload we carry (JSON/X12/XML/
+// HL7v2 text), so decode-on-magic never misclassifies, and it closes the inverse
+// stale-feed window (a payer that correctly frames to a v1-advertising requester
+// while our view of the payer is still pre-upgrade — dynamic re-registration,
+// rolling deploys). The payer's advertised frames are therefore advisory only and
+// not an input here.
+func unframeAnswer(plaintext []byte) ([]byte, error) {
 	if !IsFramed(plaintext) {
 		return plaintext, nil
 	}

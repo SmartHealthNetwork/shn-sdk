@@ -36,7 +36,10 @@ type Payer struct {
 	// VerifyBound the payer's response token.
 	AuthzPub ed25519.PublicKey
 	// MessageFrames are the payer's advertised sealed-frame versions from the
-	// /holders feed (Holder.MessageFrames). Empty ⇒ legacy bare payloads.
+	// /holders feed (Holder.MessageFrames). Empty ⇒ the payer advertised no frames.
+	// Advisory only: the originator decodes an answer on the frame magic byte
+	// regardless of what the payer advertised (see unframeAnswer), so this field
+	// records negotiated intent for observability but does not gate decoding.
 	MessageFrames []string
 }
 
@@ -197,7 +200,7 @@ func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoi
 	if err != nil {
 		return false, "", fmt.Errorf("shnsdk: open response envelope: %w", err)
 	}
-	plaintext, err = unframeAnswer(payer.MessageFrames, plaintext)
+	plaintext, err = unframeAnswer(plaintext)
 	if err != nil {
 		return false, "", fmt.Errorf("shnsdk: response answer: %w", err)
 	}

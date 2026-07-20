@@ -374,7 +374,7 @@ func (id Identity) runLegWithCorr(ctx context.Context, c *http.Client, ep Endpoi
 	}
 	// Unframe (a frame-capable payer's non-2xx APPLICATION answer surfaces as
 	// *AppAnswerError, verbatim) — shared by every runLeg/runLegWithCorr caller.
-	return unframeAnswer(payer.MessageFrames, plaintext)
+	return unframeAnswer(plaintext)
 }
 
 // SupplementalReport is the NEW clinical evidence a ClaimUpdate amendment attaches,

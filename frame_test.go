@@ -95,43 +95,32 @@ func TestEncodeHTTPFrameRejectsBadStatus(t *testing.T) {
 	}
 }
 
-// TestUnframeAnswer covers the originator side of frame negotiation: a v1 frame
-// from a frame-capable payer yields its body (2xx) or an *AppAnswerError (non-2xx);
-// a bare payload — legacy payer, or the stale-feed downgrade — passes through.
+// TestUnframeAnswer covers the originator side of frame negotiation, which keys
+// solely on the magic byte (the payer's advertised frames are advisory, not an
+// input): a v1 frame yields its body (2xx) or an *AppAnswerError (non-2xx); a bare
+// payload — legacy payer, or either stale-feed direction — passes through; a
+// corrupt frame errors.
 func TestUnframeAnswer(t *testing.T) {
 	oo := []byte(`{"resourceType":"OperationOutcome"}`)
 	framedErr, _ := EncodeHTTPFrame(422, "application/fhir+json", oo)
-	_, err := unframeAnswer([]string{"v1"}, framedErr)
+	_, err := unframeAnswer(framedErr)
 	var ae *AppAnswerError
 	if !errors.As(err, &ae) || ae.Status != 422 || !bytes.Equal(ae.Body, oo) || ae.ContentType != "application/fhir+json" {
 		t.Fatalf("framed non-2xx: got %v", err)
 	}
 	framedOK, _ := EncodeHTTPFrame(200, "application/fhir+json", oo)
-	if body, err := unframeAnswer([]string{"v1"}, framedOK); err != nil || !bytes.Equal(body, oo) {
+	if body, err := unframeAnswer(framedOK); err != nil || !bytes.Equal(body, oo) {
 		t.Fatalf("framed 2xx: %q %v", body, err)
 	}
-	// Stale-feed fallback: capable payer, bare payload → passthrough.
-	if body, err := unframeAnswer([]string{"v1"}, oo); err != nil || !bytes.Equal(body, oo) {
-		t.Fatalf("bare fallback: %q %v", body, err)
+	// Bare payload → passthrough. This is BOTH a legacy payer's success and the
+	// stale-feed downgrade case (we advertised nothing, or advertised v1 and the
+	// payer answered bare); the decode decision is identical because it is
+	// magic-keyed, so these no longer need distinct advertised-frame inputs.
+	if body, err := unframeAnswer(oo); err != nil || !bytes.Equal(body, oo) {
+		t.Fatalf("bare passthrough: %q %v", body, err)
 	}
-	// Bare payload with nil advertised frames: passthrough (a legacy payer's success).
-	if body, err := unframeAnswer(nil, oo); err != nil || !bytes.Equal(body, oo) {
-		t.Fatalf("legacy passthrough: %q %v", body, err)
-	}
-	// Inverse stale-feed window (hardened at final review): a payer that frames its
-	// answer while OUR view of it is still pre-upgrade (nil advertised frames). Decode
-	// is keyed on the magic byte, not the advertised frames — a framed payload MUST
-	// still decode, both the 2xx body and the non-2xx *AppAnswerError.
-	if body, err := unframeAnswer(nil, framedOK); err != nil || !bytes.Equal(body, oo) {
-		t.Fatalf("nil-frames framed 2xx must decode: %q %v", body, err)
-	}
-	_, err = unframeAnswer(nil, framedErr)
-	var ae2 *AppAnswerError
-	if !errors.As(err, &ae2) || ae2.Status != 422 || !bytes.Equal(ae2.Body, oo) {
-		t.Fatalf("nil-frames framed non-2xx must decode to *AppAnswerError: got %v", err)
-	}
-	// Corrupt frame from a capable payer → error.
-	if _, err := unframeAnswer([]string{"v1"}, []byte{0x00, 0xFF, 0, 0, 0, 0}); err == nil {
+	// Corrupt frame → error.
+	if _, err := unframeAnswer([]byte{0x00, 0xFF, 0, 0, 0, 0}); err == nil {
 		t.Fatal("corrupt frame accepted")
 	}
 }

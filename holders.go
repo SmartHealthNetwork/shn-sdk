@@ -89,6 +89,11 @@ func NewFeedEncResolver(c *http.Client, registrarURL string) func(holderID strin
 
 // NewFeedFrameResolver returns a ResolveFrames func backed by the live /holders
 // feed. Re-fetches per call — same deliberate simplicity as NewFeedEncResolver.
+// NOTE: a responder that wires BOTH this and NewFeedEncResolver makes two
+// independent /holders fetches per answered leg (enc-key resolve + frame resolve).
+// That is the accepted cost of the per-call-fetch simplicity; a caller that wants
+// a single fetch can share one cached holder snapshot behind both resolvers when
+// volume warrants it (additive — no wire or signature change).
 func NewFeedFrameResolver(c *http.Client, registrarURL string) func(holderID string) []string {
 	return func(holderID string) []string {
 		hs, err := FetchHolders(context.Background(), c, registrarURL)
