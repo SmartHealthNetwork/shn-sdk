@@ -21,6 +21,12 @@ type AuditRecord struct {
 	ConsentRef        string `json:"consentRef"`
 	SubjectPCI        string `json:"subjectPCI"`
 	PayloadBundleHash string `json:"payloadBundleHash"`
+
+	// RecordID is the emitter-minted unique id (ULID; HA design spec §5.1).
+	// APPENDED LAST with omitempty: records without one produce byte-identical
+	// canonical content to the pre-recordId format, so all existing signatures
+	// keep verifying. Do NOT move this field.
+	RecordID string `json:"recordId,omitempty"`
 }
 
 // signableContent is the internal canonical type whose json tags and field
@@ -43,6 +49,12 @@ type signableAuditContent struct {
 	ConsentRef        string `json:"consentRef"`
 	SubjectPCI        string `json:"subjectPCI"`
 	PayloadBundleHash string `json:"payloadBundleHash"`
+
+	// RecordID is the emitter-minted unique id (ULID; HA design spec §5.1).
+	// APPENDED LAST with omitempty: records without one produce byte-identical
+	// canonical content to the pre-recordId format, so all existing signatures
+	// keep verifying. Do NOT move this field.
+	RecordID string `json:"recordId,omitempty"`
 }
 
 // AuditAppendRequest is the POST /append body a gateway sends to the Audit Plane:
@@ -75,6 +87,7 @@ func SignableContent(r AuditRecord) []byte {
 		ConsentRef:        r.ConsentRef,
 		SubjectPCI:        r.SubjectPCI,
 		PayloadBundleHash: r.PayloadBundleHash,
+		RecordID:          r.RecordID,
 	})
 	return b
 }
