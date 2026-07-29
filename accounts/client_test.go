@@ -91,6 +91,42 @@ func TestClient_SubmitPoP(t *testing.T) {
 	}
 }
 
+// TestClient_SubmitPoP_MessageFrames verifies the library-self-declared frame
+// versions ride the pop body when the RegistrationRequest carries them, and that
+// an empty declaration omits the key entirely — the wire body stays byte-identical
+// to the pre-messageFrames shape (same additive contract as CreateWithPayerIDs).
+func TestClient_SubmitPoP_MessageFrames(t *testing.T) {
+	var got map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /clients/client-42/pop", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	reg := shnsdk.RegistrationRequest{
+		ID: "client-42", Role: "provider", EncPub: "ENC", SignPub: "SIGN",
+		BaseURL: "https://x.example", Pop: "POP",
+		MessageFrames: []string{"v1"},
+	}
+	if err := NewClient(srv.URL, "tok-1").SubmitPoP(context.Background(), "client-42", reg); err != nil {
+		t.Fatalf("SubmitPoP: %v", err)
+	}
+	frames, ok := got["messageFrames"].([]any)
+	if !ok || len(frames) != 1 || frames[0] != "v1" {
+		t.Fatalf("pop body messageFrames = %v, want [v1] (full: %+v)", got["messageFrames"], got)
+	}
+
+	got = nil
+	reg.MessageFrames = nil
+	if err := NewClient(srv.URL, "tok-1").SubmitPoP(context.Background(), "client-42", reg); err != nil {
+		t.Fatalf("SubmitPoP (no frames): %v", err)
+	}
+	if _, present := got["messageFrames"]; present {
+		t.Fatalf("empty MessageFrames must omit the key, got %+v", got)
+	}
+}
+
 // TestClient_SubmitPoP_Error verifies a 4xx/5xx response is surfaced as an error
 // containing the status and the server body text.
 func TestClient_SubmitPoP_Error(t *testing.T) {

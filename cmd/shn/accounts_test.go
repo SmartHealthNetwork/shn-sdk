@@ -293,6 +293,50 @@ func TestRotate_AgainstStubRegistrar(t *testing.T) {
 	}
 }
 
+// TestRegisterAccounts_PayerIDFlag drives the repeatable -payer-id system=value flag
+// on register --accounts: valid values reach the create body as PayerIdentifier
+// objects, and a malformed value is a usage error (exit 2) before any HTTP call.
+func TestRegisterAccounts_PayerIDFlag(t *testing.T) {
+	var gotCreate map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /clients", func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		_ = json.NewDecoder(r.Body).Decode(&gotCreate)
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "acme-1"})
+	})
+	mux.HandleFunc("POST /clients/{id}/pop", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	})
+	acct := httptest.NewServer(mux)
+	defer acct.Close()
+	cache := filepath.Join(t.TempDir(), "creds")
+	writeTestCache(t, cache, acct.URL, "id-token-xyz")
+
+	_, stderr, code := runCLI2("register", "--accounts", acct.URL, "--cache", cache,
+		"--role", "payer", "--name", "acme", "--base-url", "https://acme.example",
+		"-payer-id", "https://example.org/payer=ACME", "-payer-id", "urn:oid:2.16.840.1.113883.6.300=12345",
+		"-out", t.TempDir())
+	if code != 0 {
+		t.Fatalf("register exit %d stderr=%s", code, stderr)
+	}
+	pids, ok := gotCreate["payerIds"].([]any)
+	if !ok || len(pids) != 2 {
+		t.Fatalf("payerIds not on the wire: %+v", gotCreate)
+	}
+	first, _ := pids[0].(map[string]any)
+	if first["system"] != "https://example.org/payer" || first["value"] != "ACME" {
+		t.Fatalf("payerIds[0]: %+v", first)
+	}
+	// Malformed flag value → usage error (exit 2) before any HTTP call.
+	gotCreate = nil
+	_, _, code = runCLI2("register", "--accounts", acct.URL, "--cache", cache,
+		"--role", "payer", "--name", "acme", "--base-url", "https://x",
+		"-payer-id", "no-equals-sign", "-out", t.TempDir())
+	if code != 2 || gotCreate != nil {
+		t.Fatalf("bad -payer-id: want exit 2 with no HTTP call, got code=%d create=%v", code, gotCreate)
+	}
+}
+
 // TestRotate_RequiresFlags: rotate needs an id and a registrar.
 func TestRotate_RequiresFlags(t *testing.T) {
 	cases := [][]string{

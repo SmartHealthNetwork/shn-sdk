@@ -95,7 +95,7 @@ usage: shn <command> [flags]
 
 commands:
   keygen        generate signing+encryption keys and a public manifest snippet
-  register      register a holder: --accounts (Accounts service) or --registrar (operator)
+  register      register a holder: --accounts (Accounts service) or --registrar (operator); -payer-id system=value (repeatable, role=payer) declares payer identities
   eligibility   run a coverage-eligibility round-trip through the Hub
   priorauth     run a prior-authorization (CRD→DTR→PAS) through the Hub
   login         authenticate the CLI to the Accounts service (OAuth loopback-PKCE)

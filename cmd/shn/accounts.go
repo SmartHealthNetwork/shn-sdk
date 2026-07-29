@@ -27,6 +27,21 @@ import (
 	acct "github.com/SmartHealthNetwork/shn-sdk/accounts"
 )
 
+// payerIDList is a repeatable -payer-id system=value flag (FR-G42 Gate A
+// declaration; role=payer only — the server enforces the role rule).
+type payerIDList []shnsdk.PayerIdentifier
+
+func (p *payerIDList) String() string { return fmt.Sprintf("%v", []shnsdk.PayerIdentifier(*p)) }
+
+func (p *payerIDList) Set(v string) error {
+	sys, val, ok := strings.Cut(v, "=")
+	if !ok || sys == "" || val == "" {
+		return fmt.Errorf("expected system=value, got %q", v)
+	}
+	*p = append(*p, shnsdk.PayerIdentifier{System: sys, Value: val})
+	return nil
+}
+
 // splitPositional pulls a single leading positional argument (e.g. the client/holder
 // id for `revoke`/`rotate`) out of args so flags may appear before or after it. If the
 // first arg starts with "-" it is treated as a flag and no positional is taken. Returns
@@ -59,6 +74,8 @@ func cmdRegisterAccounts(args []string, stdout, stderr io.Writer) int {
 	name := fs.String("name", "", "client display name (required)")
 	baseURL := fs.String("base-url", "", "holder externally reachable base URL (required)")
 	out := fs.String("out", ".", "key directory (loaded if present, else generated)")
+	var payerIDs payerIDList
+	fs.Var(&payerIDs, "payer-id", "declared payer identity as system=value (repeatable; role=payer only)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -88,7 +105,7 @@ func cmdRegisterAccounts(args []string, stdout, stderr io.Writer) int {
 	encPub := base64.StdEncoding.EncodeToString(id.EncPub[:])
 	signPub := base64.StdEncoding.EncodeToString(id.SignPub)
 
-	assignedID, err := c.Create(context.Background(), *name, *role, encPub, signPub, *baseURL)
+	assignedID, err := c.CreateWithPayerIDs(context.Background(), *name, *role, encPub, signPub, *baseURL, payerIDs)
 	if err != nil {
 		fmt.Fprintf(stderr, "shn register: %v\n", err)
 		return 1

@@ -80,12 +80,23 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 // Create is step one of two-step registration: POST /clients assigns a server id
 // for the pending client and returns it.
 func (c *Client) Create(ctx context.Context, name, role, encPub, signPub, baseURL string) (string, error) {
-	body := map[string]string{
+	return c.CreateWithPayerIDs(ctx, name, role, encPub, signPub, baseURL, nil)
+}
+
+// CreateWithPayerIDs is Create carrying the payer's declared payer
+// identities (FR-G42 Gate A; role=payer only — the server rejects payerIds
+// on other roles). Additive: nil/empty payerIDs omits the key entirely, so
+// the wire body is byte-identical to the pre-payerIds Create.
+func (c *Client) CreateWithPayerIDs(ctx context.Context, name, role, encPub, signPub, baseURL string, payerIDs []shnsdk.PayerIdentifier) (string, error) {
+	body := map[string]any{
 		"name":    name,
 		"role":    role,
 		"encPub":  encPub,
 		"signPub": signPub,
 		"baseURL": baseURL,
+	}
+	if len(payerIDs) > 0 {
+		body["payerIds"] = payerIDs
 	}
 	respBody, err := c.do(ctx, http.MethodPost, "/clients", body)
 	if err != nil {
@@ -107,12 +118,19 @@ func (c *Client) Create(ctx context.Context, name, role, encPub, signPub, baseUR
 // the proof-of-possession (built over the server-assigned id) so the Accounts
 // service can register the holder with the registrar.
 func (c *Client) SubmitPoP(ctx context.Context, id string, reg shnsdk.RegistrationRequest) error {
-	body := map[string]string{
+	body := map[string]any{
 		"pop":     reg.Pop,
 		"encPub":  reg.EncPub,
 		"signPub": reg.SignPub,
 		"baseURL": reg.BaseURL,
 		"role":    reg.Role,
+	}
+	// Library-self-declared frame versions (RegistrationRequest.MessageFrames)
+	// ride the pop like the keys do — outside the operator-vouched create-time
+	// fields. Additive: empty omits the key, so the wire body is byte-identical
+	// to the pre-messageFrames pop (same contract as CreateWithPayerIDs).
+	if len(reg.MessageFrames) > 0 {
+		body["messageFrames"] = reg.MessageFrames
 	}
 	_, err := c.do(ctx, http.MethodPost, "/clients/"+id+"/pop", body)
 	return err
