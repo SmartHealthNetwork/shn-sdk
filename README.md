@@ -110,7 +110,20 @@ leave your machine. The browser sign-in happens once and the token is cached at
 ```sh
 # 1. Log in (opens a browser for sign-in; token cached at ~/.shn/credentials).
 shn login --accounts https://accounts.shn-preview.org
+```
 
+On a machine with no browser (SSH session, container, CI), use the headless flow —
+it auto-activates over SSH and on Linux without a display, or force it with the flag:
+
+    shn login --accounts https://accounts.shn-preview.org --no-browser
+
+The CLI prints a sign-in URL. Open it in a browser on any machine, sign in, and the
+page shows a login code — paste it back into the CLI prompt. Codes expire after about
+5 minutes; if the CLI reports the code expired, just re-run `shn login`. Only paste
+codes from a `shn login` you started yourself — treat a sign-in URL someone sends you
+as a phishing attempt.
+
+```sh
 # 2. Register a client (keys generated locally; only public keys are sent to the
 #    Accounts service). The holder id is server-assigned, e.g. acme-7f3a.
 shn register --accounts https://accounts.shn-preview.org \
@@ -216,8 +229,8 @@ covered, reason, err := id.RunEligibility(ctx, http.DefaultClient,
 
 ## Package map
 
-- `accounts/` — developer-account sign-in (loopback PKCE) + Accounts API client —
-  shared by the `shn` CLI and the SHN Kit.
+- `accounts/` — developer-account sign-in (loopback-PKCE and headless copy-paste
+  code) + Accounts API client — shared by the `shn` CLI and the SHN Kit.
 
 ## Public API
 
@@ -250,19 +263,23 @@ transaction types), `ParsePayerIdentifier` (coverage-derived payer routing), `Fe
 
 ## Accounts package (`shn-sdk/accounts`)
 
-Developer-account sign-in (loopback PKCE) and client management — the same flow the
-`shn login` / `register` / `clients` / `revoke` CLI and the SHN Kit's first-run sign-in
-drive. Import `github.com/SmartHealthNetwork/shn-sdk/accounts` to build your own sign-in
-flow instead of shelling out to the CLI.
+Developer-account sign-in (loopback-PKCE, browser mode; headless copy-paste code,
+manual mode) and client management — the same flows the `shn login` / `register` /
+`clients` / `revoke` CLI and the SHN Kit's first-run sign-in drive. Import
+`github.com/SmartHealthNetwork/shn-sdk/accounts` to build your own sign-in flow
+instead of shelling out to the CLI.
 
 | Symbol | Purpose |
 |---|---|
 | `FetchCLIConfig(ctx, hc, accountsURL)` → `CLIConfig` | Fetch the Accounts service's OIDC issuer + public client id (`GET {accounts}/cli-config`). |
 | `FetchOIDC(ctx, hc, issuer)` → `OIDC` | Fetch the issuer's OIDC discovery document (authorize + token endpoints). |
-| `StartPKCE(hc, cfg, oidc, ports, now)` → `*PKCEFlow` | Start a loopback-redirect PKCE authorization-code flow on one of `ports`. |
+| `StartPKCE(hc, cfg, oidc, ports, now)` → `*PKCEFlow` | Start a loopback-redirect PKCE authorization-code flow on one of `ports` (browser mode). |
 | `PKCEFlow.AuthorizeURL()` | The browser URL to open for sign-in. |
 | `PKCEFlow.Wait(ctx)` → `Tokens` | Block until the browser redirect completes; returns the id / access / refresh tokens. |
 | `PKCEFlow.Close()` | Tear down the loopback listener (also unblocks `Wait`). |
+| `StartManualPKCE(hc, cfg, oidc, accountsURL, now)` → `*ManualFlow` | Start a headless PKCE flow with no loopback listener: the redirect targets the accounts service's `/cli/code` copy-paste page (manual mode). |
+| `ManualFlow.AuthorizeURL()` | The hosted-UI URL to open in any browser, on any machine. |
+| `ManualFlow.Exchange(ctx, pasted)` → `Tokens` | Parse the pasted `"<state>.<code>"` string from `/cli/code`, verify it belongs to this flow, and exchange it for tokens. Returns `ErrCodeExpired` for an expired/replayed code. |
 | `Refresh(ctx, hc, tokenEndpoint, clientID, refreshToken, now)` → `Tokens` | Refresh an expired session without re-authenticating. |
 | `EmailFromIDToken(idToken)` | The signed-in developer's email from the id token (display only). |
 | `NewClient(baseURL, token)` → `*Client` | Accounts API client, authenticated with a session bearer (the id token). |

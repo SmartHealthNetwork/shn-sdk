@@ -304,6 +304,8 @@ Use the `shn` CLI with the `--accounts` flag:
 
 ```sh
 shn login --accounts https://accounts.shn-preview.org   # browser Cognito login, token cached
+# No browser on this machine (SSH/CI)? Add --no-browser — the CLI prints a URL to
+# open anywhere and you paste back the code it shows.
 shn register --accounts https://accounts.shn-preview.org \
   --role provider --name acme --base-url https://acme.example -out ./keys
 shn clients --accounts https://accounts.shn-preview.org  # list your clients

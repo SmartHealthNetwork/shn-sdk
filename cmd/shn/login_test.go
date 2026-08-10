@@ -1,15 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -83,6 +89,9 @@ func TestLogin_PKCE_CachesIDToken(t *testing.T) {
 	defer stub.Close()
 
 	cache := filepath.Join(t.TempDir(), "creds")
+
+	detectHeadless = func() bool { return false }
+	defer func() { detectHeadless = defaultDetectHeadless }()
 
 	// Inject openBrowser so the test drives the authorize URL itself: the default
 	// http.Client follows the 302 to our own loopback listener, delivering the code.
@@ -169,5 +178,238 @@ func TestLogin_RequiresAccounts(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(stderr), "accounts") {
 		t.Errorf("stderr should mention accounts: %s", stderr)
+	}
+}
+
+// syncBuffer is a goroutine-safe io.Writer the manual-mode tests poll while
+// runLogin runs concurrently (it blocks reading the paste from stdin).
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// TestHeadlessEnv: the auto-detect matrix. SSH always wins; Linux additionally
+// detects a missing X/Wayland display; darwin/windows never env-detect.
+func TestHeadlessEnv(t *testing.T) {
+	env := func(m map[string]string) func(string) string {
+		return func(k string) string { return m[k] }
+	}
+	cases := []struct {
+		name string
+		goos string
+		vars map[string]string
+		want bool
+	}{
+		{"ssh tty", "darwin", map[string]string{"SSH_TTY": "/dev/pts/0"}, true},
+		{"ssh connection", "windows", map[string]string{"SSH_CONNECTION": "1.2.3.4 22"}, true},
+		{"linux no display", "linux", map[string]string{}, true},
+		{"linux x11", "linux", map[string]string{"DISPLAY": ":0"}, false},
+		{"linux wayland", "linux", map[string]string{"WAYLAND_DISPLAY": "wayland-0"}, false},
+		{"darwin desktop", "darwin", map[string]string{}, false},
+		{"windows desktop", "windows", map[string]string{}, false},
+	}
+	for _, c := range cases {
+		if got := headlessEnv(c.goos, env(c.vars)); got != c.want {
+			t.Errorf("%s: headlessEnv = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// manualLoginStub serves cli-config + OIDC discovery + a token endpoint that
+// records the exchange form. No /authorize handler: manual mode must never hit
+// it from the CLI side (the user's browser does).
+func manualLoginStub(t *testing.T) (srv *httptest.Server, gotForm *url.Values) {
+	t.Helper()
+	var got url.Values
+	mux := http.NewServeMux()
+	mux.HandleFunc("/cli-config", func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer": base, "client_id": "cli-1", "scopes": []string{"openid", "email"},
+		})
+	})
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"authorization_endpoint": base + "/hostedui/authorize",
+			"token_endpoint":         base + "/hostedui/token",
+		})
+	})
+	mux.HandleFunc("/hostedui/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		got = r.PostForm
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id_token": idTokenWithEmail("dev@x.io"), "access_token": "at",
+			"expires_in": 3600, "token_type": "Bearer",
+		})
+	})
+	s := httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return s, &got
+}
+
+// authorizeURLFrom polls stderr for the printed "Open:" line and returns the
+// parsed authorize URL (carrying the state the /cli/code page would reflect).
+func authorizeURLFrom(t *testing.T, stderr *syncBuffer) *url.URL {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		out := stderr.String()
+		if i := strings.Index(out, "Open:  "); i >= 0 {
+			rest := out[i+len("Open:  "):]
+			if j := strings.IndexByte(rest, '\n'); j >= 0 {
+				u, err := url.Parse(strings.TrimSpace(rest[:j]))
+				if err != nil {
+					t.Fatalf("parse authorize URL: %v", err)
+				}
+				return u
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("authorize URL never printed; stderr:\n%s", stderr.String())
+	return nil
+}
+
+// TestLogin_NoBrowser_ManualPaste: --no-browser prints the authorize URL with the
+// accounts /cli/code redirect, accepts the pasted "<state>.<code>", exchanges it
+// (PKCE-verified), and caches the ID token — without ever opening a browser or a
+// loopback listener.
+func TestLogin_NoBrowser_ManualPaste(t *testing.T) {
+	srv, gotForm := manualLoginStub(t)
+	cache := filepath.Join(t.TempDir(), "creds")
+
+	openBrowser = func(u string) error {
+		t.Error("manual mode must not open a browser")
+		return nil
+	}
+	defer func() { openBrowser = defaultOpenBrowser }()
+
+	stdinR, stdinW := io.Pipe()
+	loginStdin = stdinR
+	defer func() { loginStdin = os.Stdin }()
+
+	stderr := &syncBuffer{}
+	done := make(chan int, 1)
+	go func() {
+		done <- runLogin([]string{"--accounts", srv.URL, "--cache", cache, "--no-browser"}, io.Discard, stderr)
+	}()
+
+	u := authorizeURLFrom(t, stderr)
+	q := u.Query()
+	if got, want := q.Get("redirect_uri"), srv.URL+"/cli/code"; got != want {
+		t.Errorf("redirect_uri = %q, want %q", got, want)
+	}
+	if _, err := stdinW.Write([]byte(q.Get("state") + ".test-code\n")); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-done; code != 0 {
+		t.Fatalf("login exit %d; stderr:\n%s", code, stderr.String())
+	}
+
+	if gotForm.Get("code") != "test-code" {
+		t.Errorf("token form code = %q", gotForm.Get("code"))
+	}
+	sum := sha256.Sum256([]byte(gotForm.Get("code_verifier")))
+	if base64.RawURLEncoding.EncodeToString(sum[:]) != q.Get("code_challenge") {
+		t.Error("S256(verifier) != challenge from the printed authorize URL")
+	}
+	if tok, ok := loadToken(cache, srv.URL); !ok || tok != idTokenWithEmail("dev@x.io") {
+		t.Errorf("cached token = %q, %v", tok, ok)
+	}
+}
+
+// TestLogin_ManualPaste_WrongState: a paste whose state does not match this
+// attempt is rejected (exit 1) and the token endpoint is never called.
+func TestLogin_ManualPaste_WrongState(t *testing.T) {
+	srv, gotForm := manualLoginStub(t)
+	cache := filepath.Join(t.TempDir(), "creds")
+	stdinR, stdinW := io.Pipe()
+	loginStdin = stdinR
+	defer func() { loginStdin = os.Stdin }()
+
+	stderr := &syncBuffer{}
+	done := make(chan int, 1)
+	go func() {
+		done <- runLogin([]string{"--accounts", srv.URL, "--cache", cache, "--no-browser"}, io.Discard, stderr)
+	}()
+	authorizeURLFrom(t, stderr)
+	_, _ = stdinW.Write([]byte("attacker-state.test-code\n"))
+	if code := <-done; code == 0 {
+		t.Fatal("wrong-state paste must fail login")
+	}
+	if len(*gotForm) != 0 {
+		t.Error("wrong-state paste must not reach the token endpoint")
+	}
+	if _, ok := loadToken(cache, srv.URL); ok {
+		t.Error("no credentials may be cached on a rejected paste")
+	}
+}
+
+// TestLogin_BrowserLaunchFails_FallsBackToManual: with detection pinned to
+// "desktop", a synchronous openBrowser error abandons the loopback flow and
+// restarts in manual mode (spec fallback #3, missing-launcher case).
+func TestLogin_BrowserLaunchFails_FallsBackToManual(t *testing.T) {
+	srv, _ := manualLoginStub(t)
+	cache := filepath.Join(t.TempDir(), "creds")
+
+	detectHeadless = func() bool { return false }
+	defer func() { detectHeadless = defaultDetectHeadless }()
+	openBrowser = func(u string) error { return fmt.Errorf("exec: \"xdg-open\": not found") }
+	defer func() { openBrowser = defaultOpenBrowser }()
+
+	stdinR, stdinW := io.Pipe()
+	loginStdin = stdinR
+	defer func() { loginStdin = os.Stdin }()
+
+	stderr := &syncBuffer{}
+	done := make(chan int, 1)
+	go func() {
+		done <- runLogin([]string{"--accounts", srv.URL, "--cache", cache}, io.Discard, stderr)
+	}()
+	u := authorizeURLFrom(t, stderr)
+	if got, want := u.Query().Get("redirect_uri"), srv.URL+"/cli/code"; got != want {
+		t.Errorf("fallback should re-issue the MANUAL redirect, got %q", got)
+	}
+	_, _ = stdinW.Write([]byte(u.Query().Get("state") + ".test-code\n"))
+	if code := <-done; code != 0 {
+		t.Fatalf("login exit %d; stderr:\n%s", code, stderr.String())
+	}
+}
+
+// TestReadLine_ReadError: a reader that hits EOF before any byte (stdin closed
+// out from under the paste prompt, e.g. Ctrl-D or a piped-empty stdin) reports
+// the read error rather than an empty line.
+func TestReadLine_ReadError(t *testing.T) {
+	r, w := io.Pipe()
+	_ = w.Close() // EOF, nothing ever written
+	if _, err := readLine(context.Background(), r); err == nil {
+		t.Fatal("expected an error reading from an already-closed pipe")
+	}
+}
+
+// TestReadLine_ContextDeadline: readLine honors ctx even though the underlying
+// read blocks forever (stdin has no portable deadline — see readLine's doc
+// comment on the resulting leaked reader goroutine).
+func TestReadLine_ContextDeadline(t *testing.T) {
+	r, w := io.Pipe() // never written; closed at cleanup to unblock the reader goroutine
+	t.Cleanup(func() { _ = w.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := readLine(ctx, r)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want context.DeadlineExceeded", err)
 	}
 }

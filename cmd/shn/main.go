@@ -6,7 +6,7 @@
 //	shn register     — build a proof-of-possession registration and POST it to a registrar
 //	shn eligibility  — run a coverage-eligibility round-trip through the Hub
 //	shn priorauth    — run a prior-authorization (CRD→DTR→PAS) through the Hub
-//	shn login        — authenticate the CLI to the Accounts service (OAuth loopback-PKCE)
+//	shn login        — authenticate the CLI to the Accounts service (browser PKCE; --no-browser for headless copy-paste)
 package main
 
 import (
@@ -98,7 +98,7 @@ commands:
   register      register a holder: --accounts (Accounts service) or --registrar (operator); -payer-id system=value (repeatable, role=payer) declares payer identities
   eligibility   run a coverage-eligibility round-trip through the Hub
   priorauth     run a prior-authorization (CRD→DTR→PAS) through the Hub
-  login         authenticate the CLI to the Accounts service (OAuth loopback-PKCE)
+  login         authenticate the CLI to the Accounts service (browser PKCE; --no-browser for headless copy-paste)
   clients       list your registered clients (Accounts service)
   revoke        revoke a client by id (Accounts service)
   rotate        rotate a holder's keys against the registrar (holder-self)

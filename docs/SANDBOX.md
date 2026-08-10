@@ -104,6 +104,8 @@ generated client-side — your private keys never leave your process.
 ```sh
 # Log in (opens a browser for Cognito sign-in; token cached at ~/.shn/credentials).
 shn login --accounts https://accounts.shn-preview.org
+# No browser on this machine (SSH/CI)? Add --no-browser — the CLI prints a URL to
+# open anywhere and you paste back the code it shows.
 
 # Register a client. The holder id is server-assigned and printed on success;
 # keys are written to -out.
