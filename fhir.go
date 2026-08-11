@@ -383,8 +383,13 @@ func BuildPatientAccessCapabilityStatement(created time.Time) ([]byte, error) {
 		Date:        created.UTC().Format(time.RFC3339),
 		Kind:        fhir.CapabilityStatementKindInstance,
 		FhirVersion: fhir.FHIRVersion4_0_1,
-		Format:      []string{"json"},
-		Software:    &fhir.CapabilityStatementSoftware{Name: "SHN Payer Patient Access API"},
+		// Versioned IG canonical (spec 2026-08-10 §3): the "|<version>" suffix
+		// pins the generation, matching the versioned supportedProfile below and
+		// HRex's #major.minor endpoint-code convention. This build's PDex line is
+		// pa.pdex@2.1 (sdk/contracts.go).
+		ImplementationGuide: []string{"http://hl7.org/fhir/us/davinci-pdex/ImplementationGuide/hl7.fhir.us.davinci-pdex|2.1.0"},
+		Format:              []string{"json"},
+		Software:            &fhir.CapabilityStatementSoftware{Name: "SHN Payer Patient Access API"},
 		Implementation: &fhir.CapabilityStatementImplementation{
 			Description: "SHN CMS-0057 Patient Access API (Da Vinci PDex Prior Authorization ExplanationOfBenefit).",
 		},
@@ -407,6 +412,83 @@ func BuildPatientAccessCapabilityStatement(created time.Time) ([]byte, error) {
 		}},
 	}
 	return json.Marshal(cs) // fhir.CapabilityStatement.MarshalJSON injects resourceType
+}
+
+// BuildProviderIngressCapabilityStatement returns the provider gateway's
+// Da Vinci ingress CapabilityStatement, served at GET /metadata on the
+// ingress edge (FR-37 per-role statements; spec 2026-08-10 §3 path 3). It
+// declares the CRD/DTR/PAS 2.0.1 generation this build speaks natively
+// (pa.crd@2.0 / pa.dtr@2.0 / pa.pas@2.0, sdk/contracts.go) via versioned IG
+// canonicals, and the two FHIR operations the ingress serves. CRD is CDS
+// Hooks, not FHIR REST — it is named in documentation and implementationGuide
+// only; its discovery document lives at /cds-services.
+func BuildProviderIngressCapabilityStatement(created time.Time) ([]byte, error) {
+	doc := "Da Vinci ingress for foreign EHR/CDS clients: PAS Claim/$submit, DTR $questionnaire-package (FHIR operations below), and CRD CDS Hooks discovered at /cds-services. Version-specific endpoint codes are published at /.well-known/davinci-configuration (HRex 1.2.0)."
+	sec := "SMART Backend Services (client_credentials, private_key_jwt); configuration at /.well-known/smart-configuration."
+	cs := fhir.CapabilityStatement{
+		Status:      fhir.PublicationStatusActive,
+		Date:        created.UTC().Format(time.RFC3339),
+		Kind:        fhir.CapabilityStatementKindInstance,
+		FhirVersion: fhir.FHIRVersion4_0_1,
+		Format:      []string{"json"},
+		Software:    &fhir.CapabilityStatementSoftware{Name: "SHN Provider Da Vinci Ingress"},
+		Implementation: &fhir.CapabilityStatementImplementation{
+			Description: "SHN provider gateway Da Vinci ingress (CRD 2.0.1, DTR 2.0.1, PAS 2.0.1).",
+		},
+		ImplementationGuide: []string{
+			"http://hl7.org/fhir/us/davinci-crd/ImplementationGuide/hl7.fhir.us.davinci-crd|2.0.1",
+			"http://hl7.org/fhir/us/davinci-dtr/ImplementationGuide/hl7.fhir.us.davinci-dtr|2.0.1",
+			"http://hl7.org/fhir/us/davinci-pas/ImplementationGuide/hl7.fhir.us.davinci-pas|2.0.1",
+		},
+		Rest: []fhir.CapabilityStatementRest{{
+			Mode:          fhir.RestfulCapabilityModeServer,
+			Documentation: &doc,
+			Security:      &fhir.CapabilityStatementRestSecurity{Description: &sec},
+			Resource: []fhir.CapabilityStatementRestResource{
+				{
+					Type:             fhir.ResourceTypeClaim,
+					SupportedProfile: []string{"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim|2.0.1"},
+					Operation: []fhir.CapabilityStatementRestResourceOperation{
+						{Name: "submit", Definition: "http://hl7.org/fhir/us/davinci-pas/OperationDefinition/Claim-submit"},
+					},
+				},
+				{
+					Type: fhir.ResourceTypeQuestionnaire,
+					Operation: []fhir.CapabilityStatementRestResourceOperation{
+						{Name: "questionnaire-package", Definition: "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/questionnaire-package"},
+					},
+				},
+			},
+		}},
+	}
+	return json.Marshal(cs) // fhir.CapabilityStatement.MarshalJSON injects resourceType
+}
+
+// BuildHubCapabilityStatement returns the Hub's CapabilityStatement, served
+// at GET /metadata (FR-37 per-role statements). Deliberately minimal: the Hub
+// is the payload-blind routing plane (OWD-2 — the envelope stays
+// version-blind), so this statement declares NO implementationGuide, NO
+// profiles, and NO rest resources — only that a JSON service exists here and
+// where its real surface is documented. Its two routes (POST /route,
+// GET /transport-key) are substrate wire contracts, not FHIR REST.
+func BuildHubCapabilityStatement(created time.Time) ([]byte, error) {
+	doc := "SHN Hub — payload-blind exchange routing plane. No FHIR REST surface: substrate routes are POST /route and GET /transport-key (see PARTICIPANT_PROTOCOL). The Hub never inspects payloads and advertises no payload versions."
+	cs := fhir.CapabilityStatement{
+		Status:      fhir.PublicationStatusActive,
+		Date:        created.UTC().Format(time.RFC3339),
+		Kind:        fhir.CapabilityStatementKindInstance,
+		FhirVersion: fhir.FHIRVersion4_0_1,
+		Format:      []string{"json"},
+		Software:    &fhir.CapabilityStatementSoftware{Name: "SHN Hub"},
+		Implementation: &fhir.CapabilityStatementImplementation{
+			Description: "SHN Hub routing plane (payload-blind; no FHIR resources served).",
+		},
+		Rest: []fhir.CapabilityStatementRest{{
+			Mode:          fhir.RestfulCapabilityModeServer,
+			Documentation: &doc,
+		}},
+	}
+	return json.Marshal(cs)
 }
 
 func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {

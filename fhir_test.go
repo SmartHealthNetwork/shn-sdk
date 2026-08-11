@@ -3,6 +3,7 @@ package shnsdk
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -248,10 +249,100 @@ func TestBuildPatientAccessCapabilityStatement_Shape(t *testing.T) {
 	if len(interactions) != 2 {
 		t.Errorf("want 2 interactions (read+search-type), got %d", len(interactions))
 	}
+	// FR-37 + spec 2026-08-10 §3 path 3: the statement names the IG generation
+	// it conforms to — a versioned canonical, the machine-readable sibling of
+	// the versioned supportedProfile it already carries.
+	igs, _ := m["implementationGuide"].([]any)
+	if len(igs) != 1 || igs[0] != "http://hl7.org/fhir/us/davinci-pdex/ImplementationGuide/hl7.fhir.us.davinci-pdex|2.1.0" {
+		t.Fatalf("implementationGuide = %v, want the versioned PDex 2.1.0 canonical", igs)
+	}
 	// Determinism: same input → byte-identical output.
 	b2, _ := BuildPatientAccessCapabilityStatement(at)
 	if string(b) != string(b2) {
 		t.Error("BuildPatientAccessCapabilityStatement is non-deterministic")
+	}
+}
+
+// TestBuildProviderIngressCapabilityStatement_Shape pins the provider Da Vinci
+// ingress statement (FR-37 gap closed: per-role CapabilityStatements): the
+// versioned CRD/DTR/PAS 2.0.1 IG canonicals, the two FHIR operations the
+// ingress serves (PAS Claim/$submit, DTR $questionnaire-package), and
+// determinism under a fixed clock. CRD is CDS Hooks (not FHIR REST) — it
+// appears via its IG canonical and the rest documentation, never as a
+// rest.resource.
+func TestBuildProviderIngressCapabilityStatement_Shape(t *testing.T) {
+	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	b, err := BuildProviderIngressCapabilityStatement(at)
+	if err != nil {
+		t.Fatalf("BuildProviderIngressCapabilityStatement: %v", err)
+	}
+	var cs map[string]any
+	if err := json.Unmarshal(b, &cs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cs["resourceType"] != "CapabilityStatement" || cs["kind"] != "instance" {
+		t.Fatalf("resourceType/kind wrong: %v/%v", cs["resourceType"], cs["kind"])
+	}
+	igs, _ := cs["implementationGuide"].([]any)
+	want := map[string]bool{
+		"http://hl7.org/fhir/us/davinci-crd/ImplementationGuide/hl7.fhir.us.davinci-crd|2.0.1": true,
+		"http://hl7.org/fhir/us/davinci-dtr/ImplementationGuide/hl7.fhir.us.davinci-dtr|2.0.1": true,
+		"http://hl7.org/fhir/us/davinci-pas/ImplementationGuide/hl7.fhir.us.davinci-pas|2.0.1": true,
+	}
+	if len(igs) != len(want) {
+		t.Fatalf("implementationGuide = %v, want the three 2.0.1 canonicals", igs)
+	}
+	for _, ig := range igs {
+		if s, _ := ig.(string); !want[s] {
+			t.Fatalf("unexpected implementationGuide entry %v", ig)
+		}
+	}
+	raw := string(b)
+	for _, must := range []string{
+		"OperationDefinition/Claim-submit",
+		"OperationDefinition/questionnaire-package",
+	} {
+		if !strings.Contains(raw, must) {
+			t.Fatalf("statement missing operation %q", must)
+		}
+	}
+	b2, err := BuildProviderIngressCapabilityStatement(at)
+	if err != nil || !bytes.Equal(b, b2) {
+		t.Fatal("BuildProviderIngressCapabilityStatement is not deterministic")
+	}
+}
+
+// TestBuildHubCapabilityStatement_Shape pins the Hub statement (FR-37
+// per-role): a deliberately MINIMAL kind=instance server statement with NO
+// implementationGuide and NO rest resources — the Hub is payload-blind
+// (OWD-2): it speaks no IG and must never advertise payload-version
+// knowledge. cpb-1 requires a rest element; it carries only documentation.
+func TestBuildHubCapabilityStatement_Shape(t *testing.T) {
+	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	b, err := BuildHubCapabilityStatement(at)
+	if err != nil {
+		t.Fatalf("BuildHubCapabilityStatement: %v", err)
+	}
+	var cs map[string]any
+	if err := json.Unmarshal(b, &cs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cs["resourceType"] != "CapabilityStatement" || cs["kind"] != "instance" {
+		t.Fatalf("resourceType/kind wrong: %v/%v", cs["resourceType"], cs["kind"])
+	}
+	if _, has := cs["implementationGuide"]; has {
+		t.Fatal("Hub statement must NOT declare implementationGuide (payload-blind, OWD-2)")
+	}
+	rest, _ := cs["rest"].([]any)
+	if len(rest) != 1 {
+		t.Fatalf("rest = %v, want exactly one server element (cpb-1)", rest)
+	}
+	if _, has := rest[0].(map[string]any)["resource"]; has {
+		t.Fatal("Hub statement must NOT list rest resources (no FHIR REST surface)")
+	}
+	b2, err := BuildHubCapabilityStatement(at)
+	if err != nil || !bytes.Equal(b, b2) {
+		t.Fatal("BuildHubCapabilityStatement is not deterministic")
 	}
 }
 

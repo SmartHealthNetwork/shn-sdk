@@ -120,6 +120,27 @@ verified STRICTLY in `VerifyBound` (see §4.4). A consumer whose SDK speaks a
 different version should refuse to proceed and prompt an upgrade rather than send a leg
 the sandbox may reject (`shn doctor` exits code `20` here).
 
+### Participant directory
+
+```
+GET {accounts}/participants
+```
+
+A public, same-origin, deliberately **narrow** projection of the registrar's
+`/holders` feed (§2.3): every registered participant's id, role, and declared
+contract versions — nothing else (no keys, no base URLs). Sorted by `id`.
+
+```json
+[
+  { "id": "acme-payer", "role": "payer", "contractVersions": ["pa.pas@2.0", "pa.pdex@2.1"] },
+  { "id": "acme-provider", "role": "provider" }
+]
+```
+
+`contractVersions` is omitted for a participant that never declared any
+(§2.3's field is optional). A feed error surfaces as `502` rather than a
+guess — this endpoint never invents a directory. FR-G47.
+
 ---
 
 ## 2. Identity and registration
@@ -1617,9 +1638,86 @@ conformance.
 
 ### 8.4 CapabilityStatements
 
-The payer gateway publishes a `CapabilityStatement` at `GET /metadata` for the
-CMS-0057 Patient Access API (PDex PA EOB). Participants implementing that surface
-must conform to it.
+Every SHN role publishes a `CapabilityStatement` at `GET /metadata` (FR-G45).
+Participants implementing any of these surfaces must conform to the declared
+IG canonicals and profiles.
+
+- **Payer `/metadata`** — the CMS-0057 Patient Access API (PDex PA EOB)
+  statement. `implementationGuide` carries the versioned PDex canonical
+  matching the payer's declared `pa.pdex` contract line:
+  `http://hl7.org/fhir/us/davinci-pdex/ImplementationGuide/hl7.fhir.us.davinci-pdex|2.1.0`.
+  `rest[0].resource` declares `ExplanationOfBenefit` (`read`, `search-type`)
+  against the `pdex-priorauthorization` profile.
+- **Provider ingress `GET /metadata`** — the Da Vinci ingress statement for
+  foreign EHR/CDS clients calling into the Smart Gateway's ingress edge.
+  `implementationGuide` lists the versioned CRD/DTR/PAS canonicals this build
+  speaks natively (matching its `pa.crd@2.0` / `pa.dtr@2.0` / `pa.pas@2.0`
+  contract lines):
+  ```
+  http://hl7.org/fhir/us/davinci-crd/ImplementationGuide/hl7.fhir.us.davinci-crd|2.0.1
+  http://hl7.org/fhir/us/davinci-dtr/ImplementationGuide/hl7.fhir.us.davinci-dtr|2.0.1
+  http://hl7.org/fhir/us/davinci-pas/ImplementationGuide/hl7.fhir.us.davinci-pas|2.0.1
+  ```
+  `rest[0].resource` declares the two FHIR-REST operations the ingress edge
+  actually serves: `Claim.$submit` (PAS) and `Questionnaire.$questionnaire-package`
+  (DTR). **CRD is CDS Hooks, not FHIR REST** — it is named in
+  `implementationGuide` and `implementation.description` only; its own
+  discovery document is served separately at `/cds-services`. Version-specific
+  endpoint codes for all three lines are published at
+  `/.well-known/davinci-configuration` (§8.5).
+- **Hub `GET /metadata`** — deliberately **IG-free and resource-free**: the
+  Hub is the payload-blind routing plane (OWD-2), so its statement declares
+  no `implementationGuide`, no profiles, and no `rest[0].resource` entries —
+  only that a JSON service exists here and where its real surface is
+  documented. The Hub's two routes (`POST /route`, `GET /transport-key`) are
+  substrate wire contracts, not FHIR REST, and are described in
+  `implementation.description` / `rest[0].documentation` instead.
+
+### 8.5 Da Vinci well-known configuration (`GET /.well-known/davinci-configuration`)
+
+The provider gateway's Da Vinci ingress edge (§8.4's provider-ingress
+statement) also serves the HRex 1.2.0
+[`.well-known/davinci-configuration`](http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-wellknown)
+document — plain TLS, no auth (HRex requires the document be readable without
+mTLS; it names public base URLs only). It is absent (404) when the ingress
+edge is disabled.
+
+```
+GET {provider-ingress}/.well-known/davinci-configuration
+```
+
+```json
+{
+  "identifier": { "system": "urn:shn:participant-id", "value": "acme-provider" },
+  "endpoints": {
+    "davinci_crd_hook_endpoint#2.0": "https://acme-provider.example.com/fhir",
+    "davinci_dtr_qpackage_endpoint#2.0": "https://acme-provider.example.com/fhir",
+    "davinci_pas_submission_endpoint#2.0": "https://acme-provider.example.com/fhir"
+  }
+}
+```
+
+- **`identifier`** (REQUIRED, 1..1) — namespaces the holder id under
+  `urn:shn:participant-id`. SHN has no FHIR `NamingSystem` for participant ids
+  yet, so a URN is used; additive to replace with a resolvable canonical
+  later.
+- **`endpoints`** — a `<code>#<major.minor>` → base-URL map (HRex endpoint
+  values are operation **base** URLs; callers append the actual operation
+  path, e.g. `/Claim/$submit`). Each code line derives from the ingress
+  edge's own declared `contractVersions` (§2.3) — a build that natively
+  speaks a contract earns the matching HRex code with zero new code once the
+  contract-to-code mapping exists. Today's mapping:
+
+  | Contract | HRex code |
+  |---|---|
+  | `pa.crd` | `davinci_crd_hook_endpoint` |
+  | `pa.dtr` | `davinci_dtr_qpackage_endpoint` |
+  | `pa.pas` | `davinci_pas_submission_endpoint` |
+
+  `pa.pdex` has **no** HRex code here: the patient-access endpoint belongs to
+  the payer edge, which has no config-pinned self base URL yet. Additive: a
+  future deployment adds that config field and reuses this same builder with
+  the `davinci_pdex_patient_endpoint#2.1` code.
 
 ---
 
@@ -1770,7 +1868,6 @@ must conform to it.
 | Feature | Notes |
 |---|---|
 | **Push-notify on admission** | Hub + authz poll today (~3-second cycle); push-notify is the tracked fast-follow |
-| **Per-role CapabilityStatements** | Machine-readable capability declarations for provider and Hub roles |
 | **Trust-issued PCI** | Today: deterministic hash (demo only); goal: unguessable Trust-minted PCI |
 | **Distributed replay cache** | Today: single-Hub in-process guard; goal: shared cache for horizontal scale |
 | **Audit reader access control** | Today: audit chain is open; goal: role-gated reads |
