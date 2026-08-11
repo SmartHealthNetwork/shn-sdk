@@ -1146,17 +1146,31 @@ rest          body        raw bytes — no additional encoding
 
 ```json
 {
-  "status": 422,
+  "status": 200,
   "headers": {
-    "Content-Type": "application/fhir+json"
+    "Content-Type": "application/fhir+json",
+    "contractVersion": "pa.pas@2.0"
   }
 }
 ```
 
 - `status` — the application's real HTTP status, `100`–`599`. Both 2xx and
   non-2xx answers are framed identically; there is no separate error shape.
-- `headers` — an **allowlist**, `Content-Type` only in v1. No other header
+- `headers` — an **allowlist**, widened 2026-08-11 (multi-version-contracts
+  design §4, routing) to `Content-Type` and `contractVersion`. No other header
   (hop-by-hop, cookie, or otherwise) is ever carried inside a frame.
+- `contractVersion` — the full `<contract>@<line>` token (e.g. `pa.pas@2.0`) of
+  the exchange-contract line the response body was **built at** — content-
+  descriptive, like `Content-Type`, not a negotiation echo. Present only on
+  contract-mapped legs (§8.6); a version-neutral leg's frame omits it, same as
+  every other legacy answer. **Stamped only by SHN gateways** on every framed
+  **success** (2xx) answer; **verified only by originators on ≥v0.37.0 of this
+  library** against the contract line the leg actually routed to (§8.6) —
+  disagreement is rejected before the body reaches any parser. An **absent**
+  stamp is always tolerated (a pre-version responder, or a responder on an
+  older published SDK build that does not yet emit the stamp), exactly like
+  an absent frame is tolerated today. A non-2xx frame is never stamped: its
+  body is relayed verbatim and never parsed as contract content.
 
 **Decoding is strict.** A decoder rejects (rather than silently degrading) on: an
 unknown version byte, a header length that overruns the payload or the 64 KiB
@@ -1718,6 +1732,62 @@ GET {provider-ingress}/.well-known/davinci-configuration
   the payer edge, which has no config-pinned self base URL yet. Additive: a
   future deployment adds that config field and reuses this same builder with
   the `davinci_pdex_patient_endpoint#2.1` code.
+
+### 8.6 Version-matched routing
+
+At origination, the Smart Gateway selects — for every contract-mapped leg
+(the `pa.crd` / `pa.dtr` / `pa.pas` families named in §8.4) — the highest
+contract line **both** the originating build and the recipient share,
+deterministically. Selection happens entirely at the originating gateway
+edge; the Hub stays version-blind — it never inspects `contractVersion`,
+which lives inside the seal (§6.3).
+
+- **A silent recipient** (no `contractVersions` declared at all — the default
+  for a holder that has never registered the field, §2.3) is not treated as
+  incompatible: the leg routes at the originating build's own highest native
+  line for that contract. Silence is not disagreement.
+- **A non-empty declaration is exhaustive.** Once a recipient declares *any*
+  contract-version tokens, that declaration is read as its complete
+  capability across every contract, including ones it never mentions. A
+  recipient that declares tokens but shares no line with this build for the
+  leg's contract — or omits the contract entirely from a non-empty
+  declaration — fails closed. This is deliberately **stricter** than the
+  operator connectivity-check drift rule (FR-G46), which treats silence on
+  one contract as "not drift": routing compares two parties' capabilities to
+  decide whether a leg can run at all, drift compares two descriptions of the
+  *same* endpoint after the fact.
+- **Refusal is a legible `422`**, never the Hub's generic `502`/`"hub routing
+  failed"`. It names the failing contract, the leg, and both parties'
+  declared tokens; a duplicate declared token (admission validates shape only
+  and tolerates duplicates by design — the same `messageFrames` precedent)
+  collapses to one entry. Verbatim example — this build speaks `pa.pas@2.0`
+  only, and `acme-payer` has declared `pa.pas@3.0` only:
+
+  ```json
+  {"error":"no shared contract line for pa.pas (leg pas-claim): this gateway speaks pa.pas@2.0; recipient \"acme-payer\" declares pa.pas@3.0 — no bridge available"}
+  ```
+
+- **A pended exchange pins its line at origination.** A PAS submit that
+  returns `pended` (§7b) selects its contract-version line once, at the leg
+  that ran to `PENDED`, and every resume leg (the ClaimUpdate amend, §7b.2)
+  reuses that exact line — it is never re-selected. The pin lives beside the
+  already-pinned `recipient` in the provider's in-memory pend state, not the
+  durable exchange store — the store is metadata-only by its own invariant and
+  gates nothing, so a routing decision cannot live there.
+- **The frame stamp verifies the routed line**, not the reverse — see §6.3: a
+  responder's framed 2xx answer carries the line it actually built at; the
+  originator rejects a stamp that disagrees with the line it routed the leg
+  to, and tolerates an absent one.
+- **The foreign Da Vinci peer** (native-forward payer mode, `PAYER_DAVINCI_*`)
+  is filtered by the same rule, sourced from the operator's declared
+  `PAYER_DAVINCI_CONTRACT_VERSIONS` instead of the registry: a leg whose
+  contract shares no line with the operator's declaration is refused
+  **before** anything is sent to the partner — zero bytes leave the gateway.
+  Leaving `PAYER_DAVINCI_CONTRACT_VERSIONS` unset leaves native-forward legs
+  unfiltered (today's default). See the gateway's `docs/CONFIGURATION.md`.
+
+See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md`
+§4 and §7 item 3.
 
 ---
 

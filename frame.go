@@ -42,10 +42,19 @@ type HTTPFrameHeader struct {
 	Headers map[string]string `json:"headers,omitempty"`
 }
 
+// FrameHeaderContractVersion is the frame header carrying the full
+// "<contract>@<line>" token of the line the sealed payload was BUILT at
+// (spec 2026-08-10 §4: each frame is one contract's message; the token is
+// content-descriptive like Content-Type, not a negotiation echo). Inside the
+// ciphertext, so the Hub cannot see it. Absence means "pre-version contract"
+// (the frames-absent lane precedent) and is always tolerated.
+const FrameHeaderContractVersion = "contractVersion"
+
 // allowedFrameHeaders is the produce+consume header allowlist (spec §3): relaying
 // arbitrary headers through the seal would be a smuggling vector (cookies,
-// hop-by-hop, internal headers). Widening it is a spec change.
-var allowedFrameHeaders = map[string]bool{"Content-Type": true}
+// hop-by-hop, internal headers). Widening it is a spec change — contractVersion
+// was added by the 2026-08-10 multi-version-contracts design §4 (slice 3).
+var allowedFrameHeaders = map[string]bool{"Content-Type": true, FrameHeaderContractVersion: true}
 
 // IsFramed reports whether payload begins with the v1 frame magic. Bare legacy
 // payloads are all text formats, which cannot begin 0x00 — see the spec's
@@ -62,6 +71,40 @@ func EncodeHTTPFrame(status int, contentType string, body []byte) ([]byte, error
 	hdr := HTTPFrameHeader{Status: status}
 	if contentType != "" {
 		hdr.Headers = map[string]string{"Content-Type": contentType}
+	}
+	hj, err := json.Marshal(hdr)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: marshal frame header: %w", err)
+	}
+	out := make([]byte, 0, 6+len(hj)+len(body))
+	out = append(out, frameMagic, frameVersion1)
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], uint32(len(hj)))
+	out = append(out, l[:]...)
+	out = append(out, hj...)
+	return append(out, body...), nil
+}
+
+// EncodeHTTPFrameHeaders seals an application answer with an explicit header
+// map. Every header must be allowlisted — producing a header the consumer
+// would strip (DecodeHTTPFrame deletes non-allowlisted keys) is a caller bug
+// surfaced as an error, never a silent drop. Empty-valued headers are omitted.
+func EncodeHTTPFrameHeaders(status int, headers map[string]string, body []byte) ([]byte, error) {
+	if status < 100 || status > 599 {
+		return nil, fmt.Errorf("shnsdk: frame status %d out of range", status)
+	}
+	hdr := HTTPFrameHeader{Status: status}
+	for k, v := range headers {
+		if !allowedFrameHeaders[k] {
+			return nil, fmt.Errorf("shnsdk: frame header %q is not allowlisted", k)
+		}
+		if v == "" {
+			continue
+		}
+		if hdr.Headers == nil {
+			hdr.Headers = map[string]string{}
+		}
+		hdr.Headers[k] = v
 	}
 	hj, err := json.Marshal(hdr)
 	if err != nil {

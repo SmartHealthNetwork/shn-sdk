@@ -87,6 +87,67 @@ func TestDecodeHTTPFrameDropsNonAllowlistedHeaders(t *testing.T) {
 	}
 }
 
+// TestEncodeHTTPFrameHeaders_ContractVersion: the slice-3 allowlist widening
+// (spec 2026-08-10 §4 "frame header carries the full token"; the 2026-07-17
+// frame spec §3 names widening a documented spec change). The contractVersion
+// header round-trips produce→consume; the legacy Content-Type-only encoder is
+// byte-unchanged; a non-allowlisted header is refused at ENCODE (producing a
+// header the consumer would strip is a caller bug, not a silent drop).
+func TestEncodeHTTPFrameHeaders_ContractVersion(t *testing.T) {
+	body := []byte(`{"resourceType":"ClaimResponse"}`)
+	framed, err := EncodeHTTPFrameHeaders(200, map[string]string{
+		"Content-Type":             "application/fhir+json",
+		FrameHeaderContractVersion: "pa.pas@2.0",
+	}, body)
+	if err != nil {
+		t.Fatalf("EncodeHTTPFrameHeaders: %v", err)
+	}
+	hdr, got, err := DecodeHTTPFrame(framed)
+	if err != nil {
+		t.Fatalf("DecodeHTTPFrame: %v", err)
+	}
+	if hdr.Status != 200 || !bytes.Equal(got, body) {
+		t.Fatalf("round-trip: status=%d body=%q", hdr.Status, got)
+	}
+	if hdr.Headers[FrameHeaderContractVersion] != "pa.pas@2.0" {
+		t.Fatalf("contractVersion header lost on consume: %v", hdr.Headers)
+	}
+	if hdr.Headers["Content-Type"] != "application/fhir+json" {
+		t.Fatalf("Content-Type lost: %v", hdr.Headers)
+	}
+
+	// Refuse a non-allowlisted header at encode.
+	if _, err := EncodeHTTPFrameHeaders(200, map[string]string{"Cookie": "x"}, body); err == nil {
+		t.Fatal("non-allowlisted header must be refused at encode")
+	}
+
+	// The legacy encoder's bytes are UNCHANGED (wire regression fence).
+	legacy1, err1 := EncodeHTTPFrame(200, "application/fhir+json", body)
+	legacy2, err2 := EncodeHTTPFrameHeaders(200, map[string]string{"Content-Type": "application/fhir+json"}, body)
+	if err1 != nil || err2 != nil || !bytes.Equal(legacy1, legacy2) {
+		t.Fatal("EncodeHTTPFrameHeaders with Content-Type only must be byte-identical to EncodeHTTPFrame")
+	}
+}
+
+// TestDecodeHTTPFrame_StillDropsUnknownHeaders: consume-side allowlisting is
+// unchanged for anything outside the widened set (no smuggling regression).
+// EncodeHTTPFrameHeaders refuses the smuggled key, so build the raw frame via
+// the file's EXISTING mustEncodeRawFrame helper (frame_test.go:68's idiom —
+// read its signature and match it).
+func TestDecodeHTTPFrame_StillDropsUnknownHeaders(t *testing.T) {
+	frame := mustEncodeRawFrame(t, `{"status":200,"headers":{"Content-Type":"application/json","X-Internal":"leak","contractVersion":"pa.pas@2.0"}}`, []byte(`{}`))
+	hdr, _, err := DecodeHTTPFrame(frame)
+	if err != nil {
+		t.Fatalf("DecodeHTTPFrame: %v", err)
+	}
+	if _, leaked := hdr.Headers["X-Internal"]; leaked {
+		t.Fatal("non-allowlisted header survived consume")
+	}
+	if hdr.Headers[FrameHeaderContractVersion] != "pa.pas@2.0" {
+		t.Fatal("allowlisted contractVersion must survive consume")
+	}
+}
+
 func TestEncodeHTTPFrameRejectsBadStatus(t *testing.T) {
 	for _, s := range []int{0, 99, 600} {
 		if _, err := EncodeHTTPFrame(s, "", nil); err == nil {
