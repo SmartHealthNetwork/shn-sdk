@@ -28,6 +28,11 @@ type Holder struct {
 	// negotiates (library-self-declared at registration; "v1" = the binary
 	// status+headers+body response frame). Absent ⇒ legacy bare payloads.
 	MessageFrames []string `json:"messageFrames,omitempty"`
+	// ContractVersions are the exchange-contract version tokens this holder's
+	// build speaks natively ("pa.pas@2.0"-style; library-self-declared at
+	// registration, spec 2026-08-10 §3). Display/discovery only in slice 1;
+	// version-aware routing consumes it in slice 3. Absent ⇒ pre-contract build.
+	ContractVersions []string `json:"contractVersions,omitempty"`
 }
 
 // EncKey decodes the holder's X25519 public key.

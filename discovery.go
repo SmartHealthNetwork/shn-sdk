@@ -7,12 +7,18 @@ package shnsdk
 // registrar /holders feed; AuthzPub from /pubkey). No keys are embedded (no drift).
 // MUST stay wire-identical to the substrate's accountsvc.Discovery (test/sdkparity).
 type Discovery struct {
-	Sandbox             bool               `json:"sandbox"`
-	SyntheticDataOnly   bool               `json:"syntheticDataOnly"`
-	WireProtocolVersion string             `json:"wireProtocolVersion"`
-	IGVersions          map[string]string  `json:"igVersions"`
-	Endpoints           DiscoveryEndpoints `json:"endpoints"`
-	AuthzPublicKeyURL   string             `json:"authzPublicKeyURL"`
+	Sandbox             bool              `json:"sandbox"`
+	SyntheticDataOnly   bool              `json:"syntheticDataOnly"`
+	WireProtocolVersion string            `json:"wireProtocolVersion"`
+	IGVersions          map[string]string `json:"igVersions"`
+	// ContractVersions are the exchange-contract version tokens this substrate
+	// speaks natively ("<contract>@<line>", e.g. "pa.pas@2.0" — spec 2026-08-10 §3).
+	// Supersedes the scalar-per-IG IGVersions map for per-line truth (IGVersions
+	// stays for compat). ADDITIVE optional field — an older consumer ignores it;
+	// does NOT bump wireProtocolVersion. Producer: internal/accountsvc/discovery.go.
+	ContractVersions  []string           `json:"contractVersions,omitempty"`
+	Endpoints         DiscoveryEndpoints `json:"endpoints"`
+	AuthzPublicKeyURL string             `json:"authzPublicKeyURL"`
 	// HubTransportKeyURL is the URL of the Hub's X-Hub-Assertion verification
 	// key (hub GET /transport-key). Consumers use this to verify per-hop
 	// transport assertions on inbound messages. ADDITIVE optional field — an

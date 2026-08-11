@@ -76,6 +76,26 @@ func TestRegistrationAdvertisesMessageFrames(t *testing.T) {
 	}
 }
 
+// TestRegistrationCarriesContractVersions verifies Registration() self-declares
+// the library's contract-version tokens, and that the PoP signing payload stays
+// the frozen 5-field layout (contractVersions rides OUTSIDE it, like messageFrames).
+func TestRegistrationCarriesContractVersions(t *testing.T) {
+	id, err := GenerateIdentity("ext-provider") // the file's existing idiom (registration_test.go:15)
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	req := id.Registration("provider", "https://p.example")
+	if len(req.ContractVersions) == 0 {
+		t.Fatal("Registration() did not self-declare contractVersions")
+	}
+	want := SupportedContractVersions()
+	for i := range want {
+		if req.ContractVersions[i] != want[i] {
+			t.Fatalf("ContractVersions[%d] = %q, want %q", i, req.ContractVersions[i], want[i])
+		}
+	}
+}
+
 // mustB64 decodes std-base64, failing the test on error.
 func mustB64(t *testing.T, s string) []byte {
 	t.Helper()

@@ -66,6 +66,7 @@ Returns (the Accounts service, `accounts.<apex>`):
   "syntheticDataOnly": true,
   "wireProtocolVersion": "1.1.0",
   "igVersions": { "uscore": "6.1.0", "crd": "2.0.1", "dtr": "2.0.1", "pas": "2.0.1", "pdex": "2.1.0" },
+  "contractVersions": ["pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0", "pa.pdex@2.1"],
   "endpoints": {
     "hub": "https://hub.<apex>",
     "authz": "https://authz.<apex>",
@@ -92,6 +93,7 @@ Returns (the Accounts service, `accounts.<apex>`):
 | `syntheticDataOnly` | Always `true` — **synthetic personas only, never production PHI**. |
 | `wireProtocolVersion` | The wire-protocol version the sandbox speaks (see below). A consumer rejects a descriptor whose version it does not support **before** running any leg. |
 | `igVersions` | Pinned IG versions the substrate validates against (server-side gate). |
+| `contractVersions` | The exchange-contract version tokens (`<contract>@<line>`, e.g. `"pa.pas@2.0"`) **this substrate** speaks natively — the same declaration grammar and caps as a holder's own `contractVersions` (§2.3). Today's set: `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1`. Additive field — its addition did **not** bump `wireProtocolVersion`. Version-aware routing and translation consume these in later slices; today they are declaration + surfacing. |
 | `endpoints.{hub,authz,registrar,patientAccess}` | The live participant-facing base URLs. `hub` is where you originate a leg (`POST /route`); `authz` mints/serves tokens; `registrar` serves the holder feed; `patientAccess` is the FHIR/Patient-Access surface (`GET /metadata`). |
 | `authzPublicKeyURL` | Where to fetch the Authorization Framework Ed25519 verifying key (`{authz}/pubkey`). |
 | `hubTransportKeyURL` | Where to fetch the Hub's Ed25519 transport verifying key (`{hub}/transport-key` → `{"pubkey": "<base64 ed25519>"}`). Responders use this key to verify `X-Hub-Assertion` on every inbound forward (§6.2a). |
@@ -216,6 +218,7 @@ Body (JSON, all keys base64-standard-encoded):
   "signPub": "<base64 Ed25519 32-byte public key>",
   "baseURL": "https://external-payer.example.com",
   "messageFrames": ["v1"],
+  "contractVersions": ["pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0", "pa.pdex@2.1"],
   "pop":     "<base64 Ed25519 signature — registration proof-of-possession>"
 }
 ```
@@ -228,6 +231,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `signPub` | Base64 Ed25519 public key (32 bytes raw) — assertion verification |
 | `baseURL` | Where the Hub delivers inbound envelopes. Must be a publicly resolvable https URL — no userinfo, no ASCII control characters (< 0x20) — and must not redirect at /substrate/inbound (the Hub refuses redirects). Originator-only clients are never dialed but the URL must still validate. |
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
+| `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the substrate does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`, FR-G42). Today's substrate-native set is `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1` (§1a). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. Version-aware routing and translation consume these in later slices; today they are declaration + surfacing. |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
 
 **Proof-of-possession (`pop`).** In addition to the Trust admin gate, the
@@ -271,7 +275,10 @@ Authorization Framework on their next poll.
 
 **`GET /holders`** — returns all dynamically registered holders as a JSON array of
 the same shape as the `POST /register` body. The Hub and Authorization Framework
-poll this endpoint on a ~3-second interval to pick up new admissions.
+poll this endpoint on a ~3-second interval to pick up new admissions. Each row
+republishes the holder's `messageFrames` and `contractVersions` **verbatim** — the
+feed is the same self-declared value the holder registered or last rotated, not
+re-derived or re-validated beyond the admission-time shape check.
 
 **Registry merge rule:** `registry = manifest base ∪ dynamic`. Dynamic holders are
 appended; the **manifest base is immutable at runtime** (founding holders are never
@@ -404,6 +411,7 @@ X-Holder-Assertion: base64(json(assertion))   // holderId="external-payer", audi
   "signPub": "<base64 Ed25519 32-byte public key — NEW>",
   "baseURL": "https://external-payer.example.com",
   "messageFrames": ["v1"],
+  "contractVersions": ["pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0", "pa.pdex@2.1"],
   "pop":     "<base64 Ed25519 signature over the canonical payload, by the NEW signPub private key>"
 }
 ```
@@ -420,6 +428,18 @@ build, so the registrar re-reads it from every rotate. **Include `messageFrames`
 every rotate**, or your advertised capability silently resets to legacy (no framing);
 a codec-capable SDK/gateway build re-stamps it for you, so a library-driven rotate
 carries it automatically — hand-built rotate bodies must not drop it.
+
+**Rotation refreshes `contractVersions` the same way** — same rule as
+`messageFrames`: it is a self-declared property of the *current* build, not an
+operator-attested field, so the registrar re-reads it from every rotate rather than
+carrying the prior value forward. **Include `contractVersions` on every rotate**
+you submit by hand, or your advertised set silently clears. The registrar
+admission-validates shape only (grammar `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`,
+≤16 tokens, each 3–48 bytes) — same as at registration (§2.3) — and the tokens
+remain outside the PoP signing payload, so rotating them never changes your `pop`.
+This is additive: no `wireProtocolVersion` bump was needed to add it. Version-aware
+routing and translation consume these in later slices; today they are declaration +
+surfacing.
 
 Rejection cases (checks are ordered):
 
@@ -1607,6 +1627,17 @@ must conform to it.
 
 ### Changelog
 
+- **2026-08-11 — Contract-version declaration + surfacing (`contractVersions`, §1a, §2.3, §2.4).**
+  Registration and rotation MAY carry a self-declared `contractVersions` array of
+  `<contract>@<line>` tokens (grammar `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`, ≤16
+  tokens, each 3–48 bytes), outside the PoP payload, and the `/holders` feed republishes
+  them verbatim. The discovery descriptor now also advertises the substrate's own
+  native set (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1`, §1a). This is
+  **additive** — no `wireProtocolVersion` bump — and tokens are self-asserted
+  capability, not admission-verified identity (contrast the operator-vouched
+  `payerIds`). Nothing in this slice branches behavior on the declared tokens:
+  version-aware routing and translation consume these in later slices; today they are
+  declaration + surfacing. See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md` §3.
 - **2026-07-17 — Message frame v1: negotiated, sealed application answers (§6.2, §6.3).** A
   frame-capable responder now carries its real application status (success or not) and body
   inside the sealed response leg, versus the Hub's implicit `200`-on-bare-payload / generic

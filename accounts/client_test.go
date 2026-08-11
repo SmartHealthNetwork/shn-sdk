@@ -127,6 +127,50 @@ func TestClient_SubmitPoP_MessageFrames(t *testing.T) {
 	}
 }
 
+// TestClient_SubmitPoP_ContractVersions verifies the library-self-declared
+// contract-version tokens ride the pop body when the RegistrationRequest carries
+// them, driving the REAL producer (Identity.Registration) rather than a
+// hand-built RegistrationRequest — this is the path every self-serve lane
+// (cloudctl identity, kit bootstrap, shn CLI) actually calls. An empty
+// declaration omits the key entirely (same additive contract as MessageFrames).
+func TestClient_SubmitPoP_ContractVersions(t *testing.T) {
+	var got map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /clients/client-42/pop", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	id, err := shnsdk.GenerateIdentity("client-42")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	reg := id.Registration("provider", "https://x.example")
+	if err := NewClient(srv.URL, "tok-1").SubmitPoP(context.Background(), "client-42", reg); err != nil {
+		t.Fatalf("SubmitPoP: %v", err)
+	}
+	want := shnsdk.SupportedContractVersions()
+	versions, ok := got["contractVersions"].([]any)
+	if !ok || len(versions) != len(want) {
+		t.Fatalf("pop body contractVersions = %v, want %v (full: %+v)", got["contractVersions"], want, got)
+	}
+	for i, v := range want {
+		if versions[i] != v {
+			t.Fatalf("pop body contractVersions[%d] = %v, want %q", i, versions[i], v)
+		}
+	}
+
+	got = nil
+	reg.ContractVersions = nil
+	if err := NewClient(srv.URL, "tok-1").SubmitPoP(context.Background(), "client-42", reg); err != nil {
+		t.Fatalf("SubmitPoP (no contract versions): %v", err)
+	}
+	if _, present := got["contractVersions"]; present {
+		t.Fatalf("empty ContractVersions must omit the key, got %+v", got)
+	}
+}
+
 // TestClient_SubmitPoP_Error verifies a 4xx/5xx response is surfaced as an error
 // containing the status and the server body text.
 func TestClient_SubmitPoP_Error(t *testing.T) {

@@ -125,12 +125,19 @@ func (c *Client) SubmitPoP(ctx context.Context, id string, reg shnsdk.Registrati
 		"baseURL": reg.BaseURL,
 		"role":    reg.Role,
 	}
-	// Library-self-declared frame versions (RegistrationRequest.MessageFrames)
-	// ride the pop like the keys do — outside the operator-vouched create-time
-	// fields. Additive: empty omits the key, so the wire body is byte-identical
-	// to the pre-messageFrames pop (same contract as CreateWithPayerIDs).
+	// Library-self-declared frame versions (RegistrationRequest.MessageFrames) and
+	// contract-version tokens (RegistrationRequest.ContractVersions) ride the pop
+	// like the keys do — outside the operator-vouched create-time fields.
+	// Additive: empty omits the key, so the wire body is byte-identical to the
+	// pre-messageFrames/pre-contractVersions pop (same contract as
+	// CreateWithPayerIDs). This is the ONLY self-serve registration path (cloudctl
+	// identity, kit bootstrap, shn CLI all call it) — dropping either key here
+	// silently strips the capability from every hosted tenant.
 	if len(reg.MessageFrames) > 0 {
 		body["messageFrames"] = reg.MessageFrames
+	}
+	if len(reg.ContractVersions) > 0 {
+		body["contractVersions"] = reg.ContractVersions
 	}
 	_, err := c.do(ctx, http.MethodPost, "/clients/"+id+"/pop", body)
 	return err

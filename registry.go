@@ -12,13 +12,14 @@ import (
 // decoded, in-memory peer-cache entry keyed by id, carrying the keys as usable
 // values.
 type RegistryEntry struct {
-	ID            string
-	Role          string            // "provider" | "payer" | "facility" | "phg" | "partner" (role-based routing / audit-append trust)
-	EncPub        *[32]byte         // X25519 public key for envelope encryption
-	SignPub       ed25519.PublicKey // Ed25519 public key for signature verification
-	BaseURL       string
-	PayerIDs      []PayerIdentifier // operator-attested payer-identity claims (role=payer); FeedPayerRouter index source (FR-G41)
-	MessageFrames []string          // advertised sealed message-frame versions ("v1"); absent ⇒ legacy bare payloads
+	ID               string
+	Role             string            // "provider" | "payer" | "facility" | "phg" | "partner" (role-based routing / audit-append trust)
+	EncPub           *[32]byte         // X25519 public key for envelope encryption
+	SignPub          ed25519.PublicKey // Ed25519 public key for signature verification
+	BaseURL          string
+	PayerIDs         []PayerIdentifier // operator-attested payer-identity claims (role=payer); FeedPayerRouter index source (FR-G41)
+	MessageFrames    []string          // advertised sealed message-frame versions ("v1"); absent ⇒ legacy bare payloads
+	ContractVersions []string          // declared exchange-contract version tokens ("pa.pas@2.0"); absent ⇒ pre-contract build
 }
 
 // Registry is a concurrency-safe holder registry. It is a value type whose

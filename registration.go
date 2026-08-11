@@ -27,6 +27,11 @@ type RegistrationRequest struct {
 	// (SupportedMessageFrames; library-self-declared). Deliberately OUTSIDE the
 	// PoP signing payload — registrationSigningPayload is a frozen 5-field layout.
 	MessageFrames []string `json:"messageFrames,omitempty"`
+	// ContractVersions are the exchange-contract version tokens this build speaks
+	// natively ("<contract>@<line>", SupportedContractVersions; library-self-declared).
+	// Deliberately OUTSIDE the PoP signing payload — registrationSigningPayload is a
+	// frozen 5-field layout (same rule as MessageFrames).
+	ContractVersions []string `json:"contractVersions,omitempty"`
 	// Pop is base64.StdEncoding of this identity's ed25519 signature over the
 	// canonical registration statement, proving control of SignPub.
 	Pop string `json:"pop"`
@@ -56,12 +61,13 @@ func (id Identity) Registration(role, baseURL string) RegistrationRequest {
 	signPub := base64.StdEncoding.EncodeToString(id.SignPub)
 	pop := ed25519.Sign(id.SignPriv, registrationSigningPayload(id.HolderID, role, encPub, signPub, baseURL))
 	return RegistrationRequest{
-		ID:            id.HolderID,
-		Role:          role,
-		EncPub:        encPub,
-		SignPub:       signPub,
-		BaseURL:       baseURL,
-		MessageFrames: SupportedMessageFrames(),
-		Pop:           base64.StdEncoding.EncodeToString(pop),
+		ID:               id.HolderID,
+		Role:             role,
+		EncPub:           encPub,
+		SignPub:          signPub,
+		BaseURL:          baseURL,
+		MessageFrames:    SupportedMessageFrames(),
+		ContractVersions: SupportedContractVersions(),
+		Pop:              base64.StdEncoding.EncodeToString(pop),
 	}
 }
