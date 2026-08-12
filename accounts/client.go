@@ -139,6 +139,9 @@ func (c *Client) SubmitPoP(ctx context.Context, id string, reg shnsdk.Registrati
 	if len(reg.ContractVersions) > 0 {
 		body["contractVersions"] = reg.ContractVersions
 	}
+	if len(reg.RequestFrames) > 0 {
+		body["requestFrames"] = reg.RequestFrames
+	}
 	_, err := c.do(ctx, http.MethodPost, "/clients/"+id+"/pop", body)
 	return err
 }

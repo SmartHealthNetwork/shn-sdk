@@ -33,6 +33,11 @@ type Holder struct {
 	// registration, spec 2026-08-10 §3). Display/discovery only in slice 1;
 	// version-aware routing consumes it in slice 3. Absent ⇒ pre-contract build.
 	ContractVersions []string `json:"contractVersions,omitempty"`
+	// RequestFrames are the sealed REQUEST-frame versions this holder accepts
+	// ("v1"; library-self-declared at registration — request frames, spec 2026-08-11 slice 4).
+	// An originator frames a contract-mapped request ONLY toward a holder that
+	// declares it. Absent ⇒ send bare (byte-identical to the pre-slice-4 wire).
+	RequestFrames []string `json:"requestFrames,omitempty"`
 }
 
 // EncKey decodes the holder's X25519 public key.

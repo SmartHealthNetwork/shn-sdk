@@ -160,30 +160,84 @@ func TestEncodeHTTPFrameRejectsBadStatus(t *testing.T) {
 // solely on the magic byte (the payer's advertised frames are advisory, not an
 // input): a v1 frame yields its body (2xx) or an *AppAnswerError (non-2xx); a bare
 // payload — legacy payer, or either stale-feed direction — passes through; a
-// corrupt frame errors.
+// corrupt frame errors. expectedToken "" throughout — the contractVersion stamp-verify rows
+// live in TestUnframeAnswer_StampVerify.
 func TestUnframeAnswer(t *testing.T) {
 	oo := []byte(`{"resourceType":"OperationOutcome"}`)
 	framedErr, _ := EncodeHTTPFrame(422, "application/fhir+json", oo)
-	_, err := unframeAnswer(framedErr)
+	_, err := unframeAnswer(framedErr, "")
 	var ae *AppAnswerError
 	if !errors.As(err, &ae) || ae.Status != 422 || !bytes.Equal(ae.Body, oo) || ae.ContentType != "application/fhir+json" {
 		t.Fatalf("framed non-2xx: got %v", err)
 	}
 	framedOK, _ := EncodeHTTPFrame(200, "application/fhir+json", oo)
-	if body, err := unframeAnswer(framedOK); err != nil || !bytes.Equal(body, oo) {
+	if body, err := unframeAnswer(framedOK, ""); err != nil || !bytes.Equal(body, oo) {
 		t.Fatalf("framed 2xx: %q %v", body, err)
 	}
 	// Bare payload → passthrough. This is BOTH a legacy payer's success and the
 	// stale-feed downgrade case (we advertised nothing, or advertised v1 and the
 	// payer answered bare); the decode decision is identical because it is
 	// magic-keyed, so these no longer need distinct advertised-frame inputs.
-	if body, err := unframeAnswer(oo); err != nil || !bytes.Equal(body, oo) {
+	if body, err := unframeAnswer(oo, ""); err != nil || !bytes.Equal(body, oo) {
 		t.Fatalf("bare passthrough: %q %v", body, err)
 	}
 	// Corrupt frame → error.
-	if _, err := unframeAnswer([]byte{0x00, 0xFF, 0, 0, 0, 0}); err == nil {
+	if _, err := unframeAnswer([]byte{0x00, 0xFF, 0, 0, 0, 0}, ""); err == nil {
 		t.Fatal("corrupt frame accepted")
 	}
+}
+
+// TestUnframeAnswer_StampVerify covers the contractVersion stamp-verify rows (spec 2026-08-10
+// §4, published-SDK parity — v0.38.0): unframeAnswer(frame, expectedToken)
+// verbatim-mirrors the gateway's response-leg verify (gateway/engine/gateway.go
+// roundTripInner) — non-empty expectation + present stamp + MISMATCH → reject;
+// matching stamp → accept; ABSENT stamp is always tolerated regardless of
+// expectation (the frames-absent-lane precedent); expectedToken == "" (the
+// caller has no routed-token expectation) skips the check even when a stamp is
+// present.
+func TestUnframeAnswer_StampVerify(t *testing.T) {
+	body := []byte(`{"resourceType":"ClaimResponse"}`)
+
+	stamped := func(t *testing.T, token string) []byte {
+		t.Helper()
+		headers := map[string]string{"Content-Type": "application/fhir+json"}
+		if token != "" {
+			headers[FrameHeaderContractVersion] = token
+		}
+		f, err := EncodeHTTPFrameHeaders(200, headers, body)
+		if err != nil {
+			t.Fatalf("EncodeHTTPFrameHeaders: %v", err)
+		}
+		return f
+	}
+
+	t.Run("matching stamp accepted", func(t *testing.T) {
+		got, err := unframeAnswer(stamped(t, "pa.pas@2.0"), "pa.pas@2.0")
+		if err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("got %q, %v; want body, nil", got, err)
+		}
+	})
+
+	t.Run("mismatched stamp rejected", func(t *testing.T) {
+		_, err := unframeAnswer(stamped(t, "pa.pas@2.1"), "pa.pas@2.0")
+		if err == nil {
+			t.Fatal("mismatched contractVersion stamp must be rejected")
+		}
+	})
+
+	t.Run("absent stamp tolerated despite expectation", func(t *testing.T) {
+		got, err := unframeAnswer(stamped(t, ""), "pa.pas@2.0")
+		if err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("got %q, %v; want body, nil (absent stamp always tolerated)", got, err)
+		}
+	})
+
+	t.Run("no expectation skips the check even with a stamp present", func(t *testing.T) {
+		got, err := unframeAnswer(stamped(t, "pa.pas@9.9"), "")
+		if err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("got %q, %v; want body, nil (expectedToken \"\" never verifies)", got, err)
+		}
+	})
 }
 
 // mustEncodeRawFrame hand-builds magic+version+len+headerJSON+body, bypassing

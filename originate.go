@@ -41,6 +41,14 @@ type Payer struct {
 	// regardless of what the payer advertised (see unframeAnswer), so this field
 	// records negotiated intent for observability but does not gate decoding.
 	MessageFrames []string
+	// RequestFrames are the payer's advertised sealed REQUEST-frame versions from
+	// the /holders feed (Holder.RequestFrames — request frames, spec 2026-08-11 slice 4).
+	// UNLIKE MessageFrames this DOES gate: a contract-mapped request (CRD/DTR/PAS —
+	// see contractTokenForTxType) is framed toward this payer IFF it declares "v1"
+	// here; empty ⇒ the payer receives a BYTE-IDENTICAL bare request (same rule as
+	// the gateway's roundTripInner). coverage-eligibility never frames (no
+	// contract-version token exists for it), regardless of this field.
+	RequestFrames []string
 }
 
 // RunEligibility runs one coverage-eligibility round-trip through the substrate and
@@ -200,7 +208,10 @@ func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoi
 	if err != nil {
 		return false, "", fmt.Errorf("shnsdk: open response envelope: %w", err)
 	}
-	plaintext, err = unframeAnswer(plaintext)
+	// expectedToken "" — coverage-eligibility has no contract-version token
+	// (contractTokenForTxType's precedent), so this leg never verifies a stamp;
+	// an absent OR present-and-any stamp is tolerated (unframeAnswer's stamp check).
+	plaintext, err = unframeAnswer(plaintext, "")
 	if err != nil {
 		return false, "", fmt.Errorf("shnsdk: response answer: %w", err)
 	}

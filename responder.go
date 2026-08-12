@@ -49,6 +49,27 @@ type ResponderConfig struct {
 	// for unknown or legacy holders). OPTIONAL: nil means never frame (legacy-only
 	// responder) — safe default for existing constructors. See NewFeedFrameResolver.
 	ResolveFrames func(holderID string) []string
+
+	// StampContractVersion opts this Responder into the contractVersion stamp (spec 2026-08-10
+	// §4, published-SDK parity — v0.38.0): every SUCCESS (2xx) framed answer gets
+	// a FrameHeaderContractVersion header. The TOKEN is computed internally, per
+	// leg, from the request's TransactionType (contractTokenForTxType — the SAME
+	// mapping RunPriorAuth's originator side uses to build its expectedToken:
+	// crd-order-select→pa.crd@2.0, dtr-questionnaire-fetch→pa.dtr@2.0,
+	// pas-claim/pas-claim-update→pa.pas@2.0) rather than a caller-supplied
+	// literal — this SDK Responder answers ALL of those legs behind ONE
+	// ResponderConfig/Adjudicator (unlike the gateway, which the caller could
+	// restrict to a single contract), so a single string value applied
+	// uniformly across legs would stamp two of the three contract families
+	// WRONG and break RunPriorAuth's own per-leg verification (unframeAnswer's
+	// contractVersion check) against a Responder built with this SDK. coverage-eligibility
+	// has no contract token (version-neutral, mirrors the gateway) and is NEVER
+	// stamped regardless of this field. OPTIONAL: false (the default) preserves
+	// today's behavior byte-for-byte — a success frame is sealed with no
+	// contractVersion header, exactly as before v0.38.0. Mirrors the gateway's
+	// Stamp rule: an app-error frame (respondLegError's sibling here) is NEVER stamped,
+	// since it may relay bytes this build did not produce.
+	StampContractVersion bool
 }
 
 // Responder serves a payer holder's /substrate/inbound with the SAME pipeline
@@ -259,6 +280,33 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// RECEIVER OBLIGATION (spec 2026-08-11 slice 4, published-SDK parity —
+	// v0.38.0): this build self-declares requestFrames v1 at registration
+	// (RegistrationWithDeclared/Registration — SupportedRequestFrames defaults ON),
+	// so it MUST accept BOTH framed and bare inbound requests. Decode-on-magic —
+	// same argument as unframeAnswer: 0x00 cannot begin any bare payload this SDK
+	// carries, so decoding is safe unconditionally, not gated on having advertised
+	// the capability. Unlike the gateway's unframeRequest, this Responder does NOT
+	// honor/validate the claim against a native∩laned set — it has no per-line
+	// content negotiation (every PA-chain handler builds one fixed native line;
+	// see ResponderConfig.StampContractVersion) — so the claim is surfaced to the
+	// handler as an additive, currently-unread parameter (a reserved seam for a
+	// future per-line-honoring responder — the gateway engine's respondLeg
+	// documents the same "unread plumbing until a real consumer exists" precedent
+	// for its own per-leg Content-Type field) rather than acted on. A corrupt
+	// frame is the one rejection: a magic byte with a body that fails
+	// DecodeHTTPFrame is 400, exactly like a corrupt envelope at step 2.
+	var claimedContract string
+	if IsFramed(plaintext) {
+		hdr, body, ferr := DecodeHTTPFrame(plaintext)
+		if ferr != nil {
+			respondErr(w, http.StatusBadRequest, "request frame decode failed")
+			return
+		}
+		claimedContract = hdr.Headers[FrameHeaderContractVersion]
+		plaintext = body
+	}
+
 	// Frame negotiation (spec 2026-07-17): frame the response leg iff the requester
 	// advertises v1 — capability is two-sided (the responder only frames to a peer
 	// that declared it can decode). nil ResolveFrames ⇒ never frame (legacy-only).
@@ -274,13 +322,13 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	case "coverage-eligibility":
 		res = r.handleEligibility(plaintext, corr, now)
 	case "crd-order-select":
-		res = r.handleCRD(plaintext)
+		res = r.handleCRD(plaintext, claimedContract)
 	case "dtr-questionnaire-fetch":
-		res = r.handleDTR(plaintext)
+		res = r.handleDTR(plaintext, claimedContract)
 	case "pas-claim":
-		res = r.handlePASSubmit(plaintext, tok, corr, now)
+		res = r.handlePASSubmit(plaintext, tok, corr, now, claimedContract)
 	case "pas-claim-update":
-		res = r.handlePASUpdate(plaintext, tok, corr, now)
+		res = r.handlePASUpdate(plaintext, tok, corr, now, claimedContract)
 	default:
 		// Defensive: step 5 already rejects unknowns via responderReqOp, but
 		// this hardens against a future responderReqOp edit.
@@ -318,7 +366,24 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 			ct = "application/fhir+json"
 		}
 		var ferr error
-		if sealPayload, ferr = EncodeHTTPFrame(st, ct, res.payload); ferr != nil {
+		// contractVersion stamp (v0.38.0 parity): ONLY a success (2xx) frame is stamped, and
+		// only when the deployment opted in (StampContractVersion) — false takes
+		// the EXACT same EncodeHTTPFrame call as before this field existed
+		// (byte-identical for every partner build that never sets it). The token
+		// is this leg's own contract (contractTokenForTxType — "" for
+		// coverage-eligibility, which is never stamped). An app-error frame is
+		// never stamped (mirrors the gateway's respondLegError: it may relay
+		// bytes this build did not produce).
+		stampToken := contractTokenForTxType(env.Metadata.TransactionType)
+		if r.cfg.StampContractVersion && stampToken != "" && st/100 == 2 {
+			sealPayload, ferr = EncodeHTTPFrameHeaders(st, map[string]string{
+				"Content-Type":             ct,
+				FrameHeaderContractVersion: stampToken,
+			}, res.payload)
+		} else {
+			sealPayload, ferr = EncodeHTTPFrame(st, ct, res.payload)
+		}
+		if ferr != nil {
 			respondErr(w, http.StatusInternalServerError, "frame encode failed")
 			return
 		}
@@ -457,7 +522,11 @@ func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Ti
 
 // handleDTR implements the dtr-questionnaire-fetch handler. Mirrors payer.go
 // handleDTRInbound guard order and error strings, minus the $validate divergence.
-func (r *Responder) handleDTR(plaintext []byte) handlerResult {
+//
+// claimedContract is the inbound request-frame claim (handleInbound step 7,
+// "" when the request arrived bare or unclaimed) — currently unread; see
+// handleInbound's RECEIVER OBLIGATION comment for why.
+func (r *Responder) handleDTR(plaintext []byte, claimedContract string) handlerResult {
 	var fetch QuestionnaireFetchRequest
 	if err := json.Unmarshal(plaintext, &fetch); err != nil {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse questionnaire fetch failed"}

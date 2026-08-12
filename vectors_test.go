@@ -103,6 +103,43 @@ func TestVectorFillQuestionnaireReproduce(t *testing.T) {
 	}
 }
 
+// TestVectorFillQuestionnaireAtLineReproduce (vector corpus): the additive
+// testdata/vectors/{2.1,2.2}/questionnaireresponse.json vectors must be
+// REPRODUCED byte-for-byte by FillQuestionnaireAtLine from the SAME
+// questionnaire.json input (there is no per-line questionnaire — DTRDef never
+// gates the bare Questionnaire, only the QR/package shape).
+func TestVectorFillQuestionnaireAtLineReproduce(t *testing.T) {
+	dir := vectorsDir(t)
+	questionnaire := readVector(t, dir, "questionnaire.json")
+	cc := ClinicalContext{
+		ConditionCode:            "M51.16",
+		ConditionRef:             "Condition/cond-m5116",
+		ConservativeTherapyWeeks: 6,
+		ConservativeTherapyRef:   "Observation/obs-pt-weeks",
+		ConservativeDate:         "2026-05-20",
+		NeuroDeficit:             false,
+		NeuroDeficitRef:          "Observation/obs-neuro",
+		PriorImaging:             true,
+		PriorImagingRef:          "DiagnosticReport/dr-xray",
+	}
+	qc := QRContext{
+		PatientRef:  "Patient/MBR-COVERED",
+		CoverageRef: "Coverage/MBR-COVERED",
+		OrderRef:    "ServiceRequest/sr-MBR-COVERED",
+		Authored:    vecClock,
+	}
+	for _, line := range []string{"2.1", "2.2"} {
+		want := readVector(t, dir, line+"/questionnaireresponse.json")
+		got, err := FillQuestionnaireAtLine(line, questionnaire, cc, qc)
+		if err != nil {
+			t.Fatalf("FillQuestionnaireAtLine(%s): %v", line, err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("line %s: QR not reproduced byte-for-byte:\n got=%s\nwant=%s", line, got, want)
+		}
+	}
+}
+
 // TestVectorClaimResponseConsume: the SDK's ParseClaimResponse must CONSUME the approved
 // vector → PriorAuthResult{Outcome:"approved", PreAuthRef, ValidUntil}.
 func TestVectorClaimResponseConsume(t *testing.T) {
@@ -119,6 +156,31 @@ func TestVectorClaimResponseConsume(t *testing.T) {
 	}
 	if res.ValidUntil != "2026-09-02" {
 		t.Errorf("ValidUntil = %q, want 2026-09-02", res.ValidUntil)
+	}
+}
+
+// TestVectorClaimResponseAtLineConsume (vector corpus): the additive
+// testdata/vectors/{2.1,2.2}/claimresponse-approved.json vectors must CONSUME
+// identically to the flat vector — BuildClaimResponseAtLine is documented
+// "interface symmetry" (no structural delta at any line, sdk/pasresponder.go),
+// so this also proves ParseClaimResponse doesn't accidentally depend on
+// anything that WOULD vary by line.
+func TestVectorClaimResponseAtLineConsume(t *testing.T) {
+	dir := vectorsDir(t)
+	for _, line := range []string{"2.1", "2.2"} {
+		res, err := ParseClaimResponse(readVector(t, dir, line+"/claimresponse-approved.json"))
+		if err != nil {
+			t.Fatalf("line %s: ParseClaimResponse(claimresponse-approved): %v", line, err)
+		}
+		if res.Outcome != "approved" {
+			t.Errorf("line %s: Outcome = %q, want approved", line, res.Outcome)
+		}
+		if res.PreAuthRef != "PA-0123456789ab" {
+			t.Errorf("line %s: PreAuthRef = %q, want PA-0123456789ab", line, res.PreAuthRef)
+		}
+		if res.ValidUntil != "2026-09-02" {
+			t.Errorf("line %s: ValidUntil = %q, want 2026-09-02", line, res.ValidUntil)
+		}
 	}
 }
 
@@ -316,6 +378,27 @@ func TestVectorPendedConsume(t *testing.T) {
 	}
 }
 
+// TestVectorPendedAtLineConsume (vector corpus): the additive
+// testdata/vectors/{2.1,2.2}/claimresponse-pended.json vectors — line 2.2 adds
+// the mandatory response Bundle.identifier (PAS package differential); ParsePendedResponse
+// must still CONSUME the same (pended, needed) shape at every line.
+func TestVectorPendedAtLineConsume(t *testing.T) {
+	dir := vectorsDir(t)
+	for _, line := range []string{"2.1", "2.2"} {
+		pendedJSON := readVector(t, dir, line+"/claimresponse-pended.json")
+		pended, needed, err := ParsePendedResponse(pendedJSON)
+		if err != nil {
+			t.Fatalf("line %s: ParsePendedResponse: %v", line, err)
+		}
+		if !pended {
+			t.Fatalf("line %s: ParsePendedResponse: pended=false, want true", line)
+		}
+		if len(needed) != 1 || needed[0].Code != "operative-diagnostic-report" {
+			t.Fatalf("line %s: needed = %+v, want [operative-diagnostic-report]", line, needed)
+		}
+	}
+}
+
 // TestVectorDeniedConsume: the SDK parses the substrate-built DENIED ClaimResponse →
 // Outcome denied + Denial.ReasonCode A3 + a non-empty rationale.
 func TestVectorDeniedConsume(t *testing.T) {
@@ -330,5 +413,26 @@ func TestVectorDeniedConsume(t *testing.T) {
 	}
 	if res.Denial == nil || res.Denial.ReasonCode != "A3" || res.Denial.Rationale == "" {
 		t.Errorf("Denial = %+v, want ReasonCode A3 + non-empty Rationale", res.Denial)
+	}
+}
+
+// TestVectorDeniedAtLineConsume (vector corpus): the additive
+// testdata/vectors/{2.1,2.2}/claimresponse-denied-uc08.json vectors must CONSUME
+// identically to the flat vector — BuildDeniedResponseAtLine is documented
+// "interface symmetry" (no structural delta at any line, sdk/pasresponder.go).
+func TestVectorDeniedAtLineConsume(t *testing.T) {
+	dir := vectorsDir(t)
+	for _, line := range []string{"2.1", "2.2"} {
+		deniedJSON := readVector(t, dir, line+"/claimresponse-denied-uc08.json")
+		res, err := ParseClaimResponse(deniedJSON)
+		if err != nil {
+			t.Fatalf("line %s: ParseClaimResponse(denied): %v", line, err)
+		}
+		if res.Outcome != "denied" {
+			t.Errorf("line %s: Outcome = %q, want denied", line, res.Outcome)
+		}
+		if res.Denial == nil || res.Denial.ReasonCode != "A3" || res.Denial.Rationale == "" {
+			t.Errorf("line %s: Denial = %+v, want ReasonCode A3 + non-empty Rationale", line, res.Denial)
+		}
 	}
 }

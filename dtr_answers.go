@@ -43,8 +43,27 @@ type AnswerCoding struct{ System, Code, Display string }
 //
 // The QR carries subject=qc.PatientRef, the versioned questionnaire canonical,
 // authored, and the DTR qr-context extensions (reuses dtrQRContextExtensions). Unlike
-// FillQuestionnaire it is NOT restricted to one canonical.
+// FillQuestionnaire it is NOT restricted to one canonical. It is
+// FillQuestionnaireFromAnswersAtLine("2.0", …), byte-identical (regression-fenced by
+// sdk/dtr_answers_test.go). Use FillQuestionnaireFromAnswersAtLine to target 2.1/2.2
+// (DTR package differential: the qr-coverage extension at 2.2 — the answer-level
+// source="manual" code itself never changes by line).
 func FillQuestionnaireFromAnswers(questionnaireJSON []byte, answers map[string]Answer, author string, qc QRContext) ([]byte, error) {
+	return FillQuestionnaireFromAnswersAtLine("2.0", questionnaireJSON, answers, author, qc)
+}
+
+// FillQuestionnaireFromAnswersAtLine is FillQuestionnaireFromAnswers parameterized by
+// DTR line ("2.0", "2.1", "2.2"). Unknown line -> error (fail-closed, never a silent
+// 2.0 fallback).
+func FillQuestionnaireFromAnswersAtLine(line string, questionnaireJSON []byte, answers map[string]Answer, author string, qc QRContext) ([]byte, error) {
+	def, ok := DTRLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: FillQuestionnaireFromAnswersAtLine: unknown DTR line %q", line)
+	}
+	return fillQuestionnaireFromAnswers(def, questionnaireJSON, answers, author, qc)
+}
+
+func fillQuestionnaireFromAnswers(def DTRDef, questionnaireJSON []byte, answers map[string]Answer, author string, qc QRContext) ([]byte, error) {
 	if author == "" {
 		return nil, fmt.Errorf("shnsdk: FillQuestionnaireFromAnswers: author is required (dtrx-1: source=\"manual\" answers must name an author)")
 	}
@@ -65,7 +84,7 @@ func FillQuestionnaireFromAnswers(questionnaireJSON []byte, answers map[string]A
 		Questionnaire: questionnaireCanonical(q),
 		Authored:      &authored,
 		Subject:       &fhir.Reference{Reference: &qc.PatientRef},
-		Extension:     dtrQRContextExtensions(qc),
+		Extension:     dtrQRContextExtensions(def, qc),
 		Item:          items,
 	}
 	raw, err := json.Marshal(qr)

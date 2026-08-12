@@ -519,6 +519,52 @@ func TestFillQuestionnaireFromAnswers_OptionalItemOmitted(t *testing.T) {
 	}
 }
 
+// TestFillQuestionnaireFromAnswersAtLine_RegressionFence: the legacy
+// FillQuestionnaireFromAnswers is byte-identical to AtLine("2.0") (per-line parity).
+func TestFillQuestionnaireFromAnswersAtLine_RegressionFence(t *testing.T) {
+	bTrue := true
+	answers := map[string]Answer{"1.2": {Boolean: &bTrue}}
+	qc := sharedQC()
+	legacy, err := FillQuestionnaireFromAnswers([]byte(l8000Questionnaire), answers, testAuthor, qc)
+	if err != nil {
+		t.Fatalf("FillQuestionnaireFromAnswers: %v", err)
+	}
+	atLine, err := FillQuestionnaireFromAnswersAtLine("2.0", []byte(l8000Questionnaire), answers, testAuthor, qc)
+	if err != nil {
+		t.Fatalf("FillQuestionnaireFromAnswersAtLine(2.0): %v", err)
+	}
+	if string(legacy) != string(atLine) {
+		t.Fatalf("FillQuestionnaireFromAnswers != FillQuestionnaireFromAnswersAtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
+	}
+}
+
+// TestFillQuestionnaireFromAnswersAtLine_UnknownLineErrors: fail-closed rejection (per-line parity).
+func TestFillQuestionnaireFromAnswersAtLine_UnknownLineErrors(t *testing.T) {
+	bTrue := true
+	answers := map[string]Answer{"1.2": {Boolean: &bTrue}}
+	if _, err := FillQuestionnaireFromAnswersAtLine("9.9", []byte(l8000Questionnaire), answers, testAuthor, sharedQC()); err == nil {
+		t.Fatal("FillQuestionnaireFromAnswersAtLine(\"9.9\") = nil error, want an error")
+	}
+}
+
+// TestFillQuestionnaireFromAnswersAtLine_CoverageByLine: the same DTR 2.2
+// SingleCoverageConstraint delta as FillQuestionnaireAtLine (shared
+// dtrQRContextExtensions helper) — origin code is NOT asserted here (this builder
+// always stamps "manual", which never varies by line; see
+// TestFillQuestionnaireFromAnswers_ManualNotAuto).
+func TestFillQuestionnaireFromAnswersAtLine_CoverageByLine(t *testing.T) {
+	bTrue := true
+	answers := map[string]Answer{"1.2": {Boolean: &bTrue}}
+	qc := sharedQC()
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		raw, err := FillQuestionnaireFromAnswersAtLine(line, []byte(l8000Questionnaire), answers, testAuthor, qc)
+		if err != nil {
+			t.Fatalf("FillQuestionnaireFromAnswersAtLine(%s): %v", line, err)
+		}
+		assertQRCoverageAndOriginByLine(t, line, raw, qc.CoverageRef, qc.OrderRef, "")
+	}
+}
+
 // TestFillQuestionnaireFromAnswers_ManualNotAuto asserts that filled answers carry
 // source="manual" and NOT source="auto". This is the honesty distinction:
 // FillQuestionnaire stamps "auto" (CQL-computed); FillQuestionnaireFromAnswers stamps

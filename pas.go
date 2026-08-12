@@ -74,6 +74,11 @@ const pasBundleBaseURL = "https://shn.example/fhir"
 // byte-parity-locked builders stay byte-identical.
 const pasBundleIdentifierSystem = "urn:shn:pas:bundle"
 
+// pasCorrelationSystem is the business-identifier system every SHN-built PAS
+// Claim / ClaimResponse carries (Claim.identifier, ClaimResponse.identifier and —
+// from PAS line 2.1 on — ClaimResponse.request.identifier).
+const pasCorrelationSystem = "urn:shn:correlation"
+
 // pasFullURLFor returns the resolvable fullUrl for a bundle entry resource, derived
 // from its resourceType + id. Errors if either is missing. Ported standalone from
 // internal/pas.fullURLFor.
@@ -219,7 +224,148 @@ const (
 	// (FillQuestionnaire emits one per ref). BuildConformantClaimBundle rewrites these to
 	// the bundle-local Coverage/SR ids so the builder owns them. MUST match dtr.qrContextExt.
 	extQRContext = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context"
+
+	// -- PAS 2.1+ Claim.item line-detail + Claim.related relationship --
+	// (line-conditional, gated on PASDef.ClaimItemLineDetailRequired /
+	// ClaimRelatedRelationshipRequired; see linedef.go's delta-table comment).
+
+	// pasExtCertificationType / pasExtServiceItemRequestType are the Da Vinci PAS
+	// extension canonicals for Claim.item.extension:certificationType (sliceName
+	// "certificationType") and Claim.item.extension:requestType (sliceName
+	// "requestType", canonical extension-serviceItemRequestType — the sliceName and
+	// the extension's own canonical URL differ, per the PAS package). Verified against
+	// the PAS 2.1.0/2.2.1 StructureDefinition-profile-claim(-update).json differential
+	// (both slices min=1 starting 2.1.0, unchanged into 2.2.1).
+	pasExtCertificationType      = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType"
+	pasExtServiceItemRequestType = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType"
+
+	// pasSystemX12CertificationType / pasSystemX12ServiceItemRequestType are the
+	// licensed X12 code systems the two extensions above bind to (required binding,
+	// unexpandable offline — same "curated code, allowlisted" posture as the existing
+	// X12 1365 productOrService/category and X12 306 reviewAction codes in this file).
+	// The codes below (certificationType "I" Initial; requestType "IN" Initial Medical
+	// Services Reservation) are copied VERBATIM from the PAS 2.2.1 package's own
+	// conformant example instance (example/Claim-MedicalServicesAuthorizationExample.json)
+	// — not invented (FR-36 no-hallucination).
+	pasSystemX12CertificationType      = "https://codesystem.x12.org/005010/1322"
+	pasSystemX12ServiceItemRequestType = "https://codesystem.x12.org/005010/1525"
+
+	// pasSystemCMSPlaceOfService is the CMS place-of-service code system
+	// Claim.item.location[x]'s X12278LocationType required binding includes
+	// (ValueSet-X12278LocationType.json compose — NOT X12-licensed, a public CMS code
+	// set). Code "11" ("Office") is copied verbatim from the same PAS 2.2.1 example
+	// instance's locationCodeableConcept (no display given there — omitted here too,
+	// rather than inventing one).
+	pasSystemCMSPlaceOfService = "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
+
+	// pasRelatedClaimRelationshipSystem is the STANDARD (non-licensed) HL7 terminology
+	// CodeSystem Claim.related.relationship's PAS 2.1+ patternCodeableConcept pins to
+	// (code "prior") — verified against the PAS 2.1.0/2.2.1
+	// StructureDefinition-profile-claim-update.json differential (patternCodeableConcept
+	// on Claim.related.relationship, min=1) and confirmed by the same package's
+	// example/Claim-HomecareAuthorizationUpdateExample.json.
+	pasRelatedClaimRelationshipSystem = "http://terminology.hl7.org/CodeSystem/ex-relatedclaimrelationship"
 )
+
+// addPASLineItemDetail appends the PAS 2.1+ Claim.item line-detail — the
+// certificationType + requestType extensions and locationCodeableConcept — to
+// Claim.item[0], gated on def.ClaimItemLineDetailRequired. No-op (byte-identical)
+// when the flag is false (line 2.0). Shared by the submit and update conformant
+// builders; called AFTER conformantizePASClaim so it APPENDS to (rather than is
+// clobbered by) the existing extension-requestedService slice.
+func addPASLineItemDetail(claimJSON []byte, def PASDef) ([]byte, error) {
+	if !def.ClaimItemLineDetailRequired {
+		return claimJSON, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(claimJSON, &m); err != nil {
+		return nil, fmt.Errorf("addPASLineItemDetail: parse claim: %w", err)
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(m["item"], &items); err != nil {
+		return nil, fmt.Errorf("addPASLineItemDetail: parse claim.item: %w", err)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("addPASLineItemDetail: claim has no item")
+	}
+	var exts []map[string]any
+	if raw, ok := items[0]["extension"]; ok && len(raw) > 0 {
+		if err := json.Unmarshal(raw, &exts); err != nil {
+			return nil, fmt.Errorf("addPASLineItemDetail: parse item extension: %w", err)
+		}
+	}
+	exts = append(exts,
+		map[string]any{
+			"url": pasExtCertificationType,
+			"valueCodeableConcept": map[string]any{"coding": []map[string]any{{
+				"system": pasSystemX12CertificationType, "code": "I", "display": "Initial",
+			}}},
+		},
+		map[string]any{
+			"url": pasExtServiceItemRequestType,
+			"valueCodeableConcept": map[string]any{"coding": []map[string]any{{
+				"system": pasSystemX12ServiceItemRequestType, "code": "IN", "display": "Initial Medical Services Reservation",
+			}}},
+		},
+	)
+	extJSON, err := json.Marshal(exts)
+	if err != nil {
+		return nil, fmt.Errorf("addPASLineItemDetail: marshal extension: %w", err)
+	}
+	items[0]["extension"] = extJSON
+	locJSON, err := json.Marshal(map[string]any{"coding": []map[string]any{{
+		"system": pasSystemCMSPlaceOfService, "code": "11",
+	}}})
+	if err != nil {
+		return nil, fmt.Errorf("addPASLineItemDetail: marshal location: %w", err)
+	}
+	items[0]["locationCodeableConcept"] = locJSON
+	itemsJSON, err := json.Marshal(items)
+	if err != nil {
+		return nil, fmt.Errorf("addPASLineItemDetail: marshal items: %w", err)
+	}
+	m["item"] = itemsJSON
+	return json.Marshal(m)
+}
+
+// addPASLineRelatedRelationship sets Claim.related[0].relationship to the PAS 2.1+
+// pattern (ex-relatedclaimrelationship#prior), gated on
+// def.ClaimRelatedRelationshipRequired. No-op (byte-identical) when the flag is
+// false (line 2.0). Update-builder only (a fresh submit Claim carries no
+// related[]; profile-claim in fact FORBIDS it — max=0 — from 2.1 forward, unchanged
+// by this build since buildPASClaim never sets Related).
+func addPASLineRelatedRelationship(claimJSON []byte, def PASDef) ([]byte, error) {
+	if !def.ClaimRelatedRelationshipRequired {
+		return claimJSON, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(claimJSON, &m); err != nil {
+		return nil, fmt.Errorf("addPASLineRelatedRelationship: parse claim: %w", err)
+	}
+	if len(m["related"]) == 0 {
+		return nil, fmt.Errorf("addPASLineRelatedRelationship: claim has no related[]")
+	}
+	var related []map[string]json.RawMessage
+	if err := json.Unmarshal(m["related"], &related); err != nil {
+		return nil, fmt.Errorf("addPASLineRelatedRelationship: parse related: %w", err)
+	}
+	if len(related) == 0 {
+		return nil, fmt.Errorf("addPASLineRelatedRelationship: claim has empty related[]")
+	}
+	relJSON, err := json.Marshal(map[string]any{"coding": []map[string]any{{
+		"system": pasRelatedClaimRelationshipSystem, "code": "prior",
+	}}})
+	if err != nil {
+		return nil, fmt.Errorf("addPASLineRelatedRelationship: marshal relationship: %w", err)
+	}
+	related[0]["relationship"] = relJSON
+	relatedJSON, err := json.Marshal(related)
+	if err != nil {
+		return nil, fmt.Errorf("addPASLineRelatedRelationship: marshal related: %w", err)
+	}
+	m["related"] = relatedJSON
+	return json.Marshal(m)
+}
 
 // ConformantClaimInputs are the inputs the conformant $submit builder needs from the
 // Originator: the answered DTR QuestionnaireResponse + the order ServiceRequest (both
@@ -297,7 +443,28 @@ type ConformantClaimInputs struct {
 // DIFFERS from the CRD builder, which KEEPS US Core meta.profile. The Claim's insurer stays
 // the generic Organization/payer (NOT a named br-payer insurer). Deterministic (no
 // time.Now/random); the QR/SR/refs are demo-persona-derived by the caller.
+//
+// BuildConformantClaimBundle speaks PAS line 2.0 — it is BuildConformantClaimBundleAtLine("2.0", in),
+// byte-identical (regression-fenced by test/sdkparity). Use BuildConformantClaimBundleAtLine to
+// target 2.1/2.2 (PAS package differential: Claim.item certificationType/requestType/location[x]).
 func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
+	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
+	return buildConformantClaimBundle(def, in)
+}
+
+// BuildConformantClaimBundleAtLine is BuildConformantClaimBundle parameterized by PAS
+// line ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed — never a silent 2.0
+// fallback). ONE code path: the line-conditional sections are driven entirely by the
+// resolved PASDef (see addPASLineItemDetail), not inline per-line branches.
+func BuildConformantClaimBundleAtLine(line string, in ConformantClaimInputs) ([]byte, error) {
+	def, ok := PASLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: BuildConformantClaimBundleAtLine: unknown PAS line %q", line)
+	}
+	return buildConformantClaimBundle(def, in)
+}
+
+func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, error) {
 	// --- Claim: reuse the byte-parity-locked buildPASClaim, then post-process to carry
 	// the conformant CPT 72148 (buildPASClaim natively emits X12 1365 "Medical Care") +
 	// the extension-requestedService → ServiceRequest. The id is overridden to the stable
@@ -313,6 +480,12 @@ func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
 	claimJSON, err = conformantizePASClaim(claimJSON, srRef)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: conformantize claim: %w", err)
+	}
+	// PAS 2.1+ (def-driven, PAS package differential): append the item-detail extensions +
+	// location[x]. No-op at line 2.0 (def.ClaimItemLineDetailRequired false).
+	claimJSON, err = addPASLineItemDetail(claimJSON, def)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: add line item detail: %w", err)
 	}
 	// Composite lane: override the hardcoded CPT 72148 with the order's actual code (the
 	// composite HCPCS code, e.g. L8000 or E0431) — br-payer keys PAS on Claim.item.productOrService.
@@ -1285,7 +1458,27 @@ type ConformantClaimUpdateInputs struct {
 // Deterministic (no time.Now/random); caller injects Created. It reuses the
 // byte-parity-locked buildPASUpdateClaim helper (the minimized BuildClaimUpdateBundle
 // public builder has been removed — this is the sole PA-update builder).
+//
+// BuildConformantClaimUpdateBundle speaks PAS line 2.0 — it is
+// BuildConformantClaimUpdateBundleAtLine("2.0", in), byte-identical (regression-fenced
+// by test/sdkparity). Use BuildConformantClaimUpdateBundleAtLine to target 2.1/2.2
+// (PAS package differential: Claim.item line-detail + Claim.related.relationship).
 func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, error) {
+	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
+	return buildConformantClaimUpdateBundle(def, in)
+}
+
+// BuildConformantClaimUpdateBundleAtLine is BuildConformantClaimUpdateBundle
+// parameterized by PAS line ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
+func BuildConformantClaimUpdateBundleAtLine(line string, in ConformantClaimUpdateInputs) ([]byte, error) {
+	def, ok := PASLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: BuildConformantClaimUpdateBundleAtLine: unknown PAS line %q", line)
+	}
+	return buildConformantClaimUpdateBundle(def, in)
+}
+
+func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs) ([]byte, error) {
 	// --- Claim: reuse buildPASUpdateClaim (emits related[] by OriginalCorr), then
 	// conformantize (CPT 72148 + extension-requestedService) and restamp id to the
 	// update-specific conformant id. ---
@@ -1303,6 +1496,17 @@ func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, e
 	claimJSON, err = withResourceID(claimJSON, conformantPASClaimUpdateID)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: id claim update: %w", err)
+	}
+	// PAS 2.1+ (def-driven, PAS package differential): item-detail extensions + location[x],
+	// and Claim.related[0].relationship (ex-relatedclaimrelationship#prior). No-op at
+	// line 2.0.
+	claimJSON, err = addPASLineItemDetail(claimJSON, def)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: add line item detail: %w", err)
+	}
+	claimJSON, err = addPASLineRelatedRelationship(claimJSON, def)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: add related relationship: %w", err)
 	}
 	// Composite lane: override the hardcoded CPT 72148 with the SR's actual code (the
 	// composite HCPCS code) — br-payer keys PAS on Claim.item.productOrService.

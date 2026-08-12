@@ -259,6 +259,29 @@ func (id Identity) runLeg(ctx context.Context, c *http.Client, ep Endpoints, pay
 	return id.runLegWithCorr(ctx, c, ep, payer, pci, txType, reqOp, respOp, hex.EncodeToString(corrRaw[:]), payload)
 }
 
+// contractTokenForTxType returns the request-frame contract-version claim (spec
+// 2026-08-11 slice 4) — the token this SDK's request at txType is BUILT at, or "" for a version-neutral leg
+// (coverage-eligibility — mirrors the gateway's paCatalog "" Contract). This SDK does
+// NOT do per-line content negotiation: every Build* helper the PA-chain legs use
+// targets a single fixed native line (BuildClaimResponse's "speaks PAS line 2.0"
+// comment is the precedent), so the token is a static per-leg constant rather than a
+// selected one. It is used BOTH to frame the request (toward a requestFrames-
+// declaring payer) and as the expected stamp on that leg's response
+// (unframeAnswer's stamp verify) — the same token both directions, exactly like the
+// gateway's roundTripInner reads content.ProfileID for both.
+func contractTokenForTxType(txType string) string {
+	switch txType {
+	case "crd-order-select":
+		return ContractPACRD20
+	case "dtr-questionnaire-fetch":
+		return ContractPADTR20
+	case "pas-claim", "pas-claim-update":
+		return ContractPAPAS20
+	default:
+		return ""
+	}
+}
+
 // runLegWithCorr is runLeg with a caller-supplied correlationID. Used when the
 // envelope correlationID must equal the bundle's own claim correlation — specifically
 // the pas-claim leg, where the payer ledger keys the pended claim on the ENVELOPE
@@ -266,6 +289,24 @@ func (id Identity) runLeg(ctx context.Context, c *http.Client, ep Endpoints, pay
 // same value (pasCorr). All other legs use runLeg (fresh random correlation each leg).
 func (id Identity) runLegWithCorr(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp, correlationID string, payload []byte) ([]byte, error) {
 	now := id.now()
+
+	// REQUEST-line claim (spec 2026-08-11 slice 4, published-SDK parity —
+	// v0.38.0): frame the request IFF this leg maps to a contract AND the payer's
+	// registry entry declares requestFrames v1 — a payer that never declares it
+	// gets a BYTE-IDENTICAL bare request (same rule + status-200 inert filler as
+	// the gateway's roundTripInner). The claim rides INSIDE the seal (AI-2's
+	// Hub-payload-blindness is unaffected — this wraps `payload` before Seal).
+	contractToken := contractTokenForTxType(txType)
+	if contractToken != "" && SupportsRequestFrameV1(payer.RequestFrames) {
+		framed, ferr := EncodeHTTPFrameHeaders(http.StatusOK, map[string]string{
+			"Content-Type":             "application/fhir+json",
+			FrameHeaderContractVersion: contractToken,
+		}, payload)
+		if ferr != nil {
+			return nil, fmt.Errorf("encode request frame: %w", ferr)
+		}
+		payload = framed
+	}
 
 	// Seal FIRST so the ciphertext exists (AI-2: seal-then-authorize).
 	meta := Metadata{
@@ -374,7 +415,10 @@ func (id Identity) runLegWithCorr(ctx context.Context, c *http.Client, ep Endpoi
 	}
 	// Unframe (a frame-capable payer's non-2xx APPLICATION answer surfaces as
 	// *AppAnswerError, verbatim) — shared by every runLeg/runLegWithCorr caller.
-	return unframeAnswer(plaintext)
+	// expectedToken = contractToken: the SAME line this leg's request was built
+	// (and, when capable, framed) at is what a 2xx framed answer must be stamped
+	// with, or leave unstamped (tolerated) — verified by unframeAnswer.
+	return unframeAnswer(plaintext, contractToken)
 }
 
 // SupplementalReport is the NEW clinical evidence a ClaimUpdate amendment attaches,

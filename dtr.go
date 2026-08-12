@@ -23,11 +23,49 @@ const SupportedQuestionnaireCanonical = "http://smarthealth.network/fhir/Questio
 const (
 	informationOriginExt = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/information-origin"
 	qrContextExt         = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context"
-	intendedUseExt       = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/intendedUse"
-	// crdTempCodeSystem is the CRD CodeSystem the DocReason value set draws from;
-	// "withpa" = information needed for a prior authorization.
+	// qrCoverageExt is the DTR 2.2-only dedicated Coverage-reference extension
+	// (StructureDefinition-qr-coverage.json, min=1 max=* at 2.2 — DTR package differential).
+	// At 2.0/2.1 the coverage reference instead rides a qrContextExt entry, as before.
+	qrCoverageExt  = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-coverage"
+	intendedUseExt = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/intendedUse"
+	// crdTempCodeSystem is the CRD CodeSystem the DocReason value set draws from at
+	// CRD 2.0.1/2.1.0; "withpa" = information needed for a prior authorization.
 	crdTempCodeSystem = "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp"
+	// crdCoverageInformationCodeSystem is where CRD 2.2.1 moved those same DocReason
+	// concepts (CodeSystem-coverage-information-codes.json — {withpa, withclaim,
+	// withorder, retain-doc, …}; CodeSystem-temp at 2.2.1 no longer defines them).
+	// Selected per line by DTRDef.IntendedUseCodeSystem.
+	crdCoverageInformationCodeSystem = "http://hl7.org/fhir/us/davinci-crd/CodeSystem/coverage-information-codes"
 )
+
+// dtrBundleBaseURL is the deterministic base for a $questionnaire-package entry
+// fullUrl when embedding a caller-supplied QuestionnaireResponse (DTR line 2.2's
+// DTR-QPackageBundle profile requires one — DTR package differential). Same
+// convention/value as pasBundleBaseURL (sdk/pas.go); kept as its own named constant
+// here so dtr.go stays self-contained.
+const dtrBundleBaseURL = "https://shn.example/fhir"
+
+// questionnaireResponseEntryFullURL derives the resolvable fullUrl for a
+// QuestionnaireResponse $questionnaire-package Bundle entry (FHIR bdl-7-style:
+// fullUrl consistent with Resource.id, mirroring pasFullURLFor's convention).
+// Errors — never fabricates an id — if the resource is not a QuestionnaireResponse
+// or carries no id.
+func questionnaireResponseEntryFullURL(questionnaireResponse []byte) (string, error) {
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+	}
+	if err := json.Unmarshal(questionnaireResponse, &probe); err != nil {
+		return "", fmt.Errorf("questionnaireResponse is not valid json: %w", err)
+	}
+	if probe.ResourceType != "QuestionnaireResponse" {
+		return "", fmt.Errorf("expected resourceType QuestionnaireResponse, got %q", probe.ResourceType)
+	}
+	if probe.ID == "" {
+		return "", fmt.Errorf("questionnaireResponse has no id for entry fullUrl")
+	}
+	return dtrBundleBaseURL + "/QuestionnaireResponse/" + probe.ID, nil
+}
 
 // ClinicalContext is the provider-LOCAL clinical data FillQuestionnaire answers
 // from. Ported standalone from internal/dtr.ClinicalContext (the sandbox
@@ -89,26 +127,61 @@ func BuildQuestionnaireFetch(canonical string) ([]byte, error) {
 
 // BuildQuestionnairePackage wraps a bare FHIR Questionnaire into a one-entry Da Vinci
 // $questionnaire-package collection Bundle — the SDK responder's UNIFORM DTR-fetch wire
-// shape (§6.2). It is byte-identical to the substrate's
-// gateway/engine.buildQuestionnairePackage (test/sdkparity asserts byte-parity): the
-// canonical bytes are json.Marshal of map[string]any{"resourceType":"Bundle",
-// "type":"collection","entry":[{"fullUrl":<url>,"resource":<questionnaire>}]} (Go sorts
-// map keys, so the wire is {"entry":[{"fullUrl":<url>,"resource":<q>}],"resourceType":
-// "Bundle","type":"collection"}). A FHIR collection Bundle requires every entry to carry a
-// fullUrl (IG-HAPI $validate enforces it); the Questionnaire's canonical url is the entry
-// identity. The sandbox payer carries no dependent Libraries/ValueSets, so this wrap is
-// honestly deps-free; a real partner's package carries them.
+// shape (§6.2). It is BuildQuestionnairePackageAtLine("2.0", questionnaire, nil),
+// byte-identical (regression-fenced by sdk/dtr_test.go; the pinned wire-shape string is
+// also independently held by the substrate's gateway/engine.buildQuestionnairePackage —
+// gateway/engine/davincimap_test.go — since that function is unexported and cannot be
+// cross-imported). The canonical bytes are json.Marshal of
+// map[string]any{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":<url>,
+// "resource":<questionnaire>}]} (Go sorts map keys, so the wire is
+// {"entry":[{"fullUrl":<url>,"resource":<q>}],"resourceType":"Bundle","type":"collection"}).
+// A FHIR collection Bundle requires every entry to carry a fullUrl (IG-HAPI $validate
+// enforces it); the Questionnaire's canonical url is the entry identity. The sandbox
+// payer carries no dependent Libraries/ValueSets, so this wrap is honestly deps-free; a
+// real partner's package carries them. Use BuildQuestionnairePackageAtLine to target
+// 2.1/2.2 (DTR package differential: DTR 2.2 requires a QuestionnaireResponse entry too).
 func BuildQuestionnairePackage(questionnaire []byte) ([]byte, error) {
+	return BuildQuestionnairePackageAtLine("2.0", questionnaire, nil)
+}
+
+// BuildQuestionnairePackageAtLine is BuildQuestionnairePackage parameterized by DTR
+// line ("2.0", "2.1", "2.2"). questionnaireResponse is OPTIONAL at "2.0"/"2.1" and,
+// when supplied, is embedded VERBATIM as a second Bundle entry (never fabricated) —
+// its fullUrl is derived from its own resourceType+id (questionnaireResponseEntryFullURL).
+// At "2.2" (DTRLineDef's QuestionnairePackageReturnShape=="qr-required") it is
+// MANDATORY: the DTR-QPackageBundle profile requires Bundle.entry:questionnaireResponse
+// min=1 (DTR package differential) — an empty questionnaireResponse errors rather than emit a
+// non-conformant package. Unknown line -> error (fail-closed, never a silent 2.0 fallback).
+func BuildQuestionnairePackageAtLine(line string, questionnaire, questionnaireResponse []byte) ([]byte, error) {
+	def, ok := DTRLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: BuildQuestionnairePackageAtLine: unknown DTR line %q", line)
+	}
+	return buildQuestionnairePackage(def, questionnaire, questionnaireResponse)
+}
+
+func buildQuestionnairePackage(def DTRDef, questionnaire, questionnaireResponse []byte) ([]byte, error) {
 	url, err := ParseQuestionnaireURL(questionnaire) // validates resourceType + non-empty url
 	if err != nil {
-		return nil, fmt.Errorf("shnsdk: BuildQuestionnairePackage: %w", err)
+		return nil, fmt.Errorf("shnsdk: BuildQuestionnairePackageAtLine: %w", err)
+	}
+	if def.QuestionnairePackageReturnShape == "qr-required" && len(questionnaireResponse) == 0 {
+		return nil, fmt.Errorf("shnsdk: BuildQuestionnairePackageAtLine: DTR line %q (profile DTR-QPackageBundle) requires a QuestionnaireResponse entry (Bundle.entry:questionnaireResponse min=1) but none was supplied", def.Line)
+	}
+	entries := []map[string]any{
+		{"fullUrl": url, "resource": json.RawMessage(questionnaire)},
+	}
+	if len(questionnaireResponse) > 0 {
+		qrURL, err := questionnaireResponseEntryFullURL(questionnaireResponse)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: BuildQuestionnairePackageAtLine: %w", err)
+		}
+		entries = append(entries, map[string]any{"fullUrl": qrURL, "resource": json.RawMessage(questionnaireResponse)})
 	}
 	pkg := map[string]any{
 		"resourceType": "Bundle",
 		"type":         "collection",
-		"entry": []map[string]any{
-			{"fullUrl": url, "resource": json.RawMessage(questionnaire)},
-		},
+		"entry":        entries,
 	}
 	return json.Marshal(pkg)
 }
@@ -166,8 +239,25 @@ func ParseQuestionnaireURL(data []byte) (string, error) {
 // matching internal/dtr.AutoFill's wire output. SANDBOX-TARGETED STUB (DEF): NOT a
 // general SDC engine — it handles the sandbox questionnaire's known items. It MUST
 // FAIL LOUDLY (a clear error naming the supported canonical) on a questionnaire whose
-// canonical/url it does not recognize, and NEVER emit a half-filled QR.
+// canonical/url it does not recognize, and NEVER emit a half-filled QR. It is
+// FillQuestionnaireAtLine("2.0", …), byte-identical (regression-fenced by
+// sdk/dtr_test.go). Use FillQuestionnaireAtLine to target 2.1/2.2 (DTR package differential:
+// the qr-coverage extension + the "auto-client" origin code at 2.2).
 func FillQuestionnaire(questionnaireJSON []byte, cc ClinicalContext, qc QRContext) ([]byte, error) {
+	return FillQuestionnaireAtLine("2.0", questionnaireJSON, cc, qc)
+}
+
+// FillQuestionnaireAtLine is FillQuestionnaire parameterized by DTR line ("2.0",
+// "2.1", "2.2"). Unknown line -> error (fail-closed, never a silent 2.0 fallback).
+func FillQuestionnaireAtLine(line string, questionnaireJSON []byte, cc ClinicalContext, qc QRContext) ([]byte, error) {
+	def, ok := DTRLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: FillQuestionnaireAtLine: unknown DTR line %q", line)
+	}
+	return fillQuestionnaire(def, questionnaireJSON, cc, qc)
+}
+
+func fillQuestionnaire(def DTRDef, questionnaireJSON []byte, cc ClinicalContext, qc QRContext) ([]byte, error) {
 	var q fhir.Questionnaire
 	if err := json.Unmarshal(questionnaireJSON, &q); err != nil {
 		return nil, fmt.Errorf("shnsdk: FillQuestionnaire: parse questionnaire: %w", err)
@@ -190,7 +280,7 @@ func FillQuestionnaire(questionnaireJSON []byte, cc ClinicalContext, qc QRContex
 		if !ok {
 			continue
 		}
-		answer.Extension = []fhir.Extension{originExtension()}
+		answer.Extension = []fhir.Extension{originExtension(def)}
 		items = append(items, fhir.QuestionnaireResponseItem{
 			LinkId: qi.LinkId,
 			Answer: []fhir.QuestionnaireResponseItemAnswer{answer},
@@ -203,7 +293,7 @@ func FillQuestionnaire(questionnaireJSON []byte, cc ClinicalContext, qc QRContex
 		Questionnaire: questionnaireCanonical(q),
 		Authored:      &authored,
 		Subject:       &fhir.Reference{Reference: &qc.PatientRef},
-		Extension:     dtrQRContextExtensions(qc),
+		Extension:     dtrQRContextExtensions(def, qc),
 		Item:          items,
 	}
 	raw, err := json.Marshal(qr)
@@ -251,13 +341,16 @@ func answerFor(linkID string, cc ClinicalContext) (fhir.QuestionnaireResponseIte
 	}
 }
 
-// originExtension builds the FR-17 information-origin extension with source="auto".
-// DTR 2.0.1 source="auto" carries only the "source" sub-extension. Byte-identical to
-// internal/dtr.originExtension.
-func originExtension() fhir.Extension {
+// originExtension builds the FR-17 information-origin extension for a CQL/EHR-
+// auto-populated answer, with the source code taken from def.AutoOriginSourceCode
+// ("auto" at 2.0/2.1's CodeSystem/temp; "auto-client" at 2.2's renamed
+// CodeSystem/dtr-informationorigin-codes — DTR package differential). DTR
+// source="auto"/"auto-client" carries only the "source" sub-extension.
+// Byte-identical to internal/dtr.originExtension at the same line.
+func originExtension(def DTRDef) fhir.Extension {
 	return fhir.Extension{
 		Url:       informationOriginExt,
-		Extension: []fhir.Extension{{Url: "source", ValueCode: strPtr("auto")}},
+		Extension: []fhir.Extension{{Url: "source", ValueCode: strPtr(def.AutoOriginSourceCode)}},
 	}
 }
 
@@ -274,14 +367,29 @@ func questionnaireCanonical(q fhir.Questionnaire) *string {
 	return &c
 }
 
-// dtrQRContextExtensions builds the DTR QR-level extensions: 2 qr-context references
-// (coverage + order) + intendedUse=withpa. Byte-identical to internal/dtr.
-func dtrQRContextExtensions(qc QRContext) []fhir.Extension {
+// dtrQRContextExtensions builds the DTR QR-level extensions. At 2.0/2.1
+// (!def.SingleCoverageConstraint): 2 qr-context references (coverage + order) +
+// intendedUse=withpa (3 total — matches dtr-questionnaireresponse 2.0.1/2.1.0's
+// extension min=3). At 2.2 (def.SingleCoverageConstraint): the coverage reference
+// moves to its own required qr-coverage extension (StructureDefinition-qr-
+// coverage.json, min=1 max=*); the qr-context slice — now optional (min=0) — carries
+// the order reference only; intendedUse keeps min=1 (it gained mustSupport=true,
+// which is profile metadata, not a wire field) but its REQUIRED DocReason binding
+// resolves to a CRD 2.2.1 value set that draws "withpa" from a renamed CodeSystem —
+// so the coding's system comes from def.IntendedUseCodeSystem (DTR package differential +
+// the 2.2-lane conformance fix wave). Byte-identical to internal/dtr at the same line.
+func dtrQRContextExtensions(def DTRDef, qc QRContext) []fhir.Extension {
+	var coverage fhir.Extension
+	if def.SingleCoverageConstraint {
+		coverage = fhir.Extension{Url: qrCoverageExt, ValueReference: &fhir.Reference{Reference: strPtr(qc.CoverageRef)}}
+	} else {
+		coverage = fhir.Extension{Url: qrContextExt, ValueReference: &fhir.Reference{Reference: strPtr(qc.CoverageRef)}}
+	}
 	return []fhir.Extension{
-		{Url: qrContextExt, ValueReference: &fhir.Reference{Reference: strPtr(qc.CoverageRef)}},
+		coverage,
 		{Url: qrContextExt, ValueReference: &fhir.Reference{Reference: strPtr(qc.OrderRef)}},
 		{Url: intendedUseExt, ValueCodeableConcept: &fhir.CodeableConcept{Coding: []fhir.Coding{{
-			System:  strPtr(crdTempCodeSystem),
+			System:  strPtr(def.IntendedUseCodeSystem),
 			Code:    strPtr("withpa"),
 			Display: strPtr("Information needed for a prior authorization"),
 		}}}},

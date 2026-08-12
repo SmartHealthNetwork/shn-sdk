@@ -310,7 +310,39 @@ func ParseOrderSelectRequest(data []byte) (OrderSelectRequest, error) {
 // not-covered → "warning"; PA-required → "warning"; otherwise → "info". Byte parity with
 // internal/crd.BuildCards for equivalent coverage is proven by
 // test/sdkparity/crd_parity_test.go.
+//
+// Thin delegate to BuildCardsAtLine("2.0", …), matching the AtLine convention Tasks 3/4
+// established for the PAS/DTR builders.
 func BuildCards(cov CardCoverage) ([]byte, error) {
+	return BuildCardsAtLine("2.0", cov)
+}
+
+// BuildCardsAtLine is BuildCards parameterized by CRD line ("2.0", "2.1", "2.2").
+// Unknown line -> error (fail-closed, never a silent 2.0 fallback).
+//
+// Derived live from packages.simplifier.net/hl7.fhir.us.davinci-crd/
+// {2.0.1,2.1.0,2.2.1}, diffing StructureDefinition-ext-coverage-information.json's
+// differential.element against 2.0.1): the split coverage-information sub-extension
+// shape this projection carries — covered (min=1/max=1), pa-needed (min=0/max=1),
+// questionnaire (min=0/max=*), satisfied-pa-id (min=0/max=1) — is min/max-IDENTICAL
+// across all three published CRD STUs (confirms the pre-existing normalizer comment
+// at gateway/engine/davincimap.go:21-26, which reads this same split shape on the
+// INBOUND/foreign-partner side). In-band CRD version extensions: the 2.2.1
+// package introduces two NEW extensions — CDSHookServiceRequestExtensionRequestCRDVersion
+// (a client-set "requested CRD version" on the hook request) and
+// CDSHookServicesExtensionCRDVersion (a server-declared supported-version list on the
+// /cds-services discovery doc) — but BOTH are verified OPTIONAL (no min override in
+// their differential; the extension pattern default is min=0) at 2.2.1. Per the
+// produce-iff ruling (produce iff the package REQUIRES it), neither is built: the
+// package does not require them, so there is nothing to stamp regardless of data
+// availability. Net effect: BuildCardsAtLine has no per-line behavioral delta to gate
+// today — the line parameter exists for fail-closed validation and API symmetry with
+// the other AtLine builders, and is the growth point a future CRD line's genuine delta
+// would extend (see CRDDef in linedef.go).
+func BuildCardsAtLine(line string, cov CardCoverage) ([]byte, error) {
+	if _, ok := CRDLineDef(line); !ok {
+		return nil, fmt.Errorf("shnsdk: BuildCardsAtLine: unknown CRD line %q", line)
+	}
 	c := card{Extension: cov}
 	switch {
 	case cov.Covered == CoveredNotCovered:

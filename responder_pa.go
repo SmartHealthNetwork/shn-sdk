@@ -25,7 +25,11 @@ import (
 // from the conformant CDS Hooks request, runs the three-way member fence (SR subject + Coverage
 // beneficiary + context.patientId — mirrors engine.conformantCRDBind), reads the CPT, and asks
 // the Adjudicator whether PA is required + which questionnaire applies.
-func (r *Responder) handleCRD(plaintext []byte) handlerResult {
+//
+// claimedContract is the inbound request-frame claim (handleInbound step 7, "" when the
+// request arrived bare or unclaimed) — currently unread; see handleInbound's RECEIVER
+// OBLIGATION comment for why.
+func (r *Responder) handleCRD(plaintext []byte, claimedContract string) handlerResult {
 	srJSON, ok := parseConformantOrderSelectSR(plaintext)
 	if !ok {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse order-select failed"}
@@ -78,7 +82,11 @@ func (r *Responder) handleCRD(plaintext []byte) handlerResult {
 // Claim Bundle, adjudicates from the QR + DR-presence, and builds the approve/pend/deny response.
 // On pend the ledger record is deferred to commit (runs only after seal+authorize succeed),
 // the same commit-after-seal ordering the gateway uses across the handler/pipeline split.
-func (r *Responder) handlePASSubmit(plaintext []byte, tok Token, corr string, now time.Time) handlerResult {
+//
+// claimedContract is the inbound request-frame claim (handleInbound step 7, "" when the
+// request arrived bare or unclaimed) — currently unread; see handleInbound's RECEIVER
+// OBLIGATION comment for why.
+func (r *Responder) handlePASSubmit(plaintext []byte, tok Token, corr string, now time.Time, claimedContract string) handlerResult {
 	cs, ok := parseConformantClaimSubmit(plaintext)
 	if !ok {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse bundle failed"}
@@ -135,7 +143,11 @@ func (r *Responder) handlePASSubmit(plaintext []byte, tok Token, corr string, no
 //
 // Ledger ordering: finalize runs in commit (after seal+authorize succeed); a response-leg failure
 // runs rollback (release) — no stranded-approved claim (the gateway's commit-after-seal discipline).
-func (r *Responder) handlePASUpdate(plaintext []byte, tok Token, corr string, now time.Time) handlerResult {
+//
+// claimedContract is the inbound request-frame claim (handleInbound step 7, "" when the
+// request arrived bare or unclaimed) — currently unread; see handleInbound's RECEIVER
+// OBLIGATION comment for why.
+func (r *Responder) handlePASUpdate(plaintext []byte, tok Token, corr string, now time.Time, claimedContract string) handlerResult {
 	cs, ok := parseConformantClaimSubmit(plaintext)
 	if !ok {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse bundle failed"}

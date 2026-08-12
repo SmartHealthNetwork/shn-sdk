@@ -299,6 +299,200 @@ func TestConformantizePASClaim_NoItem(t *testing.T) {
 	}
 }
 
+// -- PAS builders at line --
+
+// claimItemOf extracts the single Claim.item[0] from a built conformant $submit/update
+// bundle, for the line-detail shape assertions.
+func claimItemOf(t *testing.T, bundleJSON []byte) map[string]json.RawMessage {
+	t.Helper()
+	var bundle struct {
+		Entry []struct {
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundleJSON, &bundle); err != nil {
+		t.Fatalf("unmarshal bundle: %v", err)
+	}
+	for _, e := range bundle.Entry {
+		var probe struct {
+			ResourceType string                       `json:"resourceType"`
+			Item         []map[string]json.RawMessage `json:"item"`
+		}
+		if err := json.Unmarshal(e.Resource, &probe); err != nil {
+			continue
+		}
+		if probe.ResourceType == "Claim" {
+			if len(probe.Item) != 1 {
+				t.Fatalf("Claim.item count = %d, want 1", len(probe.Item))
+			}
+			return probe.Item[0]
+		}
+	}
+	t.Fatal("built bundle has no Claim entry")
+	return nil
+}
+
+// itemHasLineDetailExtensions reports whether a Claim.item map carries BOTH the
+// certificationType and requestType extensions (the PAS 2.1+ delta).
+func itemHasLineDetailExtensions(t *testing.T, item map[string]json.RawMessage) (hasCert, hasReqType, hasLocation bool) {
+	t.Helper()
+	if raw, ok := item["extension"]; ok {
+		var exts []struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(raw, &exts); err != nil {
+			t.Fatalf("unmarshal item.extension: %v", err)
+		}
+		for _, ext := range exts {
+			switch ext.URL {
+			case pasExtCertificationType:
+				hasCert = true
+			case pasExtServiceItemRequestType:
+				hasReqType = true
+			}
+		}
+	}
+	_, hasLocation = item["locationCodeableConcept"]
+	return hasCert, hasReqType, hasLocation
+}
+
+// TestBuildConformantClaimBundleAtLine_RegressionFence: the legacy
+// BuildConformantClaimBundle is byte-identical to AtLine("2.0") for the same
+// inputs — existing exported signatures are unchanged, line 2.0 is just the
+// AtLine delegate.
+func TestBuildConformantClaimBundleAtLine_RegressionFence(t *testing.T) {
+	in := conformantSubmitInputs(t)
+	legacy, err := BuildConformantClaimBundle(in)
+	if err != nil {
+		t.Fatalf("BuildConformantClaimBundle: %v", err)
+	}
+	atLine, err := BuildConformantClaimBundleAtLine("2.0", in)
+	if err != nil {
+		t.Fatalf("BuildConformantClaimBundleAtLine(2.0): %v", err)
+	}
+	if !bytes.Equal(legacy, atLine) {
+		t.Fatalf("BuildConformantClaimBundle != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
+	}
+}
+
+// TestBuildConformantClaimBundleAtLine_ItemLineDetailByLine: PAS 2.1/2.2 add the
+// certificationType + requestType extensions and location[x] to Claim.item[0]
+// (verified via the PAS 2.1.0/2.2.1 package differential);
+// 2.0 does not carry them (regression fence).
+func TestBuildConformantClaimBundleAtLine_ItemLineDetailByLine(t *testing.T) {
+	in := conformantSubmitInputs(t)
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{{"2.0", false}, {"2.1", true}, {"2.2", true}} {
+		got, err := BuildConformantClaimBundleAtLine(tc.line, in)
+		if err != nil {
+			t.Fatalf("BuildConformantClaimBundleAtLine(%s): %v", tc.line, err)
+		}
+		item := claimItemOf(t, got)
+		hasCert, hasReqType, hasLocation := itemHasLineDetailExtensions(t, item)
+		if hasCert != tc.want || hasReqType != tc.want || hasLocation != tc.want {
+			t.Errorf("line %s: hasCert=%v hasReqType=%v hasLocation=%v, want all %v", tc.line, hasCert, hasReqType, hasLocation, tc.want)
+		}
+	}
+}
+
+// TestBuildConformantClaimBundleAtLine_UnknownLineErrors: fail-closed — an
+// unrecognised line errors, never a silent 2.0 fallback.
+func TestBuildConformantClaimBundleAtLine_UnknownLineErrors(t *testing.T) {
+	if _, err := BuildConformantClaimBundleAtLine("9.9", conformantSubmitInputs(t)); err == nil {
+		t.Fatal("BuildConformantClaimBundleAtLine(\"9.9\") = nil error, want an error")
+	}
+}
+
+// TestBuildConformantClaimUpdateBundleAtLine_RegressionFence: the legacy
+// BuildConformantClaimUpdateBundle is byte-identical to AtLine("2.0").
+func TestBuildConformantClaimUpdateBundleAtLine_RegressionFence(t *testing.T) {
+	in := conformantUpdateInputsFromGolden(t)
+	legacy, err := BuildConformantClaimUpdateBundle(in)
+	if err != nil {
+		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
+	}
+	atLine, err := BuildConformantClaimUpdateBundleAtLine("2.0", in)
+	if err != nil {
+		t.Fatalf("BuildConformantClaimUpdateBundleAtLine(2.0): %v", err)
+	}
+	if !bytes.Equal(legacy, atLine) {
+		t.Fatalf("BuildConformantClaimUpdateBundle != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
+	}
+}
+
+// TestBuildConformantClaimUpdateBundleAtLine_DeltasByLine: PAS 2.1/2.2 add the
+// Claim.item line-detail (certificationType/requestType/location[x]) AND
+// Claim.related[0].relationship (patternCodeableConcept
+// ex-relatedclaimrelationship#prior) to the update Claim; 2.0 carries neither.
+func TestBuildConformantClaimUpdateBundleAtLine_DeltasByLine(t *testing.T) {
+	in := conformantUpdateInputsFromGolden(t)
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{{"2.0", false}, {"2.1", true}, {"2.2", true}} {
+		got, err := BuildConformantClaimUpdateBundleAtLine(tc.line, in)
+		if err != nil {
+			t.Fatalf("BuildConformantClaimUpdateBundleAtLine(%s): %v", tc.line, err)
+		}
+		item := claimItemOf(t, got)
+		hasCert, hasReqType, hasLocation := itemHasLineDetailExtensions(t, item)
+		if hasCert != tc.want || hasReqType != tc.want || hasLocation != tc.want {
+			t.Errorf("line %s item detail: hasCert=%v hasReqType=%v hasLocation=%v, want all %v", tc.line, hasCert, hasReqType, hasLocation, tc.want)
+		}
+
+		var bundle struct {
+			Entry []struct {
+				Resource json.RawMessage `json:"resource"`
+			} `json:"entry"`
+		}
+		if err := json.Unmarshal(got, &bundle); err != nil {
+			t.Fatalf("unmarshal bundle: %v", err)
+		}
+		hasRelationship := false
+		for _, e := range bundle.Entry {
+			var probe struct {
+				ResourceType string `json:"resourceType"`
+				Related      []struct {
+					Relationship *struct {
+						Coding []struct {
+							System string `json:"system"`
+							Code   string `json:"code"`
+						} `json:"coding"`
+					} `json:"relationship"`
+				} `json:"related"`
+			}
+			if err := json.Unmarshal(e.Resource, &probe); err != nil {
+				continue
+			}
+			if probe.ResourceType != "Claim" {
+				continue
+			}
+			if len(probe.Related) == 0 {
+				t.Fatalf("line %s: Claim has no related[]", tc.line)
+			}
+			if probe.Related[0].Relationship != nil {
+				for _, c := range probe.Related[0].Relationship.Coding {
+					if c.System == pasRelatedClaimRelationshipSystem && c.Code == "prior" {
+						hasRelationship = true
+					}
+				}
+			}
+		}
+		if hasRelationship != tc.want {
+			t.Errorf("line %s: Claim.related[0].relationship present=%v, want %v", tc.line, hasRelationship, tc.want)
+		}
+	}
+}
+
+// TestBuildConformantClaimUpdateBundleAtLine_UnknownLineErrors: fail-closed rejection.
+func TestBuildConformantClaimUpdateBundleAtLine_UnknownLineErrors(t *testing.T) {
+	if _, err := BuildConformantClaimUpdateBundleAtLine("9.9", conformantUpdateInputsFromGolden(t)); err == nil {
+		t.Fatal("BuildConformantClaimUpdateBundleAtLine(\"9.9\") = nil error, want an error")
+	}
+}
+
 // TestStripMetaProfile asserts stripMetaProfile's intent directly: it removes meta.profile,
 // PRESERVES other meta fields (meta.security survives), and deletes an emptied meta object
 // (no "meta":{} litter).

@@ -16,7 +16,12 @@ type Discovery struct {
 	// Supersedes the scalar-per-IG IGVersions map for per-line truth (IGVersions
 	// stays for compat). ADDITIVE optional field — an older consumer ignores it;
 	// does NOT bump wireProtocolVersion. Producer: internal/accountsvc/discovery.go.
-	ContractVersions  []string           `json:"contractVersions,omitempty"`
+	ContractVersions []string `json:"contractVersions,omitempty"`
+	// RequestFrames are the sealed REQUEST-frame versions this substrate's
+	// holders accept ("v1" — request frames, spec 2026-08-11 slice 4). ADDITIVE optional
+	// field — an older consumer ignores it; does NOT bump wireProtocolVersion.
+	// Producer: internal/accountsvc/discovery.go.
+	RequestFrames     []string           `json:"requestFrames,omitempty"`
 	Endpoints         DiscoveryEndpoints `json:"endpoints"`
 	AuthzPublicKeyURL string             `json:"authzPublicKeyURL"`
 	// HubTransportKeyURL is the URL of the Hub's X-Hub-Assertion verification

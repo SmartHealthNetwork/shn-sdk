@@ -208,7 +208,7 @@ func TestBuildEligibilityResponse(t *testing.T) {
 // internal/fhirmap shim is proven in test/sdkparity/capabilitystatement_parity_test.go.
 func TestBuildPatientAccessCapabilityStatement_Shape(t *testing.T) {
 	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
-	b, err := BuildPatientAccessCapabilityStatement(at)
+	b, err := BuildPatientAccessCapabilityStatement(at, SupportedContractVersions())
 	if err != nil {
 		t.Fatalf("BuildPatientAccessCapabilityStatement: %v", err)
 	}
@@ -257,9 +257,44 @@ func TestBuildPatientAccessCapabilityStatement_Shape(t *testing.T) {
 		t.Fatalf("implementationGuide = %v, want the versioned PDex 2.1.0 canonical", igs)
 	}
 	// Determinism: same input → byte-identical output.
-	b2, _ := BuildPatientAccessCapabilityStatement(at)
+	b2, _ := BuildPatientAccessCapabilityStatement(at, SupportedContractVersions())
 	if string(b) != string(b2) {
 		t.Error("BuildPatientAccessCapabilityStatement is non-deterministic")
+	}
+}
+
+// TestBuildPatientAccessCapabilityStatement_DeclaredSet (declared-set driven): the
+// implementationGuide list is declared-set-driven — an unrecognized pa.pdex line is
+// tolerated (skipped, never fabricated), and a declared set with no pa.pdex token at
+// all yields no implementationGuide entries (never a silent hardcoded fallback).
+func TestBuildPatientAccessCapabilityStatement_DeclaredSet(t *testing.T) {
+	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+
+	// Unrecognized pa.pdex line -> skipped, no error, no fabricated canonical.
+	b, err := BuildPatientAccessCapabilityStatement(at, []string{"pa.pdex@9.9"})
+	if err != nil {
+		t.Fatalf("BuildPatientAccessCapabilityStatement(unrecognized pdex line): %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, has := m["implementationGuide"]; has {
+		t.Fatalf("implementationGuide = %v, want absent (no recognized pa.pdex line declared)", m["implementationGuide"])
+	}
+
+	// No pa.pdex token at all (e.g. a declared set naming only unrelated contracts) ->
+	// no implementationGuide entries.
+	b, err = BuildPatientAccessCapabilityStatement(at, []string{"pa.crd@2.0"})
+	if err != nil {
+		t.Fatalf("BuildPatientAccessCapabilityStatement(no pdex token): %v", err)
+	}
+	m = map[string]any{} // reset — json.Unmarshal into a non-nil map merges, never clears stale keys
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, has := m["implementationGuide"]; has {
+		t.Fatalf("implementationGuide = %v, want absent (declared set carries no pa.pdex token)", m["implementationGuide"])
 	}
 }
 
@@ -272,7 +307,7 @@ func TestBuildPatientAccessCapabilityStatement_Shape(t *testing.T) {
 // rest.resource.
 func TestBuildProviderIngressCapabilityStatement_Shape(t *testing.T) {
 	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
-	b, err := BuildProviderIngressCapabilityStatement(at)
+	b, err := BuildProviderIngressCapabilityStatement(at, SupportedContractVersions())
 	if err != nil {
 		t.Fatalf("BuildProviderIngressCapabilityStatement: %v", err)
 	}
@@ -306,9 +341,90 @@ func TestBuildProviderIngressCapabilityStatement_Shape(t *testing.T) {
 			t.Fatalf("statement missing operation %q", must)
 		}
 	}
-	b2, err := BuildProviderIngressCapabilityStatement(at)
+	b2, err := BuildProviderIngressCapabilityStatement(at, SupportedContractVersions())
 	if err != nil || !bytes.Equal(b, b2) {
 		t.Fatal("BuildProviderIngressCapabilityStatement is not deterministic")
+	}
+}
+
+// TestBuildProviderIngressCapabilityStatement_DeclaredSet (declared-set driven): the
+// implementationGuide list and the Claim resource's supportedProfile pins are
+// declared-set-driven — declaring pa.crd@{2.0,2.2} yields EXACTLY two CRD IG
+// canonicals and no dtr/pas canonicals at all (positive AND negative assertion).
+func TestBuildProviderIngressCapabilityStatement_DeclaredSet(t *testing.T) {
+	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+
+	b, err := BuildProviderIngressCapabilityStatement(at, []string{"pa.crd@2.0", "pa.crd@2.2"})
+	if err != nil {
+		t.Fatalf("BuildProviderIngressCapabilityStatement: %v", err)
+	}
+	var cs map[string]any
+	if err := json.Unmarshal(b, &cs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	igs, _ := cs["implementationGuide"].([]any)
+	wantCRD := map[string]bool{
+		"http://hl7.org/fhir/us/davinci-crd/ImplementationGuide/hl7.fhir.us.davinci-crd|2.0.1": true,
+		"http://hl7.org/fhir/us/davinci-crd/ImplementationGuide/hl7.fhir.us.davinci-crd|2.2.1": true,
+	}
+	if len(igs) != 2 {
+		t.Fatalf("implementationGuide = %v, want exactly 2 CRD canonicals", igs)
+	}
+	for _, ig := range igs {
+		s, _ := ig.(string)
+		if !wantCRD[s] {
+			t.Fatalf("unexpected implementationGuide entry %v, want one of %v", ig, wantCRD)
+		}
+		if strings.Contains(s, "davinci-dtr") || strings.Contains(s, "davinci-pas") {
+			t.Fatalf("declared set carried no pa.dtr/pa.pas — implementationGuide must not carry %v", ig)
+		}
+	}
+
+	// PAS-declared-only: the Claim resource's supportedProfile carries one pin per
+	// declared PAS line (multi-line, per the brief's "per-line supportedProfile
+	// pins" requirement), and no CRD/DTR canonicals appear.
+	b, err = BuildProviderIngressCapabilityStatement(at, []string{"pa.pas@2.0", "pa.pas@2.2"})
+	if err != nil {
+		t.Fatalf("BuildProviderIngressCapabilityStatement(pas-only): %v", err)
+	}
+	cs = map[string]any{} // reset — json.Unmarshal into a non-nil map merges, never clears stale keys
+	if err := json.Unmarshal(b, &cs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	rests, _ := cs["rest"].([]any)
+	rest0, _ := rests[0].(map[string]any)
+	resources, _ := rest0["resource"].([]any)
+	claimRes, _ := resources[0].(map[string]any)
+	if claimRes["type"] != "Claim" {
+		t.Fatalf("resource[0].type = %v, want Claim", claimRes["type"])
+	}
+	profiles, _ := claimRes["supportedProfile"].([]any)
+	wantProfiles := map[string]bool{
+		"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim|2.0.1": true,
+		"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim|2.2.1": true,
+	}
+	if len(profiles) != 2 {
+		t.Fatalf("Claim supportedProfile = %v, want exactly 2 pins (one per declared PAS line)", profiles)
+	}
+	for _, p := range profiles {
+		if s, _ := p.(string); !wantProfiles[s] {
+			t.Fatalf("unexpected supportedProfile entry %v", p)
+		}
+	}
+
+	// Unrecognized line + unrelated contract tokens are tolerated (skipped, no error,
+	// no fabricated canonical) — an empty/irrelevant declared set yields an empty
+	// implementationGuide.
+	b, err = BuildProviderIngressCapabilityStatement(at, []string{"pa.crd@9.9", "pa.pdex@2.1"})
+	if err != nil {
+		t.Fatalf("BuildProviderIngressCapabilityStatement(unrecognized/unrelated): %v", err)
+	}
+	cs = map[string]any{} // reset — see comment above
+	if err := json.Unmarshal(b, &cs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, has := cs["implementationGuide"]; has {
+		t.Fatalf("implementationGuide = %v, want absent (no recognized pa.crd/pa.dtr/pa.pas line declared)", cs["implementationGuide"])
 	}
 }
 

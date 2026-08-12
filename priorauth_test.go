@@ -48,6 +48,23 @@ type paFakeSubstrate struct {
 	frameLeg    string
 	frameStatus int
 	frameBody   []byte
+
+	// capturedRequestFramed/capturedRequestClaim record, per REQUEST
+	// TransactionType, whether the payload the originator sealed arrived as a v1
+	// frame and (if so) its contractVersion claim — the REQUEST-framing
+	// assertions (spec 2026-08-11 slice 4, published-SDK parity — v0.38.0).
+	// Populated unconditionally by routeHandler; nil until the first leg routes.
+	capturedRequestFramed map[string]bool
+	capturedRequestClaim  map[string]string
+
+	// doStamp/stampLeg/stampToken seal a SUCCESS response for the leg whose
+	// TransactionType equals stampLeg as a v1 frame carrying stampToken as its
+	// contractVersion header ("" ⇒ the header is omitted entirely — the "framed
+	// but unstamped" tolerated case) instead of payloadFor's plain seal — the contractVersion
+	// stamp-verify assertions (unframeAnswer's expectedToken check).
+	doStamp    bool
+	stampLeg   string
+	stampToken string
 }
 
 // responseOpFor mirrors hubsvc.responseOp: the op the response-leg token is pinned
@@ -149,6 +166,25 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 		var inTok Token
 		_ = json.Unmarshal([]byte(env.Metadata.AuthzToken), &inTok)
 
+		// REQUEST-frame capture (spec 2026-08-11 slice 4): record whether THIS
+		// leg's request arrived framed and, if so, its contractVersion claim —
+		// magic-keyed decode, same argument as unframeAnswer/handleInbound.
+		if f.capturedRequestFramed == nil {
+			f.capturedRequestFramed = map[string]bool{}
+		}
+		if f.capturedRequestClaim == nil {
+			f.capturedRequestClaim = map[string]string{}
+		}
+		if IsFramed(reqPlain) {
+			f.capturedRequestFramed[txType] = true
+			if hdr, unwrapped, ferr := DecodeHTTPFrame(reqPlain); ferr == nil {
+				f.capturedRequestClaim[txType] = hdr.Headers[FrameHeaderContractVersion]
+				reqPlain = unwrapped
+			}
+		} else {
+			f.capturedRequestFramed[txType] = false
+		}
+
 		respOp, ok := paResponseOp[txType]
 		if !ok {
 			http.Error(w, "unknown tx", http.StatusBadGateway)
@@ -160,6 +196,20 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 			framed, ferr := EncodeHTTPFrame(f.frameStatus, "application/fhir+json", f.frameBody)
 			if ferr != nil {
 				http.Error(w, "frame", http.StatusInternalServerError)
+				return
+			}
+			payload = framed
+		} else if f.doStamp && txType == f.stampLeg {
+			// contractVersion stamp-verify test seam: seal a SUCCESS answer as a v1 frame
+			// carrying (or, when stampToken=="", deliberately omitting) the
+			// contractVersion header.
+			headers := map[string]string{"Content-Type": "application/fhir+json"}
+			if f.stampToken != "" {
+				headers[FrameHeaderContractVersion] = f.stampToken
+			}
+			framed, ferr := EncodeHTTPFrameHeaders(http.StatusOK, headers, payload)
+			if ferr != nil {
+				http.Error(w, "stamp", http.StatusInternalServerError)
 				return
 			}
 			payload = framed

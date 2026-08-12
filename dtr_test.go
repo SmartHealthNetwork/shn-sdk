@@ -105,6 +105,314 @@ func TestFillQuestionnaireHappyPath(t *testing.T) {
 	}
 }
 
+// TestFillQuestionnaireAtLine_RegressionFence: the legacy FillQuestionnaire is
+// byte-identical to AtLine("2.0") for the same inputs (per-line parity).
+func TestFillQuestionnaireAtLine_RegressionFence(t *testing.T) {
+	legacy, err := FillQuestionnaire([]byte(sandboxQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
+	if err != nil {
+		t.Fatalf("FillQuestionnaire: %v", err)
+	}
+	atLine, err := FillQuestionnaireAtLine("2.0", []byte(sandboxQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
+	if err != nil {
+		t.Fatalf("FillQuestionnaireAtLine(2.0): %v", err)
+	}
+	if string(legacy) != string(atLine) {
+		t.Fatalf("FillQuestionnaire != FillQuestionnaireAtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
+	}
+}
+
+// TestFillQuestionnaireAtLine_UnknownLineErrors: fail-closed rejection (per-line parity).
+func TestFillQuestionnaireAtLine_UnknownLineErrors(t *testing.T) {
+	if _, err := FillQuestionnaireAtLine("9.9", []byte(sandboxQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC()); err == nil {
+		t.Fatal("FillQuestionnaireAtLine(\"9.9\") = nil error, want an error")
+	}
+}
+
+// qrExtensionProbe is the shape used to inspect a built QR's top-level extensions
+// (the per-line coverage/origin-code shape tests).
+type qrExtensionProbe struct {
+	Extension []struct {
+		URL            string `json:"url"`
+		ValueReference *struct {
+			Reference string `json:"reference"`
+		} `json:"valueReference"`
+	} `json:"extension"`
+	Item []struct {
+		LinkId string `json:"linkId"`
+		Answer []struct {
+			Extension []struct {
+				URL       string `json:"url"`
+				Extension []struct {
+					URL       string `json:"url"`
+					ValueCode string `json:"valueCode"`
+				} `json:"extension"`
+			} `json:"extension"`
+		} `json:"answer"`
+	} `json:"item"`
+}
+
+// assertQRCoverageAndOriginByLine is shared by FillQuestionnaireAtLine and
+// FillQuestionnaireFromAnswersAtLine's per-line shape tests: at "2.0"/"2.1" the
+// coverage reference rides a qr-context extension (2 qr-context total: coverage +
+// order) and 0 qr-coverage extensions; at "2.2" it rides a dedicated qr-coverage
+// extension (1 qr-coverage + 1 qr-context, for the order only) — DTR package differential
+// (StructureDefinition-dtr-questionnaireresponse.json + StructureDefinition-
+// qr-coverage.json). wantOriginCode, when non-empty, is checked against every
+// answer's information-origin source code found in the QR (FillQuestionnaireAtLine
+// only — FillQuestionnaireFromAnswersAtLine stamps "manual", which never changes by
+// line, so its test passes "").
+func assertQRCoverageAndOriginByLine(t *testing.T, line string, raw []byte, coverageRef, orderRef, wantOriginCode string) {
+	t.Helper()
+	var qr qrExtensionProbe
+	if err := json.Unmarshal(raw, &qr); err != nil {
+		t.Fatalf("line %s: QR does not unmarshal: %v", line, err)
+	}
+	var qrContextCount, qrCoverageCount int
+	var qrContextRefs, qrCoverageRefs []string
+	for _, ext := range qr.Extension {
+		switch ext.URL {
+		case qrContextExt:
+			qrContextCount++
+			if ext.ValueReference != nil {
+				qrContextRefs = append(qrContextRefs, ext.ValueReference.Reference)
+			}
+		case qrCoverageExt:
+			qrCoverageCount++
+			if ext.ValueReference != nil {
+				qrCoverageRefs = append(qrCoverageRefs, ext.ValueReference.Reference)
+			}
+		}
+	}
+	if line == "2.2" {
+		if qrCoverageCount != 1 {
+			t.Errorf("line 2.2: qr-coverage extension count = %d, want 1", qrCoverageCount)
+		}
+		if len(qrCoverageRefs) != 1 || qrCoverageRefs[0] != coverageRef {
+			t.Errorf("line 2.2: qr-coverage refs = %v, want [%q]", qrCoverageRefs, coverageRef)
+		}
+		if qrContextCount != 1 {
+			t.Errorf("line 2.2: qr-context extension count = %d, want 1 (order only)", qrContextCount)
+		}
+		if len(qrContextRefs) != 1 || qrContextRefs[0] != orderRef {
+			t.Errorf("line 2.2: qr-context refs = %v, want [%q]", qrContextRefs, orderRef)
+		}
+	} else {
+		if qrCoverageCount != 0 {
+			t.Errorf("line %s: qr-coverage extension count = %d, want 0 (2.2-only)", line, qrCoverageCount)
+		}
+		if qrContextCount != 2 {
+			t.Errorf("line %s: qr-context extension count = %d, want 2 (coverage+order)", line, qrContextCount)
+		}
+		wantRefs := map[string]bool{coverageRef: false, orderRef: false}
+		for _, r := range qrContextRefs {
+			if _, ok := wantRefs[r]; ok {
+				wantRefs[r] = true
+			}
+		}
+		for r, seen := range wantRefs {
+			if !seen {
+				t.Errorf("line %s: qr-context refs %v missing %q", line, qrContextRefs, r)
+			}
+		}
+	}
+	if wantOriginCode == "" {
+		return
+	}
+	found := false
+	for _, it := range qr.Item {
+		for _, ans := range it.Answer {
+			for _, ext := range ans.Extension {
+				if ext.URL != informationOriginExt {
+					continue
+				}
+				for _, sub := range ext.Extension {
+					if sub.URL != "source" {
+						continue
+					}
+					found = true
+					if sub.ValueCode != wantOriginCode {
+						t.Errorf("line %s: answer source code = %q, want %q", line, sub.ValueCode, wantOriginCode)
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("line %s: no information-origin source code found in any answer", line)
+	}
+}
+
+// TestFillQuestionnaireAtLine_CoverageAndOriginByLine: DTR 2.2's SingleCoverageConstraint
+// (qr-coverage extension) and AutoOriginSourceCode ("auto-client") deltas — both
+// verified in the DTR package differential.
+func TestFillQuestionnaireAtLine_CoverageAndOriginByLine(t *testing.T) {
+	cc := mbrCoveredCC()
+	qc := mbrCoveredQC()
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		raw, err := FillQuestionnaireAtLine(line, []byte(sandboxQuestionnaireJSON), cc, qc)
+		if err != nil {
+			t.Fatalf("FillQuestionnaireAtLine(%s): %v", line, err)
+		}
+		def, ok := DTRLineDef(line)
+		if !ok {
+			t.Fatalf("DTRLineDef(%q) ok = false", line)
+		}
+		assertQRCoverageAndOriginByLine(t, line, raw, qc.CoverageRef, qc.OrderRef, def.AutoOriginSourceCode)
+	}
+}
+
+// TestFillQuestionnaireAtLine_IntendedUseSystemByLine (Finding E): the DTR
+// intendedUse extension required-binds to the CRD DocReason ValueSet
+// (StructureDefinition-intendedUse.json Extension.value[x], strength=required at
+// DTR 2.1.0 and 2.2.0). CRD moved the "withpa" concept: ValueSet-DocReason draws
+// it from CodeSystem/temp at CRD 2.1.0 and from the renamed
+// CodeSystem/coverage-information-codes at CRD 2.2.1 (where CodeSystem-temp no
+// longer defines it). Same code, new system at 2.2.
+func TestFillQuestionnaireAtLine_IntendedUseSystemByLine(t *testing.T) {
+	cc := mbrCoveredCC()
+	qc := mbrCoveredQC()
+	wantSystem := map[string]string{
+		"2.0": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp",
+		"2.1": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp",
+		"2.2": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/coverage-information-codes",
+	}
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		raw, err := FillQuestionnaireAtLine(line, []byte(sandboxQuestionnaireJSON), cc, qc)
+		if err != nil {
+			t.Fatalf("FillQuestionnaireAtLine(%s): %v", line, err)
+		}
+		var qr struct {
+			Extension []struct {
+				URL                  string `json:"url"`
+				ValueCodeableConcept *struct {
+					Coding []struct {
+						System string `json:"system"`
+						Code   string `json:"code"`
+					} `json:"coding"`
+				} `json:"valueCodeableConcept"`
+			} `json:"extension"`
+		}
+		if err := json.Unmarshal(raw, &qr); err != nil {
+			t.Fatalf("line %s: QR does not unmarshal: %v", line, err)
+		}
+		var saw bool
+		for _, ext := range qr.Extension {
+			if ext.URL != intendedUseExt {
+				continue
+			}
+			saw = true
+			if ext.ValueCodeableConcept == nil || len(ext.ValueCodeableConcept.Coding) != 1 {
+				t.Fatalf("line %s: intendedUse value = %+v, want exactly one coding", line, ext.ValueCodeableConcept)
+			}
+			c := ext.ValueCodeableConcept.Coding[0]
+			if c.System != wantSystem[line] || c.Code != "withpa" {
+				t.Errorf("line %s: intendedUse coding = %s#%s, want %s#withpa", line, c.System, c.Code, wantSystem[line])
+			}
+		}
+		if !saw {
+			t.Fatalf("line %s: QR carries no intendedUse extension", line)
+		}
+	}
+}
+
+// TestBuildQuestionnairePackageAtLine_RegressionFence: the legacy
+// BuildQuestionnairePackage is byte-identical to AtLine("2.0", q, nil) (per-line parity).
+func TestBuildQuestionnairePackageAtLine_RegressionFence(t *testing.T) {
+	q := []byte(`{"resourceType":"Questionnaire","url":"u"}`)
+	legacy, err := BuildQuestionnairePackage(q)
+	if err != nil {
+		t.Fatalf("BuildQuestionnairePackage: %v", err)
+	}
+	atLine, err := BuildQuestionnairePackageAtLine("2.0", q, nil)
+	if err != nil {
+		t.Fatalf("BuildQuestionnairePackageAtLine(2.0): %v", err)
+	}
+	if string(legacy) != string(atLine) {
+		t.Fatalf("BuildQuestionnairePackage != BuildQuestionnairePackageAtLine(\"2.0\", nil):\n legacy: %s\n atLine: %s", legacy, atLine)
+	}
+}
+
+// TestBuildQuestionnairePackageAtLine_UnknownLineErrors: fail-closed rejection (per-line parity).
+func TestBuildQuestionnairePackageAtLine_UnknownLineErrors(t *testing.T) {
+	q := []byte(`{"resourceType":"Questionnaire","url":"u"}`)
+	if _, err := BuildQuestionnairePackageAtLine("9.9", q, nil); err == nil {
+		t.Fatal("BuildQuestionnairePackageAtLine(\"9.9\") = nil error, want an error")
+	}
+}
+
+// TestBuildQuestionnairePackageAtLine_QRRequiredAt22 is the rejection test for the
+// verified DTR-QPackageBundle delta (per-line parity): Bundle.entry:questionnaireResponse is
+// unconstrained at 2.0, optional (min=0) at 2.1, and REQUIRED (min=1) at 2.2. A nil
+// questionnaireResponse is accepted at 2.0/2.1 (1-entry package, unchanged) and
+// rejected at 2.2 (never a silently non-conformant package).
+func TestBuildQuestionnairePackageAtLine_QRRequiredAt22(t *testing.T) {
+	q := []byte(`{"resourceType":"Questionnaire","url":"http://x/q"}`)
+
+	for _, line := range []string{"2.0", "2.1"} {
+		pkg, err := BuildQuestionnairePackageAtLine(line, q, nil)
+		if err != nil {
+			t.Fatalf("line %s: nil QR must be accepted: %v", line, err)
+		}
+		var probe struct {
+			Entry []json.RawMessage `json:"entry"`
+		}
+		if err := json.Unmarshal(pkg, &probe); err != nil {
+			t.Fatalf("line %s: unmarshal package: %v", line, err)
+		}
+		if len(probe.Entry) != 1 {
+			t.Errorf("line %s: entry count = %d, want 1 (no QR supplied)", line, len(probe.Entry))
+		}
+	}
+
+	// 2.2 with nil QR: rejected (profile requires the entry).
+	if _, err := BuildQuestionnairePackageAtLine("2.2", q, nil); err == nil {
+		t.Fatal("BuildQuestionnairePackageAtLine(\"2.2\", q, nil) = nil error, want an error (QR required)")
+	}
+
+	// 2.2 with a supplied QR: accepted, 2-entry package, second entry is the QR at its
+	// derived fullUrl.
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-1","status":"completed"}`)
+	pkg, err := BuildQuestionnairePackageAtLine("2.2", q, qr)
+	if err != nil {
+		t.Fatalf("BuildQuestionnairePackageAtLine(2.2, q, qr): %v", err)
+	}
+	var probe struct {
+		Entry []struct {
+			FullUrl  string          `json:"fullUrl"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(pkg, &probe); err != nil {
+		t.Fatalf("unmarshal 2.2 package: %v", err)
+	}
+	if len(probe.Entry) != 2 {
+		t.Fatalf("2.2 entry count = %d, want 2 (Questionnaire + QuestionnaireResponse)", len(probe.Entry))
+	}
+	if probe.Entry[1].FullUrl != "https://shn.example/fhir/QuestionnaireResponse/qr-1" {
+		t.Errorf("QR entry fullUrl = %q, want the derived https://shn.example/fhir/QuestionnaireResponse/qr-1", probe.Entry[1].FullUrl)
+	}
+	var qrProbe struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+	}
+	if err := json.Unmarshal(probe.Entry[1].Resource, &qrProbe); err != nil {
+		t.Fatalf("unmarshal QR entry resource: %v", err)
+	}
+	if qrProbe.ResourceType != "QuestionnaireResponse" || qrProbe.ID != "qr-1" {
+		t.Errorf("QR entry resource = %+v, want the qr-1 QuestionnaireResponse", qrProbe)
+	}
+}
+
+// TestBuildQuestionnairePackageAtLine_QRMissingIDErrors: a supplied QR with no id
+// cannot be given a resolvable fullUrl — never fabricated, so this errors.
+func TestBuildQuestionnairePackageAtLine_QRMissingIDErrors(t *testing.T) {
+	q := []byte(`{"resourceType":"Questionnaire","url":"http://x/q"}`)
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed"}`)
+	if _, err := BuildQuestionnairePackageAtLine("2.2", q, qr); err == nil {
+		t.Fatal("BuildQuestionnairePackageAtLine(2.2, q, qr-without-id) = nil error, want an error")
+	}
+}
+
 // TestBuildQuestionnaireFetchAndParseURL: the fetch request round-trips its canonical,
 // and ParseQuestionnaireURL reads the url out of the sandbox questionnaire.
 func TestBuildQuestionnaireFetchAndParseURL(t *testing.T) {

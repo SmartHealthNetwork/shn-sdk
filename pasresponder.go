@@ -194,10 +194,30 @@ func parseSandboxAdjudicationInputs(qrJSON []byte) (weeks int, attested, priorSu
 // reviewAction extension serialises cleanly.
 //
 // PORTED-standalone: internal/pas.BuildClaimResponse.
+//
+// BuildClaimResponse speaks PAS line 2.0 — it is BuildClaimResponseAtLine("2.0", …),
+// byte-identical (regression-fenced by test/sdkparity). No structural delta was found
+// for profile-claimresponse.json across 2.0.1/2.1.0/2.2.1 (PAS package differential); the
+// AtLine variant exists for interface symmetry + meta.profile-from-def discipline.
 func BuildClaimResponse(preAuthRef, validUntil, patientRef, correlationID string, created time.Time) ([]byte, error) {
+	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
+	return buildClaimResponse(def, preAuthRef, validUntil, patientRef, correlationID, created)
+}
+
+// BuildClaimResponseAtLine is BuildClaimResponse parameterized by PAS line
+// ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
+func BuildClaimResponseAtLine(line, preAuthRef, validUntil, patientRef, correlationID string, created time.Time) ([]byte, error) {
+	def, ok := PASLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: BuildClaimResponseAtLine: unknown PAS line %q", line)
+	}
+	return buildClaimResponse(def, preAuthRef, validUntil, patientRef, correlationID, created)
+}
+
+func buildClaimResponse(def PASDef, preAuthRef, validUntil, patientRef, correlationID string, created time.Time) ([]byte, error) {
 	cr := pasApprovedCR{
 		ResourceType: "ClaimResponse",
-		Meta:         &pasClaimResponseMeta{Profile: []string{pasProfileClaimResponse}},
+		Meta:         &pasClaimResponseMeta{Profile: []string{def.ClaimResponseProfile}},
 		Status:       "active",
 		Type:         pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/claim-type", Code: "professional"}}},
 		Use:          "preauthorization",
@@ -205,7 +225,11 @@ func BuildClaimResponse(preAuthRef, validUntil, patientRef, correlationID string
 		Created:      created.UTC().Format(time.RFC3339),
 		Insurer:      pasDeniedReference{Reference: "Organization/payer"},
 		Outcome:      "complete",
-		Identifier:   []pasDeniedIdentifier{{System: "urn:shn:correlation", Value: correlationID}},
+		Identifier:   []pasDeniedIdentifier{{System: pasCorrelationSystem, Value: correlationID}},
+		// PAS 2.1+ (def-driven): ClaimResponse.request — the Reference to the request
+		// Claim this response answers. nil (omitted) at 2.0, keeping that line's
+		// byte-frozen shape.
+		Request: pasClaimRequestFor(def, correlationID),
 		Item: []pasDeniedItem{{
 			ItemSequence: 1,
 			// PAS 2.0.1 declares extension-reviewAction's context as item.adjudication
@@ -242,9 +266,48 @@ func BuildClaimResponse(preAuthRef, validUntil, patientRef, correlationID string
 // never sees it (AI-2).
 //
 // PORTED-standalone: internal/pas.BuildPendedResponse (:617–669).
+//
+// BuildPendedResponse speaks PAS line 2.0 — it is BuildPendedResponseAtLine("2.0", …),
+// byte-identical (regression-fenced by test/sdkparity). Use BuildPendedResponseAtLine
+// to target 2.1/2.2 (PAS package differential: PAS 2.2 makes response Bundle.identifier
+// mandatory — profile-pas-response-bundle.json, absent at 2.0.1/2.1.0).
 func BuildPendedResponse(patientRef, correlationID string, needed []string, created time.Time) ([]byte, error) {
+	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
+	return buildPendedResponse(def, patientRef, correlationID, needed, created)
+}
+
+// BuildPendedResponseAtLine is BuildPendedResponse parameterized by PAS line
+// ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
+func BuildPendedResponseAtLine(line, patientRef, correlationID string, needed []string, created time.Time) ([]byte, error) {
+	def, ok := PASLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: BuildPendedResponseAtLine: unknown PAS line %q", line)
+	}
+	return buildPendedResponse(def, patientRef, correlationID, needed, created)
+}
+
+// pasPendedOutcome maps def.PendedResponseOutcome onto the samply enum,
+// fail-closed (an unmapped code is a manifest/def bug, never a silent default).
+func pasPendedOutcome(def PASDef) (fhir.ClaimProcessingCodes, error) {
+	switch def.PendedResponseOutcome {
+	case "queued":
+		return fhir.ClaimProcessingCodesQueued, nil
+	case "complete":
+		return fhir.ClaimProcessingCodesComplete, nil
+	default:
+		return 0, fmt.Errorf("shnsdk: PAS line %q: unsupported pended ClaimResponse.outcome %q", def.Line, def.PendedResponseOutcome)
+	}
+}
+
+func buildPendedResponse(def PASDef, patientRef, correlationID string, needed []string, created time.Time) ([]byte, error) {
+	// PAS 2.2 (def-driven): "queued" leaves the required ClaimResponseOutcome value
+	// set at 2.2.1 — the pend is carried by the Task entry, not the outcome code.
+	outcome, err := pasPendedOutcome(def)
+	if err != nil {
+		return nil, err
+	}
 	cr := fhir.ClaimResponse{
-		Meta:   &fhir.Meta{Profile: []string{pasProfileClaimResponse}},
+		Meta:   &fhir.Meta{Profile: []string{def.ClaimResponseProfile}},
 		Id:     strPtr("claim-response-" + correlationID),
 		Status: fhir.FinancialResourceStatusCodesActive,
 		Type: fhir.CodeableConcept{
@@ -257,11 +320,19 @@ func BuildPendedResponse(patientRef, correlationID string, needed []string, crea
 		Patient: fhir.Reference{Reference: strPtr(patientRef)},
 		Created: created.UTC().Format(time.RFC3339),
 		Insurer: fhir.Reference{Reference: strPtr("Organization/payer")},
-		Outcome: fhir.ClaimProcessingCodesQueued,
+		Outcome: outcome,
 		Identifier: []fhir.Identifier{{
-			System: strPtr("urn:shn:correlation"),
+			System: strPtr(pasCorrelationSystem),
 			Value:  strPtr(correlationID),
 		}},
+	}
+	// PAS 2.1+ (def-driven): the request Claim this pended response answers. nil at
+	// 2.0 (fhir.Reference is a pointer field — omitted, byte-frozen shape).
+	if def.ClaimResponseRequestRequired {
+		cr.Request = &fhir.Reference{Identifier: &fhir.Identifier{
+			System: strPtr(pasCorrelationSystem),
+			Value:  strPtr(correlationID),
+		}}
 	}
 	crJSON, err := json.Marshal(cr)
 	if err != nil {
@@ -289,6 +360,12 @@ func BuildPendedResponse(patientRef, correlationID string, needed []string, crea
 			{FullUrl: strPtr(crURL), Resource: json.RawMessage(crJSON)},
 			{FullUrl: strPtr(taskURL), Resource: json.RawMessage(taskJSON)},
 		},
+	}
+	// PAS 2.2 (def-driven, PAS package differential): response Bundle.identifier is
+	// mandatory. No-op at 2.0/2.1 (def.ResponseBundleIdentifierRequired false) —
+	// byte-identical to the existing legacy shape.
+	if def.ResponseBundleIdentifierRequired {
+		bundle.Identifier = &fhir.Identifier{System: strPtr(pasBundleIdentifierSystem), Value: strPtr(correlationID)}
 	}
 	raw, err := json.Marshal(bundle)
 	if err != nil {
@@ -382,8 +459,11 @@ type pasDeniedCR struct {
 	Outcome      string                   `json:"outcome"`
 	Disposition  string                   `json:"disposition"`
 	Identifier   []pasDeniedIdentifier    `json:"identifier"`
-	Item         []pasDeniedItem          `json:"item"`
-	ProcessNote  []pasDeniedProcessNote   `json:"processNote"`
+	// Request is the PAS 2.1+ mandatory ClaimResponse.request (omitted at 2.0 —
+	// PASDef.ClaimResponseRequestRequired).
+	Request     *pasClaimRequestRef    `json:"request,omitempty"`
+	Item        []pasDeniedItem        `json:"item"`
+	ProcessNote []pasDeniedProcessNote `json:"processNote"`
 }
 
 type pasDeniedItem struct {
@@ -428,6 +508,27 @@ type pasDeniedIdentifier struct {
 	System string `json:"system"`
 	Value  string `json:"value"`
 }
+
+// pasClaimRequestRef is ClaimResponse.request: a Reference to the request Claim
+// this response answers, carried as the Claim's BUSINESS identifier
+// (urn:shn:correlation|<correlationID>) rather than a literal "Claim/<id>". See
+// PASDef.ClaimResponseRequestRequired for why the identifier is the honest form
+// here (the conformant submit path stamps its own stable Claim.id; the
+// correlation identifier is the one datum both paths' Claims genuinely carry).
+type pasClaimRequestRef struct {
+	Identifier pasDeniedIdentifier `json:"identifier"`
+}
+
+// pasClaimRequestFor returns the ClaimResponse.request Reference for def, or nil
+// at a line that does not require it (2.0 — keeps the built response byte-identical
+// to the pre-slice-4 shape).
+func pasClaimRequestFor(def PASDef, correlationID string) *pasClaimRequestRef {
+	if !def.ClaimResponseRequestRequired {
+		return nil
+	}
+	return &pasClaimRequestRef{Identifier: pasDeniedIdentifier{System: pasCorrelationSystem, Value: correlationID}}
+}
+
 type pasClaimResponseMeta struct {
 	Profile []string `json:"profile,omitempty"`
 }
@@ -440,16 +541,19 @@ type pasClaimResponseMeta struct {
 //
 // PORTED-standalone: internal/pas.claimResponseApprovedJSON.
 type pasApprovedCR struct {
-	ResourceType  string                    `json:"resourceType"`
-	Meta          *pasClaimResponseMeta     `json:"meta,omitempty"`
-	Status        string                    `json:"status"`
-	Type          pasDeniedCodeableConcept  `json:"type"`
-	Use           string                    `json:"use"`
-	Patient       pasDeniedReference        `json:"patient"`
-	Created       string                    `json:"created"`
-	Insurer       pasDeniedReference        `json:"insurer"`
-	Outcome       string                    `json:"outcome"`
-	Identifier    []pasDeniedIdentifier     `json:"identifier"`
+	ResourceType string                   `json:"resourceType"`
+	Meta         *pasClaimResponseMeta    `json:"meta,omitempty"`
+	Status       string                   `json:"status"`
+	Type         pasDeniedCodeableConcept `json:"type"`
+	Use          string                   `json:"use"`
+	Patient      pasDeniedReference       `json:"patient"`
+	Created      string                   `json:"created"`
+	Insurer      pasDeniedReference       `json:"insurer"`
+	Outcome      string                   `json:"outcome"`
+	Identifier   []pasDeniedIdentifier    `json:"identifier"`
+	// Request is the PAS 2.1+ mandatory ClaimResponse.request (omitted at 2.0 —
+	// PASDef.ClaimResponseRequestRequired).
+	Request       *pasClaimRequestRef       `json:"request,omitempty"`
 	PreAuthRef    string                    `json:"preAuthRef,omitempty"`
 	PreAuthPeriod *pasApprovedPreAuthPeriod `json:"preAuthPeriod,omitempty"`
 	Item          []pasDeniedItem           `json:"item"`
@@ -481,10 +585,30 @@ const (
 // Outcome is "complete" — denial is a decision, not an error.
 //
 // PORTED-standalone: internal/pas.BuildDeniedResponse (:1019–1060).
+//
+// BuildDeniedResponse speaks PAS line 2.0 — it is BuildDeniedResponseAtLine("2.0", …),
+// byte-identical (regression-fenced by test/sdkparity). No structural delta was found
+// for profile-claimresponse.json across 2.0.1/2.1.0/2.2.1 (PAS package differential); the
+// AtLine variant exists for interface symmetry + meta.profile-from-def discipline.
 func BuildDeniedResponse(patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
+	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
+	return buildDeniedResponse(def, patientRef, correlationID, rationale, created)
+}
+
+// BuildDeniedResponseAtLine is BuildDeniedResponse parameterized by PAS line
+// ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
+func BuildDeniedResponseAtLine(line, patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
+	def, ok := PASLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: BuildDeniedResponseAtLine: unknown PAS line %q", line)
+	}
+	return buildDeniedResponse(def, patientRef, correlationID, rationale, created)
+}
+
+func buildDeniedResponse(def PASDef, patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
 	cr := pasDeniedCR{
 		ResourceType: "ClaimResponse",
-		Meta:         &pasClaimResponseMeta{Profile: []string{pasProfileClaimResponse}},
+		Meta:         &pasClaimResponseMeta{Profile: []string{def.ClaimResponseProfile}},
 		Status:       "active",
 		Type:         pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/claim-type", Code: "professional"}}},
 		Use:          "preauthorization",
@@ -493,7 +617,9 @@ func BuildDeniedResponse(patientRef, correlationID, rationale string, created ti
 		Insurer:      pasDeniedReference{Reference: "Organization/payer"},
 		Outcome:      "complete",
 		Disposition:  rationale,
-		Identifier:   []pasDeniedIdentifier{{System: "urn:shn:correlation", Value: correlationID}},
+		Identifier:   []pasDeniedIdentifier{{System: pasCorrelationSystem, Value: correlationID}},
+		// PAS 2.1+ (def-driven): the request Claim this denial answers. nil at 2.0.
+		Request: pasClaimRequestFor(def, correlationID),
 		Item: []pasDeniedItem{{
 			ItemSequence: 1,
 			Adjudication: []pasDeniedAdj{{

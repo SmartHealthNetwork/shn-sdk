@@ -27,6 +27,33 @@ func SupportsMessageFrameV1(frames []string) bool {
 	return false
 }
 
+// RequestFrameV1 is the capability token a holder advertises in its registry
+// entry (requestFrames) to accept a v1 sealed frame on the REQUEST payload
+// (request frames, spec 2026-08-11 slice 4). It reuses the message-frame codec verbatim —
+// the only new thing is WHO may emit it: an originator frames a request iff the
+// leg is contract-mapped AND the recipient declares this capability, so a peer
+// that never declares it keeps receiving byte-identical bare requests. Receivers
+// that declare it MUST accept BOTH framed and bare requests (bare = a
+// pre-slice-4 sender or a version-neutral leg — always tolerated).
+const RequestFrameV1 = "v1"
+
+// SupportedRequestFrames returns the request-frame versions THIS library
+// implements. Registration self-declares it (SupportedMessageFrames precedent) —
+// the capability defaults ON for SHN builds.
+func SupportedRequestFrames() []string { return []string{RequestFrameV1} }
+
+// SupportsRequestFrameV1 reports whether a holder's advertised request frames
+// include v1. Absent ⇒ NOT capable (the request-frame fence: no framed request is ever sent
+// to a peer that did not declare it).
+func SupportsRequestFrameV1(frames []string) bool {
+	for _, f := range frames {
+		if f == RequestFrameV1 {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	frameMagic    byte = 0x00 // illegal first byte of every text format we carry (JSON/X12/XML/HL7v2)
 	frameVersion1 byte = 0x01
@@ -177,7 +204,19 @@ func (e *AppAnswerError) Error() string {
 // while our view of the payer is still pre-upgrade — dynamic re-registration,
 // rolling deploys). The payer's advertised frames are therefore advisory only and
 // not an input here.
-func unframeAnswer(plaintext []byte) ([]byte, error) {
+//
+// expectedToken is the contractVersion stamp-verify check (spec 2026-08-10 §4, published-SDK
+// parity — v0.38.0): when non-empty (the caller knows the contract-version token
+// this leg was routed/built at) AND the 2xx frame carries a non-empty
+// FrameHeaderContractVersion stamp that DIFFERS from it, the answer is rejected —
+// tamper or skew, either way not the payload this leg negotiated. Verbatim
+// semantics of the gateway's response-leg verify (gateway/engine/gateway.go
+// roundTripInner). An ABSENT stamp is always tolerated (the frames-absent-lane
+// precedent — a pre-version responder, or a responder that never sets
+// ResponderConfig.StampContractVersion), and expectedToken == "" (the caller has no
+// routed-token expectation, e.g. RunEligibility — coverage-eligibility is not a
+// contract) skips the check entirely.
+func unframeAnswer(plaintext []byte, expectedToken string) ([]byte, error) {
 	if !IsFramed(plaintext) {
 		return plaintext, nil
 	}
@@ -187,6 +226,11 @@ func unframeAnswer(plaintext []byte) ([]byte, error) {
 	}
 	if hdr.Status/100 != 2 {
 		return nil, &AppAnswerError{Status: hdr.Status, ContentType: hdr.Headers["Content-Type"], Body: body}
+	}
+	if expectedToken != "" {
+		if stamped := hdr.Headers[FrameHeaderContractVersion]; stamped != "" && stamped != expectedToken {
+			return nil, fmt.Errorf("shnsdk: response contract version mismatch: frame declares %s, leg routed %s", stamped, expectedToken)
+		}
 	}
 	return body, nil
 }

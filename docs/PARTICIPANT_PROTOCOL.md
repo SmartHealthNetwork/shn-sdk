@@ -1163,21 +1163,29 @@ rest          body        raw bytes — no additional encoding
   the exchange-contract line the response body was **built at** — content-
   descriptive, like `Content-Type`, not a negotiation echo. Present only on
   contract-mapped legs (§8.6); a version-neutral leg's frame omits it, same as
-  every other legacy answer. **Stamped only by SHN gateways** on every framed
-  **success** (2xx) answer; **verified only by originators on ≥v0.37.0 of this
-  library** against the contract line the leg actually routed to (§8.6) —
-  disagreement is rejected before the body reaches any parser. An **absent**
-  stamp is always tolerated (a pre-version responder, or a responder on an
-  older published SDK build that does not yet emit the stamp), exactly like
-  an absent frame is tolerated today. A non-2xx frame is never stamped: its
-  body is relayed verbatim and never parsed as contract content.
+  every other legacy answer. **Stamped** on every framed **success** (2xx)
+  answer by SHN gateways since **v0.37.0**, and — published-SDK stamp parity,
+  spec 2026-08-11 slice 4 — by an SDK-based `Responder` that opts in
+  (`ResponderConfig.StampContractVersion`) as of **v0.38.0** of this library.
+  **Verified** against the contract line the leg actually routed to (§8.6) by
+  SHN gateways since **v0.37.0**, and — the same v0.38.0 parity — by the
+  published SDK's own originators (`RunEligibility`, `RunPriorAuth`; the
+  package-private `unframeAnswer`'s `expectedToken` check, verbatim-mirroring
+  the gateway's verify) as of **v0.38.0**; disagreement is rejected before the
+  body reaches any parser, either way. An **absent** stamp is always tolerated
+  (a pre-version responder, or a responder build that does not opt into
+  stamping), exactly like an absent frame is tolerated today. A non-2xx frame
+  is never stamped: its body is relayed verbatim and never parsed as contract
+  content.
 
 **Decoding is strict.** A decoder rejects (rather than silently degrading) on: an
 unknown version byte, a header length that overruns the payload or the 64 KiB
 cap, a non-JSON or malformed header, or an out-of-range `status`. Each of these
 is a distinct, typed decode failure. A header field outside the allowlist is
 **not** a reject: the reference decoder silently drops it and returns success
-(producers only ever emit `Content-Type`, so this never fires in practice).
+(SHN gateways only ever emit the two allowlisted headers, `Content-Type` and,
+on contract-mapped legs, `contractVersion` (§8.6), so this rarely fires in
+practice).
 
 **Mechanical vs. application status — the rule that replaced
 `RESPONDER_RELAY_ERRORS`.** A responder returns a non-2xx status **to the Hub**
@@ -1200,6 +1208,75 @@ governing this — a prior, now-removed release-specific mechanism
 (`RESPONDER_RELAY_ERRORS`, a JSON wrapper) covered the same problem for a single
 release before message-frame negotiation replaced it; see the gateway's
 `docs/CONFIGURATION.md`.
+
+**Request frames (`requestFrames`, spec 2026-08-11 slice 4).** The same v1
+codec above also frames the **request** leg of a contract-mapped exchange
+(`pa.crd` / `pa.dtr` / `pa.pas`, §8.6): an originator wraps the request payload
+in a v1 frame carrying the `contractVersion` it built the request at (the line
+it is routing the leg to, §8.6) — same wire layout and header schema as the
+response direction, with the frame's `status` field inert on a request (a
+`200` filler; no receiver reads it). This is a capability distinct from
+`messageFrames` — a **separate** registry list, so the request and response
+directions negotiate, and can be rolled out, independently:
+
+- An originator frames a request iff the **recipient's** registry entry
+  advertises `"v1"` in its `requestFrames` capability list — a peer that never
+  declares it keeps receiving a byte-identical bare request, the same
+  one-recipient-at-a-time gate `messageFrames` uses for the response direction.
+- **Receiver obligation.** A holder that declares `requestFrames` MUST accept
+  **both** a framed and a bare inbound request — declaring the capability
+  commits only to being *able* to decode a frame when one arrives, never to
+  requiring one. The reference decoder is the same `shnsdk.DecodeHTTPFrame`
+  §6.3 already documents, applied to the request payload (keyed on the frame
+  magic byte, exactly like the response direction) before the request is
+  dispatched to application logic. This SDK's `Responder` self-declares
+  `requestFrames` automatically at registration (`SupportedRequestFrames` —
+  on by default for every SDK-library registrant, the `messageFrames`
+  precedent) and decodes accordingly; a partner implementing its own receiver
+  from scratch must do the same — call `DecodeHTTPFrame` (or an equivalent
+  decoder) on any inbound payload beginning with the frame magic, and fall
+  through to bare parsing otherwise.
+- A framed request carrying **no** `contractVersion` claim is treated exactly
+  like a bare request (the frames-without-versions case — absence is always
+  tolerated, the same precedent as the response direction).
+- `coverage-eligibility` is version-neutral (no contract-version token exists
+  for it, §8.6) and is therefore never framed, regardless of what either side
+  declares.
+
+The Smart Gateway additionally *honors* a well-formed claim it can both
+natively build and validate for (native ∩ laned — spec
+`docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md` §4);
+this SDK's published `Responder` does not do per-line content negotiation, so
+it decodes and tolerates the claim without acting on it.
+
+**Ingress refusal — a claim the receiver cannot honor is a legible `422`, never
+a silent downgrade.** A Smart Gateway that decodes a request-frame
+`contractVersion` claim answers at that line only when it can *both* build and
+validate there; otherwise it refuses the leg before any application logic runs,
+naming what it does speak. Three distinct refusals, each a `422`:
+
+- **Unknown / unbuildable line.** The claimed token is not in the receiver's
+  native set for that leg's contract — e.g. a peer claims `pa.pas@3.0`:
+  `request declares contract version pa.pas@3.0, which this gateway cannot build for leg pas-claim (it speaks pa.pas@2.0,pa.pas@2.1,pa.pas@2.2)`.
+- **Native but unlaned.** The receiver *can* build the line but has no
+  `$validate` lane configured for it, so it cannot certify its own answer —
+  it refuses rather than answer unvalidated (FR-36):
+  `request declares contract version pa.pas@2.2 but this gateway has no FHIR validator lane for line 2.2 — refusing to answer at an unvalidatable line (FR-36/FR-G29)`.
+  One `$validate` server hosts exactly one version of a given IG, so a line
+  without its own lane genuinely cannot be validated on another line's.
+- **Claim on a version-neutral leg.** `coverage-eligibility` carries no
+  contract-version token (§8.6); a frame that claims one on that leg is
+  malformed, not tolerated.
+
+A **bare** request (or a framed one carrying no claim) is never refused: the
+receiver symmetrically recomputes the line the originator would have selected —
+the sender's declared set × the receiver's declared set, highest common line,
+falling back to the receiver's own canonical line for a silent sender — so a
+pre-request-frame or version-neutral sender is answered exactly as before. A
+recomputation that would *refuse* degrades to the receiver's canonical line
+instead: the originator already made the routing decision, and refusing an
+in-flight leg on the receiving side would break the declared-set change window
+described in the gateway's `docs/CONFIGURATION.md`.
 
 ---
 
@@ -1786,6 +1863,44 @@ which lives inside the seal (§6.3).
   Leaving `PAYER_DAVINCI_CONTRACT_VERSIONS` unset leaves native-forward legs
   unfiltered (today's default). See the gateway's `docs/CONFIGURATION.md`.
 
+**Native capability vs. the declared set — two separate axes (2026-08-11).**
+"What a build *can* produce" and "what a deployment *advertises* it speaks" are
+deliberately different sets, and only the second one routes:
+
+- **Native set.** The Smart Gateway and this SDK build every PA contract at
+  **three** lines — `pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`,
+  `pa.pas@{2.0,2.1,2.2}` — plus `pa.pdex@2.1`. Each line's payloads are built
+  against that line's own IG package pins and validated against a `$validate`
+  lane loaded with *that line's* packages (one validator per line — a single
+  server cannot host two versions of the same IG). `shnsdk.NativeContractVersions()`
+  is the machine-readable list.
+- **Declared set.** What a deployment publishes — in its registration /
+  rotation `contractVersions`, its `CapabilityStatement`s' versioned
+  `implementationGuide` canonicals, its `.well-known/davinci-configuration`, and
+  the `/holders` feed peers select against (§1a, §2.3, §8.4, §8.5). It defaults
+  to the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`,
+  `pa.pdex@2.1`) and is operator-configurable to any **subset of the native
+  set**. Declaring a line the build cannot produce is a configuration error that
+  fails at boot, not a routing outcome; so is declaring a line with no
+  `$validate` lane configured for it. All four surfaces read one accessor, so a
+  deployment cannot declare one set locally and a different one to its peers.
+- **Selection routes on the declared sets** — the highest common line between
+  the *originator's* declared set and the *recipient's* declared set, exactly as
+  the rules above describe. Native capability beyond the declared set is
+  invisible to selection.
+- **Honoring an inbound claim is wider than the declared set.** A receiver
+  honors a request-frame `contractVersion` claim (§6.3) whenever it can both
+  natively build and validate at that line — *native ∩ laned*, which is a
+  superset of its declared set. That is what makes a declared-set change benign:
+  a peer still holding the receiver's previous, smaller declaration keeps routing
+  legs at the old line and they still complete.
+- **A declared set may grow, never swap or shrink.** Adding a line is safe in
+  either order (the sender's stale view simply keeps selecting the older line
+  until the feed converges). Removing one can strand a pended exchange that
+  pinned the removed line at origination and must resume on it verbatim — a
+  breaking operation that requires draining pends first. See the gateway's
+  `docs/CONFIGURATION.md` for the opt-in procedure and the change window.
+
 See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md`
 §4 and §7 item 3.
 
@@ -1795,6 +1910,42 @@ See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md`
 
 ### Changelog
 
+- **2026-08-12 — Tri-line native builders + request frames (`requestFrames`, §6.3, §8.6).**
+  Two additive changes, no `wireProtocolVersion` bump, no new frame version.
+  (1) **Tri-line native.** The Smart Gateway and this SDK now build every PA
+  contract at three lines (`pa.crd`/`pa.dtr`/`pa.pas` at `@2.0`, `@2.1`, `@2.2`),
+  each validated against its own line's `$validate` lane. What a deployment
+  *declares* stays a configurable subset of that native capability and still
+  defaults to the canonical `2.0` line, so **nothing about an existing
+  deployment's wire behavior changes** until an operator opts a line in — the
+  `2.0` payload bytes are frozen and fenced by regression tests. §8.6 gains the
+  native-vs-declared distinction and the grow-only rule for declared sets.
+  (2) **Request frames.** A new, independently negotiated `requestFrames`
+  registry capability lets the **request** leg of a contract-mapped exchange
+  carry the line it was built at, in the same v1 frame the response direction
+  already uses (§6.3). Receivers that declare it MUST accept both framed and
+  bare requests; a peer that does not declare it keeps receiving byte-identical
+  bare requests. A claim the receiver cannot both build and validate for is
+  refused with a legible `422` (§6.3, ingress refusal) rather than silently
+  answered at another line. `coverage-eligibility` is version-neutral and is
+  never framed. Also in this release: an SDK-based `Responder` can opt into
+  stamping `contractVersion` on its framed success answers
+  (`ResponderConfig.StampContractVersion`), and the SDK's own originators verify
+  the stamp — the published-library parity for what SHN gateways have done since
+  v0.37.0. Absence is tolerated in every direction, as before.
+- **2026-08-11 — Version-matched routing + frame-header allowlist widened (`contractVersion`, §6.3, §8.6).**
+  The message-frame header allowlist (§6.3) widens from `Content-Type` alone to
+  `{Content-Type, contractVersion}`. `contractVersion` carries the full
+  `<contract>@<line>` token of the exchange-contract line the response body was
+  **built at**; it is stamped only by SHN gateways on every framed **success**
+  (2xx) answer for a contract-mapped leg (§8.6), and verified only by originators
+  on **≥v0.37.0** of this library against the line the leg actually routed to —
+  disagreement is rejected before the body reaches any parser. An **absent**
+  stamp is always tolerated, exactly like an absent frame: a pre-version
+  responder, or one on an older published build that predates the stamp, is
+  never treated as an error. This is additive to message frame v1 (§6.3) and
+  rides the same version-matched routing this slice adds (§8.6) — no new frame
+  version, no `wireProtocolVersion` bump.
 - **2026-08-11 — Contract-version declaration + surfacing (`contractVersions`, §1a, §2.3, §2.4).**
   Registration and rotation MAY carry a self-declared `contractVersions` array of
   `<contract>@<line>` tokens (grammar `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`, ≤16

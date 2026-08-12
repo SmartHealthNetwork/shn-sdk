@@ -38,6 +38,11 @@ type fakeSubstrate struct {
 	// drives the framed-app-error behavioral test (RunEligibility unframing).
 	frameStatus int
 	frameBody   []byte
+	// capturedRequestFramed records whether the coverage-eligibility REQUEST
+	// payload arrived framed (request frames, spec 2026-08-11 slice 4) — coverage-eligibility
+	// has no contract-version token, so it must always be false regardless of what
+	// the Payer declares.
+	capturedRequestFramed bool
 }
 
 // mint signs a Token the way the substrate authz framework does (Signature over
@@ -83,10 +88,12 @@ func (f *fakeSubstrate) routeHandler() http.HandlerFunc {
 			return
 		}
 		// Open the request payload with the payer key (proves the seal target).
-		if _, err := Open(env, f.payerPub, f.payerEnc); err != nil {
+		reqPlain, err := Open(env, f.payerPub, f.payerEnc)
+		if err != nil {
 			http.Error(w, "open", http.StatusBadRequest)
 			return
 		}
+		f.capturedRequestFramed = IsFramed(reqPlain)
 		corr := env.Metadata.CorrelationID
 		var inTok Token
 		_ = json.Unmarshal([]byte(env.Metadata.AuthzToken), &inTok)

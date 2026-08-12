@@ -20,6 +20,7 @@ type RegistryEntry struct {
 	PayerIDs         []PayerIdentifier // operator-attested payer-identity claims (role=payer); FeedPayerRouter index source (FR-G41)
 	MessageFrames    []string          // advertised sealed message-frame versions ("v1"); absent ⇒ legacy bare payloads
 	ContractVersions []string          // declared exchange-contract version tokens ("pa.pas@2.0"); absent ⇒ pre-contract build
+	RequestFrames    []string          // declared sealed REQUEST-frame versions ("v1"); absent ⇒ send this peer BARE requests
 }
 
 // Registry is a concurrency-safe holder registry. It is a value type whose

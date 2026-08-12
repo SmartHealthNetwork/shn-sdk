@@ -1,6 +1,7 @@
 package shnsdk
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -109,6 +110,55 @@ func TestBuildCards(t *testing.T) {
 	}
 	if cov.PARequired() || cov.NeedsDTR() {
 		t.Errorf("no-pa round-trip = %+v, want not PA-required, no questionnaire", cov)
+	}
+}
+
+// TestBuildCardsAtLine_RegressionFenceAndRejection: the legacy BuildCards is
+// byte-identical to AtLine("2.0"); an unrecognised line errors (fail-closed).
+// Derived live from packages.simplifier.net/hl7.fhir.us.davinci-crd/{2.0.1,2.1.0,2.2.1}
+// (StructureDefinition-ext-coverage-information.json differential): confirmed the
+// covered/pa-needed/questionnaire/satisfied-pa-id split sub-extension shape this
+// projection carries is min/max-IDENTICAL across all three published CRD STUs — so
+// BuildCardsAtLine has no per-line behavioral delta to gate; the parameter exists to
+// fail closed on an unrecognized line, matching the AtLine convention Tasks 3/4
+// established for PAS/DTR.
+func TestBuildCardsAtLine_RegressionFenceAndRejection(t *testing.T) {
+	cov := CardCoverage{Covered: "covered", PANeeded: "auth-needed", Questionnaires: []string{QuestionnaireCanonicalLumbarMRI}}
+	legacy, err := BuildCards(cov)
+	if err != nil {
+		t.Fatalf("BuildCards: %v", err)
+	}
+	atLine, err := BuildCardsAtLine("2.0", cov)
+	if err != nil {
+		t.Fatalf("BuildCardsAtLine(2.0): %v", err)
+	}
+	if !bytes.Equal(legacy, atLine) {
+		t.Fatalf("BuildCards != BuildCardsAtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
+	}
+	if _, err := BuildCardsAtLine("9.9", cov); err == nil {
+		t.Fatal("BuildCardsAtLine(\"9.9\") = nil error, want an error")
+	}
+}
+
+// TestBuildCardsAtLine_LineInvariantShape asserts BuildCardsAtLine emits
+// byte-identical output at every known CRD line (2.0/2.1/2.2) — the Step-1
+// package diff found no behavioral delta for the split coverage-information
+// projection SHN builds, so the three lines must stay byte-equal until a future
+// diff finds a real one (regression fence against silent drift).
+func TestBuildCardsAtLine_LineInvariantShape(t *testing.T) {
+	cov := CardCoverage{Covered: "not-covered", PANeeded: "no-auth"}
+	b20, err := BuildCardsAtLine("2.0", cov)
+	if err != nil {
+		t.Fatalf("BuildCardsAtLine(2.0): %v", err)
+	}
+	for _, line := range []string{"2.1", "2.2"} {
+		b, err := BuildCardsAtLine(line, cov)
+		if err != nil {
+			t.Fatalf("BuildCardsAtLine(%s): %v", line, err)
+		}
+		if !bytes.Equal(b20, b) {
+			t.Fatalf("BuildCardsAtLine(%s) != BuildCardsAtLine(\"2.0\"):\n 2.0: %s\n %s: %s", line, b20, line, b)
+		}
 	}
 }
 

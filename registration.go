@@ -32,6 +32,13 @@ type RegistrationRequest struct {
 	// Deliberately OUTSIDE the PoP signing payload — registrationSigningPayload is a
 	// frozen 5-field layout (same rule as MessageFrames).
 	ContractVersions []string `json:"contractVersions,omitempty"`
+	// RequestFrames are the sealed REQUEST-frame versions this build accepts
+	// (SupportedRequestFrames; library-self-declared — request frames, spec 2026-08-11 slice
+	// 4). An originator frames a contract-mapped request ONLY toward a peer whose
+	// registry entry declares this, so the wire stays additive in both directions.
+	// Deliberately OUTSIDE the PoP signing payload — registrationSigningPayload is
+	// a frozen 5-field layout (same rule as MessageFrames/ContractVersions).
+	RequestFrames []string `json:"requestFrames,omitempty"`
 	// Pop is base64.StdEncoding of this identity's ed25519 signature over the
 	// canonical registration statement, proving control of SignPub.
 	Pop string `json:"pop"`
@@ -57,9 +64,27 @@ func registrationSigningPayload(id, role, encPub, signPub, baseURL string) []byt
 // Trust-admin credential that gates the registrar's POST /register (that authority
 // is substrate/portal-side). The caller supplies the admin credential out of band.
 func (id Identity) Registration(role, baseURL string) RegistrationRequest {
+	return id.RegistrationWithDeclared(role, baseURL, nil)
+}
+
+// RegistrationWithDeclared is Registration with an EXPLICIT declared
+// contract-version set (D1a, spec 2026-08-11 slice 4). A deployment whose
+// declared set is operator-configured (the gateway's SHN_CONTRACT_VERSIONS
+// accessor) must stamp THAT set into its registry entry — peers select off
+// entry.ContractVersions, so an override that only reroutes local selection
+// would desync own-selection from the peers' view of this holder.
+//
+// contractVersions == nil ⇒ SupportedContractVersions(), i.e. Registration's
+// build-constant default, so library users are unaffected. The declared set is
+// deliberately outside the frozen 5-field PoP payload, so the override does not
+// change the proof-of-possession signature.
+func (id Identity) RegistrationWithDeclared(role, baseURL string, contractVersions []string) RegistrationRequest {
 	encPub := base64.StdEncoding.EncodeToString(id.EncPub[:])
 	signPub := base64.StdEncoding.EncodeToString(id.SignPub)
 	pop := ed25519.Sign(id.SignPriv, registrationSigningPayload(id.HolderID, role, encPub, signPub, baseURL))
+	if contractVersions == nil {
+		contractVersions = SupportedContractVersions()
+	}
 	return RegistrationRequest{
 		ID:               id.HolderID,
 		Role:             role,
@@ -67,7 +92,8 @@ func (id Identity) Registration(role, baseURL string) RegistrationRequest {
 		SignPub:          signPub,
 		BaseURL:          baseURL,
 		MessageFrames:    SupportedMessageFrames(),
-		ContractVersions: SupportedContractVersions(),
+		ContractVersions: contractVersions,
+		RequestFrames:    SupportedRequestFrames(),
 		Pop:              base64.StdEncoding.EncodeToString(pop),
 	}
 }

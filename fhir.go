@@ -366,6 +366,25 @@ type PADecisionEOBParams struct {
 	Created         time.Time
 }
 
+// davinciIGCanonical builds a versioned Da Vinci implementationGuide canonical
+// ("http://hl7.org/fhir/us/<ig>/ImplementationGuide/hl7.fhir.us.<ig>|<pkgVersion>").
+// Shared by the two declared-set-driven CapabilityStatement builders below.
+func davinciIGCanonical(ig, pkgVersion string) string {
+	return "http://hl7.org/fhir/us/" + ig + "/ImplementationGuide/hl7.fhir.us." + ig + "|" + pkgVersion
+}
+
+// pasProfileClaimBase is the unversioned Da Vinci PAS Claim profile canonical;
+// per-declared-line pins append "|<pkgVersion>" (davinci-pas manifest package
+// version, resolved via PASLineDef).
+const pasProfileClaimBase = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim"
+
+// pdexPackageVersionByLine resolves a PDex line ("2.1") to its manifest-pinned
+// package version ("2.1.0"). Unlike CRD/DTR/PAS, PDex has exactly one native line
+// today (tools/contracts/manifest.json pins "hl7.fhir.us.davinci-pdex" as a single
+// top-level value, not per-line) — a minimal inline lookup rather than a full
+// PDexDef/linedef.go map (YAGNI; promote it if/when PDex goes multi-line).
+var pdexPackageVersionByLine = map[string]string{"2.1": "2.1.0"}
+
 // BuildPatientAccessCapabilityStatement returns the CMS-0057/PDex Patient Access
 // CapabilityStatement the payer serves at GET /metadata (FR-37): a kind=instance
 // server statement declaring the ExplanationOfBenefit read+search surface (PDex PA
@@ -373,21 +392,48 @@ type PADecisionEOBParams struct {
 // the real payer routes (GET /ExplanationOfBenefit?patient= and /ExplanationOfBenefit/{id})
 // and validates as a base FHIR CapabilityStatement (0 errors).
 //
+// declared is the deployment's declared contract-version token set — the gateway
+// passes Gateway.declaredContractVersions() (SHN_CONTRACT_VERSIONS, D1a); an SDK
+// caller with no declared-set config passes SupportedContractVersions(), whose
+// output is byte-identical to the pre-declared-set hardcoded PDex 2.1.0 canonical. The
+// statement's implementationGuide
+// carries one versioned canonical per declared pa.pdex@<line> token, resolved via
+// pdexPackageVersionByLine; a declared line this build cannot resolve is silently
+// skipped (the declared set may legitimately name lines/contracts this statement
+// does not speak — never a fabricated canonical, never a build error over foreign
+// evidence). Tokens for other contracts (pa.crd/pa.dtr/pa.pas) are ignored — the
+// Patient Access API is PDex-only.
+//
 // Promoted verbatim from internal/fhirmap.BuildPatientAccessCapabilityStatement.
 // fhircodes-clean — no value-set references; dependency-light.
-func BuildPatientAccessCapabilityStatement(created time.Time) ([]byte, error) {
+func BuildPatientAccessCapabilityStatement(created time.Time, declared []string) ([]byte, error) {
 	doc := "Patient Access to prior-authorization decisions. Each request carries a per-operation patient-access authority token bound to the patient (AI-11) — no blanket access."
 	sec := "Per-operation patient-access bearer token (substrate Authorization Framework); subject-bound, signature-covered."
+	var igs []string
+	seen := map[string]bool{}
+	for _, tok := range declared {
+		contract, line, ok := strings.Cut(tok, "@")
+		if !ok || contract != "pa.pdex" {
+			continue
+		}
+		pkgVer, ok := pdexPackageVersionByLine[line]
+		if !ok {
+			continue
+		}
+		if ig := davinciIGCanonical("davinci-pdex", pkgVer); !seen[ig] {
+			igs = append(igs, ig)
+			seen[ig] = true
+		}
+	}
 	cs := fhir.CapabilityStatement{
 		Status:      fhir.PublicationStatusActive,
 		Date:        created.UTC().Format(time.RFC3339),
 		Kind:        fhir.CapabilityStatementKindInstance,
 		FhirVersion: fhir.FHIRVersion4_0_1,
-		// Versioned IG canonical (spec 2026-08-10 §3): the "|<version>" suffix
-		// pins the generation, matching the versioned supportedProfile below and
-		// HRex's #major.minor endpoint-code convention. This build's PDex line is
-		// pa.pdex@2.1 (sdk/contracts.go).
-		ImplementationGuide: []string{"http://hl7.org/fhir/us/davinci-pdex/ImplementationGuide/hl7.fhir.us.davinci-pdex|2.1.0"},
+		// Versioned IG canonical(s) (spec 2026-08-10 §3): the "|<version>" suffix
+		// pins the generation, one per declared pa.pdex line, matching HRex's
+		// #major.minor endpoint-code convention.
+		ImplementationGuide: igs,
 		Format:              []string{"json"},
 		Software:            &fhir.CapabilityStatementSoftware{Name: "SHN Payer Patient Access API"},
 		Implementation: &fhir.CapabilityStatementImplementation{
@@ -417,14 +463,60 @@ func BuildPatientAccessCapabilityStatement(created time.Time) ([]byte, error) {
 // BuildProviderIngressCapabilityStatement returns the provider gateway's
 // Da Vinci ingress CapabilityStatement, served at GET /metadata on the
 // ingress edge (FR-37 per-role statements; spec 2026-08-10 §3 path 3). It
-// declares the CRD/DTR/PAS 2.0.1 generation this build speaks natively
-// (pa.crd@2.0 / pa.dtr@2.0 / pa.pas@2.0, sdk/contracts.go) via versioned IG
-// canonicals, and the two FHIR operations the ingress serves. CRD is CDS
-// Hooks, not FHIR REST — it is named in documentation and implementationGuide
-// only; its discovery document lives at /cds-services.
-func BuildProviderIngressCapabilityStatement(created time.Time) ([]byte, error) {
+// declares the CRD/DTR/PAS generation(s) the deployment DECLARES (not merely
+// natively builds) via versioned IG canonicals, and the two FHIR operations the
+// ingress serves. CRD is CDS Hooks, not FHIR REST — it is named in documentation
+// and implementationGuide only; its discovery document lives at /cds-services.
+//
+// declared is the deployment's declared contract-version token set — the gateway
+// passes Gateway.declaredContractVersions() (SHN_CONTRACT_VERSIONS, D1a); an SDK
+// caller with no declared-set config passes SupportedContractVersions(), whose
+// output is byte-identical to the pre-declared-set hardcoded CRD/DTR/PAS 2.0.1
+// canonicals. For each declared
+// pa.crd/pa.dtr/pa.pas@<line> token, the corresponding *LineDef resolves the
+// manifest-pinned package version (fail-silent skip on a line this build does not
+// speak natively — never a fabricated canonical); pa.pas additionally contributes a
+// per-line `profile-claim|<pkgver>` supportedProfile pin on the Claim resource (one
+// per declared PAS line). A declared token for an unrelated contract (e.g.
+// pa.pdex, or a future workstream's) is ignored — this statement is CRD/DTR/PAS-only.
+func BuildProviderIngressCapabilityStatement(created time.Time, declared []string) ([]byte, error) {
 	doc := "Da Vinci ingress for foreign EHR/CDS clients: PAS Claim/$submit, DTR $questionnaire-package (FHIR operations below), and CRD CDS Hooks discovered at /cds-services. Version-specific endpoint codes are published at /.well-known/davinci-configuration (HRex 1.2.0)."
 	sec := "SMART Backend Services (client_credentials, private_key_jwt); configuration at /.well-known/smart-configuration."
+	var igs, pasProfiles []string
+	seenIG, seenProfile := map[string]bool{}, map[string]bool{}
+	for _, tok := range declared {
+		contract, line, ok := strings.Cut(tok, "@")
+		if !ok {
+			continue
+		}
+		switch contract {
+		case "pa.crd":
+			if def, ok := CRDLineDef(line); ok {
+				if ig := davinciIGCanonical("davinci-crd", def.PackageVersion); !seenIG[ig] {
+					igs = append(igs, ig)
+					seenIG[ig] = true
+				}
+			}
+		case "pa.dtr":
+			if def, ok := DTRLineDef(line); ok {
+				if ig := davinciIGCanonical("davinci-dtr", def.PackageVersion); !seenIG[ig] {
+					igs = append(igs, ig)
+					seenIG[ig] = true
+				}
+			}
+		case "pa.pas":
+			if def, ok := PASLineDef(line); ok {
+				if ig := davinciIGCanonical("davinci-pas", def.PackageVersion); !seenIG[ig] {
+					igs = append(igs, ig)
+					seenIG[ig] = true
+				}
+				if profile := pasProfileClaimBase + "|" + def.PackageVersion; !seenProfile[profile] {
+					pasProfiles = append(pasProfiles, profile)
+					seenProfile[profile] = true
+				}
+			}
+		}
+	}
 	cs := fhir.CapabilityStatement{
 		Status:      fhir.PublicationStatusActive,
 		Date:        created.UTC().Format(time.RFC3339),
@@ -435,11 +527,7 @@ func BuildProviderIngressCapabilityStatement(created time.Time) ([]byte, error) 
 		Implementation: &fhir.CapabilityStatementImplementation{
 			Description: "SHN provider gateway Da Vinci ingress (CRD 2.0.1, DTR 2.0.1, PAS 2.0.1).",
 		},
-		ImplementationGuide: []string{
-			"http://hl7.org/fhir/us/davinci-crd/ImplementationGuide/hl7.fhir.us.davinci-crd|2.0.1",
-			"http://hl7.org/fhir/us/davinci-dtr/ImplementationGuide/hl7.fhir.us.davinci-dtr|2.0.1",
-			"http://hl7.org/fhir/us/davinci-pas/ImplementationGuide/hl7.fhir.us.davinci-pas|2.0.1",
-		},
+		ImplementationGuide: igs,
 		Rest: []fhir.CapabilityStatementRest{{
 			Mode:          fhir.RestfulCapabilityModeServer,
 			Documentation: &doc,
@@ -447,7 +535,7 @@ func BuildProviderIngressCapabilityStatement(created time.Time) ([]byte, error) 
 			Resource: []fhir.CapabilityStatementRestResource{
 				{
 					Type:             fhir.ResourceTypeClaim,
-					SupportedProfile: []string{"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim|2.0.1"},
+					SupportedProfile: pasProfiles,
 					Operation: []fhir.CapabilityStatementRestResourceOperation{
 						{Name: "submit", Definition: "http://hl7.org/fhir/us/davinci-pas/OperationDefinition/Claim-submit"},
 					},
