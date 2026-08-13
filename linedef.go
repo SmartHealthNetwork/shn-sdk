@@ -161,6 +161,22 @@ type DTRDef struct {
 	// an empty/nil QR is rejected only at "qr-required".
 	QuestionnairePackageReturnShape string
 
+	// QuestionnairePackageCoverageRequired gates the $questionnaire-package REQUEST
+	// (the OTHER side of the wire from QuestionnairePackageReturnShape, above):
+	// verified live against the pinned DTR package's StructureDefinition-dtr-qpackage-
+	// input-parameters.json + OperationDefinition-questionnaire-package.json
+	// (2026-08-12) — `coverage` is min=1 at EVERY line (2.0.1/2.1.0/2.2.0 all require
+	// it; a real Da Vinci payer 400s "The 'coverage' parameter is required (min=1)"
+	// without it regardless of line, per the long-standing FR-G28 comment on
+	// buildQuestionnairePackageRequest), but 2.2.0 additionally TIGHTENS max from *
+	// to 1 (min=1 max=1, i.e. exactly one) — the genuinely NEW per-line fact. true
+	// only at "2.2": the request builder refuses BEFORE the wire (a legible local
+	// refusal replacing what would otherwise be the partner's 400) when a caller
+	// omits coverage at this line; 2.0/2.1 keep today's looser behavior (coverage is
+	// attached when the caller supplies one, omitted otherwise — no local refusal,
+	// as before this field existed).
+	QuestionnairePackageCoverageRequired bool
+
 	// NOT a field: an earlier draft DTRDef included a QRItemWeightExtension field
 	// (the canonical http://hl7.org/fhir/StructureDefinition/itemWeight — DTR 2.2's new
 	// QuestionnaireResponse.item.answer.extension:itemWeight slice, the successor of the
@@ -202,28 +218,31 @@ type DTRDef struct {
 
 var dtrLineDefs = map[string]DTRDef{
 	"2.0": {
-		Line:                            "2.0",
-		PackageVersion:                  "2.0.1",
-		SingleCoverageConstraint:        false,
-		QuestionnairePackageReturnShape: "unconstrained",
-		AutoOriginSourceCode:            "auto",
-		IntendedUseCodeSystem:           crdTempCodeSystem,
+		Line:                                 "2.0",
+		PackageVersion:                       "2.0.1",
+		SingleCoverageConstraint:             false,
+		QuestionnairePackageReturnShape:      "unconstrained",
+		QuestionnairePackageCoverageRequired: false,
+		AutoOriginSourceCode:                 "auto",
+		IntendedUseCodeSystem:                crdTempCodeSystem,
 	},
 	"2.1": {
-		Line:                            "2.1",
-		PackageVersion:                  "2.1.0",
-		SingleCoverageConstraint:        false,
-		QuestionnairePackageReturnShape: "qr-optional",
-		AutoOriginSourceCode:            "auto",
-		IntendedUseCodeSystem:           crdTempCodeSystem,
+		Line:                                 "2.1",
+		PackageVersion:                       "2.1.0",
+		SingleCoverageConstraint:             false,
+		QuestionnairePackageReturnShape:      "qr-optional",
+		QuestionnairePackageCoverageRequired: false,
+		AutoOriginSourceCode:                 "auto",
+		IntendedUseCodeSystem:                crdTempCodeSystem,
 	},
 	"2.2": {
-		Line:                            "2.2",
-		PackageVersion:                  "2.2.0",
-		SingleCoverageConstraint:        true,
-		QuestionnairePackageReturnShape: "qr-required",
-		AutoOriginSourceCode:            "auto-client",
-		IntendedUseCodeSystem:           crdCoverageInformationCodeSystem,
+		Line:                                 "2.2",
+		PackageVersion:                       "2.2.0",
+		SingleCoverageConstraint:             true,
+		QuestionnairePackageReturnShape:      "qr-required",
+		QuestionnairePackageCoverageRequired: true,
+		AutoOriginSourceCode:                 "auto-client",
+		IntendedUseCodeSystem:                crdCoverageInformationCodeSystem,
 	},
 }
 

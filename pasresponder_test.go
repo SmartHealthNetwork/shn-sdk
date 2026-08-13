@@ -182,6 +182,9 @@ func TestBuildPendedResponse_RoundTrip(t *testing.T) {
 	if len(items) != 1 || items[0].Code != "operative-diagnostic-report" {
 		t.Errorf("NeededItems = %v, want [{Code:operative-diagnostic-report}]", items)
 	}
+	if got := pendedBundleTimestamp(t, resp); got != testNow.UTC().Format(time.RFC3339) {
+		t.Errorf("Bundle.timestamp = %q, want %q (PAS SD min=1 since PAS 2.0.1)", got, testNow.UTC().Format(time.RFC3339))
+	}
 }
 
 // TestBuildDeniedResponse_RoundTrip: BuildDeniedResponse → SDK's own
@@ -276,6 +279,30 @@ func TestBuildPendedResponseAtLine_RegressionFenceAndRejection(t *testing.T) {
 	if _, err := BuildPendedResponseAtLine("9.9", "Patient/MBR-UC04", "corr-pend-atline", needed, testNow); err == nil {
 		t.Fatal("BuildPendedResponseAtLine(\"9.9\") = nil error, want an error")
 	}
+	// Bundle.timestamp: the PAS StructureDefinition sets min=1 on
+	// Bundle.timestamp at every line (2.0.1/2.1.0/2.2.1) — assert it at each.
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		got, err := BuildPendedResponseAtLine(line, "Patient/MBR-UC04", "corr-pend-atline-ts", needed, testNow)
+		if err != nil {
+			t.Fatalf("BuildPendedResponseAtLine(%s): %v", line, err)
+		}
+		if ts := pendedBundleTimestamp(t, got); ts != testNow.UTC().Format(time.RFC3339) {
+			t.Errorf("line %s: Bundle.timestamp = %q, want %q", line, ts, testNow.UTC().Format(time.RFC3339))
+		}
+	}
+}
+
+// pendedBundleTimestamp extracts Bundle.timestamp ("" if absent) from a built
+// pended response.
+func pendedBundleTimestamp(t *testing.T, pendedJSON []byte) string {
+	t.Helper()
+	var probe struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(pendedJSON, &probe); err != nil {
+		t.Fatalf("unmarshal pended bundle: %v", err)
+	}
+	return probe.Timestamp
 }
 
 // pendedBundleIdentifier extracts Bundle.identifier (nil if absent) from a built

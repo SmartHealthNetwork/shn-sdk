@@ -355,7 +355,8 @@ func buildPendedResponse(def PASDef, patientRef, correlationID string, needed []
 		return nil, err
 	}
 	bundle := fhir.Bundle{
-		Type: fhir.BundleTypeCollection,
+		Type:      fhir.BundleTypeCollection,
+		Timestamp: strPtr(created.UTC().Format(time.RFC3339)),
 		Entry: []fhir.BundleEntry{
 			{FullUrl: strPtr(crURL), Resource: json.RawMessage(crJSON)},
 			{FullUrl: strPtr(taskURL), Resource: json.RawMessage(taskJSON)},

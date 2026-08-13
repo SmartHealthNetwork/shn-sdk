@@ -68,20 +68,19 @@ vector is only verifiable if the test can open/verify it, and these protect noth
 `2.1/` and `2.2/` are ADDITIVE subdirectories carrying native-line vectors — the
 flat files above are the byte-frozen PAS/DTR/CRD **2.0** line and are never
 touched by the per-line generator. Only the vectors that are genuinely
-line-bearing (built via the `…AtLine` builders) get a per-line copy; a vector
-with no PAS/DTR/CRD line dependency (`order-select*`, `crd-cards-pa.json`,
-`questionnaire.json`, `crr-*.json`, `token.json`, `envelope.json`,
-`assertion.b64`, …) is never duplicated:
+line-bearing (built via the `…AtLine` builders) **and** actually read by an
+sdk test get a per-line copy; a vector with no PAS/DTR/CRD line dependency
+(`order-select*`, `crd-cards-pa.json`, `questionnaire.json`, `crr-*.json`,
+`token.json`, `envelope.json`, `assertion.b64`, …) is never duplicated. Every
+row below is covered by exactly one `sdk/vectors_test.go` `TestVector*AtLine*`
+test, run against both `2.1/` and `2.2/`:
 
-| File | Line-gated by |
-|---|---|
-| `<line>/questionnaireresponse.json` | DTR `AutoFillAtLine` — origin-code + qr-coverage/qr-context shape (2.2 delta). |
-| `<line>/claim-bundle.json` | PAS `BuildClaimBundleAtLine` — `Claim.item` requestType/certificationType/location (2.1+ delta), built from `<line>/questionnaireresponse.json`. |
-| `<line>/claimresponse-approved.json` | PAS `BuildClaimResponseAtLine` — documented "interface symmetry" (no structural delta at ANY line); still emitted per line for a complete, predictable per-line file set. |
-| `<line>/questionnaireresponse-uc04.json` | DTR `AutoFillAtLine` (prior-surgery UC-04 context). |
-| `<line>/claimupdate-bundle-uc04.json` | PAS `BuildClaimUpdateBundleAtLine` — item-detail + `Claim.related.relationship` (2.1+ delta). |
-| `<line>/claimresponse-pended.json` | PAS `BuildPendedResponseAtLine` — response `Bundle.identifier` becomes mandatory at 2.2. |
-| `<line>/claimresponse-denied-uc08.json` | PAS `BuildDeniedResponseAtLine` — same "interface symmetry" note as approved. |
+| File | Line-gated by | Covering test |
+|---|---|---|
+| `<line>/questionnaireresponse.json` | DTR `AutoFillAtLine` — origin-code + qr-coverage/qr-context shape (2.2 delta). | `TestVectorFillQuestionnaireAtLineReproduce` |
+| `<line>/claimresponse-approved.json` | PAS `BuildClaimResponseAtLine` — documented "interface symmetry" (no structural delta at ANY line); still emitted per line for a complete, predictable per-line file set. | `TestVectorClaimResponseAtLineConsume` |
+| `<line>/claimresponse-pended.json` | PAS `BuildPendedResponseAtLine` — response `Bundle.identifier` becomes mandatory at 2.2. | `TestVectorPendedAtLineConsume` |
+| `<line>/claimresponse-denied-uc08.json` | PAS `BuildDeniedResponseAtLine` — same "interface symmetry" note as approved. | `TestVectorDeniedAtLineConsume` |
 
 Minted by the SAME substrate generator (`tools/goldengen`'s `writePerLineVectors`),
 under the SAME fixed `vecClock`. `sdk/vectors_test.go`'s `TestVector*AtLine*`
@@ -89,6 +88,13 @@ tests extend the existing per-file read idiom — there is no directory-walking
 vector loader in the SDK module (by design: the SDK never imports `internal/`,
 and a walker would need to invent its own per-line file-class taxonomy that the
 substrate's `test/conformance` completeness guard already owns).
+
+**No per-line copy of `claim-bundle.json`, `claimupdate-bundle-uc04.json`, or
+`questionnaireresponse-uc04.json`:** their flat counterparts above are
+pre-existing orphans — read by no sdk test since the minimized PA shape they
+served was deleted (`04ac7d81`) — and are retained only as frozen fixtures, so
+`writePerLineVectors` deliberately excludes those three names rather than
+minting a second, equally-unread copy per line.
 
 ### Why some vectors are CONSUME, not REPRODUCE
 
