@@ -13,23 +13,23 @@ Da Vinci prior authorization (CRD+DTR+PAS, PDex).
 Depends only on the Go standard library, `golang.org/x/crypto`, and
 `github.com/samply/golang-fhir-models`. **It never imports SHN-internal code.**
 
-> **Sandbox preview — synthetic data only. Never send production PHI.** Not for
+> **Preview network — synthetic data only. Never send production PHI.** Not for
 > production deployment.
 
 ## What you can test today
 
-- Register a sandbox participant client (self-serve, invite-gated).
+- Register a participant client (self-serve, invite-gated).
 - Run eligibility checks against synthetic covered / not-covered members.
 - Run a full CRD → DTR → PAS prior-authorization flow.
 - Exercise the approved, pended → amended, and denied scenarios.
 - Validate your setup end-to-end with `shn doctor`.
 
-The sandbox uses synthetic data only — never send production PHI.
+The network uses synthetic data only — never send production PHI.
 
 ## What this is not
 
 This is not a production connection to the Smart Health Network. It is a public
-**sandbox** SDK and CLI for exercising the participant wire protocol — holder identity,
+SDK and CLI for exercising the participant wire protocol — holder identity,
 per-operation authorization, sealed-envelope routing, FHIR payloads, and the
 prior-authorization scenarios — against **synthetic data only**.
 
@@ -56,7 +56,7 @@ holds no decryption key and cannot read the payload.
 
 ## Documentation map
 
-- [`docs/SANDBOX.md`](docs/SANDBOX.md) — start here: install → register → run → validate, with the exact `shn` commands.
+- [`docs/PREVIEW.md`](docs/PREVIEW.md) — start here: install → register → run → validate, with the exact `shn` commands.
 - [`docs/PARTICIPANT_PROTOCOL.md`](docs/PARTICIPANT_PROTOCOL.md) — the language-neutral wire protocol for direct integration.
 - [`docs/TECHNICAL_ARCHITECTURE.md`](docs/TECHNICAL_ARCHITECTURE.md) — the system architecture and security model.
 - [`testdata/vectors/README.md`](testdata/vectors/README.md) — canonical wire vectors (the SDK's hermetic conformance contract).
@@ -73,9 +73,9 @@ The CLI:
 go install github.com/SmartHealthNetwork/shn-sdk/cmd/shn@latest
 ```
 
-## Sandbox
+## Preview network
 
-The public sandbox is live at `shn-preview.org` (synthetic data only). The public surfaces:
+The preview network is live at `shn-preview.org` (synthetic data only). The public surfaces:
 
 | Service | Base URL |
 |---|---|
@@ -83,16 +83,16 @@ The public sandbox is live at `shn-preview.org` (synthetic data only). The publi
 | Authorization Framework (`POST /authorize`) | `https://authz.shn-preview.org` |
 | Registrar (`POST /register`) | `https://registrar.shn-preview.org` |
 | FHIR / Patient Access (`GET /metadata`) | `https://fhir.shn-preview.org` |
-| Developer accounts / sandbox client registration | `https://accounts.shn-preview.org` |
+| Developer accounts / client registration | `https://accounts.shn-preview.org` |
 
 `accounts.shn-preview.org` is the **Accounts service** — the self-serve
 developer-onboarding control plane for client registration, Cognito-gated (browser
 login, token cached at `~/.shn/credentials`). It also serves the machine-readable
-discovery descriptor at `GET /discovery` (live endpoints, sandbox responders, seeded
+discovery descriptor at `GET /discovery` (live endpoints, responders, seeded
 personas).
 
 **New here? Start with the getting-started guide:**
-[docs/SANDBOX.md](docs/SANDBOX.md) — the Install → Discover → Register → Build →
+[docs/PREVIEW.md](docs/PREVIEW.md) — the Install → Discover → Register → Build →
 Run → Validate path with the exact `shn` commands.
 
 You also need the payer's holder id + X25519 public key and the Authorization
@@ -100,9 +100,9 @@ Framework's Ed25519 verifying key — published in the network's holder feed /
 manifest. **Keys are generated client-side (proof-of-possession): your private keys
 never leave your process.**
 
-## Quickstart: register a sandbox client
+## Quickstart: register a client
 
-Use this path to test the public sandbox. Registration is invite-gated and goes
+Use this path to test the public preview network. Registration is invite-gated and goes
 through the Accounts service; keys are generated locally and your private keys never
 leave your machine. The browser sign-in happens once and the token is cached at
 `~/.shn/credentials`.
@@ -133,8 +133,8 @@ shn register --accounts https://accounts.shn-preview.org \
 shn doctor --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
 
 # 4. Run a prior-authorization (CRD→DTR→PAS) yourself. Payer + endpoints are resolved
-#    from the sandbox discovery descriptor; the order + clinical context are the fixed
-#    sandbox values.
+#    from the discovery descriptor; the order + clinical context are the fixed
+#    test values.
 shn priorauth --member MBR-COVERED \
   --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
 # → outcome=approved preAuthRef=PA-… validUntil=…
@@ -154,7 +154,7 @@ evaluation bundles.
 
 ## Operator registration
 
-For operator-managed deployments (not self-serve sandbox onboarding), registration is
+For operator-managed deployments (not self-serve onboarding), registration is
 gated by an operator-admin credential supplied out of band. Keys are still generated
 locally; your private keys never leave your machine.
 
@@ -170,14 +170,14 @@ shn register --role provider --name ext-provider \
   --admin-assertion "$ADMIN_ASSERTION" -out ./keys
 ```
 
-Most sandbox developers should use the self-serve Accounts path above. The direct
+Most developers should use the self-serve Accounts path above. The direct
 `POST /register` path is for operator-managed and non-self-serve environments (see
 [docs/PARTICIPANT_PROTOCOL.md](docs/PARTICIPANT_PROTOCOL.md) §2.3).
 
 ## Self-validate (`shn doctor`)
 
 One command answers "am I wired up + do my eligibility AND prior-auth round-trips
-conform". It fetches the sandbox discovery descriptor and runs eligibility against the
+conform". It fetches the discovery descriptor and runs eligibility against the
 seeded covered/not-covered personas, then — once eligibility passes — runs a
 prior-authorization (CRD→DTR→PAS) for the persona that advertises an expected PA outcome, all using
 your OWN registered identity — no FHIR validator needed (the network validates
@@ -204,7 +204,7 @@ a failure is:
 |---|---|---|
 | 0 | — | all checks passed |
 | 10 | sandbox health | discovery/authz/registrar/payer unreachable or missing |
-| 20 | wire version | the sandbox speaks a wire version this CLI doesn't — upgrade |
+| 20 | wire version | the network speaks a wire version this CLI doesn't — upgrade |
 | 30 | your registration | your client isn't in `/holders` (run `shn register`, or it was revoked) |
 | 40 | outcome | an eligibility run returned the wrong coverage, or a prior-auth run returned the wrong outcome |
 
@@ -234,7 +234,7 @@ covered, reason, err := id.RunEligibility(ctx, http.DefaultClient,
 
 ## Public API
 
-Most sandbox users drive everything through the `shn` CLI (above). Use the Go API
+Most users drive everything through the `shn` CLI (above). Use the Go API
 directly if you are building a native integration or test harness.
 
 | Symbol | Purpose |
@@ -250,12 +250,12 @@ directly if you are building a native integration or test harness.
 | `BuildEligibilityRequest` / `ParseEligibilityResponse` | FHIR `CoverageEligibilityRequest` / `…Response` helpers. |
 | `BuildConformantOrderSelectRequest(srJSON, covJSON, patientID)` / `ParseCards` | CRD order-select request (a CDS Hooks `order-select` request whose `context.draftOrders` is a FHIR collection Bundle); `ParseCards` → a `CardCoverage` (`Covered`, `PANeeded`, `Questionnaires[]`, `SatisfiedPaID`) with `.PARequired()` / `.NeedsDTR()` helpers — the projection of Da Vinci CRD coverage-information. |
 | `BuildQuestionnaireFetch` / `ExtractQuestionnaireFromPackage` / `ParseQuestionnaireURL` | DTR questionnaire-fetch request; the response is a Da Vinci `$questionnaire-package` collection Bundle (Questionnaire + dependent Libraries/ValueSets) — `ExtractQuestionnaireFromPackage` returns the bare `Questionnaire`, then `ParseQuestionnaireURL` reads its canonical url. (`BuildQuestionnairePackage` is the responder-side wrapper.) |
-| `FillQuestionnaire(questionnaireJSON, cc, qc)` | Fill the sandbox prior-auth DTR questionnaire into a conformant `QuestionnaireResponse` (LOCAL answers + information-origin attribution). Sandbox-targeted: FAILS LOUDLY on an unrecognized questionnaire (never a half-filled QR). |
-| `FillQuestionnaireFromAnswers(questionnaireJSON, answers, author, qc)` | Fill ANY DTR questionnaire into a conformant `QuestionnaireResponse` from a caller-supplied `map[string]Answer` (keyed by `linkId`; an `Answer` carries a typed value or an `AnswerCoding{System,Code,Display}`), with information-origin attribution — for manually/attestation-sourced answers when the questionnaire isn't the built-in sandbox one. |
+| `FillQuestionnaire(questionnaireJSON, cc, qc)` | Fill the built-in prior-auth DTR questionnaire into a conformant `QuestionnaireResponse` (LOCAL answers + information-origin attribution). Targets only the built-in questionnaire: FAILS LOUDLY on an unrecognized questionnaire (never a half-filled QR). |
+| `FillQuestionnaireFromAnswers(questionnaireJSON, answers, author, qc)` | Fill ANY DTR questionnaire into a conformant `QuestionnaireResponse` from a caller-supplied `map[string]Answer` (keyed by `linkId`; an `Answer` carries a typed value or an `AnswerCoding{System,Code,Display}`), with information-origin attribution — for manually/attestation-sourced answers when the questionnaire isn't the built-in one. |
 | `BuildConformantClaimBundle(ConformantClaimInputs{QR, SR, PatientRef, CoverageRef, Corr, Created})` / `ParseClaimResponse` | PAS preauthorization submit Bundle (the conformant Da Vinci lean shape — Claim + Patient + Coverage + payor Organization + ServiceRequest + QuestionnaireResponse; `Created` drives the deterministic bundle id/timestamp) + the `ClaimResponse` parser → `PriorAuthResult` (`Outcome:"approved"` + `PreAuthRef`/`ValidUntil`). Denied (the X12 review-action code `A2` "Not Certified" that real Da Vinci PAS payers emit; the legacy `A3` is also accepted) and pended responses parse to their own outcomes; an ambiguous response returns an error, never a wrong `Outcome`. The amended re-POST sibling is `BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{…})`. |
 | `VerifyBound(tok, authzPub, now, frame, op, corr, holder, subject, payloadHash)` | Verify a token is bound to exactly this leg, INCLUDING `payloadHash = sha256hex(ciphertext)` (STRICT, AI-2) — the SDK verifies, never mints. Seal-then-authorize: seal the payload first, then authorize against its ciphertext. |
 
-**Also exported** (responder + participation helpers; see godoc and `docs/SANDBOX.md` §3c):
+**Also exported** (responder + participation helpers; see godoc and `docs/PREVIEW.md` §3c):
 `NewResponder` / `ResponderConfig` (the payer-side inbound responder handling all five
 transaction types), `ParsePayerIdentifier` (coverage-derived payer routing), `FetchHolders`
 / `NewFeedEncResolver` (registry-feed holder + encryption-key resolution),

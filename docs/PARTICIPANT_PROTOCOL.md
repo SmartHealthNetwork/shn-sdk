@@ -2,9 +2,9 @@
 
 **Audience:** Partner engineers building a native integration with the Smart Health
 Network without running the Smart Gateway binary. The details here match the current
-public SDK and sandbox behavior; field names and endpoint paths are exact.
+public SDK and network behavior; field names and endpoint paths are exact.
 
-**Scope:** Sandbox preview — synthetic data only. This document specifies the **general participant wire contract**
+**Scope:** Preview environment — synthetic data only. This document specifies the **general participant wire contract**
 (identity, per-operation authorization, sealed envelopes, payload-blind routing); the worked flows
 are the first workflow delivered on it, Prior Authorization (Da Vinci CRD+DTR+PAS, PDex). Not for
 production deployment.
@@ -48,8 +48,8 @@ This document specifies integration path B.
 
 ## 1a. Discovery
 
-A participant's **first call** is the sandbox discovery descriptor: a machine-readable
-document listing the live endpoints, the sandbox responder(s) you exchange
+A participant's **first call** is the discovery descriptor: a machine-readable
+document listing the live endpoints, the test responder(s) you exchange
 with, and the seeded personas. It is **sufficient to drive the eligibility loop** — no
 out-of-band URL list or key file required. `shn doctor` consumes it; so does a live
 discovery probe in the deploy pipeline.
@@ -66,7 +66,8 @@ Returns (the Accounts service, `accounts.<apex>`):
   "syntheticDataOnly": true,
   "wireProtocolVersion": "1.1.0",
   "igVersions": { "uscore": "6.1.0", "crd": "2.0.1", "dtr": "2.0.1", "pas": "2.0.1", "pdex": "2.1.0" },
-  "contractVersions": ["pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0", "pa.pdex@2.1"],
+  "igVersionsByLine": { "2.0": { "uscore": "6.1.0", "crd": "2.0.1", "dtr": "2.0.1", "pas": "2.0.1", "pdex": "2.1.0" }, "2.1": { "uscore": "7.0.0", "crd": "2.1.0", "dtr": "2.1.0", "pas": "2.1.0", "pdex": "2.1.0" }, "2.2": { "uscore": "7.0.0", "crd": "2.2.1", "dtr": "2.2.0", "pas": "2.2.1", "pdex": "2.1.0" } },
+  "bridgedContractVersions": ["pa.crd@2.0", "pa.crd@2.1", "pa.crd@2.2", "pa.dtr@2.0", "pa.dtr@2.1", "pa.dtr@2.2", "pa.pas@2.0", "pa.pas@2.1", "pa.pas@2.2", "pa.pdex@2.1"],
   "endpoints": {
     "hub": "https://hub.<apex>",
     "authz": "https://authz.<apex>",
@@ -81,7 +82,7 @@ Returns (the Accounts service, `accounts.<apex>`):
     { "memberId": "MBR-COVERED",    "dob": "1975-04-02", "family": "Johansson", "expectedEligibility": "covered" },
     { "memberId": "MBR-NOTCOVERED", "dob": "1980-09-15", "family": "Reyes",     "expectedEligibility": "not-covered" }
   ],
-  "docs": "https://github.com/SmartHealthNetwork/shn-sdk/blob/main/docs/SANDBOX.md"
+  "docs": "https://github.com/SmartHealthNetwork/shn-sdk/blob/main/docs/PREVIEW.md"
 }
 ```
 
@@ -91,16 +92,18 @@ Returns (the Accounts service, `accounts.<apex>`):
 |---|---|
 | `sandbox` | Always `true` for the preview substrate. |
 | `syntheticDataOnly` | Always `true` — **synthetic personas only, never production PHI**. |
-| `wireProtocolVersion` | The wire-protocol version the sandbox speaks (see below). A consumer rejects a descriptor whose version it does not support **before** running any leg. |
+| `wireProtocolVersion` | The wire-protocol version the network speaks (see below). A consumer rejects a descriptor whose version it does not support **before** running any leg. |
 | `igVersions` | Pinned IG versions the substrate validates against (server-side gate). |
-| `contractVersions` | The exchange-contract version tokens (`<contract>@<line>`, e.g. `"pa.pas@2.0"`) **this substrate** speaks natively — the same declaration grammar and caps as a holder's own `contractVersions` (§2.3). Today's set: `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1`. Additive field — its addition did **not** bump `wireProtocolVersion`. Version-aware routing and translation consume these in later slices; today they are declaration + surfacing. |
+| `contractVersions` | Legacy — no longer populated in the network descriptor: participant declarations are participant truth, carried per-participant in the registrar feed (§2.3) and the directory (§3). Field retained for wire compatibility. |
+| `igVersionsByLine` | Per-line IG pin sets: each contract line (`"2.0"`, `"2.1"`, `"2.2"`) maps to the IG versions that line validates against — same keys and composition as `igVersions`, which remains the 2.0-line snapshot. Additive field. |
+| `bridgedContractVersions` | Contract lines the network's gateways can build or bridge (version-matched routing and translation, §8.6) — the network's contract capability surface. Additive field. |
 | `endpoints.{hub,authz,registrar,patientAccess}` | The live participant-facing base URLs. `hub` is where you originate a leg (`POST /route`); `authz` mints/serves tokens; `registrar` serves the holder feed; `patientAccess` is the FHIR/Patient-Access surface (`GET /metadata`). |
 | `authzPublicKeyURL` | Where to fetch the Authorization Framework Ed25519 verifying key (`{authz}/pubkey`). |
 | `hubTransportKeyURL` | Where to fetch the Hub's Ed25519 transport verifying key (`{hub}/transport-key` → `{"pubkey": "<base64 ed25519>"}`). Responders use this key to verify `X-Hub-Assertion` on every inbound forward (§6.2a). |
-| `sandboxResponders[]` | The responders you may exchange with (`role` + `holderId`). For UC-01 there is one: the payer. |
+| `sandboxResponders[]` | The responders you may exchange with (`role` + `holderId`). For UC-01 there is one: the payer. Deprecated — will stop being populated once the shn CLI resolves test counterparties from the directory (planned for the sdk v0.40 cycle); do not build new consumers. |
 | `operations[]` | The advertised `(frame, operation, transactionType)` triples the substrate authorizes. |
 | `sandboxPersonas[]` | The seeded synthetic patients and their `expectedEligibility` (`"covered"` \| `"not-covered"`) — the inputs + expected outcomes `shn doctor` asserts. |
-| `docs` | Getting-started URL (`docs/SANDBOX.md`). |
+| `docs` | Getting-started URL (`docs/PREVIEW.md`). |
 
 **No keys are embedded** in the descriptor (so it cannot drift from the live keys).
 You resolve the two keys a UC-01 leg needs from the live endpoints:
@@ -118,7 +121,7 @@ The version string gates wire compatibility. **`1.1.0`** is the current value: i
 **payloadHash wire** — the per-leg authorize token binds `payloadHash = sha256hex(ciphertext)`,
 verified STRICTLY in `VerifyBound` (see §4.4). A consumer whose SDK speaks a
 different version should refuse to proceed and prompt an upgrade rather than send a leg
-the sandbox may reject (`shn doctor` exits code `20` here).
+the network may reject (`shn doctor` exits code `20` here).
 
 ### Participant directory
 
@@ -126,20 +129,42 @@ the sandbox may reject (`shn doctor` exits code `20` here).
 GET {accounts}/participants
 ```
 
-A public, same-origin, deliberately **narrow** projection of the registrar's
-`/holders` feed (§2.3): every registered participant's id, role, and declared
-contract versions — nothing else (no keys, no base URLs). Sorted by `id`.
+Requires a developer bearer token (`Authorization: Bearer <id_token>`, the same
+credential as `GET {accounts}/clients`). A deliberately **narrow** projection
+of the registrar's `/holders` feed (§2.3): every registered participant's id,
+role, declared contract versions, and — for payers — operator-attested payer
+IDs — nothing else (no keys, no base URLs). Sorted by `id`.
 
 ```json
 [
-  { "id": "acme-payer", "role": "payer", "contractVersions": ["pa.pas@2.0", "pa.pdex@2.1"] },
+  { "id": "acme-payer", "role": "payer", "contractVersions": ["pa.pas@2.0", "pa.pdex@2.1"], "payerIds": [{ "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00078" }] },
   { "id": "acme-provider", "role": "provider" }
 ]
 ```
 
 `contractVersions` is omitted for a participant that never declared any
-(§2.3's field is optional). A feed error surfaces as `502` rather than a
-guess — this endpoint never invents a directory. FR-G47.
+(§2.3's field is optional). `payerIds` is present only on payer rows that
+declared claims at registration (§2.3); omitted otherwise. Additive field.
+A feed error surfaces as `502` rather than a guess — this endpoint never
+invents a directory. FR-G47.
+
+### Participant directory summary
+
+```
+GET {accounts}/participants/summary
+```
+
+**Public — no bearer token required.** An anonymous aggregate over the same
+registrar `/holders` feed: total participant count and a per-role breakdown,
+nothing else (no ids, keys, base URLs, or contract versions).
+
+```json
+{ "total": 3, "byRole": { "payer": 2, "provider": 1 } }
+```
+
+A feed error surfaces as `502`, same rule as the authenticated directory. Both
+`/participants` and `/participants/summary` share ONE per-IP rate budget (120
+requests/hour); tripping the cap returns `429`.
 
 ---
 
@@ -322,10 +347,10 @@ to the registry on the same poll cycle.
 The `adminPub` field is present in every provisioning bundle;
 regenerate the bundle if it is absent.
 
-### 2.3a Self-serve registration via the Accounts service (sandbox)
+### 2.3a Self-serve registration via the Accounts service (preview environment)
 
-Sandbox developers can register clients without obtaining a Trust admin credential
-out of band. The **Accounts service** (`accounts.shn-preview.org`) is a Cognito-gated
+Developers can register clients against the preview environment without obtaining a
+Trust admin credential out of band. The **Accounts service** (`accounts.shn-preview.org`) is a Cognito-gated
 developer-onboarding control plane that wraps `POST /register` on your behalf.
 
 Use the `shn` CLI with the `--accounts` flag:
@@ -340,7 +365,7 @@ shn clients --accounts https://accounts.shn-preview.org  # list your clients
 shn revoke <id> --accounts https://accounts.shn-preview.org
 ```
 
-The `--accounts` path is the **Cognito-gated self-serve** path for sandbox
+The `--accounts` path is the **Cognito-gated self-serve** path for preview-environment
 onboarding. The admin-gated direct `POST /register` (§2.3) remains the canonical
 operator/Trust path and the authoritative wire spec for all participants — the
 Accounts service is an additive convenience layer over it.
@@ -1012,7 +1037,7 @@ record and returning it to the originator. A mis-constructed response causes the
 Hub to return 502 to the originator.
 
 **Originator-only participants** (those that only send, never receive) do not need
-to serve this endpoint. A responder/inbound surface is available today via the public SDK (`shnsdk.Responder` — see `SANDBOX.md` §3c); originator-only participants do not need to serve this endpoint.
+to serve this endpoint. A responder/inbound surface is available today via the public SDK (`shnsdk.Responder` — see `PREVIEW.md` §3c); originator-only participants do not need to serve this endpoint.
 
 ### 6.2a Inbound transport authentication (`X-Hub-Assertion`)
 
@@ -1062,7 +1087,7 @@ re-fetch per request.
 > **Go participants:** `shnsdk.Responder` implements this full verification pipeline —
 > steps 1–6 above, plus authz token `VerifyBound`, decryption, adjudication, and the
 > sealed-and-authorized response — in one call to `NewResponder` + `Handler()`. See
-> `docs/SANDBOX.md` §3c for the quickstart.
+> `docs/PREVIEW.md` §3c for the quickstart.
 
 On any failure, reject the request with:
 
@@ -1555,7 +1580,7 @@ Each `route(...)` is the §7 originate sequence with that leg's `transactionType
 request `operation` / response `operation`; the `payloadHash`-bound token is minted per
 leg. The clinical answers that drive the outcome are dev-visible inputs to
 `FillQuestionnaire` (the conservative-therapy weeks, prior-imaging, neuro-deficit flags
-— see `docs/SANDBOX.md` §3a), never conjured inside the round-trip.
+— see `docs/PREVIEW.md` §3a), never conjured inside the round-trip.
 
 ---
 
@@ -1901,8 +1926,68 @@ deliberately different sets, and only the second one routes:
   breaking operation that requires draining pends first. See the gateway's
   `docs/CONFIGURATION.md` for the opt-in procedure and the change window.
 
+**Cross-version translation, and what a carry-extension partner may see on the
+wire (2026-08-12).** When no shared declared line and no native-reach line
+exist for a leg, routing tries one more thing before refusing: a **transform
+chain** — per-adjacent-step modules (`pa.pas`/`pa.dtr`: `2.0↔2.1`, `2.1↔2.2`,
+composed for longer hops) that adapt this build's own bytes to the
+recipient's declared line. Native reach always wins over a chain when both
+are available — a chain is the bridge of last resort, for a line this build
+does not natively speak (see the spec's "native-reach-first" rationale
+below). A partner on the other end of a chained leg may therefore see two
+things a same-line exchange never carries:
+
+- A **`shn-carried-content` extension**, wherever a downcast has no honest
+  slot in the target line for an element the source line carried (e.g. a 2.2
+  `authorizationNumber` downcast to 2.0/2.1). It holds the original element,
+  byte-faithful, plus its source line, so a later upcast restores it exactly.
+  This is the network's no-silent-loss policy: an element with nowhere to go
+  is **carried**, never dropped, and a Provenance resource with an attached
+  `shn-loss-report` extension travels alongside the transformed payload
+  (payload-internal only, in the leg's observer stream, or both, depending on
+  target-profile tolerance — never an envelope/`Metadata` field, so the Hub
+  stays version-blind).
+- A payload built at a line **older or newer** than what this build's own
+  declared set advertises — the chain's target is the *peer's* declared
+  line, not this build's.
+
+**Gated-overlay semantics.** A partner that is known — by config, today; by
+probe or refusal history in a future slice — to reject unknown extensions
+gets a `gated` overlay entry. A gated peer never receives a lossy chained
+leg (one whose worst step is `carry` or `gated`); the leg refuses at
+selection instead, legibly, rather than strip the carried content to look
+clean. A chain whose every step is `full` (lossless both ways) still reaches
+a gated peer normally — the overlay gates *lossy* legs, not translation
+itself.
+
+**Refusal grammar, verbatim.** A no-bridge outcome is the same legible `422`
+family as the no-shared-line case above, with a parenthetical naming the
+specific missing ingredient. This build speaks `pa.pas@2.0` only, no
+transform chain reaches a peer that declares only `pa.pas@2.3`:
+
+```json
+{"error":"no shared contract line for pa.pas (leg pas-claim): this gateway speaks pa.pas@2.0; recipient \"acme-payer\" declares pa.pas@2.3 — no bridge available (no transform chain bridges to line 2.3)"}
+```
+
+The same base grammar carries one of three other parenthetical phrases
+depending on which reachability ingredient is missing: `"no configured
+validator lane for line …"` (a chain exists but the target line has no
+`$validate` lane), `"chain to line … refused for this peer (gated overlay:
+chain contains a lossy step)"` (a chain exists but every candidate is too
+lossy for a gated peer), or, on a pended exchange's resume leg specifically,
+`"no bridge to the pinned line … remains available"` (the pin's original
+bridge stopped existing between origination and resume). Every phrase names
+a bare **line**, never a repeated `contract@line` token, so it cannot
+duplicate a token already named earlier in the same message.
+
+**Ingress stays tolerant, not translating.** A non-native inbound line is
+still a legible 422 (§8.6's earlier "native capability vs. declared set"
+rules) until its own transform module pair ships — chained translation runs
+egress-only this generation. See the gateway's `docs/CONFIGURATION.md` for
+the operator-facing lane and gated-overlay configuration.
+
 See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md`
-§4 and §7 item 3.
+§4, §5, §6, and §7 items 3 and 5.
 
 ---
 
@@ -2082,7 +2167,7 @@ See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md`
   by delegating to the public SDK (`shnsdk.RunEligibility` / `shnsdk.RunPriorAuth`),
   without importing any Smart Gateway internals on the originate path. Each run's
   `AuditEvent` is verified. The deploy pipeline runs all of these against the public
-  sandbox on every substrate deploy.
+  preview environment on every substrate deploy.
 
 ### What's coming next
 

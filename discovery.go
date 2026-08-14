@@ -11,11 +11,11 @@ type Discovery struct {
 	SyntheticDataOnly   bool              `json:"syntheticDataOnly"`
 	WireProtocolVersion string            `json:"wireProtocolVersion"`
 	IGVersions          map[string]string `json:"igVersions"`
-	// ContractVersions are the exchange-contract version tokens this substrate
-	// speaks natively ("<contract>@<line>", e.g. "pa.pas@2.0" — spec 2026-08-10 §3).
-	// Supersedes the scalar-per-IG IGVersions map for per-line truth (IGVersions
-	// stays for compat). ADDITIVE optional field — an older consumer ignores it;
-	// does NOT bump wireProtocolVersion. Producer: internal/accountsvc/discovery.go.
+	// ContractVersions is LEGACY and no longer populated (2026-08-13): what any
+	// participant declares — including SHN-operated test participants — is participant
+	// truth (registrar feed §2.3 / directory §3), not a network property. The field
+	// stays declared for wire compatibility (grow-only); the network's contract
+	// capability surface is BridgedContractVersions. Producer: internal/accountsvc/discovery.go.
 	ContractVersions []string `json:"contractVersions,omitempty"`
 	// RequestFrames are the sealed REQUEST-frame versions this substrate's
 	// holders accept ("v1" — request frames, spec 2026-08-11 slice 4). ADDITIVE optional
@@ -42,6 +42,33 @@ type Discovery struct {
 	Operations        []DiscoveryOp        `json:"operations"`
 	SandboxPersonas   []DiscoveryPersona   `json:"sandboxPersonas"`
 	Docs              string               `json:"docs"`
+	// PublishedVersions are the live SDK/gateway/kit version pins this network
+	// deployment was built against, derived at image build time from
+	// repo-tracked pins — never hand-set.
+	// ADDITIVE optional field — an older consumer ignores it; does NOT bump
+	// wireProtocolVersion. Nil ⇒ omitted (a build without the
+	// PUBLISHED_VERSIONS_FILE env). Producer: internal/accountsvc/discovery.go.
+	PublishedVersions *PublishedVersions `json:"publishedVersions,omitempty"`
+	// IGVersionsByLine maps each contract line ("2.0", "2.1", "2.2") to the IG
+	// package pin set that line validates against — same composition and short
+	// keys as the flat IGVersions, which stays as the 2.0-line snapshot for
+	// published-SDK consumers (grow-only wire). Additive.
+	IGVersionsByLine map[string]map[string]string `json:"igVersionsByLine,omitempty"`
+	// BridgedContractVersions lists the contract lines the Hub-side gateways can
+	// build or bridge (NativeContractVersions) — the network's contract capability
+	// surface (ContractVersions above is legacy and unpopulated). Additive.
+	BridgedContractVersions []string `json:"bridgedContractVersions,omitempty"`
+}
+
+// PublishedVersions is the discovery descriptor's live-pin block.
+// Gateway alone carries omitempty: SDK and Kit are structural to every build
+// of the network's services, but a gateway image is a separate, optionally-
+// bundled artifact — the pin derivation still fails loudly rather than emit
+// a blank gateway pin when the source it reads is unparsable.
+type PublishedVersions struct {
+	SDK     string `json:"sdk"`
+	Gateway string `json:"gateway,omitempty"`
+	Kit     string `json:"kit"`
 }
 
 type DiscoveryEndpoints struct {

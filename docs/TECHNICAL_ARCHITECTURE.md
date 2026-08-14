@@ -1,6 +1,6 @@
 # Smart Health Network — Technical Architecture
 
-> **Sandbox preview — synthetic data only, not for production PHI.** Public architecture
+> **Preview environment — synthetic data only, not for production PHI.** Public architecture
 > overview — not a security, legal, or compliance certification.
 
 The Smart Health Network (SHN) is a **federated health-data exchange network**. It lets
@@ -295,11 +295,11 @@ every lifecycle event into the audit chain.
 ### Accounts service
 
 The self-service front door for external developers. It authenticates developers (OIDC),
-manages their sandbox client registrations (an ownership and presentation read-model — the
+manages their preview client registrations (an ownership and presentation read-model — the
 registrar feed remains the runtime source of truth for trust), proxies admissions to the
 registrar using a dedicated admin key, and serves an unauthenticated **discovery document**
 advertising the live endpoints, wire-protocol version, FHIR profile versions, and seeded
-sandbox details a participant needs to integrate without out-of-band coordination.
+preview details a participant needs to integrate without out-of-band coordination.
 
 ---
 
