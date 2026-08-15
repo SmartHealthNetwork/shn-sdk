@@ -58,6 +58,14 @@ type PriorAuthResume struct {
 	QRJSON                json.RawMessage `json:"qrJson"`
 	SRJSON                json.RawMessage `json:"srJson"`
 	NeededItems           []NeededItem    `json:"neededItems"`
+
+	// PayerID is the payer-identity claim the origination resolved its test
+	// counterparty from (persona payerId — stamped by the shn CLI before the
+	// handle is written). Resume re-resolves it through the directory with the
+	// same refusal semantics. ADDITIVE optional field: an older handle simply
+	// lacks it and resume falls back to the legacy sandboxResponders path.
+	// Local-file format (grow-only); NOT part of any signed/sealed wire payload.
+	PayerID *PayerIdentifier `json:"payerId,omitempty"`
 }
 
 // pasBundleBaseURL is the deterministic base for entry fullUrls. A non-urn:uuid

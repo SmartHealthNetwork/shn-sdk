@@ -128,7 +128,19 @@ func BuildEligibilityResponse(correlationID, patientRef string, covered bool, re
 			Inforce:  boolPtr(covered),
 		}},
 	}
-	if !covered {
+	// disposition is optional (0..1) in R4. Only set it when there's actual reason
+	// text — an empty-string disposition is an invalid FHIR primitive value
+	// ("Attribute value must not be empty"), which a real $validate egress gate
+	// rejects. A not-covered member with no reason (e.g. no Coverage found at all)
+	// must still produce a valid resource: omit the field. This is the LIVE path
+	// (gateway/engine/adjudicator.go's sandboxResponder.Handle calls this copy, not
+	// internal/fhirmap's) — ported-copy drift between this function and
+	// internal/fhirmap.BuildEligibilityResponse is exactly how the MBR-UC04/MBR-UC08
+	// empty-disposition 502s reached production while the substrate twin looked
+	// fine; keep both guards in sync (test/sdkparity's TestEligibilityResponseParity
+	// proves byte-parity, but only for the cases it exercises — check it when
+	// changing either copy).
+	if !covered && reason != "" {
 		resp.Disposition = strPtr(reason)
 	}
 	return json.Marshal(resp)

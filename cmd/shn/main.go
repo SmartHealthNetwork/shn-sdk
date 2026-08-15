@@ -102,7 +102,7 @@ commands:
   clients       list your registered clients (Accounts service)
   revoke        revoke a client by id (Accounts service)
   rotate        rotate a holder's keys against the registrar (holder-self)
-  doctor        self-validate against a sandbox: discovery + eligibility (wire-correctness)
+  doctor        self-validate against the network: discovery + eligibility (wire-correctness)
   send-test     drive a provider gateway's 8 /scenario UCs and tabulate pass/fail
 `)
 }

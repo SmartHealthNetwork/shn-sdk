@@ -471,8 +471,9 @@ substrate validates server-side.
 
 ```sh
 shn doctor --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
-# ✓ sandbox discovery reachable …
+# ✓ network discovery reachable …
 # ✓ wire protocol "1.1.0" supported
+# ✓ test counterparties resolve in the directory (1 payer(s))
 # ✓ your client "acme-7f3a" is registered
 # ✓ MBR-COVERED: covered=true (expected "covered")
 # ✓ MBR-NOTCOVERED: covered=false (expected "not-covered")
@@ -486,8 +487,8 @@ can tell whose problem a failure is:
 | Code | Phase | Meaning |
 |---|---|---|
 | 0 | — | all checks passed |
-| 10 | sandbox health | discovery/authz/registrar/payer unreachable or missing (not your fault) |
-| 20 | wire version | the sandbox speaks a wire version this CLI doesn't — upgrade your SDK/CLI |
+| 10 | network health | discovery/authz/registrar/payer unreachable or missing (not your fault) |
+| 20 | wire version | the network speaks a wire version this CLI doesn't — upgrade your SDK/CLI |
 | 30 | your registration | your client isn't in `/holders` (run `shn register`, or it was revoked) |
 | 40 | outcome | an eligibility run returned the wrong coverage, or a prior-auth run returned the wrong outcome |
 

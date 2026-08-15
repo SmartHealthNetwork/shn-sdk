@@ -1,10 +1,11 @@
 package shnsdk
 
-// Discovery is the SHN sandbox discovery descriptor (accountsvc GET /discovery): the
+// Discovery is the SHN network discovery descriptor (accountsvc GET /discovery): the
 // machine-readable, FR-37 conformance surface for the sealed-envelope protocol. It is
-// SUFFICIENT to drive the loop — endpoints + AuthzPublicKeyURL + SandboxResponders
-// resolve the Payer{ID,EncPub,AuthzPub} RunEligibility needs (EncPub from the
-// registrar /holders feed; AuthzPub from /pubkey). No keys are embedded (no drift).
+// SUFFICIENT to drive the loop — endpoints + AuthzPublicKeyURL + persona payerId
+// (legacy descriptors: SandboxResponders) resolve the Payer{ID,EncPub,AuthzPub}
+// RunEligibility needs (the holder matched via the registrar /holders feed; AuthzPub
+// from /pubkey). No keys are embedded (no drift).
 // MUST stay wire-identical to the substrate's accountsvc.Discovery (test/sdkparity).
 type Discovery struct {
 	Sandbox             bool              `json:"sandbox"`
@@ -109,4 +110,12 @@ type DiscoveryPersona struct {
 	// consumer safely ignores it) ⇒ does NOT bump wireProtocolVersion.
 	// Producer: internal/accountsvc/discovery.go.
 	ExpectedAfterAmend string `json:"expectedAfterAmend"` // "approved" | "" (n/a)
+	// PayerID is the payer-identity claim (system,value) of the seeded member's
+	// Coverage payor — fixture truth, not a participant property. A consumer
+	// resolves the test counterparty by matching it against holder-attested
+	// payerIds in the public /holders feed (FR-G41 semantics; unique by AI-G12).
+	// ADDITIVE optional field — an older consumer ignores it; does NOT bump
+	// wireProtocolVersion (ExpectedPriorAuth precedent). Absent ⇒ consumer falls
+	// back to sandboxResponders. Producer: internal/accountsvc/discovery.go.
+	PayerID *PayerIdentifier `json:"payerId,omitempty"`
 }

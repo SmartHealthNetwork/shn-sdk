@@ -79,8 +79,8 @@ Returns (the Accounts service, `accounts.<apex>`):
   "sandboxResponders": [{ "role": "payer", "holderId": "payer" }],
   "operations": [ { "frame": "provider-tpo", "operation": "eligibility-inquiry", "transactionType": "coverage-eligibility" }, … ],
   "sandboxPersonas": [
-    { "memberId": "MBR-COVERED",    "dob": "1975-04-02", "family": "Johansson", "expectedEligibility": "covered" },
-    { "memberId": "MBR-NOTCOVERED", "dob": "1980-09-15", "family": "Reyes",     "expectedEligibility": "not-covered" }
+    { "memberId": "MBR-COVERED",    "dob": "1975-04-02", "family": "Johansson", "expectedEligibility": "covered",     "payerId": { "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00001" } },
+    { "memberId": "MBR-NOTCOVERED", "dob": "1980-09-15", "family": "Reyes",     "expectedEligibility": "not-covered", "payerId": { "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00001" } }
   ],
   "docs": "https://github.com/SmartHealthNetwork/shn-sdk/blob/main/docs/PREVIEW.md"
 }
@@ -100,9 +100,9 @@ Returns (the Accounts service, `accounts.<apex>`):
 | `endpoints.{hub,authz,registrar,patientAccess}` | The live participant-facing base URLs. `hub` is where you originate a leg (`POST /route`); `authz` mints/serves tokens; `registrar` serves the holder feed; `patientAccess` is the FHIR/Patient-Access surface (`GET /metadata`). |
 | `authzPublicKeyURL` | Where to fetch the Authorization Framework Ed25519 verifying key (`{authz}/pubkey`). |
 | `hubTransportKeyURL` | Where to fetch the Hub's Ed25519 transport verifying key (`{hub}/transport-key` → `{"pubkey": "<base64 ed25519>"}`). Responders use this key to verify `X-Hub-Assertion` on every inbound forward (§6.2a). |
-| `sandboxResponders[]` | The responders you may exchange with (`role` + `holderId`). For UC-01 there is one: the payer. Deprecated — will stop being populated once the shn CLI resolves test counterparties from the directory (planned for the sdk v0.40 cycle); do not build new consumers. |
+| `sandboxResponders[]` | Legacy responder hint (`role` + `holderId`). Deprecated — as of sdk v0.41.0 the shn CLI resolves test counterparties from the directory (`sandboxPersonas[].payerId` → holder-attested `payerIds`, §3); the field is still populated for older consumers and stops only on a future explicit ruling. Do not build new consumers. |
 | `operations[]` | The advertised `(frame, operation, transactionType)` triples the substrate authorizes. |
-| `sandboxPersonas[]` | The seeded synthetic patients and their `expectedEligibility` (`"covered"` \| `"not-covered"`) — the inputs + expected outcomes `shn doctor` asserts. |
+| `sandboxPersonas[]` | The seeded synthetic patients and their `expectedEligibility` (`"covered"` \| `"not-covered"`) — the inputs + expected outcomes `shn doctor` asserts. Each persona also carries `payerId` — the seeded member's Coverage payor identity; resolve your test counterparty by matching it against holder-attested `payerIds` in `/holders` (§3). |
 | `docs` | Getting-started URL (`docs/PREVIEW.md`). |
 
 **No keys are embedded** in the descriptor (so it cannot drift from the live keys).
@@ -277,7 +277,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `signPub` | Base64 Ed25519 public key (32 bytes raw) — assertion verification |
 | `baseURL` | Where the Hub delivers inbound envelopes. Must be a publicly resolvable https URL — no userinfo, no ASCII control characters (< 0x20) — and must not redirect at /substrate/inbound (the Hub refuses redirects). Originator-only clients are never dialed but the URL must still validate. |
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
-| `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the substrate does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`, FR-G42). Today's substrate-native set is `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1` (§1a). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. Version-aware routing and translation consume these in later slices; today they are declaration + surfacing. |
+| `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`, FR-G42). Today's network-native set is `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1` (§8.6's bridgedContractVersions is the network's capability surface). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. Version-aware routing and translation consume these in later slices; today they are declaration + surfacing. |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
 
 **Proof-of-possession (`pop`).** In addition to the Trust admin gate, the
@@ -1995,6 +1995,14 @@ See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md`
 
 ### Changelog
 
+- **2026-08-14 — Persona `payerId` + directory-resolved test counterparties (`sandboxPersonas[].payerId`, §1a).**
+  Additive, no `wireProtocolVersion` bump. Each advertised `sandboxPersonas[]` entry now
+  also carries `payerId` — the seeded member's Coverage payor identity (fixture truth). As
+  of sdk v0.41.0, the `shn` CLI (`shn doctor`, `shn priorauth`) and cloudsmoke resolve their
+  test counterparty by matching a persona's `payerId` against holder-attested `payerIds` in
+  the registrar `/holders` feed (§3), instead of the legacy `sandboxResponders[]` hint.
+  `sandboxResponders[]` is still populated for older consumers that have not migrated; see
+  its field-table entry above for the deprecation note.
 - **2026-08-12 — Tri-line native builders + request frames (`requestFrames`, §6.3, §8.6).**
   Two additive changes, no `wireProtocolVersion` bump, no new frame version.
   (1) **Tri-line native.** The Smart Gateway and this SDK now build every PA

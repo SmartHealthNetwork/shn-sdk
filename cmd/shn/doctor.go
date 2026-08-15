@@ -2,11 +2,11 @@ package main
 
 // doctor.go implements `shn doctor`: the one-command self-validate a developer runs
 // to confirm "am I wired up + does my eligibility round-trip conform". It fetches the
-// sandbox discovery descriptor and runs eligibility against the seeded covered/
+// network discovery descriptor and runs eligibility against the seeded covered/
 // not-covered personas using the dev's OWN registered identity.
 //
-// Probes are ATTRIBUTION-ORDERED: sandbox-health checks (not the dev's fault) run
-// FIRST and fail with exitSandboxHealth; the wire-version check runs before any
+// Probes are ATTRIBUTION-ORDERED: network-health checks (not the dev's fault) run
+// FIRST and fail with exitNetworkHealth; the wire-version check runs before any
 // eligibility leg and fails with exitVersionUnsup; only then do dev-attributed checks
 // (your client registered? your eligibility outcomes correct?) run. Each phase has a
 // STABLE exit code so a script can branch on whose problem it is.
@@ -30,11 +30,11 @@ import (
 )
 
 // Stable per-phase exit codes. A wrapper script branches on these to attribute a
-// failure: a 10 is the sandbox operator's problem, a 30 is the dev's registration,
+// failure: a 10 is the network operator's problem, a 30 is the dev's registration,
 // a 40 is a genuine conformance mismatch.
 const (
 	exitOK              = 0
-	exitSandboxHealth   = 10 // discovery/authz/registrar/payer unreachable or missing
+	exitNetworkHealth   = 10 // discovery/authz/registrar/payer unreachable or missing
 	exitVersionUnsup    = 20 // descriptor wire version not supported by this CLI
 	exitDevRegistration = 30 // the dev's own client not in /holders
 	exitOutcome         = 40 // an eligibility run returned the wrong coverage
@@ -46,7 +46,7 @@ const (
 // tokens land inside the fixed-clock fake substrate's skew window.
 var doctorClock func() time.Time
 
-// skewWarnThreshold is how far the local clock may drift from the sandbox's Date
+// skewWarnThreshold is how far the local clock may drift from the network's Date
 // header before doctor WARNS (the substrate's hard skew limit is ~5m, so warn a bit
 // inside it). A warning never fails the run.
 const skewWarnThreshold = 4 * time.Minute
@@ -84,19 +84,19 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 
 	discURL := strings.TrimRight(*discovery, "/") + "/discovery"
 
-	// ───────── Phase A — sandbox health (failures are NOT the dev's fault) ─────────
+	// ───────── Phase A — network health (failures are NOT the dev's fault) ─────────
 
 	// A1. Discovery descriptor.
 	disc, discDate, err := fetchDiscovery(ctx, c, discURL)
 	if err != nil {
-		return fail(exitSandboxHealth, "sandbox discovery unreachable/malformed: %v", err)
+		return fail(exitNetworkHealth, "network discovery unreachable/malformed: %v", err)
 	}
-	pass("sandbox discovery reachable (%s)", discURL)
+	pass("network discovery reachable (%s)", discURL)
 
 	// A2. Wire-version check — FIRST real check, BEFORE any eligibility leg.
 	if disc.WireProtocolVersion != shnsdk.WireProtocolVersion {
 		return fail(exitVersionUnsup,
-			"sandbox speaks wire %q; this shn CLI speaks %q — upgrade your SDK/CLI",
+			"network speaks wire %q; this shn CLI speaks %q — upgrade your SDK/CLI",
 			disc.WireProtocolVersion, shnsdk.WireProtocolVersion)
 	}
 	pass("wire protocol %q supported", disc.WireProtocolVersion)
@@ -104,43 +104,54 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	// A3. Authz verifying key.
 	authzPub, err := fetchAuthzPub(ctx, c, disc.AuthzPublicKeyURL)
 	if err != nil {
-		return fail(exitSandboxHealth, "sandbox authz public key unreachable/malformed (%s): %v", disc.AuthzPublicKeyURL, err)
+		return fail(exitNetworkHealth, "network authz public key unreachable/malformed (%s): %v", disc.AuthzPublicKeyURL, err)
 	}
 	pass("authz verifying key fetched")
 
 	// A4. Registrar /holders feed.
 	if disc.Endpoints.Registrar == "" {
-		return fail(exitSandboxHealth, "sandbox discovery has no registrar endpoint")
+		return fail(exitNetworkHealth, "network discovery has no registrar endpoint")
 	}
 	holdersURL := strings.TrimRight(disc.Endpoints.Registrar, "/") + "/holders"
 	holders, holdersDate, err := fetchHolders(ctx, c, holdersURL)
 	if err != nil {
-		return fail(exitSandboxHealth, "sandbox registrar /holders unreachable/malformed (%s): %v", holdersURL, err)
+		return fail(exitNetworkHealth, "network registrar /holders unreachable/malformed (%s): %v", holdersURL, err)
 	}
 	pass("registrar /holders feed fetched (%d holders)", len(holders))
 
-	// A5. Each sandbox responder (the payer) must be registered with a decodable encPub.
-	if len(disc.SandboxResponders) == 0 {
-		return fail(exitSandboxHealth, "sandbox advertises no responders")
-	}
-	payerEnc := map[string]*[32]byte{}
-	for _, resp := range disc.SandboxResponders {
-		h, ok := holders[resp.HolderID]
-		if !ok {
-			return fail(exitSandboxHealth, "sandbox payer %q not registered in /holders", resp.HolderID)
+	// A5. Resolve each advertised persona's test counterparty from the directory
+	// (persona payerId → holder-attested payerIds; legacy descriptors fall back to
+	// sandboxResponders — R4). Runs over ALL advertised personas: network health is
+	// a property of the advertised fixture set, independent of --persona filtering.
+	payerFor := map[string]holderEntry{} // member id → resolved payer
+	payerEnc := map[string]*[32]byte{}   // holder id → decoded enc key
+	legacy := false
+	for _, p := range disc.SandboxPersonas {
+		h, viaLegacy, diag := resolvePersonaPayer(disc, p.PayerID, holders)
+		if diag != "" {
+			return fail(exitNetworkHealth, "%s", diag)
 		}
-		enc, err := decodeEncPub(h.EncPub)
-		if err != nil {
-			return fail(exitSandboxHealth, "sandbox payer %q has a malformed encPub: %v", resp.HolderID, err)
+		legacy = legacy || viaLegacy
+		if _, done := payerEnc[h.ID]; !done {
+			enc, err := decodeEncPub(h.EncPub)
+			if err != nil {
+				return fail(exitNetworkHealth, "test payer %q has a malformed encPub: %v", h.ID, err)
+			}
+			payerEnc[h.ID] = enc
 		}
-		payerEnc[resp.HolderID] = enc
+		payerFor[p.MemberID] = h
 	}
-	pass("sandbox responder(s) registered with encryption keys")
+	if legacy {
+		fmt.Fprintln(stdout, "⚠ test counterparty resolved via sandboxResponders — network predates persona payerId")
+		pass("test counterparty resolved via legacy responders (%d payer(s))", len(payerEnc))
+	} else {
+		pass("test counterparties resolve in the directory (%d payer(s))", len(payerEnc))
+	}
 
-	// A6. Clock-skew WARNING (never fails). Use any sandbox Date header we captured.
+	// A6. Clock-skew WARNING (never fails). Use any network Date header we captured.
 	if d := firstNonZero(holdersDate, discDate); !d.IsZero() {
 		if skew := absDuration(doctorNow().Sub(d)); skew > skewWarnThreshold {
-			fmt.Fprintf(stdout, "⚠ your clock is ~%s off the sandbox; assertions may be rejected (skew limit ~5m)\n", skew.Round(time.Second))
+			fmt.Fprintf(stdout, "⚠ your clock is ~%s off the network; assertions may be rejected (skew limit ~5m)\n", skew.Round(time.Second))
 		}
 	}
 
@@ -172,23 +183,22 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 		if len(filtered) == 0 {
-			return fail(exitUsage, "no seeded persona with member id %q", *persona)
+			return fail(exitUsage, "no test persona with member id %q", *persona)
 		}
 		personas = filtered
 	}
 	if len(personas) == 0 {
-		return fail(exitSandboxHealth, "sandbox advertises no personas to test")
+		return fail(exitNetworkHealth, "network advertises no personas to test")
 	}
 
-	// One responder drives every persona (eligibility has a single payer).
-	resp := disc.SandboxResponders[0]
-	payer := shnsdk.Payer{ID: resp.HolderID, EncPub: payerEnc[resp.HolderID], AuthzPub: authzPub}
 	ep := shnsdk.Endpoints{HubURL: disc.Endpoints.Hub, AuthzURL: disc.Endpoints.Authz}
 
 	for _, p := range personas {
+		h := payerFor[p.MemberID]
+		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub}
 		covered, _, err := devID.RunEligibility(ctx, c, ep, payer, "", p.MemberID, p.DOB, p.Family)
 		if err != nil {
-			return fail(exitSandboxHealth, "%s: eligibility round-trip failed: %v", p.MemberID, err)
+			return fail(exitNetworkHealth, "%s: eligibility round-trip failed: %v", p.MemberID, err)
 		}
 		want := p.ExpectedEligibility == "covered"
 		if covered != want {
@@ -209,8 +219,10 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		cc, ok := shnsdk.SandboxContextFor(p.MemberID)
 		if !ok {
-			return fail(exitSandboxHealth, "priorauth %s: no sandbox clinical context", p.MemberID)
+			return fail(exitNetworkHealth, "priorauth %s: no test clinical context", p.MemberID)
 		}
+		h := payerFor[p.MemberID]
+		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub}
 		res, err := devID.RunPriorAuth(ctx, c, ep, payer, shnsdk.PriorAuthRequest{
 			Member:           p.MemberID,
 			DOB:              p.DOB,
@@ -222,7 +234,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 			DiagnosisICD10:   icd,
 		})
 		if err != nil {
-			return fail(exitSandboxHealth, "priorauth %s: round-trip failed: %v", p.MemberID, err)
+			return fail(exitNetworkHealth, "priorauth %s: round-trip failed: %v", p.MemberID, err)
 		}
 		if res.Outcome != p.ExpectedPriorAuth {
 			return fail(exitOutcome, "priorauth %s: got %s want %s", p.MemberID, res.Outcome, p.ExpectedPriorAuth)
@@ -240,7 +252,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		amended, err := devID.ResumePriorAuth(ctx, c, ep, payer, *res.Resume, shnsdk.SandboxUC04Report())
 		if err != nil {
-			return fail(exitSandboxHealth, "priorauth %s: resume round-trip failed: %v", p.MemberID, err)
+			return fail(exitNetworkHealth, "priorauth %s: resume round-trip failed: %v", p.MemberID, err)
 		}
 		if amended.Outcome != p.ExpectedAfterAmend {
 			return fail(exitOutcome, "priorauth %s: after amend got %s want %s", p.MemberID, amended.Outcome, p.ExpectedAfterAmend)
@@ -263,11 +275,52 @@ func doctorNow() time.Time {
 
 // holderEntry is one row of the registrar /holders feed (subset doctor needs).
 type holderEntry struct {
-	ID      string `json:"id"`
-	Role    string `json:"role"`
-	EncPub  string `json:"encPub"`
-	SignPub string `json:"signPub"`
-	BaseURL string `json:"baseURL"`
+	ID       string                   `json:"id"`
+	Role     string                   `json:"role"`
+	EncPub   string                   `json:"encPub"`
+	SignPub  string                   `json:"signPub"`
+	BaseURL  string                   `json:"baseURL"`
+	PayerIDs []shnsdk.PayerIdentifier `json:"payerIds"`
+}
+
+// resolvePersonaPayer resolves the test counterparty for one persona.
+// payerId present → directory resolution over the /holders rows by holder-attested
+// payerIds (FR-G41 semantics; unique by AI-G12): exactly one match, role payer.
+// Zero or multiple matches REFUSE (returned diagnostic) — never pick silently,
+// never fall back on this branch (fallback would mask an AI-G12 regression).
+// payerId absent → legacy path: SandboxResponders[0] (legacy=true; caller prints
+// the visibility line). Spec 2026-08-14 R3/R4.
+func resolvePersonaPayer(disc shnsdk.Discovery, pid *shnsdk.PayerIdentifier, holders map[string]holderEntry) (holderEntry, bool, string) {
+	if pid != nil {
+		var matches []holderEntry
+		for _, h := range holders {
+			for _, hp := range h.PayerIDs {
+				if hp == *pid {
+					matches = append(matches, h)
+					break
+				}
+			}
+		}
+		switch len(matches) {
+		case 1:
+			if matches[0].Role != "payer" {
+				return holderEntry{}, false, fmt.Sprintf("test counterparty %s|%s resolves to holder %q with role %q (want payer)", pid.System, pid.Value, matches[0].ID, matches[0].Role)
+			}
+			return matches[0], false, ""
+		case 0:
+			return holderEntry{}, false, fmt.Sprintf("test counterparty %s|%s resolves to no holder in the directory", pid.System, pid.Value)
+		default:
+			return holderEntry{}, false, fmt.Sprintf("test counterparty %s|%s resolves to %d holders — payer-identity uniqueness (AI-G12) violated", pid.System, pid.Value, len(matches))
+		}
+	}
+	if len(disc.SandboxResponders) == 0 {
+		return holderEntry{}, false, "network advertises no test counterparty (no persona payerId, no sandboxResponders)"
+	}
+	h, ok := holders[disc.SandboxResponders[0].HolderID]
+	if !ok {
+		return holderEntry{}, false, fmt.Sprintf("test payer %q not registered in /holders", disc.SandboxResponders[0].HolderID)
+	}
+	return h, true, ""
 }
 
 // fetchDiscovery GETs and decodes the discovery descriptor, returning it plus the

@@ -51,6 +51,10 @@ type fakeSandbox struct {
 	// Outcome "no-pa-required". With a persona that expects "approved" this is a clean
 	// outcome MISMATCH (no error), exercising doctor's exitOutcome PA branch.
 	paNotRequired bool
+	// emptyResponders makes discovery advertise SandboxResponders: [] — no legacy
+	// fallback available. Combined with personas carrying no payerId, this drives
+	// resolvePersonaPayer's "no test counterparty" refusal (R3/R4 boundary).
+	emptyResponders bool
 
 	routeHits int32 // atomically counted /route calls (proves version-check short-circuit)
 }
@@ -265,6 +269,10 @@ func (f *fakeSandbox) start(t *testing.T) *httptest.Server {
 		wire = f.discWireVersion
 	}
 	mux.HandleFunc("/discovery", func(w http.ResponseWriter, r *http.Request) {
+		responders := []shnsdk.DiscoveryResponder{{Role: "payer", HolderID: f.payerID}}
+		if f.emptyResponders {
+			responders = nil
+		}
 		disc := shnsdk.Discovery{
 			Sandbox:             true,
 			SyntheticDataOnly:   true,
@@ -275,7 +283,7 @@ func (f *fakeSandbox) start(t *testing.T) *httptest.Server {
 				Registrar: srv.URL,
 			},
 			AuthzPublicKeyURL: srv.URL + "/pubkey",
-			SandboxResponders: []shnsdk.DiscoveryResponder{{Role: "payer", HolderID: f.payerID}},
+			SandboxResponders: responders,
 			SandboxPersonas:   f.personas,
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -310,17 +318,19 @@ func newFakeSandbox(t *testing.T) (*fakeSandbox, string, string) {
 		t.Fatalf("read dev manifest: %v", err)
 	}
 
+	cms := shnsdk.CMSPayerIdentity
 	f := &fakeSandbox{
 		signPriv: signPriv, signPub: signPub,
 		payerEnc: payerPriv, payerPub: payerPub,
 		payerID: "payer", now: now,
 		personas: []shnsdk.DiscoveryPersona{
-			{MemberID: "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson", ExpectedEligibility: "covered", ExpectedPriorAuth: "approved"},
-			{MemberID: "MBR-NOTCOVERED", DOB: "1975-04-02", Family: "Johansson", ExpectedEligibility: "not-covered"},
+			{MemberID: "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson", ExpectedEligibility: "covered", ExpectedPriorAuth: "approved", PayerID: &cms},
+			{MemberID: "MBR-NOTCOVERED", DOB: "1975-04-02", Family: "Johansson", ExpectedEligibility: "not-covered", PayerID: &cms},
 		},
 	}
 	f.holders = []map[string]any{
-		{"id": "payer", "role": "payer", "encPub": base64.StdEncoding.EncodeToString(payerPub[:]), "signPub": base64.StdEncoding.EncodeToString(signPub), "baseURL": "https://payer.example.com"},
+		{"id": "payer", "role": "payer", "encPub": base64.StdEncoding.EncodeToString(payerPub[:]), "signPub": base64.StdEncoding.EncodeToString(signPub), "baseURL": "https://payer.example.com",
+			"payerIds": []map[string]string{{"system": cms.System, "value": cms.Value}}},
 		{"id": devID, "role": "provider", "encPub": devMan.EncPub, "signPub": devMan.SignPub, "baseURL": devMan.BaseURL},
 	}
 	return f, devID, dir
@@ -418,20 +428,193 @@ func TestDoctor_VersionUnsupported_FailsBeforeEligibility(t *testing.T) {
 	}
 }
 
-func TestDoctor_PayerAbsentFromHolders(t *testing.T) {
+// TestDoctor_LegacyResponderNotRegisteredRefused (R4 legacy branch): personas carry no
+// payerId (legacy descriptor) AND the advertised SandboxResponders[0] holder is absent
+// from /holders → refuse, never silently proceed with an unresolved payer.
+func TestDoctor_LegacyResponderNotRegisteredRefused(t *testing.T) {
 	f, devID, dir := newFakeSandbox(t)
-	srv := f.start(t)
-	id, _ := loadIdentity(dir, devID)
-	f.requesterEnc = id.EncPub
+	for i := range f.personas {
+		f.personas[i].PayerID = nil
+	}
 	// Drop the payer from /holders, keep the dev.
 	f.holders = f.holders[1:]
+	srv := f.start(t)
+	id, err := loadIdentity(dir, devID)
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	f.requesterEnc = id.EncPub
 
 	stdout, stderr, code := runCLI("doctor", "--discovery", srv.URL, "--id", devID, "-keys", dir)
-	if code != exitSandboxHealth {
-		t.Fatalf("doctor exit=%d, want exitSandboxHealth=%d\nstdout=%s\nstderr=%s", code, exitSandboxHealth, stdout, stderr)
+	if code != exitNetworkHealth {
+		t.Fatalf("doctor exit=%d, want exitNetworkHealth=%d\nstdout=%s\nstderr=%s", code, exitNetworkHealth, stdout, stderr)
 	}
-	if !strings.Contains(strings.ToLower(stdout+stderr), "sandbox") {
-		t.Errorf("message should blame the sandbox: %s %s", stdout, stderr)
+	if !strings.Contains(stdout+stderr, `test payer "payer" not registered in /holders`) {
+		t.Errorf("message should report the legacy responder not-registered refusal: %s %s", stdout, stderr)
+	}
+	if strings.Contains(stdout, "PASS") {
+		t.Errorf("an unresolved legacy responder must never fall back to a PASS: %s", stdout)
+	}
+}
+
+// TestDoctor_NoTestCounterpartyAdvertisedRefused (R3/R4 boundary): personas carry no
+// payerId AND the descriptor advertises no SandboxResponders either — nothing to
+// resolve, legacy or directory → refuse.
+func TestDoctor_NoTestCounterpartyAdvertisedRefused(t *testing.T) {
+	f, devID, dir := newFakeSandbox(t)
+	for i := range f.personas {
+		f.personas[i].PayerID = nil
+	}
+	f.emptyResponders = true
+	srv := f.start(t)
+	id, err := loadIdentity(dir, devID)
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	f.requesterEnc = id.EncPub
+
+	stdout, stderr, code := runCLI("doctor", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	if code != exitNetworkHealth {
+		t.Fatalf("doctor exit=%d, want exitNetworkHealth=%d\nstdout=%s\nstderr=%s", code, exitNetworkHealth, stdout, stderr)
+	}
+	if !strings.Contains(stdout+stderr, "network advertises no test counterparty (no persona payerId, no sandboxResponders)") {
+		t.Errorf("message should report the no-counterparty refusal: %s %s", stdout, stderr)
+	}
+	if strings.Contains(stdout, "PASS") {
+		t.Errorf("no advertised counterparty must never fall back to a PASS: %s", stdout)
+	}
+}
+
+// TestDoctor_DirectoryResolutionLine: directory resolution is the default path when
+// personas advertise a payerId — the happy-path output names it, not the legacy path.
+func TestDoctor_DirectoryResolutionLine(t *testing.T) {
+	f, devID, dir := newFakeSandbox(t)
+	srv := f.start(t)
+	id, err := loadIdentity(dir, devID)
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	f.requesterEnc = id.EncPub
+
+	stdout, stderr, code := runCLI("doctor", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	if code != exitOK {
+		t.Fatalf("doctor exit=%d (want %d)\nstdout=%s\nstderr=%s", code, exitOK, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "test counterparties resolve in the directory (1 payer") {
+		t.Errorf("stdout should report the directory-resolution pass line: %s", stdout)
+	}
+	if strings.Contains(stdout, "resolved via sandboxResponders") {
+		t.Errorf("stdout must not mention the legacy fallback on the directory-resolution path: %s", stdout)
+	}
+}
+
+// TestDoctor_LegacyFallbackVisible: personas WITHOUT payerId + responders present →
+// PASS with the R4 visibility line and the legacy-phrased pass line (not the directory
+// phrasing).
+func TestDoctor_LegacyFallbackVisible(t *testing.T) {
+	f, devID, dir := newFakeSandbox(t)
+	// Zero out PayerID on every fixture persona — the network predates persona payerId.
+	for i := range f.personas {
+		f.personas[i].PayerID = nil
+	}
+	srv := f.start(t)
+	id, err := loadIdentity(dir, devID)
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	f.requesterEnc = id.EncPub
+
+	stdout, stderr, code := runCLI("doctor", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	if code != exitOK {
+		t.Fatalf("doctor exit=%d (want %d)\nstdout=%s\nstderr=%s", code, exitOK, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "resolved via sandboxResponders — network predates persona payerId") {
+		t.Errorf("stdout should report the R4 visibility line: %s", stdout)
+	}
+	if !strings.Contains(stdout, "resolved via legacy responders") {
+		t.Errorf("stdout should report the legacy-phrased pass line: %s", stdout)
+	}
+	if strings.Contains(stdout, "resolve in the directory") {
+		t.Errorf("stdout must not use the directory phrasing on the legacy path: %s", stdout)
+	}
+}
+
+// TestDoctor_PayerIDNoMatchRefused (R3): the advertised payerId matches zero /holders
+// rows → refuse, never fall back.
+func TestDoctor_PayerIDNoMatchRefused(t *testing.T) {
+	f, devID, dir := newFakeSandbox(t)
+	// Mutate the payer holder row's declared payerIds value off the persona's payerId.
+	f.holders[0]["payerIds"] = []map[string]string{{"system": shnsdk.CMSPayerIdentity.System, "value": "99999"}}
+	srv := f.start(t)
+	id, err := loadIdentity(dir, devID)
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	f.requesterEnc = id.EncPub
+
+	stdout, stderr, code := runCLI("doctor", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	if code != exitNetworkHealth {
+		t.Fatalf("doctor exit=%d, want exitNetworkHealth=%d\nstdout=%s\nstderr=%s", code, exitNetworkHealth, stdout, stderr)
+	}
+	if !strings.Contains(stdout+stderr, "resolves to no holder in the directory") {
+		t.Errorf("message should report the zero-match refusal: %s %s", stdout, stderr)
+	}
+	if strings.Contains(stdout, "PASS") {
+		t.Errorf("a zero-match refusal must never fall back to a PASS: %s", stdout)
+	}
+}
+
+// TestDoctor_PayerIDMultiMatchRefused (R3/AI-G12): the advertised payerId matches TWO
+// /holders rows → refuse, never pick.
+func TestDoctor_PayerIDMultiMatchRefused(t *testing.T) {
+	f, devID, dir := newFakeSandbox(t)
+	cms := shnsdk.CMSPayerIdentity
+	payerRow := f.holders[0]
+	f.holders = append(f.holders, map[string]any{
+		"id": "payer-dup", "role": "payer",
+		"encPub": payerRow["encPub"], "signPub": payerRow["signPub"], "baseURL": "https://payer-dup.example.com",
+		"payerIds": []map[string]string{{"system": cms.System, "value": cms.Value}},
+	})
+	srv := f.start(t)
+	id, err := loadIdentity(dir, devID)
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	f.requesterEnc = id.EncPub
+
+	stdout, stderr, code := runCLI("doctor", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	if code != exitNetworkHealth {
+		t.Fatalf("doctor exit=%d, want exitNetworkHealth=%d\nstdout=%s\nstderr=%s", code, exitNetworkHealth, stdout, stderr)
+	}
+	if !strings.Contains(stdout+stderr, "payer-identity uniqueness (AI-G12) violated") {
+		t.Errorf("message should cite the AI-G12 uniqueness violation: %s %s", stdout, stderr)
+	}
+	if strings.Contains(stdout, "PASS") {
+		t.Errorf("a multi-match refusal must never pick one and pass: %s", stdout)
+	}
+}
+
+// TestDoctor_PayerIDWrongRoleRefused: the single matching holder row is not role=payer
+// → refuse with the role mismatch named.
+func TestDoctor_PayerIDWrongRoleRefused(t *testing.T) {
+	f, devID, dir := newFakeSandbox(t)
+	f.holders[0]["role"] = "provider"
+	srv := f.start(t)
+	id, err := loadIdentity(dir, devID)
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	f.requesterEnc = id.EncPub
+
+	stdout, stderr, code := runCLI("doctor", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	if code != exitNetworkHealth {
+		t.Fatalf("doctor exit=%d, want exitNetworkHealth=%d\nstdout=%s\nstderr=%s", code, exitNetworkHealth, stdout, stderr)
+	}
+	if !strings.Contains(stdout+stderr, `role "provider" (want payer)`) {
+		t.Errorf("message should report the role mismatch: %s %s", stdout, stderr)
+	}
+	if strings.Contains(stdout, "PASS") {
+		t.Errorf("a role-mismatch refusal must never fall back to a PASS: %s", stdout)
 	}
 }
 

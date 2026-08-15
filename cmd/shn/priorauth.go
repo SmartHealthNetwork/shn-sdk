@@ -1,8 +1,8 @@
 package main
 
 // priorauth.go implements `shn priorauth`: the explicit dev-facing PA run, mirroring
-// `shn doctor`'s resolution path. It fetches the sandbox discovery descriptor and runs
-// a prior-authorization (CRD→DTR→PAS) against the seeded payer using the dev's
+// `shn doctor`'s resolution path. It fetches the network discovery descriptor and runs
+// a prior-authorization (CRD→DTR→PAS) against the resolved test payer using the dev's
 // OWN registered identity, then prints the outcome. Like doctor it calls NO FHIR/IG
 // validator — the substrate validates server-side — and depends only on stdlib +
 // shnsdk (no internal/).
@@ -21,58 +21,42 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// resolveSandboxPayer resolves the descriptor + Payer{ID,EncPub,AuthzPub} + Endpoints
-// from the sandbox discovery descriptor — the resolution shared by `shn priorauth` and
-// its `resume` subcommand. On failure it writes the diagnostic to stderr and returns a
-// non-zero rc.
-func resolveSandboxPayer(ctx context.Context, c *http.Client, discovery string, stderr io.Writer) (shnsdk.Discovery, shnsdk.Payer, shnsdk.Endpoints, int) {
-	discURL := strings.TrimRight(discovery, "/") + "/discovery"
-	disc, _, err := fetchDiscovery(ctx, c, discURL)
-	if err != nil {
-		fmt.Fprintf(stderr, "shn priorauth: sandbox discovery unreachable/malformed: %v\n", err)
-		return shnsdk.Discovery{}, shnsdk.Payer{}, shnsdk.Endpoints{}, 1
-	}
-	if disc.WireProtocolVersion != shnsdk.WireProtocolVersion {
-		fmt.Fprintf(stderr, "shn priorauth: sandbox speaks wire %q; this CLI speaks %q — upgrade your SDK/CLI\n", disc.WireProtocolVersion, shnsdk.WireProtocolVersion)
-		return shnsdk.Discovery{}, shnsdk.Payer{}, shnsdk.Endpoints{}, 1
-	}
-	if len(disc.SandboxResponders) == 0 {
-		fmt.Fprintln(stderr, "shn priorauth: sandbox advertises no responders")
-		return shnsdk.Discovery{}, shnsdk.Payer{}, shnsdk.Endpoints{}, 1
-	}
+// resolveTestPayer resolves Payer{ID,EncPub,AuthzPub} + Endpoints for the given
+// payer-identity claim (nil ⇒ legacy sandboxResponders path — spec R4; the caller
+// prints the visibility note when legacy is true). Shared by `shn priorauth` and
+// its `resume` subcommand; doctor shares the underlying resolvePersonaPayer.
+func resolveTestPayer(ctx context.Context, c *http.Client, disc shnsdk.Discovery, pid *shnsdk.PayerIdentifier, cmd string, stderr io.Writer) (shnsdk.Payer, shnsdk.Endpoints, bool, int) {
 	authzPub, err := fetchAuthzPub(ctx, c, disc.AuthzPublicKeyURL)
 	if err != nil {
-		fmt.Fprintf(stderr, "shn priorauth: sandbox authz public key unreachable/malformed: %v\n", err)
-		return shnsdk.Discovery{}, shnsdk.Payer{}, shnsdk.Endpoints{}, 1
+		fmt.Fprintf(stderr, "shn %s: network authz public key unreachable/malformed: %v\n", cmd, err)
+		return shnsdk.Payer{}, shnsdk.Endpoints{}, false, 1
 	}
 	if disc.Endpoints.Registrar == "" {
-		fmt.Fprintln(stderr, "shn priorauth: sandbox discovery has no registrar endpoint")
-		return shnsdk.Discovery{}, shnsdk.Payer{}, shnsdk.Endpoints{}, 1
+		fmt.Fprintf(stderr, "shn %s: network discovery has no registrar endpoint\n", cmd)
+		return shnsdk.Payer{}, shnsdk.Endpoints{}, false, 1
 	}
 	holders, _, err := fetchHolders(ctx, c, strings.TrimRight(disc.Endpoints.Registrar, "/")+"/holders")
 	if err != nil {
-		fmt.Fprintf(stderr, "shn priorauth: sandbox registrar /holders unreachable/malformed: %v\n", err)
-		return shnsdk.Discovery{}, shnsdk.Payer{}, shnsdk.Endpoints{}, 1
+		fmt.Fprintf(stderr, "shn %s: network registrar /holders unreachable/malformed: %v\n", cmd, err)
+		return shnsdk.Payer{}, shnsdk.Endpoints{}, false, 1
 	}
-	resp := disc.SandboxResponders[0]
-	h, ok := holders[resp.HolderID]
-	if !ok {
-		fmt.Fprintf(stderr, "shn priorauth: sandbox payer %q not registered in /holders\n", resp.HolderID)
-		return shnsdk.Discovery{}, shnsdk.Payer{}, shnsdk.Endpoints{}, 1
+	h, legacy, diag := resolvePersonaPayer(disc, pid, holders)
+	if diag != "" {
+		fmt.Fprintf(stderr, "shn %s: %s\n", cmd, diag)
+		return shnsdk.Payer{}, shnsdk.Endpoints{}, false, 1
 	}
 	encPub, err := decodeEncPub(h.EncPub)
 	if err != nil {
-		fmt.Fprintf(stderr, "shn priorauth: sandbox payer %q has a malformed encPub: %v\n", resp.HolderID, err)
-		return shnsdk.Discovery{}, shnsdk.Payer{}, shnsdk.Endpoints{}, 1
+		fmt.Fprintf(stderr, "shn %s: test payer %q has a malformed encPub: %v\n", cmd, h.ID, err)
+		return shnsdk.Payer{}, shnsdk.Endpoints{}, false, 1
 	}
-	payer := shnsdk.Payer{ID: resp.HolderID, EncPub: encPub, AuthzPub: authzPub}
-	ep := shnsdk.Endpoints{HubURL: disc.Endpoints.Hub, AuthzURL: disc.Endpoints.Authz}
-	return disc, payer, ep, 0
+	return shnsdk.Payer{ID: h.ID, EncPub: encPub, AuthzPub: authzPub},
+		shnsdk.Endpoints{HubURL: disc.Endpoints.Hub, AuthzURL: disc.Endpoints.Authz}, legacy, 0
 }
 
 // cmdPriorAuth implements `shn priorauth`: resolve Payer{ID,EncPub,AuthzPub} +
 // Endpoints from the discovery descriptor (the same resolution doctor uses), load the
-// dev identity from -keys/-out, run the sandbox order for the given member, and print
+// dev identity from -keys/-out, run the test order for the given member, and print
 // the outcome (approved/pended/denied/no-pa-required).
 func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("priorauth", flag.ContinueOnError)
@@ -98,13 +82,19 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	c := http.DefaultClient
 
-	disc, payer, ep, rc := resolveSandboxPayer(ctx, c, *discovery, stderr)
-	if rc != 0 {
-		return rc
+	discURL := strings.TrimRight(*discovery, "/") + "/discovery"
+	disc, _, err := fetchDiscovery(ctx, c, discURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "shn priorauth: network discovery unreachable/malformed: %v\n", err)
+		return 1
+	}
+	if disc.WireProtocolVersion != shnsdk.WireProtocolVersion {
+		fmt.Fprintf(stderr, "shn priorauth: network speaks wire %q; this CLI speaks %q — upgrade your SDK/CLI\n", disc.WireProtocolVersion, shnsdk.WireProtocolVersion)
+		return 1
 	}
 
 	// Locate the persona to source DOB/Family from (the order itself is the fixed
-	// sandbox order for this member).
+	// test order for this member).
 	var persona shnsdk.DiscoveryPersona
 	for _, p := range disc.SandboxPersonas {
 		if p.MemberID == *member {
@@ -113,8 +103,16 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if persona.MemberID == "" {
-		fmt.Fprintf(stderr, "shn priorauth: no seeded persona with member id %q\n", *member)
+		fmt.Fprintf(stderr, "shn priorauth: no test persona with member id %q\n", *member)
 		return exitUsage
+	}
+
+	payer, ep, legacy, rc := resolveTestPayer(ctx, c, disc, persona.PayerID, "priorauth", stderr)
+	if rc != 0 {
+		return rc
+	}
+	if legacy {
+		fmt.Fprintln(stderr, "shn priorauth: note: resolved via sandboxResponders — network predates persona payerId")
 	}
 
 	devID, err := loadIdentity(keysDir, *id)
@@ -128,7 +126,7 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 
 	cc, ok := shnsdk.SandboxContextFor(*member)
 	if !ok {
-		fmt.Fprintf(stderr, "shn priorauth: no sandbox clinical context for member %q\n", *member)
+		fmt.Fprintf(stderr, "shn priorauth: no test clinical context for member %q\n", *member)
 		return exitUsage
 	}
 	cpt, display, icd := shnsdk.SandboxUC03Order()
@@ -149,6 +147,7 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "shn priorauth: pended but no resume handle returned")
 			return 1
 		}
+		res.Resume.PayerID = persona.PayerID
 		if err := writeResumeHandle(*resumeOut, *res.Resume); err != nil {
 			fmt.Fprintf(stderr, "shn priorauth: write resume handle: %v\n", err)
 			return 1
@@ -215,10 +214,26 @@ func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 
 	ctx := context.Background()
 	c := http.DefaultClient
-	_, payer, ep, rc := resolveSandboxPayer(ctx, c, *discovery, stderr)
+
+	discURL := strings.TrimRight(*discovery, "/") + "/discovery"
+	disc, _, err := fetchDiscovery(ctx, c, discURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "shn priorauth resume: network discovery unreachable/malformed: %v\n", err)
+		return 1
+	}
+	if disc.WireProtocolVersion != shnsdk.WireProtocolVersion {
+		fmt.Fprintf(stderr, "shn priorauth resume: network speaks wire %q; this CLI speaks %q — upgrade your SDK/CLI\n", disc.WireProtocolVersion, shnsdk.WireProtocolVersion)
+		return 1
+	}
+
+	payer, ep, legacy, rc := resolveTestPayer(ctx, c, disc, handle.PayerID, "priorauth resume", stderr)
 	if rc != 0 {
 		return rc
 	}
+	if legacy {
+		fmt.Fprintln(stderr, "shn priorauth resume: note: resolved via sandboxResponders — network predates persona payerId")
+	}
+
 	devID, err := loadIdentity(keysDir, *id)
 	if err != nil {
 		fmt.Fprintf(stderr, "shn priorauth resume: load your identity from %q: %v\n", keysDir, err)

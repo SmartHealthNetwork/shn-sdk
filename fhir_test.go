@@ -201,6 +201,42 @@ func TestBuildEligibilityResponse(t *testing.T) {
 	}
 }
 
+// TestBuildEligibilityResponse_NoReasonOmitsDisposition guards the same bug the
+// substrate's internal/fhirmap.BuildEligibilityResponse guards
+// (internal/fhirmap/eligibility_test.go's TestBuildEligibilityResponse_NoReasonOmitsDisposition):
+// a not-covered member with no reason text (SoR.CoverageInforce returns "" when no
+// Coverage row is found at all, e.g. an unseeded fixture — this is exactly the bug
+// that produced the MBR-UC04/MBR-UC08 502s in production) must never marshal
+// disposition as an empty string. disposition is 0..1 in R4; an empty-string value
+// is an invalid FHIR primitive ("Attribute value must not be empty") that a real
+// $validate egress gate rejects. This is the copy production payer-gw actually
+// calls (gateway/engine/adjudicator.go's sandboxResponder.Handle -> shnsdk.BuildEligibilityResponse),
+// so this guard — not the substrate twin's — is the one that matters live.
+func TestBuildEligibilityResponse_NoReasonOmitsDisposition(t *testing.T) {
+	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
+	b, err := BuildEligibilityResponse("c1", "Patient/MBR-UC08", false, "", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := m["disposition"]; ok {
+		t.Fatalf("disposition must be omitted entirely when reason is empty, got present with value %v", v)
+	}
+	covered, reason, err := ParseEligibilityResponse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if covered {
+		t.Fatal("not-covered response must parse as not covered")
+	}
+	if reason != "" {
+		t.Fatalf("reason = %q, want empty", reason)
+	}
+}
+
 // TestBuildPatientAccessCapabilityStatement_Shape verifies the SDK-promoted
 // CMS-0057 CapabilityStatement has the required FHIR shape (FR-37): kind=instance,
 // status=active, at least one rest.resource of type ExplanationOfBenefit with a
