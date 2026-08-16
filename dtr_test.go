@@ -1,6 +1,7 @@
 package shnsdk
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -434,6 +435,47 @@ func TestBuildQuestionnaireFetchAndParseURL(t *testing.T) {
 	}
 	if url != SupportedQuestionnaireCanonical {
 		t.Errorf("parsed url = %q, want %q", url, SupportedQuestionnaireCanonical)
+	}
+}
+
+// TestBuildQuestionnaireFetchWithCoverage_RoundTrip: the coverage-carrying builder
+// round-trips both the canonical AND the exact coverage bytes.
+func TestBuildQuestionnaireFetchWithCoverage_RoundTrip(t *testing.T) {
+	covJSON := []byte(`{"resourceType":"Coverage","id":"coverage-MBR-COVERED","status":"active"}`)
+	fetch, err := BuildQuestionnaireFetchWithCoverage(SupportedQuestionnaireCanonical, covJSON)
+	if err != nil {
+		t.Fatalf("BuildQuestionnaireFetchWithCoverage: %v", err)
+	}
+	var req QuestionnaireFetchRequest
+	if err := json.Unmarshal(fetch, &req); err != nil {
+		t.Fatalf("unmarshal fetch: %v", err)
+	}
+	if req.Canonical != SupportedQuestionnaireCanonical {
+		t.Errorf("fetch canonical = %q, want %q", req.Canonical, SupportedQuestionnaireCanonical)
+	}
+	if !bytes.Equal([]byte(req.Coverage), covJSON) {
+		t.Errorf("fetch coverage = %s, want exact bytes %s", req.Coverage, covJSON)
+	}
+}
+
+// TestBuildQuestionnaireFetchWithCoverage_EmptyCanonicalErrors: an empty canonical
+// is rejected (fail-closed, never a half-built fetch request).
+func TestBuildQuestionnaireFetchWithCoverage_EmptyCanonicalErrors(t *testing.T) {
+	covJSON := []byte(`{"resourceType":"Coverage","id":"coverage-MBR-COVERED","status":"active"}`)
+	if _, err := BuildQuestionnaireFetchWithCoverage("", covJSON); err == nil {
+		t.Fatal("BuildQuestionnaireFetchWithCoverage(\"\", covJSON) = nil error, want an error")
+	}
+}
+
+// TestBuildQuestionnaireFetchWithCoverage_EmptyCoverageErrors: an empty coverageJSON
+// is rejected — this builder exists specifically to carry a coverage; an empty one
+// means the caller should use BuildQuestionnaireFetch instead.
+func TestBuildQuestionnaireFetchWithCoverage_EmptyCoverageErrors(t *testing.T) {
+	if _, err := BuildQuestionnaireFetchWithCoverage(SupportedQuestionnaireCanonical, nil); err == nil {
+		t.Fatal("BuildQuestionnaireFetchWithCoverage(canonical, nil) = nil error, want an error")
+	}
+	if _, err := BuildQuestionnaireFetchWithCoverage(SupportedQuestionnaireCanonical, []byte{}); err == nil {
+		t.Fatal("BuildQuestionnaireFetchWithCoverage(canonical, []byte{}) = nil error, want an error")
 	}
 }
 

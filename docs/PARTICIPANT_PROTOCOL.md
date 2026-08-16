@@ -1555,7 +1555,10 @@ the build/parse calls bracket the leg:
 ```
 # Leg inputs (built once from the dev-visible order):
 srJSON  = BuildServiceRequest(cpt, display, icd10, "Patient/MBR-COVERED")
-covJSON = BuildCoverage("Patient/MBR-COVERED", "Coverage/MBR-COVERED")
+covJSON = BuildCoverage("Patient/MBR-COVERED", "MBR-COVERED")   # 2nd arg = the BARE member id
+                                                                # (the urn:shn:coverage MB identifier
+                                                                #  value); a "Coverage/…" reference is
+                                                                #  refused
 
 # LEG 1 — CRD
 crdReq            = BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-COVERED")
@@ -1571,7 +1574,7 @@ url      = ParseQuestionnaireURL(qJSON)          # MUST equal canon (canonical-s
 qrJSON   = FillQuestionnaire(qJSON, clinical, qrContext)     # fill LOCALLY from your data
 
 # LEG 3 — PAS
-bundle   = BuildConformantClaimBundle(ConformantClaimInputs{QR: qrJSON, SR: srJSON, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", Corr: corrID, Created: now})
+bundle   = BuildConformantClaimBundle(ConformantClaimInputs{QR: qrJSON, SR: srJSON, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", MemberID: "MBR-COVERED", Corr: corrID, Created: now})
 pasResp  ← route(pas-claim / pas-submit → pas-response, bundle)
 result   = ParseClaimResponse(pasResp)           # → {Outcome, PreAuthRef, ValidUntil}
 ```
@@ -1668,7 +1671,7 @@ provJSON = BuildProvenance("DiagnosticReport/"+reportID, provenanceAgent, now)
 # Build the update bundle (Claim.related[] → originalCorrelationID):
 updateBundle = BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
     QR: qrJSON, SR: srJSON, DiagnosticReport: drJSON, Provenance: provJSON,
-    PatientRef: patientRef, CoverageRef: coverageRef,
+    PatientRef: patientRef, CoverageRef: coverageRef, MemberID: memberID,
     Corr: updateCorrID, OriginalCorr: originalCorrID, Created: now})
 
 # Route as pas-claim-update (single originate round-trip, §7):

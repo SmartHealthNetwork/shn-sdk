@@ -222,13 +222,19 @@ func withResourceID(resourceJSON []byte, id string) ([]byte, error) {
 
 // BuildCoverageWithPayer builds the CONFORMANT Coverage: the same us-core-coverage shape
 // as BuildCoverage (status active, beneficiary, self relationship, MB-type identifier
-// carrying coverageRef, US Core meta.profile — all KEPT) but additionally carries (a) a
-// stable id "c1" and (b) a CONTAINED cms-payer Organization (identifier system|value taken
-// from payer), with payor referencing it (#cms-payer). This is the additive conformant
-// variant of BuildCoverage (which is byte-parity-locked and stays untouched); a
-// production-conformant CRD (CMS-0057) names the payer Organization, and the contained Org
-// $validates clean. Deterministic.
-func BuildCoverageWithPayer(patientRef, coverageRef string, payer PayerIdentifier) ([]byte, error) {
+// carrying the bare memberID, US Core meta.profile — all KEPT) but additionally carries (a)
+// a stable id "c1" and (b) a CONTAINED cms-payer Organization (identifier system|value taken
+// from payer), with payor referencing it (#cms-payer). memberID is the member's BARE member
+// number, never a "Coverage/<id>" reference — a reader that needs a reference to THIS
+// resource uses its id ("c1"), and a prefixed memberID is refused rather than stamped
+// (requireBareMemberID; the signature cannot express the change, both spellings are a
+// string). This is the additive conformant variant of BuildCoverage (which is
+// byte-parity-locked); a production-conformant CRD (CMS-0057) names the payer Organization,
+// and the contained Org $validates clean. Deterministic.
+func BuildCoverageWithPayer(patientRef, memberID string, payer PayerIdentifier) ([]byte, error) {
+	if err := requireBareMemberID(memberID); err != nil {
+		return nil, err
+	}
 	cov := fhir.Coverage{
 		Id:          strPtr(conformantCoverageID),
 		Meta:        &fhir.Meta{Profile: []string{profileUSCoreCoverage}},
@@ -248,8 +254,8 @@ func BuildCoverageWithPayer(patientRef, coverageRef string, payer PayerIdentifie
 					Code:   strPtr("MB"),
 				}},
 			},
-			System: strPtr("urn:shn:coverage"),
-			Value:  strPtr(coverageRef),
+			System: strPtr(systemSHNCoverage),
+			Value:  strPtr(memberID),
 		}},
 	}
 	covJSON, err := json.Marshal(cov)

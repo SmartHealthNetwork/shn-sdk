@@ -3,6 +3,7 @@ package shnsdk
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
@@ -31,6 +32,13 @@ const (
 	// identifier type us-core-15 requires.
 	systemSubscriberRelationship = "http://terminology.hl7.org/CodeSystem/subscriber-relationship"
 	systemV2Identifier           = "http://terminology.hl7.org/CodeSystem/v2-0203"
+
+	// systemSHNCoverage is the SHN member-number identifier system. It is now named in
+	// TWO places on the same bundle — the Coverage entry's own MB identifier and the
+	// conformant PAS Claim's insurance[0].coverage LOGICAL reference (the
+	// logical-reference shape) — and the two MUST agree for that logical reference to
+	// resolve inside the bundle, so the string is single-sourced here rather than repeated.
+	systemSHNCoverage = "urn:shn:coverage"
 )
 
 // BuildServiceRequest builds a DRAFT order (CDS Hooks order-select context): a FHIR
@@ -72,10 +80,18 @@ func BuildServiceRequest(cptCode, display, dxCode, patientRef string) ([]byte, e
 // BuildCoverage builds a valid R4 Coverage conforming to us-core-coverage (US Core
 // 6.1.0): status "active", the given beneficiary (Patient) reference, a single payor
 // referencing the payer Organization, a "self" subscriber relationship (min=1), and
-// a member-number identifier (v2-0203 "MB" type) carrying coverageRef (satisfies the
-// us-core-15 invariant). meta.profile pins the US Core profile. Reimplements
-// internal/fhirmap.BuildCoverage standalone; test/sdkparity asserts byte-identity.
-func BuildCoverage(patientRef, coverageRef string) ([]byte, error) {
+// a member-number identifier (v2-0203 "MB" type, system urn:shn:coverage) carrying
+// memberID — the member's BARE member number, which is what an MB identifier means
+// (satisfies the us-core-15 invariant). memberID is NOT a "Coverage/<id>" reference:
+// nothing derives a resource reference from this identifier (a reader that needs one
+// uses Coverage.id), and a prefixed value is refused rather than stamped, because the
+// signature cannot express the change (both spellings are a string). meta.profile pins
+// the US Core profile. Reimplements internal/fhirmap.BuildCoverage standalone;
+// test/sdkparity asserts byte-identity.
+func BuildCoverage(patientRef, memberID string) ([]byte, error) {
+	if err := requireBareMemberID(memberID); err != nil {
+		return nil, err
+	}
 	cov := fhir.Coverage{
 		Meta:        &fhir.Meta{Profile: []string{profileUSCoreCoverage}},
 		Status:      fhir.FinancialResourceStatusCodesActive,
@@ -94,12 +110,25 @@ func BuildCoverage(patientRef, coverageRef string) ([]byte, error) {
 					Code:   strPtr("MB"),
 				}},
 			},
-			System: strPtr("urn:shn:coverage"),
-			Value:  strPtr(coverageRef),
+			System: strPtr(systemSHNCoverage),
+			Value:  strPtr(memberID),
 		}},
 	}
 	// fhir.Coverage's MarshalJSON injects resourceType itself.
 	return json.Marshal(cov)
+}
+
+// requireBareMemberID refuses a "Coverage/"-prefixed member id for the Coverage builders.
+// urn:shn:coverage carries the bare member number; before v0.42.0 these builders were
+// (mis)called with a reference-shaped "Coverage/<member>" value, and because the parameter
+// is a plain string that mistake is invisible to the compiler. Refusing loudly is the only
+// way a caller on the old convention finds out. The check is the PREFIX only — a member id
+// that happens to contain "/" elsewhere is the payer's business, not ours.
+func requireBareMemberID(memberID string) error {
+	if strings.HasPrefix(memberID, "Coverage/") {
+		return fmt.Errorf("shnsdk: memberID must be the bare member id, not a Coverage/ reference (see the v0.42.0 identifier-semantics release note)")
+	}
+	return nil
 }
 
 // ParseServiceRequestProcedure extracts the CPT code AND its display from a

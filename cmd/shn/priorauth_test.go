@@ -49,6 +49,7 @@ func TestPriorAuthResumeHandleRoundTrip(t *testing.T) {
 		OriginalCorrelationID: "corr-1",
 		PatientRef:            "Patient/MBR-UC04",
 		CoverageRef:           "Coverage/MBR-UC04",
+		MemberID:              "MBR-UC04",
 		SubjectPCI:            "pci:abc",
 		QRJSON:                []byte(`{"resourceType":"QuestionnaireResponse"}`),
 		SRJSON:                []byte(`{"resourceType":"ServiceRequest"}`),
@@ -63,6 +64,11 @@ func TestPriorAuthResumeHandleRoundTrip(t *testing.T) {
 	}
 	if got.OriginalCorrelationID != want.OriginalCorrelationID || got.SubjectPCI != want.SubjectPCI {
 		t.Errorf("round-trip lost fields: got %+v", got)
+	}
+	// MemberID is the additive field the resume ClaimUpdate stamps as the
+	// Coverage's bare urn:shn:coverage identifier value — it must survive the handle.
+	if got.MemberID != want.MemberID {
+		t.Errorf("MemberID round-trip drift: got %q, want %q", got.MemberID, want.MemberID)
 	}
 	if string(got.QRJSON) != string(want.QRJSON) {
 		t.Errorf("QRJSON round-trip drift: %s", got.QRJSON)

@@ -1,6 +1,7 @@
 package shnsdk_test
 
 import (
+	"strings"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -98,5 +99,23 @@ func TestParseOrderProductCoding_DeviceRequest(t *testing.T) {
 	sr := []byte(`{"resourceType":"ServiceRequest","code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI"}]}}`)
 	if sys, code, _, err := shnsdk.ParseOrderProductCoding(sr); err != nil || sys != "http://www.ama-assn.org/go/cpt" || code != "72148" {
 		t.Fatalf("SR got (%q,%q,%v)", sys, code, err)
+	}
+}
+
+// TestBuildCoverageRejectsCoveragePrefixedMember is the producer-side rejection row for the
+// identifier-semantics rule: the urn:shn:coverage MB identifier carries the BARE member id, so a
+// "Coverage/"-prefixed argument is a caller still on the pre-v0.42.0 convention. The signature
+// is unchanged (two strings in), so accepting it silently would be a semantic break no compiler
+// catches — the builder refuses loudly instead. Prefix check ONLY: a member id that
+// contains "/" elsewhere is the payer's business, not ours.
+func TestBuildCoverageRejectsCoveragePrefixedMember(t *testing.T) {
+	if _, err := shnsdk.BuildCoverage("Patient/p1", "Coverage/MBR-X"); err == nil {
+		t.Fatal("Coverage/-prefixed member must refuse loudly (signature-compatible semantic break)")
+	} else if !strings.Contains(err.Error(), "must be the bare member id") {
+		t.Fatalf("refusal must name the contract it enforces, got %v", err)
+	}
+	// The bare member id — the only correct value — still builds.
+	if _, err := shnsdk.BuildCoverage("Patient/p1", "MBR-X"); err != nil {
+		t.Fatalf("bare member id must build: %v", err)
 	}
 }

@@ -66,6 +66,15 @@ type PriorAuthResume struct {
 	// lacks it and resume falls back to the legacy sandboxResponders path.
 	// Local-file format (grow-only); NOT part of any signed/sealed wire payload.
 	PayerID *PayerIdentifier `json:"payerId,omitempty"`
+
+	// MemberID is the bare member id the pended submit stamped as the Coverage's
+	// urn:shn:coverage MB identifier value (the bare-member-id identifier rule) and as the
+	// Claim's insurance[0].coverage LOGICAL reference (the logical-reference shape); the resume
+	// ClaimUpdate must stamp the SAME value in both places, so it rides the handle
+	// beside CoverageRef (which stays the Reference-shaped value the QR-context /
+	// native-lane roles need). ADDITIVE serialized field, same grow-only local-file
+	// rules as PayerID above.
+	MemberID string `json:"memberId,omitempty"`
 }
 
 // pasBundleBaseURL is the deterministic base for entry fullUrls. A non-urn:uuid
@@ -145,6 +154,12 @@ func pasInjectResourceType(raw []byte, rt string) ([]byte, error) {
 // submit bundle; the conformant builder BuildConformantClaimBundle reuses it. The X12
 // 1365 service-type coding on Claim.item carries the licensed binding target, the actual
 // procedure stays on the referenced ServiceRequest — see internal/pas for the binding rationale).
+//
+// coverageRef is stamped as insurance[0].coverage.reference here to keep this port
+// byte-identical to its internal/pas twin, but BuildConformantClaimBundle OVERWRITES that
+// element bundle-side with a logical reference (the logical-reference shape — see
+// setInsuranceCoverageLogicalRef), exactly as it overwrites insurer via repointInsurerToEntry.
+// Nothing conformant reaches the wire carrying this value.
 func buildPASClaim(patientRef, coverageRef, correlationID string, created time.Time) ([]byte, error) {
 	claim := fhir.Claim{
 		Id:     strPtr("claim-" + correlationID),
@@ -430,6 +445,13 @@ type ConformantClaimInputs struct {
 	// and on the Coverage built via BuildCoverageWithPayer. Pass the identity read from the
 	// patient's Coverage, or shnsdk.CMSPayerIdentity for the conformance payer.
 	Payer PayerIdentifier
+	// MemberID is the bare member id stamped BOTH as the Coverage entry's urn:shn:coverage
+	// MB identifier value AND — per the logical-reference shape — as the value of the
+	// Claim's insurance[0].coverage LOGICAL reference (see setInsuranceCoverageLogicalRef).
+	// CoverageRef is Reference-shaped and stays for the caller's other roles (QR context,
+	// the native/minimized lanes); this builder no longer lands it on the wire — it stamps
+	// insurance[0].coverage bundle-side from MemberID instead.
+	MemberID string
 }
 
 // BuildConformantClaimBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
@@ -532,8 +554,13 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	}
 
 	// --- Coverage: reuse BuildCoverageWithPayer (contained cms-payer Org), restamp the id
-	// to the bundle-local conformant id, and STRIP meta.profile (PAS context). ---
-	coverageJSON, err := BuildCoverageWithPayer(in.PatientRef, in.CoverageRef, in.Payer)
+	// to the bundle-local conformant id, and STRIP meta.profile (PAS context). The
+	// urn:shn:coverage MB identifier value is the BARE member id (the identifier-semantics rule) — fail
+	// CLOSED rather than silently stamping the Reference-shaped CoverageRef. ---
+	if in.MemberID == "" {
+		return nil, fmt.Errorf("shnsdk: MemberID is required (bare member id; see the v0.42.0 identifier-semantics release note)")
+	}
+	coverageJSON, err := BuildCoverageWithPayer(in.PatientRef, in.MemberID, in.Payer)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: build coverage: %w", err)
 	}
@@ -553,6 +580,15 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant submit: repoint coverage payor to entry: %w", err)
 		}
+	}
+	// The logical-reference shape: the Claim's insurance[0].coverage becomes a LOGICAL
+	// reference to the bundle's own Coverage — the urn:shn:coverage business identifier the
+	// Coverage entry above carries — replacing the caller's member-keyed literal, which
+	// resolved nowhere. A literal to the bundle ENTRY was tried first and was refuted live at
+	// a real Da Vinci RI payer; see setInsuranceCoverageLogicalRef.
+	claimJSON, err = setInsuranceCoverageLogicalRef(claimJSON, in.MemberID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: set claim insurance coverage logical ref: %w", err)
 	}
 
 	// --- Order resource (ServiceRequest or DeviceRequest): stamp the type-aware conformant id
@@ -1040,6 +1076,76 @@ func repointInsurerToEntry(claimJSON []byte) ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// setInsuranceCoverageLogicalRef rewrites a conformant PAS Claim so
+// Claim.insurance[0].coverage is a LOGICAL reference — a FHIR Reference carrying ONLY
+// {identifier: {system: urn:shn:coverage, value: <bare member id>}}, with no literal
+// `reference` at all — regardless of the CoverageRef the caller passed.
+//
+// WHY NOT the caller's ref, and WHY NOT a literal to the bundle entry. Three shapes were
+// tried on this element; only this one is both correct and portable:
+//
+//  1. The gateway callers' member-keyed literal ("Coverage/<member id>") matched NO bundle
+//     entry and is unprocessable-by-construction on ANY receiver: FHIR ids are server-local,
+//     so it resolves to nothing in the bundle and to nothing — or, structurally worse, to an
+//     UNRELATED subscriber's Coverage — on the payer's own server. Claim.insurance.coverage
+//     is min=1 MustSupport on every PAS line (2.0.1/2.1.0/2.2.1), so the receiving payer is
+//     entitled to process it. This was the shape ruled out first.
+//  2. The next attempt — a literal to the bundle's own Coverage ENTRY
+//     ("Coverage/convergence-coverage") — was REFUTED LIVE by the real Da Vinci RI payer
+//     (br-payer a8bece4, fresh containers, 7 red smoke-two-ri rows). Naming a bundle entry
+//     makes PasSubmitService's findInBundle resolve it and PERSIST that Coverage into HAPI
+//     JPA, which then RI-checks its beneficiary — and that beneficiary MUST stay RELATIVE
+//     (see absolutizeBundleRefs's exclusion block below; an absolute one collapses every
+//     verdict to A3, re-proven live). A relative Patient/<SHN member> does not exist on the
+//     payer's server ⇒ HTTP 400 "HAPI-1094: Resource Patient/<member> not found, specified
+//     in path: Coverage.beneficiary". Leaving the ref relative rather than absolutized does
+//     NOT help: findInBundle matches on Type/id either way (live-proven).
+//  3. This shape. Base FHIR R4 explicitly permits a Reference carrying only an identifier,
+//     no PAS line puts any invariant on the element beyond base ele-1, and the request
+//     bundle is type `collection` (so no bdl-9…12 document/message resolution rule applies).
+//     The bundle's own Coverage entry carries exactly this urn:shn:coverage MB identifier
+//     (the same bare-member-id business identifier), so the bundle is SELF-CONSISTENT with nothing dangling,
+//     and it is portable to any payer, strict or lenient — no receiver is asked to host a
+//     resource at an SHN-local id. Live-proven 200/A4 against br-payer and validator-clean
+//     (plain AND profile-asserted) against the pinned PAS IG.
+//
+// Boundary: the element stays a FHIR Reference datatype (its identifier arm), the value
+// is the BARE member id (never Coverage/-prefixed), ConformantClaimInputs.CoverageRef stays a
+// field for its other roles, and buildPASClaim's signature is untouched — the stamp happens
+// bundle-side, exactly as the two payer-org repoints do. Unconditional: the Coverage entry
+// always carries this identifier, in every lane.
+func setInsuranceCoverageLogicalRef(claimJSON []byte, memberID string) ([]byte, error) {
+	if memberID == "" {
+		return nil, fmt.Errorf("setInsuranceCoverageLogicalRef: memberID is empty")
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(claimJSON, &m); err != nil {
+		return nil, fmt.Errorf("setInsuranceCoverageLogicalRef: parse claim: %w", err)
+	}
+	// Typed round-trip (not the map surgery the payer-org repoints use): fhir.ClaimInsurance
+	// models the element in full, and re-marshalling through it preserves the builders' exact
+	// key order for the untouched siblings (sequence, focal).
+	var insurance []fhir.ClaimInsurance
+	if err := json.Unmarshal(m["insurance"], &insurance); err != nil {
+		return nil, fmt.Errorf("setInsuranceCoverageLogicalRef: parse insurance: %w", err)
+	}
+	if len(insurance) == 0 {
+		return nil, fmt.Errorf("setInsuranceCoverageLogicalRef: Claim.insurance is empty")
+	}
+	// Whole-value replacement, so any literal buildPASClaim stamped from CoverageRef is GONE
+	// (fhir.Reference.Reference is omitempty — no `reference` key is emitted).
+	insurance[0].Coverage = fhir.Reference{Identifier: &fhir.Identifier{
+		System: strPtr(systemSHNCoverage),
+		Value:  strPtr(memberID),
+	}}
+	insuranceJSON, err := json.Marshal(insurance)
+	if err != nil {
+		return nil, fmt.Errorf("setInsuranceCoverageLogicalRef: marshal insurance: %w", err)
+	}
+	m["insurance"] = insuranceJSON
+	return json.Marshal(m)
+}
+
 // dropContainedPayerOrg removes any contained Organization with id == conformantPayerOrgID from
 // the resource map's "contained" array (the org lives as a bundle entry instead), deleting the
 // array if it becomes empty. No-op when there is no such contained resource.
@@ -1225,6 +1331,8 @@ func BuildProvenance(targetRef, agentWho string, recorded time.Time) ([]byte, er
 // buildPASUpdateClaim constructs the FHIR Claim for an UPDATE bundle: identical to
 // buildPASClaim but with related[] referencing the original claim by correlation
 // identifier (FR-21). Ported byte-for-byte from internal/pas.buildClaim's related path.
+// coverageRef carries the same caveat as buildPASClaim's: BuildConformantClaimUpdateBundle
+// overwrites insurance[0].coverage with a logical reference before the bundle is assembled.
 func buildPASUpdateClaim(patientRef, coverageRef, correlationID, originalCorrelationID string, created time.Time) ([]byte, error) {
 	claim := fhir.Claim{
 		Id:     strPtr("claim-" + correlationID),
@@ -1450,6 +1558,13 @@ type ConformantClaimUpdateInputs struct {
 	// ConformantClaimInputs.Payer. Pass the identity read from the patient's Coverage,
 	// or shnsdk.CMSPayerIdentity for the conformance payer.
 	Payer PayerIdentifier
+	// MemberID is the bare member id stamped BOTH as the Coverage entry's urn:shn:coverage
+	// MB identifier value AND — per the logical-reference shape — as the value of the
+	// Claim's insurance[0].coverage LOGICAL reference (see setInsuranceCoverageLogicalRef).
+	// CoverageRef is Reference-shaped and stays for the caller's other roles (QR context,
+	// the native/minimized lanes); this builder no longer lands it on the wire — it stamps
+	// insurance[0].coverage bundle-side from MemberID instead.
+	MemberID string
 }
 
 // BuildConformantClaimUpdateBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
@@ -1553,8 +1668,12 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 		}
 	}
 
-	// --- Coverage: identical to the submit builder. ---
-	coverageJSON, err := BuildCoverageWithPayer(in.PatientRef, in.CoverageRef, in.Payer)
+	// --- Coverage: identical to the submit builder (bare-member-id urn:shn:coverage
+	// identifier value — fail CLOSED on an empty MemberID). ---
+	if in.MemberID == "" {
+		return nil, fmt.Errorf("shnsdk: MemberID is required (bare member id; see the v0.42.0 identifier-semantics release note)")
+	}
+	coverageJSON, err := BuildCoverageWithPayer(in.PatientRef, in.MemberID, in.Payer)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: build coverage: %w", err)
 	}
@@ -1573,6 +1692,12 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant update: repoint coverage payor to entry: %w", err)
 		}
+	}
+	// The logical-reference shape, identical to the submit builder — insurance[0].coverage
+	// becomes the LOGICAL reference to the bundle's own Coverage (urn:shn:coverage | member).
+	claimJSON, err = setInsuranceCoverageLogicalRef(claimJSON, in.MemberID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: set claim insurance coverage logical ref: %w", err)
 	}
 
 	// --- ServiceRequest: identical to the submit builder. ---

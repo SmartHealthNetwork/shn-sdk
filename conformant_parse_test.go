@@ -11,12 +11,11 @@ import (
 func demoConformantOrderSelect(t *testing.T) []byte {
 	t.Helper()
 	patientRef := "Patient/MBR-COVERED"
-	coverageRef := "Coverage/MBR-COVERED"
 	srJSON, err := BuildServiceRequest("72148", "MRI lumbar spine without contrast", "M54.16", patientRef)
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	covJSON, err := BuildCoverageWithPayer(patientRef, coverageRef, CMSPayerIdentity)
+	covJSON, err := BuildCoverageWithPayer(patientRef, "MBR-COVERED", CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -53,6 +52,7 @@ func demoConformantClaim(t *testing.T) []byte {
 		SR:          srJSON,
 		PatientRef:  patientRef,
 		CoverageRef: coverageRef,
+		MemberID:    "MBR-COVERED",
 		Corr:        "corr-claim-demo-1",
 		Created:     time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC),
 		Payer:       CMSPayerIdentity,

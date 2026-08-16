@@ -125,7 +125,10 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: build service request: %w", err)
 	}
-	covJSON, err := BuildCoverage(patientRef, coverageRef)
+	// The Coverage's urn:shn:coverage MB identifier carries the BARE member id (the
+	// identifier-semantics rule); coverageRef above stays the REFERENCE-shaped value the
+	// QRContext/insurance roles need.
+	covJSON, err := BuildCoverage(patientRef, req.Member)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: build coverage: %w", err)
 	}
@@ -154,8 +157,18 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	}
 	canonical := StripCanonicalVersion(cov.Questionnaires[0])
 
-	// LEG 2 — DTR questionnaire fetch + local auto-fill.
-	dtrReq, err := BuildQuestionnaireFetch(canonical)
+	// LEG 2 — DTR questionnaire fetch + local auto-fill. covJSON (built above for the
+	// CRD prefetch) carries no id — sdk.BuildCoverage's output is id-less by design
+	// (Coverage.id is a server-assigned identity, not something a requester mints).
+	// A 2.2 (qr-required) responder derives the QR shell's coverage reference from
+	// Coverage.id and fails closed without one, so the fetch leg needs its
+	// OWN id-stamped copy — reuse withResourceID (sdk/crd.go) rather than mutate
+	// covJSON, which the CRD leg above already sent unstamped.
+	dtrCovJSON, err := withResourceID(covJSON, "coverage-"+req.Member)
+	if err != nil {
+		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: stamp coverage id: %w", err)
+	}
+	dtrReq, err := BuildQuestionnaireFetchWithCoverage(canonical, dtrCovJSON)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: build fetch request: %w", err)
 	}
@@ -201,6 +214,7 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		SR:          srJSON,
 		PatientRef:  patientRef,
 		CoverageRef: coverageRef,
+		MemberID:    req.Member,
 		Corr:        pasCorr,
 		Created:     id.now(),
 		Payer:       CMSPayerIdentity,
@@ -230,6 +244,7 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 			OriginalCorrelationID: pasCorr,
 			PatientRef:            patientRef,
 			CoverageRef:           coverageRef,
+			MemberID:              req.Member,
 			SubjectPCI:            pci,
 			QRJSON:                json.RawMessage(qrJSON),
 			SRJSON:                json.RawMessage(srJSON),
@@ -486,6 +501,7 @@ func (id Identity) ResumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 		SR:               resume.SRJSON,
 		PatientRef:       resume.PatientRef,
 		CoverageRef:      resume.CoverageRef,
+		MemberID:         resume.MemberID,
 		Provenance:       provJSON,
 		DiagnosticReport: drJSON,
 		Corr:             updateCorr,
@@ -515,6 +531,7 @@ func (id Identity) ResumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 			OriginalCorrelationID: resume.OriginalCorrelationID,
 			PatientRef:            resume.PatientRef,
 			CoverageRef:           resume.CoverageRef,
+			MemberID:              resume.MemberID,
 			SubjectPCI:            resume.SubjectPCI,
 			QRJSON:                resume.QRJSON,
 			SRJSON:                resume.SRJSON,

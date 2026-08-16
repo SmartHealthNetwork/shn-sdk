@@ -25,12 +25,11 @@ var errAdjudicationUnavailable = errors.New("adjudication unavailable")
 func buildConformantCRD(t *testing.T, member, cpt string) []byte {
 	t.Helper()
 	patientRef := "Patient/" + member
-	coverageRef := "Coverage/" + member
 	srJSON, err := BuildServiceRequest(cpt, "MRI lumbar spine without contrast", "M54.16", patientRef)
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	covJSON, err := BuildCoverageWithPayer(patientRef, coverageRef, CMSPayerIdentity)
+	covJSON, err := BuildCoverageWithPayer(patientRef, member, CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -73,6 +72,7 @@ func buildConformantClaim(t *testing.T, member, corr string, qrJSON []byte, now 
 		SR:          srJSON,
 		PatientRef:  patientRef,
 		CoverageRef: coverageRef,
+		MemberID:    member,
 		Corr:        corr,
 		Created:     now,
 		Payer:       CMSPayerIdentity,
@@ -138,7 +138,7 @@ func TestResponder_CRD(t *testing.T) {
 	t.Run("inconsistent-patient", func(t *testing.T) {
 		// SR subject MBR-001, Coverage beneficiary MBR-OTHER → three-way fence rejects.
 		srJSON, _ := BuildServiceRequest("72148", "MRI lumbar spine without contrast", "M54.16", "Patient/MBR-001")
-		covJSON, _ := BuildCoverageWithPayer("Patient/MBR-OTHER", "Coverage/MBR-OTHER", CMSPayerIdentity)
+		covJSON, _ := BuildCoverageWithPayer("Patient/MBR-OTHER", "MBR-OTHER", CMSPayerIdentity)
 		req, _ := BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-001")
 		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-inconsist-1", req)
 		resp := postInbound(t, srv, envBytes, hubHdr)
@@ -298,6 +298,7 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 		SR:               srJSON,
 		PatientRef:       patientRef,
 		CoverageRef:      coverageRef,
+		MemberID:         member,
 		Provenance:       provJSON,
 		DiagnosticReport: drJSON,
 		Corr:             updateCorr,

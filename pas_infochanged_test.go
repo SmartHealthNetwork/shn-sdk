@@ -21,6 +21,7 @@ func infoChangedTestInputs(infoChanged bool) ConformantClaimInputs {
 		SR:          infoChangedTestSR(),
 		PatientRef:  "Patient/MBR-PD-UC04",
 		CoverageRef: "Coverage/MBR-PD-UC04",
+		MemberID:    "MBR-PD-UC04",
 		Corr:        "corr-infochanged-0001",
 		Created:     fixedInfoChangedClock,
 		InfoChanged: infoChanged,

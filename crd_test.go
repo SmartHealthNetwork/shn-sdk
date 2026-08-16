@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -52,7 +53,7 @@ func TestBuildConformantOrderSelectRequest_MatchesGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	covJSON, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED", CMSPayerIdentity)
+	covJSON, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestBuildCards(t *testing.T) {
 // covered/pa-needed/questionnaire/satisfied-pa-id split sub-extension shape this
 // projection carries is min/max-IDENTICAL across all three published CRD STUs — so
 // BuildCardsAtLine has no per-line behavioral delta to gate; the parameter exists to
-// fail closed on an unrecognized line, matching the AtLine convention Tasks 3/4
+// fail closed on an unrecognized line, matching the AtLine convention already
 // established for PAS/DTR.
 func TestBuildCardsAtLine_RegressionFenceAndRejection(t *testing.T) {
 	cov := CardCoverage{Covered: "covered", PANeeded: "auth-needed", Questionnaires: []string{QuestionnaireCanonicalLumbarMRI}}
@@ -290,7 +291,7 @@ func TestParseServiceRequestSubject(t *testing.T) {
 // beneficiary reference from BuildCoverage output and rejects wrong resourceType.
 func TestParseCoverageBeneficiary(t *testing.T) {
 	const patientRef = "Patient/MBR-COVERED"
-	cov, err := BuildCoverage(patientRef, "Coverage/MBR-COVERED")
+	cov, err := BuildCoverage(patientRef, "MBR-COVERED")
 	if err != nil {
 		t.Fatalf("BuildCoverage: %v", err)
 	}
@@ -312,7 +313,7 @@ func TestBuildConformantOrderSelectRequest_PatientPrefetch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED", CMSPayerIdentity)
+	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
@@ -340,6 +341,22 @@ func TestBuildConformantOrderSelectRequest_PatientPrefetch(t *testing.T) {
 	}
 }
 
+// TestBuildCoverageWithPayerRejectsCoveragePrefixedMember is the conformant builder's half of
+// the producer-side rejection row (sibling: TestBuildCoverageRejectsCoveragePrefixedMember in
+// order_test.go). Same identifier-semantics rule, same rationale: the urn:shn:coverage value is
+// the bare member id, and a "Coverage/"-prefixed argument is a pre-v0.42.0 caller that the
+// unchanged signature would otherwise let through silently.
+func TestBuildCoverageWithPayerRejectsCoveragePrefixedMember(t *testing.T) {
+	if _, err := BuildCoverageWithPayer("Patient/p1", "Coverage/MBR-X", CMSPayerIdentity); err == nil {
+		t.Fatal("Coverage/-prefixed member must refuse loudly (signature-compatible semantic break)")
+	} else if !strings.Contains(err.Error(), "must be the bare member id") {
+		t.Fatalf("refusal must name the contract it enforces, got %v", err)
+	}
+	if _, err := BuildCoverageWithPayer("Patient/p1", "MBR-X", CMSPayerIdentity); err != nil {
+		t.Fatalf("bare member id must build: %v", err)
+	}
+}
+
 // TestBuildConformantOrderSelectRequest_SelectionResourceTypeAware verifies that
 // context.selections references the order by its ACTUAL resourceType (br-payer's
 // order-select service matches selections[] against draftOrders type-sensitively via
@@ -348,7 +365,7 @@ func TestBuildConformantOrderSelectRequest_PatientPrefetch(t *testing.T) {
 // order (UC-02 hospital-bed E0250) must yield "DeviceRequest/sr1" so br-payer matches
 // it and returns cards. (UC-02)
 func TestBuildConformantOrderSelectRequest_SelectionResourceTypeAware(t *testing.T) {
-	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "Coverage/MBR-COVERED", CMSPayerIdentity)
+	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}

@@ -65,6 +65,11 @@ type paFakeSubstrate struct {
 	doStamp    bool
 	stampLeg   string
 	stampToken string
+
+	// capturedDTRFetch records the opened (unframed) request plaintext of the
+	// dtr-questionnaire-fetch leg — the responder/fetch adoption test below reads
+	// it to assert RunPriorAuth's fetch request carries an id-bearing Coverage.
+	capturedDTRFetch []byte
 }
 
 // responseOpFor mirrors hubsvc.responseOp: the op the response-leg token is pinned
@@ -183,6 +188,9 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 			}
 		} else {
 			f.capturedRequestFramed[txType] = false
+		}
+		if txType == "dtr-questionnaire-fetch" {
+			f.capturedDTRFetch = append([]byte(nil), reqPlain...)
 		}
 
 		respOp, ok := paResponseOp[txType]
@@ -314,6 +322,35 @@ func TestRunPriorAuth_Approved(t *testing.T) {
 	}
 	if res.PreAuthRef == "" {
 		t.Error("PreAuthRef is empty on an approved result")
+	}
+
+	// RunPriorAuth's DTR fetch request now carries an id-bearing Coverage
+	// (BuildQuestionnaireFetchWithCoverage), not the canonical-only builder — the
+	// sent fetch coverage satisfies the qr-required id obligation.
+	if len(f.capturedDTRFetch) == 0 {
+		t.Fatal("no dtr-questionnaire-fetch request was captured")
+	}
+	var fetchReq QuestionnaireFetchRequest
+	if err := json.Unmarshal(f.capturedDTRFetch, &fetchReq); err != nil {
+		t.Fatalf("unmarshal captured dtr fetch request: %v", err)
+	}
+	if len(fetchReq.Coverage) == 0 {
+		t.Fatal("dtr-questionnaire-fetch request Coverage is empty, want an id-bearing Coverage")
+	}
+	var cov struct {
+		ID         string `json:"id"`
+		Identifier []struct {
+			Value string `json:"value"`
+		} `json:"identifier"`
+	}
+	if err := json.Unmarshal(fetchReq.Coverage, &cov); err != nil {
+		t.Fatalf("unmarshal fetch Coverage: %v", err)
+	}
+	if cov.ID == "" {
+		t.Error("fetch Coverage carries no id, want a stamped id (coverage-<member>)")
+	}
+	if len(cov.Identifier) != 1 || cov.Identifier[0].Value != sandboxPARequest().Member {
+		t.Errorf("fetch Coverage identifier value = %+v, want bare member %q", cov.Identifier, sandboxPARequest().Member)
 	}
 }
 

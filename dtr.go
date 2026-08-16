@@ -125,6 +125,22 @@ func BuildQuestionnaireFetch(canonical string) ([]byte, error) {
 	return json.Marshal(QuestionnaireFetchRequest{Canonical: canonical})
 }
 
+// BuildQuestionnaireFetchWithCoverage builds the DTR questionnaire-fetch request
+// bytes for a canonical, additionally carrying coverageJSON in the EXISTING
+// QuestionnaireFetchRequest.Coverage field. coverageJSON must carry a Coverage.id — a
+// 2.2 (`qr-required`) responder derives the QR shell's coverage reference from it and
+// fails closed without it (the qr-required id obligation). BuildQuestionnaireFetch (the
+// canonical-only builder) REMAINS for 2.0-only callers that carry no coverage.
+func BuildQuestionnaireFetchWithCoverage(canonical string, coverageJSON []byte) ([]byte, error) {
+	if canonical == "" {
+		return nil, fmt.Errorf("shnsdk: BuildQuestionnaireFetchWithCoverage: canonical is required")
+	}
+	if len(coverageJSON) == 0 {
+		return nil, fmt.Errorf("shnsdk: BuildQuestionnaireFetchWithCoverage: coverageJSON is required")
+	}
+	return json.Marshal(QuestionnaireFetchRequest{Canonical: canonical, Coverage: json.RawMessage(coverageJSON)})
+}
+
 // BuildQuestionnairePackage wraps a bare FHIR Questionnaire into a one-entry Da Vinci
 // $questionnaire-package collection Bundle — the SDK responder's UNIFORM DTR-fetch wire
 // shape (§6.2). It is BuildQuestionnairePackageAtLine("2.0", questionnaire, nil),
