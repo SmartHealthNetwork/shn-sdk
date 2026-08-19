@@ -179,8 +179,11 @@ type DTRDef struct {
 
 	// NOT a field: an earlier draft DTRDef included a QRItemWeightExtension field
 	// (the canonical http://hl7.org/fhir/StructureDefinition/itemWeight — DTR 2.2's new
-	// QuestionnaireResponse.item.answer.extension:itemWeight slice, the successor of the
-	// "ordinalValue" slice present-but-never-built at 2.0.1/2.1.0 and removed at 2.2.0).
+	// QuestionnaireResponse.item.answer.VALUE.extension:itemWeight slice, the successor of
+	// the "ordinalValue" slice present-but-never-built at 2.0.1/2.1.0 and removed at 2.2.0.
+	// 2.2.0's own differential declares the slice one level up, at item.answer.extension,
+	// which the extension's SD context forbids — the engine reads the SD, not the
+	// differential).
 	// DROPPED by ruling (Bo, 2026-08-11): the verified package diff governs over the
 	// plan's pre-verification field list — itemWeight is OPTIONAL (min=0) at 2.2, and
 	// SHN has no honest per-answer weight source to stamp on it (FR-36 applies to

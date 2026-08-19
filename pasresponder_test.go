@@ -3,6 +3,9 @@ package shnsdk
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -503,5 +506,160 @@ func TestSandboxAdjudicate_AcceptsDecimalWeeks(t *testing.T) {
 	}
 	if dec4.Outcome != PASDenied {
 		t.Fatalf("decimal weeks=4 → %v, want PASDenied", dec4.Outcome)
+	}
+}
+
+// -- nested QuestionnaireResponse items --
+
+// pasNestedTestQRs returns three QRs carrying IDENTICAL clinical content in
+// three shapes: flat, nested under a group item (QuestionnaireResponse.item.item),
+// and nested under another answer (QuestionnaireResponse.item.answer.item). Both
+// nested axes contentReference back to QuestionnaireResponse.item, so all three
+// describe the same clinical facts and must adjudicate the same way.
+func pasNestedTestQRs(weeks int, priorSurgery bool) (flat, nestedGroup, nestedAnswer []byte) {
+	inner := fmt.Sprintf(
+		`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":%d}]},`+
+			`{"linkId":"prior-surgery","answer":[{"valueBoolean":%t}]},`+
+			`{"linkId":"high-disability","answer":[{"valueBoolean":false}]}`,
+		weeks, priorSurgery)
+
+	flat = []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` + inner + `]}`)
+	nestedGroup = []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"grp-1","item":[` + inner + `]}]}`)
+	nestedAnswer = []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"parent-q","answer":[{"valueBoolean":true,"item":[` + inner + `]}]}]}`)
+	return flat, nestedGroup, nestedAnswer
+}
+
+// TestSandboxAdjudicate_NestedQRMatchesFlat is P1 and P2. A nested QR carrying
+// the same clinical content as a flat one must adjudicate IDENTICALLY.
+//
+// Before the walker recursed, nested items were discarded at json.Unmarshal, so
+// every input took its zero value — weeks 0, all flags false, no attestation —
+// and the responder returned a decision the clinical content never supported. It
+// did not error. That is strictly worse than losing an element: it silently
+// changes an outcome.
+//
+// The expectation is the FLAT result, never a hardcoded outcome: pinning
+// literals would let both sides drift together and still pass.
+func TestSandboxAdjudicate_NestedQRMatchesFlat(t *testing.T) {
+	now := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name          string
+		weeks         int
+		priorSurgery  bool
+		hasDiagReport bool
+	}{
+		{"approve-shaped", 6, false, false},
+		{"deny-shaped", 2, false, false},
+		{"pend-shaped", 6, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			flat, nestedGroup, nestedAnswer := pasNestedTestQRs(c.weeks, c.priorSurgery)
+
+			want, err := SandboxAdjudicate(flat, c.hasDiagReport, now, bytes.NewReader([]byte("SEEDNG")))
+			if err != nil {
+				t.Fatalf("flat: %v", err)
+			}
+			for _, n := range []struct {
+				axis string
+				qr   []byte
+			}{{"item.item", nestedGroup}, {"item.answer.item", nestedAnswer}} {
+				got, err := SandboxAdjudicate(n.qr, c.hasDiagReport, now, bytes.NewReader([]byte("SEEDNG")))
+				if err != nil {
+					t.Fatalf("%s: %v", n.axis, err)
+				}
+				if got.Outcome != want.Outcome {
+					t.Errorf("%s: outcome = %v, want %v (the flat result for identical clinical content)",
+						n.axis, got.Outcome, want.Outcome)
+				}
+				if !reflect.DeepEqual(got.NeededItems, want.NeededItems) {
+					t.Errorf("%s: neededItems = %v, want %v", n.axis, got.NeededItems, want.NeededItems)
+				}
+				if got.PreAuthRef != want.PreAuthRef || got.ValidUntil != want.ValidUntil {
+					t.Errorf("%s: preAuthRef/validUntil = %q/%q, want %q/%q",
+						n.axis, got.PreAuthRef, got.ValidUntil, want.PreAuthRef, want.ValidUntil)
+				}
+			}
+		})
+	}
+}
+
+// TestSandboxAdjudicate_NestedAttestation is P3: the clinician-attestation path
+// reads item.extension, not item.answer, so it needs its own nested case — a
+// walker could reach nested answers and still miss nested item extensions.
+func TestSandboxAdjudicate_NestedAttestation(t *testing.T) {
+	now := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	const attestedItem = `{"linkId":"functional-status-oswestry",` +
+		`"extension":[{"url":"http://smarthealth.network/fhir/StructureDefinition/clinician-attestation",` +
+		`"extension":[{"url":"npi","valueString":"1234567893"},{"url":"text","valueString":"reviewed"},{"url":"date","valueDate":"2026-08-18"}]}],` +
+		`"answer":[{"valueString":"severe"}]}`
+	inner := `{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},` +
+		`{"linkId":"high-disability","answer":[{"valueBoolean":true}]},` + attestedItem
+
+	flat := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` + inner + `]}`)
+	nested := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"grp-1","item":[` + inner + `]}]}`)
+
+	want, err := SandboxAdjudicate(flat, false, now, bytes.NewReader([]byte("SEEDAT")))
+	if err != nil {
+		t.Fatalf("flat: %v", err)
+	}
+	if want.Outcome != PASApproved {
+		t.Fatalf("precondition: flat attested QR should approve, got %v — the fixture is wrong, not the walker", want.Outcome)
+	}
+	got, err := SandboxAdjudicate(nested, false, now, bytes.NewReader([]byte("SEEDAT")))
+	if err != nil {
+		t.Fatalf("nested: %v", err)
+	}
+	if got.Outcome != want.Outcome {
+		t.Fatalf("nested attested QR outcome = %v, want %v", got.Outcome, want.Outcome)
+	}
+}
+
+// TestSandboxAdjudicate_RepeatingGroupIsAmbiguous is P6. FHIR's que-2 makes
+// linkIds unique within a QUESTIONNAIRE, not within a QuestionnaireResponse: a
+// group with repeats=true yields one QR item per occurrence, all sharing a
+// linkId. Those duplicates were unreachable while nested items were dropped at
+// unmarshal — flattening makes them reachable for the first time.
+//
+// The switch that reads adjudication inputs is last-write-wins, so without this
+// guard a QR recording 2 weeks of conservative therapy in one occurrence and 8 in
+// another would adjudicate on whichever was visited last. Refusing is the only
+// safe answer for a prior authorization.
+func TestSandboxAdjudicate_RepeatingGroupIsAmbiguous(t *testing.T) {
+	now := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[
+		{"linkId":"therapy-episode","item":[{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":2}]}]},
+		{"linkId":"therapy-episode","item":[{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":8}]}]}
+	]}`)
+
+	_, err := SandboxAdjudicate(qr, false, now, bytes.NewReader([]byte("SEEDDU")))
+	if err == nil {
+		t.Fatal("adjudicated a QR with two conservative-therapy-weeks items instead of refusing")
+	}
+	if !strings.Contains(err.Error(), "conservative-therapy-weeks") {
+		t.Errorf("error does not name the ambiguous linkId: %v", err)
+	}
+}
+
+// TestSandboxAdjudicate_RepeatingGroupElsewhereIsFine is P6's restraint half: a
+// repeating group the rules do not read is legal FHIR, none of this responder's
+// business, and must NOT become an error.
+func TestSandboxAdjudicate_RepeatingGroupElsewhereIsFine(t *testing.T) {
+	now := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[
+		{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},
+		{"linkId":"unrelated-repeat","answer":[{"valueString":"a"}]},
+		{"linkId":"unrelated-repeat","answer":[{"valueString":"b"}]}
+	]}`)
+
+	got, err := SandboxAdjudicate(qr, false, now, bytes.NewReader([]byte("SEEDDU")))
+	if err != nil {
+		t.Fatalf("a repeating group the rules do not read must not be an error: %v", err)
+	}
+	if got.Outcome != PASApproved {
+		t.Fatalf("outcome = %v, want PASApproved", got.Outcome)
 	}
 }

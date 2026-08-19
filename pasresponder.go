@@ -43,6 +43,13 @@ type PASDecision struct {
 // Approved — a generated preAuthRef + validUntil. randSource seeds the auth
 // number (nil → crypto/rand, matching the nil-safe internal default).
 //
+// Returns an error when the QR is AMBIGUOUS about an adjudication input — two or
+// more items carrying the same read linkId (a repeating group), which the rules
+// cannot resolve without arbitrarily picking one clinical fact over another. In
+// that case the returned PASDecision has Outcome set to PASDenied, but it is not
+// a real decision: callers MUST check the error before reading Outcome (or any
+// other field) rather than treating it as an actual denial.
+//
 // SANDBOX adjudication policy — the reference implementation for
 // quickstarts/tests/feedsmoke. A real payer implements its own PriorAuth. DEF-4
 // stub (AI-9 holds).
@@ -82,6 +89,114 @@ func SandboxAdjudicate(qrJSON []byte, hasDiagnosticReport bool, now time.Time, r
 	return PASDecision{Outcome: PASDenied}, nil
 }
 
+// sandboxQRItem is the QuestionnaireResponse item shape the sandbox rules read.
+//
+// NAMED rather than declared inline because QuestionnaireResponse.item is
+// self-recursive and an anonymous struct cannot reference itself. FHIR nests
+// items on two axes — item.item and item.answer.item — both contentReferencing
+// back to QuestionnaireResponse.item, so both fields below are required: without
+// them nested items are discarded at json.Unmarshal and no loop can recover them.
+//
+// PORTED-standalone twin: internal/pas.adjudicationQRItem. The two differ ONLY in
+// that this one also accepts valueDecimal for conservative-therapy-weeks (the
+// operated $populate engine emits a CQL numeric as valueDecimal regardless of
+// item type). Keep them otherwise identical.
+type sandboxQRItem struct {
+	LinkId    string `json:"linkId"`
+	Extension []struct {
+		Url            string `json:"url"`
+		ValueSignature *struct {
+			Type []struct {
+				System string `json:"system"`
+				Code   string `json:"code"`
+			} `json:"type"`
+		} `json:"valueSignature"`
+		Extension []struct {
+			Url         string  `json:"url"`
+			ValueString *string `json:"valueString"`
+			ValueDate   *string `json:"valueDate"`
+		} `json:"extension"`
+	} `json:"extension"`
+	Answer []struct {
+		ValueInteger *int            `json:"valueInteger"`
+		ValueDecimal *float64        `json:"valueDecimal"`
+		ValueBoolean *bool           `json:"valueBoolean"`
+		ValueString  *string         `json:"valueString"`
+		Item         []sandboxQRItem `json:"item"`
+	} `json:"answer"`
+	Item []sandboxQRItem `json:"item"`
+}
+
+// sandboxQRItemsFlattened returns every item in the subtree, at every depth, on
+// both recursion axes. The rules below select items by linkId and apply the same
+// rule wherever one is found, so nesting depth carries no meaning for them.
+//
+// Depth is not the same as UNIQUENESS, and this function does not assert it.
+// FHIR's que-2 makes linkIds unique within a QUESTIONNAIRE, not within a
+// QuestionnaireResponse: a group with repeats=true produces one QR item per
+// occurrence, all sharing the group's linkId. Those duplicate ITEMS were
+// unreachable while nested items were discarded at unmarshal; flattening makes
+// them reachable for the first time, so the caller must decide what to do about
+// them rather than letting a last-write-wins switch pick one. See
+// sandboxDuplicateAdjudicationLinkID — which checks the ITEM axis only, and does
+// NOT refuse a single item carrying multiple answers.
+//
+// Not depth-capped: a cap would silently drop clinical content below it, which
+// is the failure this function exists to prevent.
+func sandboxQRItemsFlattened(items []sandboxQRItem) []sandboxQRItem {
+	var out []sandboxQRItem
+	for _, it := range items {
+		out = append(out, it)
+		for _, a := range it.Answer {
+			out = append(out, sandboxQRItemsFlattened(a.Item)...)
+		}
+		out = append(out, sandboxQRItemsFlattened(it.Item)...)
+	}
+	return out
+}
+
+// sandboxDuplicateAdjudicationLinkID returns the first linkId the rules read that
+// is carried by more than ONE ITEM, with the number of such items, or "" when
+// every read linkId is carried by at most one item.
+//
+// Only the five linkIds adjudication actually consumes are checked. A repeating
+// group elsewhere in the QR is legal, none of this responder's business, and must
+// not turn into an error.
+//
+// SCOPE — this checks the ITEM axis only. A single item carrying MULTIPLE ANSWERS
+// (answer:[{"valueInteger":2},{"valueInteger":8}]) is NOT reported here and is not
+// refused: the rules read it.Answer[0] and silently ignore the rest. That gap is
+// reachable on FLAT QRs, predates the nesting fix, and is tracked separately —
+// do not read this function as a guarantee that repeating answer content is
+// refused. It guarantees only that two items cannot both claim the same
+// adjudication input.
+func sandboxDuplicateAdjudicationLinkID(items []sandboxQRItem) (string, int) {
+	read := map[string]bool{
+		"conservative-therapy-weeks": true,
+		"prior-surgery":              true,
+		"high-disability":            true,
+		"patient-reported-required":  true,
+		"functional-status-oswestry": true,
+	}
+	counts := map[string]int{}
+	var order []string
+	for _, it := range items {
+		if !read[it.LinkId] {
+			continue
+		}
+		if counts[it.LinkId] == 0 {
+			order = append(order, it.LinkId)
+		}
+		counts[it.LinkId]++
+	}
+	for _, l := range order {
+		if counts[l] > 1 {
+			return l, counts[l]
+		}
+	}
+	return "", 0
+}
+
 // parseSandboxAdjudicationInputs reads the QR items the sandbox rules need.
 // Extension URLs for clinician-attestation and QR-signature are ported
 // standalone from internal/dtr constants (byte-identical).
@@ -94,34 +209,25 @@ func parseSandboxAdjudicationInputs(qrJSON []byte) (weeks int, attested, priorSu
 		qrSignatureExt          = "http://hl7.org/fhir/StructureDefinition/questionnaireresponse-signature"
 	)
 	var qr struct {
-		Item []struct {
-			LinkId    string `json:"linkId"`
-			Extension []struct {
-				Url            string `json:"url"`
-				ValueSignature *struct {
-					Type []struct {
-						System string `json:"system"`
-						Code   string `json:"code"`
-					} `json:"type"`
-				} `json:"valueSignature"`
-				Extension []struct {
-					Url         string  `json:"url"`
-					ValueString *string `json:"valueString"`
-					ValueDate   *string `json:"valueDate"`
-				} `json:"extension"`
-			} `json:"extension"`
-			Answer []struct {
-				ValueInteger *int     `json:"valueInteger"`
-				ValueDecimal *float64 `json:"valueDecimal"`
-				ValueBoolean *bool    `json:"valueBoolean"`
-				ValueString  *string  `json:"valueString"`
-			} `json:"answer"`
-		} `json:"item"`
+		Item []sandboxQRItem `json:"item"`
 	}
 	if e := json.Unmarshal(qrJSON, &qr); e != nil {
 		return 0, false, false, false, false, false, fmt.Errorf("parse QuestionnaireResponse: %w", e)
 	}
-	for _, it := range qr.Item {
+	items := sandboxQRItemsFlattened(qr.Item)
+	// Refuse rather than choose. Flattening makes repeating-group duplicates
+	// reachable for the first time, and the switch below is last-write-wins: on a
+	// QR recording 2 weeks of conservative therapy in one occurrence and 8 in
+	// another, it would adjudicate on whichever the walk happened to visit last.
+	// Declining to decide is the only safe answer — this is a prior authorization,
+	// and an arbitrary choice between two clinical facts is worse than an error.
+	if dup, n := sandboxDuplicateAdjudicationLinkID(items); dup != "" {
+		// No "shnsdk:" prefix here — SandboxAdjudicate wraps this with
+		// "shnsdk: SandboxAdjudicate: ", and doubling it reads as a bug to the client.
+		return 0, false, false, false, false, false, fmt.Errorf(
+			"%d items share linkId %q (a repeating group): the adjudication input is ambiguous", n, dup)
+	}
+	for _, it := range items {
 		switch it.LinkId {
 		case "conservative-therapy-weeks":
 			// Accept valueInteger (managed FillQuestionnaire) OR valueDecimal (the operated
