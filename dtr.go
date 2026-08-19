@@ -642,8 +642,42 @@ func AmendQRWithItem(qrJSON, itemJSON []byte) ([]byte, error) {
 		}
 	}
 
-	// Append the new item.
-	items = append(items, json.RawMessage(itemJSON))
+	// SUPERSEDE, don't duplicate. An amendment carries the authoritative answer
+	// for its linkId — the clinician's or patient's attested value replaces
+	// whatever the populate step left there. Appending instead produced a
+	// QuestionnaireResponse asserting two different answers for one question,
+	// which nothing downstream can resolve: the adjudicator refuses such a
+	// response outright rather than guessing which value is the clinical fact.
+	//
+	// Scoped to the amended linkId and position-preserving: the superseded item
+	// is replaced where it sat, so ordering is stable across calls, and no other
+	// item is touched. When the linkId is absent the item is appended, which is
+	// what every pre-existing caller and golden depends on.
+	var newLink struct {
+		LinkId string `json:"linkId"`
+	}
+	if err := json.Unmarshal(itemJSON, &newLink); err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: unmarshal amended item: %w", err)
+	}
+	replaced := false
+	if newLink.LinkId != "" {
+		for i, raw := range items {
+			var existingLink struct {
+				LinkId string `json:"linkId"`
+			}
+			if err := json.Unmarshal(raw, &existingLink); err != nil {
+				return nil, fmt.Errorf("dtr: amend qr: unmarshal item %d: %w", i, err)
+			}
+			if existingLink.LinkId == newLink.LinkId {
+				items[i] = json.RawMessage(itemJSON)
+				replaced = true
+				break
+			}
+		}
+	}
+	if !replaced {
+		items = append(items, json.RawMessage(itemJSON))
+	}
 
 	// Re-marshal the items array and put it back.
 	itemsRaw, err := json.Marshal(items)

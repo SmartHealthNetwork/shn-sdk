@@ -709,3 +709,150 @@ func TestValidatePatientAnswer(t *testing.T) {
 		t.Fatalf("unknown item: want 'no attestation rule' error, got nil")
 	}
 }
+
+// TestAmendQRWithItemSupersedes pins that amending a QuestionnaireResponse with
+// an item whose linkId is ALREADY present replaces that item rather than
+// appending a second one, leaving exactly one item for the linkId.
+//
+// This is what an amendment means: the clinician- or patient-attested answer
+// supersedes whatever the populate step left there. Appending instead produced
+// two items carrying the same linkId with different answers, which is a
+// QuestionnaireResponse that asserts two conflicting values for one question —
+// and adjudication cannot resolve it, so SandboxAdjudicate refuses the whole
+// submission rather than guessing. The UC-06 clinician resume hit exactly that:
+// the populate step had already emitted a functional-status-oswestry item, the
+// attestation appended a second, and the prior-auth came back 422.
+//
+// Note the pre-existing item here carries an UNSIGNED answer, which is the shape
+// that makes the first submit pend in the first place — so this is the real
+// sequence, not a contrived one.
+func TestAmendQRWithItemSupersedes(t *testing.T) {
+	const linkID = "functional-status-oswestry"
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},` +
+		`{"linkId":"` + linkID + `","answer":[{"valueString":"unsigned-auto"}]}` +
+		`]}`)
+
+	item, err := BuildManualAttestedItem(linkID, "42",
+		Attestation{NPI: "1999999999", Text: "I attest these are my clinical findings.", When: "2026-08-19"})
+	if err != nil {
+		t.Fatalf("BuildManualAttestedItem: %v", err)
+	}
+
+	got, err := AmendQRWithItem(qr, item)
+	if err != nil {
+		t.Fatalf("AmendQRWithItem: %v", err)
+	}
+
+	var doc struct {
+		Item []struct {
+			LinkId    string `json:"linkId"`
+			Extension []struct {
+				Url string `json:"url"`
+			} `json:"extension"`
+			Answer []struct {
+				ValueString *string `json:"valueString"`
+			} `json:"answer"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(got, &doc); err != nil {
+		t.Fatalf("decode amended QR: %v", err)
+	}
+
+	var matches int
+	var attested bool
+	var answer string
+	for _, it := range doc.Item {
+		if it.LinkId != linkID {
+			continue
+		}
+		matches++
+		for _, e := range it.Extension {
+			if e.Url == ClinicianAttestationExt {
+				attested = true
+			}
+		}
+		if len(it.Answer) == 1 && it.Answer[0].ValueString != nil {
+			answer = *it.Answer[0].ValueString
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("amended QR carries %d items with linkId %q, want exactly 1 — an amendment supersedes, it does not duplicate: %s", matches, linkID, got)
+	}
+	if !attested {
+		t.Errorf("the surviving %q item is not the attested one (no clinician-attestation extension): %s", linkID, got)
+	}
+	if answer != "42" {
+		t.Errorf("surviving answer = %q, want the attested value %q (the auto value must not win)", answer, "42")
+	}
+
+	// The other item must be untouched — superseding is scoped to the amended linkId.
+	var others int
+	for _, it := range doc.Item {
+		if it.LinkId == "conservative-therapy-weeks" {
+			others++
+		}
+	}
+	if others != 1 {
+		t.Errorf("unrelated item count = %d, want 1 (superseding must not disturb other items)", others)
+	}
+}
+
+// TestAmendQRWithItemAppendsWhenAbsent is the restraint half: when the linkId is
+// NOT already present, the amendment still appends, so every existing caller and
+// golden is byte-unchanged.
+func TestAmendQRWithItemAppendsWhenAbsent(t *testing.T) {
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]}]}`)
+	item, err := BuildManualAttestedItem("functional-status-oswestry", "42",
+		Attestation{NPI: "1999999999", Text: "I attest these are my clinical findings.", When: "2026-08-19"})
+	if err != nil {
+		t.Fatalf("BuildManualAttestedItem: %v", err)
+	}
+	got, err := AmendQRWithItem(qr, item)
+	if err != nil {
+		t.Fatalf("AmendQRWithItem: %v", err)
+	}
+	var doc struct {
+		Item []struct {
+			LinkId string `json:"linkId"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(got, &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(doc.Item) != 2 {
+		t.Fatalf("item count = %d, want 2 (append when the linkId is absent): %s", len(doc.Item), got)
+	}
+	if doc.Item[0].LinkId != "conservative-therapy-weeks" || doc.Item[1].LinkId != "functional-status-oswestry" {
+		t.Fatalf("append must preserve order and put the new item last, got %+v", doc.Item)
+	}
+}
+
+// TestAmendedQRAdjudicates is the end of the chain this exists to protect: the
+// amended QR must be adjudicable, not merely well-shaped. Before superseding it
+// carried two functional-status-oswestry items and SandboxAdjudicate refused it.
+func TestAmendedQRAdjudicates(t *testing.T) {
+	const linkID = "functional-status-oswestry"
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},` +
+		`{"linkId":"high-disability","answer":[{"valueBoolean":true}]},` +
+		`{"linkId":"` + linkID + `","answer":[{"valueString":"unsigned-auto"}]}` +
+		`]}`)
+	item, err := BuildManualAttestedItem(linkID, "42",
+		Attestation{NPI: "1234567893", Text: "I attest these are my clinical findings.", When: "2026-08-19"})
+	if err != nil {
+		t.Fatalf("BuildManualAttestedItem: %v", err)
+	}
+	amended, err := AmendQRWithItem(qr, item)
+	if err != nil {
+		t.Fatalf("AmendQRWithItem: %v", err)
+	}
+	dec, err := SandboxAdjudicate(amended, false, testNow, bytes.NewReader([]byte("SEEDAM")))
+	if err != nil {
+		t.Fatalf("amended QR must be adjudicable, got error: %v", err)
+	}
+	if dec.Outcome != PASApproved {
+		t.Fatalf("outcome = %v, want PASApproved (6 weeks + attested high-disability)", dec.Outcome)
+	}
+}
