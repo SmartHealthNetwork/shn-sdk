@@ -52,7 +52,7 @@ type paFakeSubstrate struct {
 	// capturedRequestFramed/capturedRequestClaim record, per REQUEST
 	// TransactionType, whether the payload the originator sealed arrived as a v1
 	// frame and (if so) its contractVersion claim — the REQUEST-framing
-	// assertions (spec 2026-08-11 slice 4, published-SDK parity — v0.38.0).
+	// assertions (request-frame contract, published-SDK parity — v0.38.0).
 	// Populated unconditionally by routeHandler; nil until the first leg routes.
 	capturedRequestFramed map[string]bool
 	capturedRequestClaim  map[string]string
@@ -171,7 +171,7 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 		var inTok Token
 		_ = json.Unmarshal([]byte(env.Metadata.AuthzToken), &inTok)
 
-		// REQUEST-frame capture (spec 2026-08-11 slice 4): record whether THIS
+		// REQUEST-frame capture (request-frame contract): record whether THIS
 		// leg's request arrived framed and, if so, its contractVersion claim —
 		// magic-keyed decode, same argument as unframeAnswer/handleInbound.
 		if f.capturedRequestFramed == nil {

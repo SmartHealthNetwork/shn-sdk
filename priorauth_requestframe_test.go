@@ -13,8 +13,8 @@ import (
 	"golang.org/x/crypto/nacl/box"
 )
 
-// priorauth_requestframe_test.go — the Originator's REQUEST-framing (spec
-// 2026-08-11 slice 4, published-SDK parity — v0.38.0): RunPriorAuth frames each
+// priorauth_requestframe_test.go — the Originator's REQUEST-framing (request-frame
+// contract, published-SDK parity — v0.38.0): RunPriorAuth frames each
 // contract-mapped leg's REQUEST toward a requestFrames-declaring payer, with the
 // SAME per-leg token contractTokenForTxType computes for both the request stamp
 // AND the response unframeAnswer verify. A payer that does not declare

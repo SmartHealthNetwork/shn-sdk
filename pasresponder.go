@@ -1,11 +1,19 @@
 package shnsdk
 
-// PORTED-standalone from internal/pas/pas.go. Parity tests live in
-// test/sdkparity/pas_parity_test.go (TestPASResponderParity). Every exported
-// function in this file is byte-identical in logic to its internal twin; the
-// difference is the package-level prefix and the use of pasFullURLFor /
-// pasEnsureID / pasInjectResourceType (already in sdk/pas.go) instead of
-// the internal-private copies.
+// The PAS response builders in this file (BuildClaimResponse, BuildPendedResponse,
+// BuildDeniedResponse and their AtLine variants) are PORTED-standalone from
+// internal/pas/pas.go — byte-identical in logic to their internal twins, which
+// the substrate's golden-corpus generator still uses; the difference is the
+// package-level prefix and the use of pasFullURLFor / pasEnsureID /
+// pasInjectResourceType (sdk/pas.go) instead of the internal-private copies.
+// Parity tests live in test/sdkparity/pas_parity_test.go.
+//
+// The adjudicator (SandboxAdjudicate and its input parser) is NOT a port: it is
+// the only prior-auth adjudicator in the codebase. Its former internal twin had
+// no production caller and was deleted; the live path is
+// gateway/engine/adjudicator.go → SandboxAdjudicate, and the behaviour rows
+// (every rule, every ambiguity refusal, at every nesting depth) live in
+// pasresponder_test.go.
 
 import (
 	"crypto/rand"
@@ -43,18 +51,19 @@ type PASDecision struct {
 // Approved — a generated preAuthRef + validUntil. randSource seeds the auth
 // number (nil → crypto/rand, matching the nil-safe internal default).
 //
-// Returns an error when the QR is AMBIGUOUS about an adjudication input — two or
-// more items carrying the same read linkId (a repeating group), which the rules
-// cannot resolve without arbitrarily picking one clinical fact over another. In
-// that case the returned PASDecision has Outcome set to PASDenied, but it is not
-// a real decision: callers MUST check the error before reading Outcome (or any
-// other field) rather than treating it as an actual denial.
+// Returns an error when the QR is AMBIGUOUS about an adjudication input, in
+// either of FHIR's two repeating encodings: two or more ITEMS carrying the same
+// read linkId (a repeating group), or ONE item carrying more than one ANSWER (a
+// repeating item). The rules model each input as single-valued and cannot
+// resolve either shape without arbitrarily picking one clinical fact over
+// another, so they refuse rather than choose. In that case the returned
+// PASDecision has Outcome set to PASDenied, but it is not a real decision:
+// callers MUST check the error before reading Outcome (or any other field)
+// rather than treating it as an actual denial.
 //
 // SANDBOX adjudication policy — the reference implementation for
 // quickstarts/tests/feedsmoke. A real payer implements its own PriorAuth. DEF-4
 // stub (AI-9 holds).
-//
-// PORTED-standalone: internal/pas.Adjudicate (:379–407).
 func SandboxAdjudicate(qrJSON []byte, hasDiagnosticReport bool, now time.Time, randSource io.Reader) (PASDecision, error) {
 	weeks, attested, priorSurgery, highDisability, patientReportedRequired, patientAttested, err := parseSandboxAdjudicationInputs(qrJSON)
 	if err != nil {
@@ -97,10 +106,9 @@ func SandboxAdjudicate(qrJSON []byte, hasDiagnosticReport bool, now time.Time, r
 // back to QuestionnaireResponse.item, so both fields below are required: without
 // them nested items are discarded at json.Unmarshal and no loop can recover them.
 //
-// PORTED-standalone twin: internal/pas.adjudicationQRItem. The two differ ONLY in
-// that this one also accepts valueDecimal for conservative-therapy-weeks (the
-// operated $populate engine emits a CQL numeric as valueDecimal regardless of
-// item type). Keep them otherwise identical.
+// Accepts valueDecimal as well as valueInteger for conservative-therapy-weeks:
+// the operated $populate engine emits a CQL numeric as valueDecimal regardless
+// of item type.
 type sandboxQRItem struct {
 	LinkId    string `json:"linkId"`
 	Extension []struct {
@@ -138,8 +146,8 @@ type sandboxQRItem struct {
 // unreachable while nested items were discarded at unmarshal; flattening makes
 // them reachable for the first time, so the caller must decide what to do about
 // them rather than letting a last-write-wins switch pick one. See
-// sandboxDuplicateAdjudicationLinkID — which checks the ITEM axis only, and does
-// NOT refuse a single item carrying multiple answers.
+// sandboxAmbiguousAdjudicationInput, which refuses both that shape and its
+// answer-axis sibling (one item, several answers).
 //
 // Not depth-capped: a cap would silently drop clinical content below it, which
 // is the failure this function exists to prevent.
@@ -155,34 +163,56 @@ func sandboxQRItemsFlattened(items []sandboxQRItem) []sandboxQRItem {
 	return out
 }
 
-// sandboxDuplicateAdjudicationLinkID returns the first linkId the rules read that
-// is carried by more than ONE ITEM, with the number of such items, or "" when
-// every read linkId is carried by at most one item.
+// sandboxAdjudicationReadLinkIDs is the set of linkIds the sandbox rules
+// consume — the ONE definition both the consuming switch in
+// parseSandboxAdjudicationInputs and the ambiguity guard are held to. Only
+// these are checked for ambiguity: a repeating group or multi-answer item
+// elsewhere in the QR is legal, none of this responder's business, and must not
+// turn into an error. pasresponder_test.go pins its ambiguity table to this set
+// in both directions, so a sixth input added here without a test row reds the
+// sweep.
+var sandboxAdjudicationReadLinkIDs = map[string]bool{
+	"conservative-therapy-weeks": true,
+	"prior-surgery":              true,
+	"high-disability":            true,
+	"patient-reported-required":  true,
+	"functional-status-oswestry": true,
+}
+
+// sandboxAmbiguousAdjudicationInput returns a non-nil error when the flattened
+// items are ambiguous about any adjudication input, in EITHER of FHIR's
+// repeating encodings:
 //
-// Only the five linkIds adjudication actually consumes are checked. A repeating
-// group elsewhere in the QR is legal, none of this responder's business, and must
-// not turn into an error.
+//   - ITEM axis: two or more items share a read linkId (a group with
+//     repeats=true yields one item per occurrence). The consuming switch is
+//     last-write-wins, so without this it would decide on whichever occurrence
+//     the walk visited last.
+//   - ANSWER axis: one item carries more than one answer
+//     (QuestionnaireResponse.item.answer is 0..*; an item with repeats=true
+//     records its occurrences this way). The rules read a single value, so
+//     without this they would decide on Answer[0] and discard the rest —
+//     silently, with err == nil.
 //
-// SCOPE — this checks the ITEM axis only. A single item carrying MULTIPLE ANSWERS
-// (answer:[{"valueInteger":2},{"valueInteger":8}]) is NOT reported here and is not
-// refused: the rules read it.Answer[0] and silently ignore the rest. That gap is
-// reachable on FLAT QRs, predates the nesting fix, and is tracked separately —
-// do not read this function as a guarantee that repeating answer content is
-// refused. It guarantees only that two items cannot both claim the same
-// adjudication input.
-func sandboxDuplicateAdjudicationLinkID(items []sandboxQRItem) (string, int) {
-	read := map[string]bool{
-		"conservative-therapy-weeks": true,
-		"prior-surgery":              true,
-		"high-disability":            true,
-		"patient-reported-required":  true,
-		"functional-status-oswestry": true,
-	}
+// Both are the same defect: a prior authorization decided on data the payload
+// does not actually assert. Cardinality is the rule, not disagreement — two
+// answers that happen to agree are still a repeating item the rules do not
+// model, and choosing one "because they agree" is a judgment this function
+// exists to refuse. The answer-axis check fires per item as the walk visits
+// it; the item-axis check needs the whole walk, so it runs after — a
+// document-later multi-answer item is therefore reported ahead of a
+// document-earlier duplicate pair. Either refusal is correct; only ONE is
+// reported, and it names the linkId so the operator can act on it. No package
+// prefix here — SandboxAdjudicate wraps this with "shnsdk: SandboxAdjudicate: ",
+// and doubling it reads as a bug to the client.
+func sandboxAmbiguousAdjudicationInput(items []sandboxQRItem) error {
 	counts := map[string]int{}
 	var order []string
 	for _, it := range items {
-		if !read[it.LinkId] {
+		if !sandboxAdjudicationReadLinkIDs[it.LinkId] {
 			continue
+		}
+		if len(it.Answer) > 1 {
+			return fmt.Errorf("item %q carries %d answers: the adjudication input is ambiguous", it.LinkId, len(it.Answer))
 		}
 		if counts[it.LinkId] == 0 {
 			order = append(order, it.LinkId)
@@ -191,23 +221,27 @@ func sandboxDuplicateAdjudicationLinkID(items []sandboxQRItem) (string, int) {
 	}
 	for _, l := range order {
 		if counts[l] > 1 {
-			return l, counts[l]
+			return fmt.Errorf("%d items share linkId %q (a repeating group): the adjudication input is ambiguous", counts[l], l)
 		}
 	}
-	return "", 0
+	return nil
 }
 
 // parseSandboxAdjudicationInputs reads the QR items the sandbox rules need.
-// Extension URLs for clinician-attestation and QR-signature are ported
-// standalone from internal/dtr constants (byte-identical).
+// weeks defaults 0; priorSurgery/highDisability/patientReportedRequired default
+// false; attested is true ONLY when the functional-status-oswestry item carries
+// a non-empty answer AND a WELL-FORMED clinician attestation — the attestation
+// extension with non-empty NPI, text, and date sub-extensions (FR-16 requires
+// all three). patientAttested is true when the item carries a standard
+// questionnaireresponse-signature (Author's Signature, system
+// urn:iso-astm:E1762-95:2013, code 1.2.840.10065.1.12.1.1) AND a non-empty
+// answer (FR-27). Metadata alone, or a signature missing the correct type,
+// does not satisfy either attestation.
 //
-// PORTED-standalone: internal/pas.parseAdjudicationInputs (:418–513).
+// Every case below reads it.Answer[0] — safe ONLY because
+// sandboxAmbiguousAdjudicationInput has already refused any read item with
+// more than one answer. Do not read an answer before that guard runs.
 func parseSandboxAdjudicationInputs(qrJSON []byte) (weeks int, attested, priorSurgery, highDisability, patientReportedRequired, patientAttested bool, err error) {
-	// Extension URL constants — ported byte-for-byte from internal/dtr.
-	const (
-		clinicianAttestationExt = "http://smarthealth.network/fhir/StructureDefinition/clinician-attestation"
-		qrSignatureExt          = "http://hl7.org/fhir/StructureDefinition/questionnaireresponse-signature"
-	)
 	var qr struct {
 		Item []sandboxQRItem `json:"item"`
 	}
@@ -215,17 +249,14 @@ func parseSandboxAdjudicationInputs(qrJSON []byte) (weeks int, attested, priorSu
 		return 0, false, false, false, false, false, fmt.Errorf("parse QuestionnaireResponse: %w", e)
 	}
 	items := sandboxQRItemsFlattened(qr.Item)
-	// Refuse rather than choose. Flattening makes repeating-group duplicates
-	// reachable for the first time, and the switch below is last-write-wins: on a
-	// QR recording 2 weeks of conservative therapy in one occurrence and 8 in
-	// another, it would adjudicate on whichever the walk happened to visit last.
-	// Declining to decide is the only safe answer — this is a prior authorization,
-	// and an arbitrary choice between two clinical facts is worse than an error.
-	if dup, n := sandboxDuplicateAdjudicationLinkID(items); dup != "" {
-		// No "shnsdk:" prefix here — SandboxAdjudicate wraps this with
-		// "shnsdk: SandboxAdjudicate: ", and doubling it reads as a bug to the client.
-		return 0, false, false, false, false, false, fmt.Errorf(
-			"%d items share linkId %q (a repeating group): the adjudication input is ambiguous", n, dup)
+	// Refuse rather than choose. On a QR recording 2 weeks of conservative
+	// therapy in one occurrence and 8 in another — whether as two items or as two
+	// answers on one item — the rules below would decide on one of them with no
+	// error. Declining to decide is the only safe answer: this is a prior
+	// authorization, and an arbitrary choice between two clinical facts is worse
+	// than an error.
+	if e := sandboxAmbiguousAdjudicationInput(items); e != nil {
+		return 0, false, false, false, false, false, e
 	}
 	for _, it := range items {
 		switch it.LinkId {
@@ -256,7 +287,7 @@ func parseSandboxAdjudicationInputs(qrJSON []byte) (weeks int, attested, priorSu
 			hasAnswer := len(it.Answer) > 0 && it.Answer[0].ValueString != nil && *it.Answer[0].ValueString != ""
 			hasValidAttestation := false
 			for _, ext := range it.Extension {
-				if ext.Url == clinicianAttestationExt {
+				if ext.Url == ClinicianAttestationExt {
 					var npi, text, date string
 					for _, sub := range ext.Extension {
 						switch sub.Url {
@@ -278,7 +309,7 @@ func parseSandboxAdjudicationInputs(qrJSON []byte) (weeks int, attested, priorSu
 						hasValidAttestation = true
 					}
 				}
-				if ext.Url == qrSignatureExt && ext.ValueSignature != nil {
+				if ext.Url == QRSignatureExt && ext.ValueSignature != nil {
 					for _, ty := range ext.ValueSignature.Type {
 						if ty.System == "urn:iso-astm:E1762-95:2013" && ty.Code == "1.2.840.10065.1.12.1.1" {
 							patientAttested = hasAnswer
@@ -371,7 +402,7 @@ func buildClaimResponse(def PASDef, preAuthRef, validUntil, patientRef, correlat
 // pended/approved business outcome stays in the payload — the payload-blind Hub
 // never sees it (AI-2).
 //
-// PORTED-standalone: internal/pas.BuildPendedResponse (:617–669).
+// PORTED-standalone: internal/pas.BuildPendedResponse.
 //
 // BuildPendedResponse speaks PAS line 2.0 — it is BuildPendedResponseAtLine("2.0", …),
 // byte-identical (regression-fenced by test/sdkparity). Use BuildPendedResponseAtLine
@@ -487,7 +518,7 @@ func buildPendedResponse(def PASDef, patientRef, correlationID string, needed []
 // value, which the FHIR validator correctly rejects as unrecognised properties
 // on a choice type. We bypass the generated struct for this field only.
 //
-// PORTED-standalone: internal/pas.taskInputJSON (:676–683).
+// PORTED-standalone: internal/pas.taskInputJSON.
 type pasTaskInputJSON struct {
 	Type        pasTaskCodeableConceptJSON `json:"type"`
 	ValueString string                     `json:"valueString"`
@@ -500,7 +531,7 @@ type pasTaskCodeableConceptJSON struct {
 // pasTaskJSON is a minimal FHIR R4 Task that emits exactly the required fields
 // and avoids the samply TaskInput marshalling problem (see pasTaskInputJSON).
 //
-// PORTED-standalone: internal/pas.taskJSON (:686–699).
+// PORTED-standalone: internal/pas.taskJSON.
 type pasTaskJSON struct {
 	ResourceType string               `json:"resourceType"`
 	Id           string               `json:"id,omitempty"`
@@ -519,7 +550,7 @@ type pasTaskReferenceJSON struct {
 // (FR-20). Uses a custom minimal struct rather than the samply fhir.Task to
 // avoid the generated TaskInput marshalling all value[x] zero values.
 //
-// PORTED-standalone: internal/pas.buildTask (:707–729).
+// PORTED-standalone: internal/pas.buildTask.
 func buildPASTask(patientRef, correlationID string, needed []string, created time.Time) ([]byte, error) {
 	inputs := make([]pasTaskInputJSON, 0, len(needed))
 	for _, item := range needed {
@@ -544,7 +575,7 @@ func buildPASTask(patientRef, correlationID string, needed []string, created tim
 	return raw, nil
 }
 
-// Denied ClaimResponse types — ported standalone from internal/pas (:958–1014).
+// Denied ClaimResponse types — ported standalone from internal/pas.
 
 // pasDeniedCR is a minimal FHIR R4 ClaimResponse expressing a Da Vinci PAS
 // DENIAL: outcome=complete (the request was processed; denial is a decision,
@@ -553,7 +584,7 @@ func buildPASTask(patientRef, correlationID string, needed []string, created tim
 // carrying the appeal window + peer-to-peer instruction. NO preAuthRef — a denial
 // issues no authorization number, so ParseClaimResponse reads it as not-approved.
 //
-// PORTED-standalone: internal/pas.claimResponseDeniedJSON (:958).
+// PORTED-standalone: internal/pas.claimResponseDeniedJSON.
 type pasDeniedCR struct {
 	ResourceType string                   `json:"resourceType"`
 	Meta         *pasClaimResponseMeta    `json:"meta,omitempty"`
@@ -628,7 +659,7 @@ type pasClaimRequestRef struct {
 
 // pasClaimRequestFor returns the ClaimResponse.request Reference for def, or nil
 // at a line that does not require it (2.0 — keeps the built response byte-identical
-// to the pre-slice-4 shape).
+// to the pre-multi-version shape).
 func pasClaimRequestFor(def PASDef, correlationID string) *pasClaimRequestRef {
 	if !def.ClaimResponseRequestRequired {
 		return nil
@@ -691,7 +722,7 @@ const (
 // + peer-to-peer instruction ride in a processNote. No preAuthRef is issued.
 // Outcome is "complete" — denial is a decision, not an error.
 //
-// PORTED-standalone: internal/pas.BuildDeniedResponse (:1019–1060).
+// PORTED-standalone: internal/pas.BuildDeniedResponse.
 //
 // BuildDeniedResponse speaks PAS line 2.0 — it is BuildDeniedResponseAtLine("2.0", …),
 // byte-identical (regression-fenced by test/sdkparity). No structural delta was found

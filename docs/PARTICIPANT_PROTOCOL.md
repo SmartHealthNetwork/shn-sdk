@@ -1189,8 +1189,8 @@ rest          body        raw bytes — no additional encoding
   descriptive, like `Content-Type`, not a negotiation echo. Present only on
   contract-mapped legs (§8.6); a version-neutral leg's frame omits it, same as
   every other legacy answer. **Stamped** on every framed **success** (2xx)
-  answer by SHN gateways since **v0.37.0**, and — published-SDK stamp parity,
-  spec 2026-08-11 slice 4 — by an SDK-based `Responder` that opts in
+  answer by SHN gateways since **v0.37.0**, and — published-SDK stamp parity —
+  by an SDK-based `Responder` that opts in
   (`ResponderConfig.StampContractVersion`) as of **v0.38.0** of this library.
   **Verified** against the contract line the leg actually routed to (§8.6) by
   SHN gateways since **v0.37.0**, and — the same v0.38.0 parity — by the
@@ -1234,7 +1234,7 @@ governing this — a prior, now-removed release-specific mechanism
 release before message-frame negotiation replaced it; see the gateway's
 `docs/CONFIGURATION.md`.
 
-**Request frames (`requestFrames`, spec 2026-08-11 slice 4).** The same v1
+**Request frames (`requestFrames`).** The same v1
 codec above also frames the **request** leg of a contract-mapped exchange
 (`pa.crd` / `pa.dtr` / `pa.pas`, §8.6): an originator wraps the request payload
 in a v1 frame carrying the `contractVersion` it built the request at (the line
@@ -1269,8 +1269,7 @@ directions negotiate, and can be rolled out, independently:
   declares.
 
 The Smart Gateway additionally *honors* a well-formed claim it can both
-natively build and validate for (native ∩ laned — spec
-`docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md` §4);
+natively build and validate for (native ∩ laned);
 this SDK's published `Responder` does not do per-line content negotiation, so
 it decodes and tolerates the claim without acting on it.
 
@@ -1989,8 +1988,35 @@ rules) until its own transform module pair ships — chained translation runs
 egress-only this generation. See the gateway's `docs/CONFIGURATION.md` for
 the operator-facing lane and gated-overlay configuration.
 
-See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md`
-§4, §5, §6, and §7 items 3 and 5.
+### 8.7 Extension preservation (carry survivability)
+
+When two parties share no native line for a contract, the originating gateway
+may bridge them with a transform chain (§8.6). A downcast that has no
+target-line slot for an element **carries** it, byte-faithfully, inside a
+registered extension —
+`http://smarthealth.network/fhir/StructureDefinition/shn-carried-content` — so
+a later upcast can restore it instead of the element being dropped.
+
+That restoration depends on you. **A participant that receives a payload MUST
+preserve every extension it does not recognise, and MUST return it unmodified
+on the corresponding response.** This is ordinary FHIR extension etiquette — a
+receiver ignores extensions it does not understand; it does not strip them —
+stated explicitly because the round trip closes only if the intermediate
+system honours it. A peer that filters to profile, or that round-trips the
+payload through a model that drops unknown extensions, loses the carried
+content, and the gateway **cannot detect the loss**: on upcast the only
+evidence that anything was carried is the carry wrapper itself, so a stripped
+wrapper and a payload that never carried anything are byte-identical. No
+in-band signal can fix this (a count or manifest extension is dropped by the
+same filter), and the exchange is stateless by design, so nothing out-of-band
+remembers what was sent.
+
+Today the obligation is latent: every published line is native on both sides,
+so no downcast leaves a gateway. It becomes load-bearing with the first peer on
+a line the gateway does not build natively; at that point the partner
+self-conformance harness gains a round-trip probe — a payload with a carried
+element that must come back intact — as the onboarding check for this
+property. Until then, build to the rule: preserve what you do not recognise.
 
 ---
 
@@ -1998,6 +2024,11 @@ See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md`
 
 ### Changelog
 
+- **2026-08-20 — Extension preservation obligation (§8.7).** Documentation only — no
+  `wireProtocolVersion` bump, no wire change. States the peer obligation the carry
+  mechanism (§8.6) has always depended on: preserve extensions you do not recognise
+  and return them unmodified, `shn-carried-content` specifically. Latent until the
+  first non-native line is published; recorded now so participants build to it.
 - **2026-08-14 — Persona `payerId` + directory-resolved test counterparties (`sandboxPersonas[].payerId`, §1a).**
   Additive, no `wireProtocolVersion` bump. Each advertised `sandboxPersonas[]` entry now
   also carries `payerId` — the seeded member's Coverage payor identity (fixture truth). As
@@ -2052,7 +2083,7 @@ See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md`
   capability, not admission-verified identity (contrast the operator-vouched
   `payerIds`). Nothing in this slice branches behavior on the declared tokens:
   version-aware routing and translation consume these in later slices; today they are
-  declaration + surfacing. See spec `docs/superpowers/specs/2026-08-10-multi-version-contracts-design.md` §3.
+  declaration + surfacing.
 - **2026-07-17 — Message frame v1: negotiated, sealed application answers (§6.2, §6.3).** A
   frame-capable responder now carries its real application status (success or not) and body
   inside the sealed response leg, versus the Hub's implicit `200`-on-bare-payload / generic

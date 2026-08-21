@@ -8,12 +8,14 @@ import (
 	"time"
 )
 
-// sandboxQuestionnaireJSON is a minimal-but-faithful copy of the sandbox
-// lumbar-MRI prior-auth questionnaire (the substrate's dtr.QuestionnaireFor output): the
-// supported canonical url + the known items FillQuestionnaire fills. The SDK can't
-// import the substrate fixture, so the recognized shape lives here; the parity test
-// (test/sdkparity/dtr_parity_test.go) proves the fill matches the substrate on the
-// REAL substrate-built questionnaire.
+// sandboxQuestionnaireJSON is the FLAT variant of the sandbox lumbar-MRI
+// prior-auth questionnaire: the supported canonical url + the seven leaves
+// FillQuestionnaire knows, with no groups. The shipped fixture
+// (SandboxLumbarQuestionnaire) GROUPS those same leaves — see
+// nestedSandboxQuestionnaireJSON in dtr_nested_test.go for that shape. The flat
+// variant stays here because the fill must keep working for a flat questionnaire
+// too (a payer may serve the leaves ungrouped), and the flat-shape tests below
+// pin exactly that.
 const sandboxQuestionnaireJSON = `{
   "resourceType": "Questionnaire",
   "id": "pa-lumbar-mri",

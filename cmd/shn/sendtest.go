@@ -73,7 +73,7 @@ func runOneCase(client *http.Client, gateway string, c sendTestCase) sendTestRes
 
 // cmdSendTest drives a provider gateway's 8 /scenario/ucNN routes and tabulates per-UC pass/fail.
 // Fencing is inherent: it drives a provider gateway the caller already runs, which only originates
-// to its own configured payer (spec §7).
+// to its own configured payer.
 func cmdSendTest(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("send-test", flag.ContinueOnError)
 	fs.SetOutput(stderr)

@@ -289,7 +289,7 @@ type holderEntry struct {
 // Zero or multiple matches REFUSE (returned diagnostic) — never pick silently,
 // never fall back on this branch (fallback would mask an AI-G12 regression).
 // payerId absent → legacy path: SandboxResponders[0] (legacy=true; caller prints
-// the visibility line). Spec 2026-08-14 R3/R4.
+// the visibility line).
 func resolvePersonaPayer(disc shnsdk.Discovery, pid *shnsdk.PayerIdentifier, holders map[string]holderEntry) (holderEntry, bool, string) {
 	if pid != nil {
 		var matches []holderEntry

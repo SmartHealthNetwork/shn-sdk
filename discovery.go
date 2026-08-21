@@ -19,7 +19,7 @@ type Discovery struct {
 	// capability surface is BridgedContractVersions. Producer: internal/accountsvc/discovery.go.
 	ContractVersions []string `json:"contractVersions,omitempty"`
 	// RequestFrames are the sealed REQUEST-frame versions this substrate's
-	// holders accept ("v1" — request frames, spec 2026-08-11 slice 4). ADDITIVE optional
+	// holders accept ("v1" — the request-frame contract). ADDITIVE optional
 	// field — an older consumer ignores it; does NOT bump wireProtocolVersion.
 	// Producer: internal/accountsvc/discovery.go.
 	RequestFrames     []string           `json:"requestFrames,omitempty"`

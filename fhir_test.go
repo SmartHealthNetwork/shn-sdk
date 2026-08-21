@@ -285,7 +285,7 @@ func TestBuildPatientAccessCapabilityStatement_Shape(t *testing.T) {
 	if len(interactions) != 2 {
 		t.Errorf("want 2 interactions (read+search-type), got %d", len(interactions))
 	}
-	// FR-37 + spec 2026-08-10 §3 path 3: the statement names the IG generation
+	// FR-37 + versioned IG canonicals: the statement names the IG generation
 	// it conforms to — a versioned canonical, the machine-readable sibling of
 	// the versioned supportedProfile it already carries.
 	igs, _ := m["implementationGuide"].([]any)

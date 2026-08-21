@@ -18,8 +18,8 @@ import (
 // SDC engine).
 const SupportedQuestionnaireCanonical = "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"
 
-// DTR extension URLs — ported byte-for-byte from internal/dtr so the QR wire shape
-// is identical (test/sdkparity/dtr_parity_test.go).
+// DTR extension URLs the QR builders stamp (information-origin on answers; the
+// QR-level qr-context / qr-coverage / intendedUse set).
 const (
 	informationOriginExt = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/information-origin"
 	qrContextExt         = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context"
@@ -68,8 +68,7 @@ func questionnaireResponseEntryFullURL(questionnaireResponse []byte) (string, er
 }
 
 // ClinicalContext is the provider-LOCAL clinical data FillQuestionnaire answers
-// from. Ported standalone from internal/dtr.ClinicalContext (the sandbox
-// auto-approval fields). The *Ref fields are carried for parity with the substrate struct even
+// from (the sandbox auto-approval fields). The *Ref fields are carried even
 // though the auto information-origin extension no longer emits a sourceReference
 // (DTR 2.0.1 source="auto" carries only the source sub-extension).
 type ClinicalContext struct {
@@ -86,13 +85,13 @@ type ClinicalContext struct {
 	HighDisabilityRef                        string
 	// PatientReported signals that a functional-status item must be patient-reported
 	// (patient portal attestation flow). When set, FillQuestionnaire emits the
-	// patient-reported-required=true trigger item, matching the substrate's AutoFill.
+	// patient-reported-required=true trigger item.
 	PatientReported bool
 }
 
 // QRContext carries the DTR context the QuestionnaireResponse is completed in: the
 // patient subject, the coverage + order qr-context references, and the authoring
-// time. Ported standalone from internal/dtr.QRContext. Authored is INJECTED so the
+// time. Authored is INJECTED so the
 // QR is deterministic (the SDK never reads the wall clock).
 type QRContext struct {
 	PatientRef  string
@@ -251,8 +250,9 @@ func ParseQuestionnaireURL(data []byte) (string, error) {
 }
 
 // FillQuestionnaire fills the sandbox DTR questionnaire into a conformant
-// QuestionnaireResponse (answers + provider-LOCAL information-origin attribution),
-// matching internal/dtr.AutoFill's wire output. SANDBOX-TARGETED STUB (DEF): NOT a
+// QuestionnaireResponse (answers + provider-LOCAL information-origin attribution).
+// It is the ONE sandbox QR builder: the gateway's managed populator, the conformance
+// corpus generator, and its stale-guard all call it. SANDBOX-TARGETED STUB (DEF): NOT a
 // general SDC engine — it handles the sandbox questionnaire's known items. It MUST
 // FAIL LOUDLY (a clear error naming the supported canonical) on a questionnaire whose
 // canonical/url it does not recognize, and NEVER emit a half-filled QR. It is
@@ -290,17 +290,27 @@ func fillQuestionnaire(def DTRDef, questionnaireJSON []byte, cc ClinicalContext,
 		return nil, fmt.Errorf("shnsdk: FillQuestionnaire: unsupported questionnaire %q (sandbox supports %q)", got, SupportedQuestionnaireCanonical)
 	}
 
-	var items []fhir.QuestionnaireResponseItem
-	for _, qi := range q.Item {
-		answer, ok := answerFor(qi.LinkId, cc)
-		if !ok {
-			continue
+	// ONE structure-driven walk (shared with FillQuestionnaireFromAnswers): groups
+	// recurse and mirror their nesting into the QR, display items vanish, and each
+	// leaf is answered from LOCAL data by linkId. A leaf this stub does not know is
+	// fixture drift inside the ONE canonical it is fenced to, so it is refused —
+	// never skipped — because a skipped leaf is a quietly incomplete QR, which is
+	// the half-fill this function exists to rule out. A leaf it knows but
+	// has no local value for (a negative trigger flag; the clinician/patient-
+	// attested Oswestry item) is omitted, never fabricated.
+	items, err := walkQuestionnaireItems(q.Item, func(qi fhir.QuestionnaireItem) (fhir.QuestionnaireResponseItemAnswer, bool, error) {
+		answer, known, answered := answerFor(qi.LinkId, cc)
+		if !known {
+			return fhir.QuestionnaireResponseItemAnswer{}, false, fmt.Errorf("unknown item %q in sandbox questionnaire %q (the sandbox fill knows its leaves by linkId and never half-fills)", qi.LinkId, SupportedQuestionnaireCanonical)
+		}
+		if !answered {
+			return fhir.QuestionnaireResponseItemAnswer{}, false, nil
 		}
 		answer.Extension = []fhir.Extension{originExtension(def)}
-		items = append(items, fhir.QuestionnaireResponseItem{
-			LinkId: qi.LinkId,
-			Answer: []fhir.QuestionnaireResponseItemAnswer{answer},
-		})
+		return answer, true, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: FillQuestionnaire: %w", err)
 	}
 
 	authored := qc.Authored.UTC().Format(time.RFC3339)
@@ -319,41 +329,48 @@ func fillQuestionnaire(def DTRDef, questionnaireJSON []byte, cc ClinicalContext,
 	return raw, nil
 }
 
-// answerFor maps a linkId to a QR answer from LOCAL data. ok=false means there is no
-// local mapping for the linkId (the item is OMITTED — unanswered, never fabricated).
-// Ported byte-for-byte from internal/dtr.answerFor (the SDK drops the FilledItem
-// summary, which is an internal attribution surface).
-func answerFor(linkID string, cc ClinicalContext) (fhir.QuestionnaireResponseItemAnswer, bool) {
+// answerFor maps a sandbox leaf linkId to a QR answer from LOCAL data. Three-way,
+// not two-way, because the walker must tell "this stub does not know the leaf"
+// apart from "the stub knows it and has nothing local to say":
+//
+//   - known=false: the linkId is not a sandbox leaf at all — fixture drift, refused
+//     by the caller (never a silent skip);
+//   - known=true, answered=false: a sandbox leaf with no local value — a negative
+//     trigger flag, or functional-status-oswestry, which has no local source and is
+//     supplied by the clinician/patient attestation — OMITTED, never fabricated;
+//   - known=true, answered=true: the answer.
+func answerFor(linkID string, cc ClinicalContext) (answer fhir.QuestionnaireResponseItemAnswer, known, answered bool) {
 	switch linkID {
 	case "conservative-therapy-weeks":
-		return fhir.QuestionnaireResponseItemAnswer{ValueInteger: intPtr(cc.ConservativeTherapyWeeks)}, true
+		return fhir.QuestionnaireResponseItemAnswer{ValueInteger: intPtr(cc.ConservativeTherapyWeeks)}, true, true
 	case "neuro-deficit":
-		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(cc.NeuroDeficit)}, true
+		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(cc.NeuroDeficit)}, true, true
 	case "prior-imaging":
-		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(cc.PriorImaging)}, true
+		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(cc.PriorImaging)}, true, true
 	case "prior-surgery":
 		// Trigger flag (prior-surgery path): present ONLY when positive; a negative finding is OMITTED.
 		if !cc.PriorSurgery {
-			return fhir.QuestionnaireResponseItemAnswer{}, false
+			return fhir.QuestionnaireResponseItemAnswer{}, true, false
 		}
-		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(true)}, true
+		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(true)}, true, true
 	case "high-disability":
 		// Trigger flag (high-disability path): present ONLY when positive.
 		if !cc.HighDisability {
-			return fhir.QuestionnaireResponseItemAnswer{}, false
+			return fhir.QuestionnaireResponseItemAnswer{}, true, false
 		}
-		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(true)}, true
+		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(true)}, true, true
 	case "patient-reported-required":
 		// Trigger flag (patient attestation path): present ONLY when positive.
 		if !cc.PatientReported {
-			return fhir.QuestionnaireResponseItemAnswer{}, false
+			return fhir.QuestionnaireResponseItemAnswer{}, true, false
 		}
-		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(true)}, true
-	// functional-status-oswestry has no local source (intentionally omitted) — it must
-	// be supplied by a clinician/patient attestation, so AutoFill leaves it blank and
-	// the PAS pends.
+		return fhir.QuestionnaireResponseItemAnswer{ValueBoolean: boolPtr(true)}, true, true
+	case "functional-status-oswestry":
+		// No local source (intentionally omitted) — it must be supplied by a
+		// clinician/patient attestation, so the fill leaves it blank and the PAS pends.
+		return fhir.QuestionnaireResponseItemAnswer{}, true, false
 	default:
-		return fhir.QuestionnaireResponseItemAnswer{}, false
+		return fhir.QuestionnaireResponseItemAnswer{}, false, false
 	}
 }
 
@@ -362,7 +379,6 @@ func answerFor(linkID string, cc ClinicalContext) (fhir.QuestionnaireResponseIte
 // ("auto" at 2.0/2.1's CodeSystem/temp; "auto-client" at 2.2's renamed
 // CodeSystem/dtr-informationorigin-codes — DTR package differential). DTR
 // source="auto"/"auto-client" carries only the "source" sub-extension.
-// Byte-identical to internal/dtr.originExtension at the same line.
 func originExtension(def DTRDef) fhir.Extension {
 	return fhir.Extension{
 		Url:       informationOriginExt,
@@ -371,7 +387,6 @@ func originExtension(def DTRDef) fhir.Extension {
 }
 
 // questionnaireCanonical returns q's canonical url, versioned when a version is set.
-// Byte-identical to internal/dtr.questionnaireCanonical.
 func questionnaireCanonical(q fhir.Questionnaire) *string {
 	if q.Url == nil || *q.Url == "" {
 		return nil
@@ -393,7 +408,7 @@ func questionnaireCanonical(q fhir.Questionnaire) *string {
 // which is profile metadata, not a wire field) but its REQUIRED DocReason binding
 // resolves to a CRD 2.2.1 value set that draws "withpa" from a renamed CodeSystem —
 // so the coding's system comes from def.IntendedUseCodeSystem (DTR package differential +
-// the 2.2-lane conformance fix wave). Byte-identical to internal/dtr at the same line.
+// the 2.2-lane conformance fix wave).
 func dtrQRContextExtensions(def DTRDef, qc QRContext) []fhir.Extension {
 	var coverage fhir.Extension
 	if def.SingleCoverageConstraint {
@@ -457,52 +472,80 @@ func init() {
 		// LumbarMRICQL Library; FillQuestionnaire ignores these extensions and fills by linkId).
 		// Byte-parallel with internal/dtr.QuestionnaireFor.
 		Extension: cqlQuestionnaireExtensions(),
+		// GROUPED the way real Da Vinci payer questionnaires are grouped (the captured
+		// reference-implementation package nests to depth 2; this fixture nests to depth
+		// 3 on the item.item axis): a flat fixture hid every one-level item walker for
+		// a whole release line. Leaf linkIds, order, texts, and CQL initialExpressions
+		// are unchanged — only the structure is new. No group repeats (a repeating
+		// group would legitimately yield duplicate linkIds, which the adjudicator
+		// refuses as ambiguous; that refusal is exercised by its own tests, not here).
 		Item: []fhir.QuestionnaireItem{
 			{
-				LinkId:    "conservative-therapy-weeks",
-				Type:      fhir.QuestionnaireItemTypeInteger,
-				Text:      strPtr("Weeks of conservative therapy completed"),
-				Extension: initialExpression("ConservativeTherapyWeeks"),
+				LinkId: "clinical-history",
+				Type:   fhir.QuestionnaireItemTypeGroup,
+				Text:   strPtr("Clinical history"),
+				Item: []fhir.QuestionnaireItem{
+					{
+						LinkId:    "conservative-therapy-weeks",
+						Type:      fhir.QuestionnaireItemTypeInteger,
+						Text:      strPtr("Weeks of conservative therapy completed"),
+						Extension: initialExpression("ConservativeTherapyWeeks"),
+					},
+					{
+						LinkId:    "neuro-deficit",
+						Type:      fhir.QuestionnaireItemTypeBoolean,
+						Text:      strPtr("Progressive neurological deficit present?"),
+						Extension: initialExpression("NeuroDeficit"),
+					},
+					{
+						LinkId: "prior-treatment",
+						Type:   fhir.QuestionnaireItemTypeGroup,
+						Text:   strPtr("Prior treatment"),
+						Item: []fhir.QuestionnaireItem{
+							{
+								LinkId:    "prior-imaging",
+								Type:      fhir.QuestionnaireItemTypeBoolean,
+								Text:      strPtr("Prior imaging performed?"),
+								Extension: initialExpression("PriorImaging"),
+							},
+							{
+								LinkId:    "prior-surgery",
+								Type:      fhir.QuestionnaireItemTypeBoolean,
+								Text:      strPtr("Prior lumbar surgery?"),
+								Extension: initialExpression("PriorSurgery"),
+							},
+						},
+					},
+				},
 			},
 			{
-				LinkId:    "neuro-deficit",
-				Type:      fhir.QuestionnaireItemTypeBoolean,
-				Text:      strPtr("Progressive neurological deficit present?"),
-				Extension: initialExpression("NeuroDeficit"),
-			},
-			{
-				LinkId:    "prior-imaging",
-				Type:      fhir.QuestionnaireItemTypeBoolean,
-				Text:      strPtr("Prior imaging performed?"),
-				Extension: initialExpression("PriorImaging"),
-			},
-			{
-				LinkId:    "prior-surgery",
-				Type:      fhir.QuestionnaireItemTypeBoolean,
-				Text:      strPtr("Prior lumbar surgery?"),
-				Extension: initialExpression("PriorSurgery"),
-			},
-			{
-				LinkId:    "high-disability",
-				Type:      fhir.QuestionnaireItemTypeBoolean,
-				Text:      strPtr("High disability index flag?"),
-				Extension: initialExpression("HighDisability"),
-			},
-			{
-				// Patient attestation trigger flag: when true, the functional-status-oswestry
-				// item must be patient-attested. Absent / false means no patient-authorship
-				// leg is needed (auto-approval and clinician-attestation paths are unchanged).
-				LinkId:    "patient-reported-required",
-				Type:      fhir.QuestionnaireItemTypeBoolean,
-				Text:      strPtr("Patient-reported functional status required?"),
-				Extension: initialExpression("PatientReportedRequired"),
-			},
-			{
-				// No initialExpression — clinician/patient attestation (filled by the
-				// attestation resume flow, not the operated engine).
-				LinkId: "functional-status-oswestry",
-				Type:   fhir.QuestionnaireItemTypeText,
-				Text:   strPtr("Oswestry disability index (clinician-attested)"),
+				LinkId: "functional-status",
+				Type:   fhir.QuestionnaireItemTypeGroup,
+				Text:   strPtr("Functional status"),
+				Item: []fhir.QuestionnaireItem{
+					{
+						LinkId:    "high-disability",
+						Type:      fhir.QuestionnaireItemTypeBoolean,
+						Text:      strPtr("High disability index flag?"),
+						Extension: initialExpression("HighDisability"),
+					},
+					{
+						// Patient attestation trigger flag: when true, the functional-status-oswestry
+						// item must be patient-attested. Absent / false means no patient-authorship
+						// leg is needed (auto-approval and clinician-attestation paths are unchanged).
+						LinkId:    "patient-reported-required",
+						Type:      fhir.QuestionnaireItemTypeBoolean,
+						Text:      strPtr("Patient-reported functional status required?"),
+						Extension: initialExpression("PatientReportedRequired"),
+					},
+					{
+						// No initialExpression — clinician/patient attestation (filled by the
+						// attestation resume flow, not the operated engine).
+						LinkId: "functional-status-oswestry",
+						Type:   fhir.QuestionnaireItemTypeText,
+						Text:   strPtr("Oswestry disability index (clinician-attested)"),
+					},
+				},
 			},
 		},
 	}
@@ -599,17 +642,12 @@ func BuildManualAttestedItem(linkID, answer string, att Attestation) ([]byte, er
 	return raw, nil
 }
 
-// AmendQRWithItem appends a single QuestionnaireResponseItem (itemJSON) to the
-// item array of a QuestionnaireResponse (qrJSON) and returns the re-marshalled
-// QR. The operation preserves all other QR fields intact by operating at the
-// JSON level: the QR is unmarshalled into a map of raw JSON values, the item
-// array is extended, and the map is re-marshalled. This avoids lossy struct
-// round-trips on fields the Go FHIR model may not capture.
 // SetQuestionnaireResponseID sets the top-level id on a QuestionnaireResponse JSON
 // so it can be the EXACT target of a Provenance reference ("QuestionnaireResponse/
 // <id>"). An amended QR carrying clinician-entered supplemental evidence gets a
 // stable id so the payer resolves the Provenance target to this resource, not just
-// any QR (FR-32 attribution).
+// any QR (FR-32 attribution). Operates at the JSON level (a map of raw values) so
+// every other field survives byte-for-byte.
 func SetQuestionnaireResponseID(qrJSON []byte, id string) ([]byte, error) {
 	var qrMap map[string]json.RawMessage
 	if err := json.Unmarshal(qrJSON, &qrMap); err != nil {
@@ -627,11 +665,114 @@ func SetQuestionnaireResponseID(qrJSON []byte, id string) ([]byte, error) {
 	return raw, nil
 }
 
+// AmendQRWithItem amends a QuestionnaireResponse with a single item WITHOUT the
+// questionnaire: an existing item with the amended linkId — at any depth, on either
+// nesting axis — is superseded in place (two occurrences are refused as ambiguous);
+// when absent, the item is appended at the TOP LEVEL, which is only right for a
+// questionnaire whose item is top-level.
+//
+// Deprecated: use AmendQRWithItemIn, which places an absent item where the
+// questionnaire puts it (inside its group, or under its parent question's answer).
+// This form stays so a gateway pinned to an sdk that predates AmendQRWithItemIn
+// keeps building; it is removed once no published gateway calls it.
 func AmendQRWithItem(qrJSON, itemJSON []byte) ([]byte, error) {
-	// Unmarshal QR into a map preserving all fields as raw JSON.
 	var qrMap map[string]json.RawMessage
 	if err := json.Unmarshal(qrJSON, &qrMap); err != nil {
 		return nil, fmt.Errorf("dtr: amend qr: unmarshal qr: %w", err)
+	}
+	newLink := qrRawLinkID(itemJSON)
+	if newLink == "" {
+		return nil, fmt.Errorf("dtr: amend qr: amended item has no linkId")
+	}
+	var items []json.RawMessage
+	if existing, ok := qrMap["item"]; ok && string(existing) != "null" {
+		if err := json.Unmarshal(existing, &items); err != nil {
+			return nil, fmt.Errorf("dtr: amend qr: unmarshal items: %w", err)
+		}
+	}
+	items, n, err := qrSupersede(items, newLink, itemJSON)
+	if err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: %w", err)
+	}
+	switch {
+	case n > 1:
+		return nil, fmt.Errorf("dtr: amend qr: %d items share linkId %q (a repeating group): which one the amendment supersedes is ambiguous", n, newLink)
+	case n == 0:
+		items = append(items, json.RawMessage(itemJSON))
+	}
+	itemsRaw, err := json.Marshal(items)
+	if err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: marshal items: %w", err)
+	}
+	qrMap["item"] = json.RawMessage(itemsRaw)
+	raw, err := json.Marshal(qrMap)
+	if err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: marshal qr: %w", err)
+	}
+	return raw, nil
+}
+
+// AmendQRWithItemIn places a single QuestionnaireResponseItem (itemJSON) into a
+// QuestionnaireResponse (qrJSON) WHERE ITS QUESTIONNAIRE (questionnaireJSON) PUTS
+// THAT ITEM, and returns the re-marshalled QR:
+//
+//   - SUPERSEDE, don't duplicate. If the QR already holds an item with the
+//     amended linkId — at any depth, on either nesting axis — that item is
+//     replaced where it sits. An amendment carries the authoritative answer for
+//     its linkId: the clinician's or patient's attested value replaces whatever
+//     the populate step left there (an operated $populate engine may emit the
+//     item's unanswered shell inside its group). Appending instead produced a QR
+//     asserting two items for one question, which the adjudicator refuses rather
+//     than guessing which is the clinical fact. Two existing occurrences (a
+//     repeating group) are ambiguous and refused for the same reason.
+//   - Otherwise PLACE by the questionnaire's structure: descend the QR along the
+//     item's ancestor path, creating a missing GROUP shell (it now has an answered
+//     descendant) in questionnaire order among its siblings; an ancestor that is a
+//     QUESTION must already carry exactly one answer in the QR — the child rides
+//     under answer.item, and a missing or multiple parent answer is refused, never
+//     fabricated or chosen. Within its group the item is inserted in questionnaire
+//     order, so the QR keeps mirroring the questionnaire after the amendment.
+//   - A linkId the questionnaire does not define is refused.
+//
+// Appending at the top level was wrong for any grouped questionnaire — including
+// every Da Vinci reference questionnaire, whose attested items live under groups.
+//
+// Operates at the JSON level (maps of raw values; only the items on the touched
+// path are re-marshalled) so fields the Go FHIR model does not capture survive.
+// All three inputs are validated by resourceType / linkId, so swapped arguments
+// fail loudly rather than amend the wrong document.
+func AmendQRWithItemIn(qrJSON, questionnaireJSON, itemJSON []byte) ([]byte, error) {
+	var qrMap map[string]json.RawMessage
+	if err := json.Unmarshal(qrJSON, &qrMap); err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: unmarshal qr: %w", err)
+	}
+	if rt := rawResourceType(qrMap); rt != "QuestionnaireResponse" {
+		return nil, fmt.Errorf("dtr: amend qr: qrJSON is a %q, want a QuestionnaireResponse", rt)
+	}
+	var qProbe struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if err := json.Unmarshal(questionnaireJSON, &qProbe); err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: unmarshal questionnaire: %w", err)
+	}
+	if qProbe.ResourceType != "Questionnaire" {
+		return nil, fmt.Errorf("dtr: amend qr: questionnaireJSON is a %q, want a Questionnaire", qProbe.ResourceType)
+	}
+	var q fhir.Questionnaire
+	if err := json.Unmarshal(questionnaireJSON, &q); err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: parse questionnaire: %w", err)
+	}
+	newLink := qrRawLinkID(itemJSON)
+	if newLink == "" {
+		return nil, fmt.Errorf("dtr: amend qr: amended item has no linkId")
+	}
+	path, ok := questionnaireItemPath(q.Item, newLink)
+	if !ok {
+		canonical := ""
+		if q.Url != nil {
+			canonical = *q.Url
+		}
+		return nil, fmt.Errorf("dtr: amend qr: item %q is not an item of questionnaire %q", newLink, canonical)
 	}
 
 	// Unmarshal the existing item array (may be absent / null).
@@ -642,56 +783,251 @@ func AmendQRWithItem(qrJSON, itemJSON []byte) ([]byte, error) {
 		}
 	}
 
-	// SUPERSEDE, don't duplicate. An amendment carries the authoritative answer
-	// for its linkId — the clinician's or patient's attested value replaces
-	// whatever the populate step left there. Appending instead produced a
-	// QuestionnaireResponse asserting two different answers for one question,
-	// which nothing downstream can resolve: the adjudicator refuses such a
-	// response outright rather than guessing which value is the clinical fact.
-	//
-	// Scoped to the amended linkId and position-preserving: the superseded item
-	// is replaced where it sat, so ordering is stable across calls, and no other
-	// item is touched. When the linkId is absent the item is appended, which is
-	// what every pre-existing caller and golden depends on.
-	var newLink struct {
-		LinkId string `json:"linkId"`
+	items, n, err := qrSupersede(items, newLink, itemJSON)
+	if err != nil {
+		return nil, fmt.Errorf("dtr: amend qr: %w", err)
 	}
-	if err := json.Unmarshal(itemJSON, &newLink); err != nil {
-		return nil, fmt.Errorf("dtr: amend qr: unmarshal amended item: %w", err)
-	}
-	replaced := false
-	if newLink.LinkId != "" {
-		for i, raw := range items {
-			var existingLink struct {
-				LinkId string `json:"linkId"`
-			}
-			if err := json.Unmarshal(raw, &existingLink); err != nil {
-				return nil, fmt.Errorf("dtr: amend qr: unmarshal item %d: %w", i, err)
-			}
-			if existingLink.LinkId == newLink.LinkId {
-				items[i] = json.RawMessage(itemJSON)
-				replaced = true
-				break
-			}
+	switch {
+	case n > 1:
+		return nil, fmt.Errorf("dtr: amend qr: %d items share linkId %q (a repeating group): which one the amendment supersedes is ambiguous", n, newLink)
+	case n == 0:
+		items, err = qrPlace(items, path, itemJSON)
+		if err != nil {
+			return nil, fmt.Errorf("dtr: amend qr: %w", err)
 		}
 	}
-	if !replaced {
-		items = append(items, json.RawMessage(itemJSON))
-	}
 
-	// Re-marshal the items array and put it back.
 	itemsRaw, err := json.Marshal(items)
 	if err != nil {
 		return nil, fmt.Errorf("dtr: amend qr: marshal items: %w", err)
 	}
 	qrMap["item"] = json.RawMessage(itemsRaw)
-
-	// Re-marshal the full QR.
 	raw, err := json.Marshal(qrMap)
 	if err != nil {
 		return nil, fmt.Errorf("dtr: amend qr: marshal qr: %w", err)
 	}
 	return raw, nil
+}
+
+// qrPathStep is one level of an item's ancestry in a Questionnaire, root first,
+// ending with the item itself. siblings is every linkId at that level in
+// questionnaire order — what placement uses to keep the QR mirroring it.
+type qrPathStep struct {
+	linkID   string
+	group    bool
+	siblings []string
+}
+
+// questionnaireItemPath finds linkID anywhere in items (depth-first) and returns
+// its ancestry as qrPathSteps, root first, ending with the item's own step.
+func questionnaireItemPath(items []fhir.QuestionnaireItem, linkID string) ([]qrPathStep, bool) {
+	siblings := make([]string, 0, len(items))
+	for _, qi := range items {
+		siblings = append(siblings, qi.LinkId)
+	}
+	for _, qi := range items {
+		step := qrPathStep{linkID: qi.LinkId, group: qi.Type == fhir.QuestionnaireItemTypeGroup, siblings: siblings}
+		if qi.LinkId == linkID {
+			return []qrPathStep{step}, true
+		}
+		if rest, ok := questionnaireItemPath(qi.Item, linkID); ok {
+			return append([]qrPathStep{step}, rest...), true
+		}
+	}
+	return nil, false
+}
+
+func rawResourceType(m map[string]json.RawMessage) string {
+	var rt string
+	_ = json.Unmarshal(m["resourceType"], &rt)
+	return rt
+}
+
+func qrRawLinkID(item json.RawMessage) string {
+	var probe struct {
+		LinkId string `json:"linkId"`
+	}
+	_ = json.Unmarshal(item, &probe)
+	return probe.LinkId
+}
+
+// qrSupersede replaces every item with linkID anywhere under items — on both
+// nesting axes — with replacement, and returns the count it replaced. Only the
+// containers on a touched path are re-marshalled; untouched items keep their bytes.
+func qrSupersede(items []json.RawMessage, linkID string, replacement json.RawMessage) ([]json.RawMessage, int, error) {
+	total := 0
+	for i, raw := range items {
+		if qrRawLinkID(raw) == linkID {
+			items[i] = replacement
+			total++
+			continue
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil, 0, fmt.Errorf("unmarshal item %d: %w", i, err)
+		}
+		touched := 0
+		if sub, ok := m["item"]; ok && string(sub) != "null" {
+			var children []json.RawMessage
+			if err := json.Unmarshal(sub, &children); err != nil {
+				return nil, 0, fmt.Errorf("unmarshal item %q children: %w", qrRawLinkID(raw), err)
+			}
+			children, n, err := qrSupersede(children, linkID, replacement)
+			if err != nil {
+				return nil, 0, err
+			}
+			if n > 0 {
+				m["item"], _ = json.Marshal(children)
+				touched += n
+			}
+		}
+		if ans, ok := m["answer"]; ok && string(ans) != "null" {
+			var answers []map[string]json.RawMessage
+			if err := json.Unmarshal(ans, &answers); err != nil {
+				return nil, 0, fmt.Errorf("unmarshal item %q answers: %w", qrRawLinkID(raw), err)
+			}
+			changed := false
+			for _, a := range answers {
+				sub, ok := a["item"]
+				if !ok || string(sub) == "null" {
+					continue
+				}
+				var children []json.RawMessage
+				if err := json.Unmarshal(sub, &children); err != nil {
+					return nil, 0, fmt.Errorf("unmarshal item %q answer children: %w", qrRawLinkID(raw), err)
+				}
+				children, n, err := qrSupersede(children, linkID, replacement)
+				if err != nil {
+					return nil, 0, err
+				}
+				if n > 0 {
+					a["item"], _ = json.Marshal(children)
+					changed = true
+					touched += n
+				}
+			}
+			if changed {
+				m["answer"], _ = json.Marshal(answers)
+			}
+		}
+		if touched > 0 {
+			items[i], _ = json.Marshal(m)
+			total += touched
+		}
+	}
+	return items, total, nil
+}
+
+// qrPlace inserts item into items along path (the item's questionnaire ancestry,
+// root first, ending with the item itself), creating missing group shells and
+// hanging answer-axis children under their parent's single answer.
+func qrPlace(items []json.RawMessage, path []qrPathStep, item json.RawMessage) ([]json.RawMessage, error) {
+	step := path[0]
+	if len(path) == 1 {
+		return qrInsertOrdered(items, step, item), nil
+	}
+	idx := -1
+	for i, raw := range items {
+		if qrRawLinkID(raw) == step.linkID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		if !step.group {
+			return nil, fmt.Errorf("item %q is a child of question %q, which the QR does not answer: refusing to fabricate a parent answer to hang it from", path[len(path)-1].linkID, step.linkID)
+		}
+		children, err := qrPlace(nil, path[1:], item)
+		if err != nil {
+			return nil, err
+		}
+		shell, err := json.Marshal(map[string]json.RawMessage{
+			"linkId": mustRawJSON(step.linkID),
+			"item":   mustRawJSON(children),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("marshal group shell %q: %w", step.linkID, err)
+		}
+		return qrInsertOrdered(items, step, shell), nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(items[idx], &m); err != nil {
+		return nil, fmt.Errorf("unmarshal item %q: %w", step.linkID, err)
+	}
+	if step.group {
+		var children []json.RawMessage
+		if sub, ok := m["item"]; ok && string(sub) != "null" {
+			if err := json.Unmarshal(sub, &children); err != nil {
+				return nil, fmt.Errorf("unmarshal group %q children: %w", step.linkID, err)
+			}
+		}
+		children, err := qrPlace(children, path[1:], item)
+		if err != nil {
+			return nil, err
+		}
+		m["item"] = mustRawJSON(children)
+	} else {
+		var answers []map[string]json.RawMessage
+		if ans, ok := m["answer"]; ok && string(ans) != "null" {
+			if err := json.Unmarshal(ans, &answers); err != nil {
+				return nil, fmt.Errorf("unmarshal question %q answers: %w", step.linkID, err)
+			}
+		}
+		switch len(answers) {
+		case 0:
+			return nil, fmt.Errorf("item %q is a child of question %q, which the QR does not answer: refusing to fabricate a parent answer to hang it from", path[len(path)-1].linkID, step.linkID)
+		case 1:
+		default:
+			return nil, fmt.Errorf("item %q is a child of question %q, which carries %d answers: which answer it belongs under is ambiguous", path[len(path)-1].linkID, step.linkID, len(answers))
+		}
+		var children []json.RawMessage
+		if sub, ok := answers[0]["item"]; ok && string(sub) != "null" {
+			if err := json.Unmarshal(sub, &children); err != nil {
+				return nil, fmt.Errorf("unmarshal question %q answer children: %w", step.linkID, err)
+			}
+		}
+		children, err := qrPlace(children, path[1:], item)
+		if err != nil {
+			return nil, err
+		}
+		answers[0]["item"] = mustRawJSON(children)
+		m["answer"] = mustRawJSON(answers)
+	}
+	items[idx] = mustRawJSON(m)
+	return items, nil
+}
+
+// qrInsertOrdered inserts item among items in questionnaire order: before the
+// first existing sibling the questionnaire lists AFTER it; at the end when there
+// is none (or when no existing item is known to the questionnaire).
+func qrInsertOrdered(items []json.RawMessage, step qrPathStep, item json.RawMessage) []json.RawMessage {
+	rank := map[string]int{}
+	for i, l := range step.siblings {
+		rank[l] = i
+	}
+	mine := rank[step.linkID]
+	at := len(items)
+	for i, raw := range items {
+		if r, ok := rank[qrRawLinkID(raw)]; ok && r > mine {
+			at = i
+			break
+		}
+	}
+	out := make([]json.RawMessage, 0, len(items)+1)
+	out = append(out, items[:at]...)
+	out = append(out, item)
+	out = append(out, items[at:]...)
+	return out
+}
+
+// mustRawJSON marshals a value the caller already unmarshalled from JSON (so a
+// marshal failure would be a programmer error, not an input error).
+func mustRawJSON(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic("shnsdk: re-marshal of parsed JSON failed: " + err.Error())
+	}
+	return b
 }
 
 // QRSignatureExt is the standard FHIR/SDC extension carrying a Signature for a

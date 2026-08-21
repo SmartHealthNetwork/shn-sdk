@@ -33,8 +33,8 @@ type RegistrationRequest struct {
 	// frozen 5-field layout (same rule as MessageFrames).
 	ContractVersions []string `json:"contractVersions,omitempty"`
 	// RequestFrames are the sealed REQUEST-frame versions this build accepts
-	// (SupportedRequestFrames; library-self-declared — request frames, spec 2026-08-11 slice
-	// 4). An originator frames a contract-mapped request ONLY toward a peer whose
+	// (SupportedRequestFrames; library-self-declared — the request-frame
+	// contract). An originator frames a contract-mapped request ONLY toward a peer whose
 	// registry entry declares this, so the wire stays additive in both directions.
 	// Deliberately OUTSIDE the PoP signing payload — registrationSigningPayload is
 	// a frozen 5-field layout (same rule as MessageFrames/ContractVersions).
@@ -68,7 +68,7 @@ func (id Identity) Registration(role, baseURL string) RegistrationRequest {
 }
 
 // RegistrationWithDeclared is Registration with an EXPLICIT declared
-// contract-version set (D1a, spec 2026-08-11 slice 4). A deployment whose
+// contract-version set (the request-frame contract). A deployment whose
 // declared set is operator-configured (the gateway's SHN_CONTRACT_VERSIONS
 // accessor) must stamp THAT set into its registry entry — peers select off
 // entry.ContractVersions, so an override that only reroutes local selection

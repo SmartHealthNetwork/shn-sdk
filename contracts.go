@@ -6,12 +6,12 @@ import (
 )
 
 // Contract-version tokens are the generalized capability grammar of the
-// multi-version exchange-contracts design (spec 2026-08-10 §3):
+// multi-version exchange-contracts design:
 // "<contract>@<line>", where a contract names a message-surface family within a
 // workstream (pa.pas) and a line is the wire-significant major.minor of the IG
 // generation this build speaks natively. Patch versions are never wire-significant.
 // Registrar admission validates token SHAPE only (the grammar is open to future
-// contracts/lines); membership meaning arrives with version-aware routing (slice 3).
+// contracts/lines); membership meaning arrives with version-aware routing.
 const (
 	ContractPACRD20  = "pa.crd@2.0"  // Da Vinci CRD 2.0.x surface
 	ContractPACRD21  = "pa.crd@2.1"  // Da Vinci CRD 2.1.x surface

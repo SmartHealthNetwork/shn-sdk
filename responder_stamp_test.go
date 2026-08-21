@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// responder_stamp_test.go — the Responder's contractVersion STAMP (spec
-// 2026-08-10 §4, published-SDK parity — v0.38.0): ResponderConfig.StampContractVersion
+// responder_stamp_test.go — the Responder's contractVersion STAMP (multi-version contracts design,
+// published-SDK parity — v0.38.0): ResponderConfig.StampContractVersion
 // opts a Responder into stamping FrameHeaderContractVersion on every SUCCESS (2xx)
 // framed answer, computed PER LEG (contractTokenForTxType — the same mapping
 // RunPriorAuth's originator side verifies against), never on an app-error frame,

@@ -8,8 +8,8 @@ import (
 )
 
 // MessageFrameV1 is the capability token a holder advertises in its registry
-// entry (messageFrames) to negotiate the v1 sealed message frame (spec
-// 2026-07-17-opaque-payload-frame-design.md). A leg uses the frame iff BOTH
+// entry (messageFrames) to negotiate the v1 sealed message frame (the opaque-payload
+// message-frame contract). A leg uses the frame iff BOTH
 // ends advertise it; absent ⇒ the pre-v0.27.0 bare-payload contract.
 const MessageFrameV1 = "v1"
 
@@ -29,12 +29,12 @@ func SupportsMessageFrameV1(frames []string) bool {
 
 // RequestFrameV1 is the capability token a holder advertises in its registry
 // entry (requestFrames) to accept a v1 sealed frame on the REQUEST payload
-// (request frames, spec 2026-08-11 slice 4). It reuses the message-frame codec verbatim —
+// (the request-frame contract). It reuses the message-frame codec verbatim —
 // the only new thing is WHO may emit it: an originator frames a request iff the
 // leg is contract-mapped AND the recipient declares this capability, so a peer
 // that never declares it keeps receiving byte-identical bare requests. Receivers
 // that declare it MUST accept BOTH framed and bare requests (bare = a
-// pre-slice-4 sender or a version-neutral leg — always tolerated).
+// pre-request-frame sender or a version-neutral leg — always tolerated).
 const RequestFrameV1 = "v1"
 
 // SupportedRequestFrames returns the request-frame versions THIS library
@@ -71,16 +71,16 @@ type HTTPFrameHeader struct {
 
 // FrameHeaderContractVersion is the frame header carrying the full
 // "<contract>@<line>" token of the line the sealed payload was BUILT at
-// (spec 2026-08-10 §4: each frame is one contract's message; the token is
+// (each frame is one contract's message; the token is
 // content-descriptive like Content-Type, not a negotiation echo). Inside the
 // ciphertext, so the Hub cannot see it. Absence means "pre-version contract"
 // (the frames-absent lane precedent) and is always tolerated.
 const FrameHeaderContractVersion = "contractVersion"
 
-// allowedFrameHeaders is the produce+consume header allowlist (spec §3): relaying
+// allowedFrameHeaders is the produce+consume header allowlist: relaying
 // arbitrary headers through the seal would be a smuggling vector (cookies,
 // hop-by-hop, internal headers). Widening it is a spec change — contractVersion
-// was added by the 2026-08-10 multi-version-contracts design §4 (slice 3).
+// was added with the multi-version contracts design.
 var allowedFrameHeaders = map[string]bool{"Content-Type": true, FrameHeaderContractVersion: true}
 
 // IsFramed reports whether payload begins with the v1 frame magic. Bare legacy
@@ -205,7 +205,7 @@ func (e *AppAnswerError) Error() string {
 // rolling deploys). The payer's advertised frames are therefore advisory only and
 // not an input here.
 //
-// expectedToken is the contractVersion stamp-verify check (spec 2026-08-10 §4, published-SDK
+// expectedToken is the contractVersion stamp-verify check (multi-version contracts design, published-SDK
 // parity — v0.38.0): when non-empty (the caller knows the contract-version token
 // this leg was routed/built at) AND the 2xx frame carries a non-empty
 // FrameHeaderContractVersion stamp that DIFFERS from it, the answer is rejected —

@@ -274,8 +274,8 @@ func (id Identity) runLeg(ctx context.Context, c *http.Client, ep Endpoints, pay
 	return id.runLegWithCorr(ctx, c, ep, payer, pci, txType, reqOp, respOp, hex.EncodeToString(corrRaw[:]), payload)
 }
 
-// contractTokenForTxType returns the request-frame contract-version claim (spec
-// 2026-08-11 slice 4) — the token this SDK's request at txType is BUILT at, or "" for a version-neutral leg
+// contractTokenForTxType returns the request-frame contract-version claim (the
+// request-frame contract) — the token this SDK's request at txType is BUILT at, or "" for a version-neutral leg
 // (coverage-eligibility — mirrors the gateway's paCatalog "" Contract). This SDK does
 // NOT do per-line content negotiation: every Build* helper the PA-chain legs use
 // targets a single fixed native line (BuildClaimResponse's "speaks PAS line 2.0"
@@ -305,7 +305,7 @@ func contractTokenForTxType(txType string) string {
 func (id Identity) runLegWithCorr(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp, correlationID string, payload []byte) ([]byte, error) {
 	now := id.now()
 
-	// REQUEST-line claim (spec 2026-08-11 slice 4, published-SDK parity —
+	// REQUEST-line claim (request-frame contract, published-SDK parity —
 	// v0.38.0): frame the request IFF this leg maps to a contract AND the payer's
 	// registry entry declares requestFrames v1 — a payer that never declares it
 	// gets a BYTE-IDENTICAL bare request (same rule + status-200 inert filler as

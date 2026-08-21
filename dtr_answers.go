@@ -94,57 +94,90 @@ func fillQuestionnaireFromAnswers(def DTRDef, questionnaireJSON []byte, answers 
 	return raw, nil
 }
 
-// fillItems recursively walks a slice of QuestionnaireItem and returns the
-// corresponding QuestionnaireResponseItems. It is the core of the structure-driven
-// walk: groups recurse; display items are skipped; leaf items are filled from
-// `answers` with source="manual" + author (dtrx-1); required leaves without an answer
-// produce an error.
+// fillItems walks the questionnaire's item tree with the ONE shared walker and
+// fills each leaf from `answers` with source="manual" + author (dtrx-1); required
+// leaves without an answer produce an error (the honesty guard); optional ones are
+// omitted.
 func fillItems(qItems []fhir.QuestionnaireItem, answers map[string]Answer, author string) ([]fhir.QuestionnaireResponseItem, error) {
+	return walkQuestionnaireItems(qItems, func(qi fhir.QuestionnaireItem) (fhir.QuestionnaireResponseItemAnswer, bool, error) {
+		a, ok := answers[qi.LinkId]
+		if !ok || !answerHasValue(a) {
+			// No answer supplied. Required items are a hard error (honesty guard).
+			if isRequired(qi) {
+				return fhir.QuestionnaireResponseItemAnswer{}, false, fmt.Errorf("required item %q has no supplied answer (honesty guard: a required QR item cannot be fabricated)", qi.LinkId)
+			}
+			// Optional: omit.
+			return fhir.QuestionnaireResponseItemAnswer{}, false, nil
+		}
+		qrAnswer, err := answerToQRAnswer(a)
+		if err != nil {
+			return fhir.QuestionnaireResponseItemAnswer{}, false, fmt.Errorf("item %q: %w", qi.LinkId, err)
+		}
+		// Stamp source="manual" + author (dtrx-1) — recorded human entry, not
+		// CQL-computed "auto". Reuses clinicianOriginExtension which already
+		// builds the conformant source + nested author sub-extension.
+		qrAnswer.Extension = []fhir.Extension{clinicianOriginExtension(author)}
+		return qrAnswer, true, nil
+	})
+}
+
+// leafFiller decides the QR answer for ONE question item (never a group or a
+// display item — the walker handles those). answered=false omits the leaf; a
+// non-nil error aborts the whole fill, so a builder can refuse rather than emit a
+// quietly incomplete QR.
+type leafFiller func(qi fhir.QuestionnaireItem) (answer fhir.QuestionnaireResponseItemAnswer, answered bool, err error)
+
+// walkQuestionnaireItems is the ONE structure-driven walk every QR builder in this
+// module shares (FillQuestionnaire's sandbox fill and FillQuestionnaireFromAnswers'
+// manual fill differ only in their leafFiller). It mirrors the questionnaire's
+// nesting into the QR on BOTH axes FHIR nests on:
+//
+//   - group items recurse; the group is emitted only when at least one descendant
+//     answered (no empty shells — a QR group with nothing under it asserts nothing);
+//   - display items carry no answer and are skipped;
+//   - question items are filled by `fill`; a question's own child items (SDC's
+//     "questions within an answer") recurse too and ride under answer.item — and
+//     if such a child answers while its parent does not, the walk ERRORS rather
+//     than drop the child or fabricate a parent answer to hang it from.
+//
+// Two walkers that each got half of this right is how nested items went unread
+// for a whole release line; this is the one walk. Not depth-capped: a cap would
+// silently drop content below it.
+func walkQuestionnaireItems(qItems []fhir.QuestionnaireItem, fill leafFiller) ([]fhir.QuestionnaireResponseItem, error) {
 	var result []fhir.QuestionnaireResponseItem
 	for _, qi := range qItems {
 		switch qi.Type {
 		case fhir.QuestionnaireItemTypeGroup:
-			// Group: recurse into children and mirror the nesting in the QR.
-			children, err := fillItems(qi.Item, answers, author)
+			children, err := walkQuestionnaireItems(qi.Item, fill)
 			if err != nil {
 				return nil, err
 			}
-			// Only emit the group item when it has at least one child QR item
-			// (mirroring FillQuestionnaire's omit-when-no-answer behaviour for the
-			// group level — no child content means no group item in the QR).
 			if len(children) > 0 {
-				result = append(result, fhir.QuestionnaireResponseItem{
-					LinkId: qi.LinkId,
-					Item:   children,
-				})
+				result = append(result, fhir.QuestionnaireResponseItem{LinkId: qi.LinkId, Item: children})
 			}
 
 		case fhir.QuestionnaireItemTypeDisplay:
-			// Display items carry no answer; skip them entirely.
 			continue
 
 		default:
-			// Leaf item: look up the caller-supplied answer.
-			a, ok := answers[qi.LinkId]
-			if !ok || !answerHasValue(a) {
-				// No answer supplied. Required items are a hard error (honesty guard).
-				if isRequired(qi) {
-					return nil, fmt.Errorf("required item %q has no supplied answer (honesty guard: a required QR item cannot be fabricated)", qi.LinkId)
+			answer, answered, err := fill(qi)
+			if err != nil {
+				return nil, err
+			}
+			children, err := walkQuestionnaireItems(qi.Item, fill)
+			if err != nil {
+				return nil, err
+			}
+			if !answered {
+				if len(children) > 0 {
+					return nil, fmt.Errorf("item %q has answered child items but no answer of its own (answer.item needs an answer to hang from; refusing to drop the children or fabricate the parent)", qi.LinkId)
 				}
-				// Optional: silently omit.
 				continue
 			}
-			qrAnswer, err := answerToQRAnswer(a)
-			if err != nil {
-				return nil, fmt.Errorf("item %q: %w", qi.LinkId, err)
-			}
-			// Stamp source="manual" + author (dtrx-1) — recorded human entry, not
-			// CQL-computed "auto". Reuses clinicianOriginExtension which already
-			// builds the conformant source + nested author sub-extension.
-			qrAnswer.Extension = []fhir.Extension{clinicianOriginExtension(author)}
+			answer.Item = children
 			result = append(result, fhir.QuestionnaireResponseItem{
 				LinkId: qi.LinkId,
-				Answer: []fhir.QuestionnaireResponseItemAnswer{qrAnswer},
+				Answer: []fhir.QuestionnaireResponseItemAnswer{answer},
 			})
 		}
 	}

@@ -1,8 +1,8 @@
 // Package metrics is a tiny, vendor-neutral CloudWatch Embedded Metric Format
 // (EMF) emitter: one JSON line per metric to an io.Writer (stdout in prod).
 // CloudWatch extracts metrics from the log stream on ingestion — no agent, no
-// PutMetricData, no IAM beyond the log delivery every task already has
-// (design spec §6). Fire-and-forget by design: emitting must never block or
+// PutMetricData, no IAM beyond the log delivery every task already has.
+// Fire-and-forget by design: emitting must never block or
 // fail a caller's path, so all errors are swallowed.
 //
 // Stdlib-only by policy (enforced by this package's deps test, same gate as

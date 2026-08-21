@@ -12,7 +12,7 @@ import (
 // $validate gate (make validate) certifies resource SHAPE, not code MEANING — the IG-HAPI
 // returns only a *warning* for an unresolvable SNOMED/LOINC code, which passes — so a
 // hallucinated code can slip through $validate (it did: two invented SNOMED codes were caught
-// in PR #13 review, not by the gate). This hermetic test runs in `make check` and fails loudly
+// in code review, not by the gate). This hermetic test runs in `make check` and fails loudly
 // if any code constant changes, forcing whoever changes it to RE-VERIFY the new code against a
 // terminology service and update the expected display here.
 //

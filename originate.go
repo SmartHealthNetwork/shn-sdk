@@ -42,7 +42,7 @@ type Payer struct {
 	// records negotiated intent for observability but does not gate decoding.
 	MessageFrames []string
 	// RequestFrames are the payer's advertised sealed REQUEST-frame versions from
-	// the /holders feed (Holder.RequestFrames — request frames, spec 2026-08-11 slice 4).
+	// the /holders feed (Holder.RequestFrames — the request-frame contract).
 	// UNLIKE MessageFrames this DOES gate: a contract-mapped request (CRD/DTR/PAS —
 	// see contractTokenForTxType) is framed toward this payer IFF it declares "v1"
 	// here; empty ⇒ the payer receives a BYTE-IDENTICAL bare request (same rule as

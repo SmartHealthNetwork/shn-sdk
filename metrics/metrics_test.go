@@ -95,7 +95,7 @@ type errWriter struct{}
 func (errWriter) Write([]byte) (int, error) { return 0, errors.New("boom") }
 
 func TestEmit_FireAndForget(t *testing.T) {
-	// Write errors are swallowed (spec §6: never block or fail a caller path).
+	// Write errors are swallowed (never block or fail a caller path).
 	e := New(errWriter{}, "SHN/Preview", nil, testNow)
 	e.EmitGauge("X", 1, "None", nil) // must not panic
 

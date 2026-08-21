@@ -39,7 +39,7 @@ type fakeSubstrate struct {
 	frameStatus int
 	frameBody   []byte
 	// capturedRequestFramed records whether the coverage-eligibility REQUEST
-	// payload arrived framed (request frames, spec 2026-08-11 slice 4) — coverage-eligibility
+	// payload arrived framed (the request-frame contract) — coverage-eligibility
 	// has no contract-version token, so it must always be false regardless of what
 	// the Payer declares.
 	capturedRequestFramed bool

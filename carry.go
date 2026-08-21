@@ -31,7 +31,7 @@ const (
 	carrySubContent    = "content"
 )
 
-// CarryElement builds one shn-carried-content extension (spec §5): path
+// CarryElement builds one shn-carried-content extension (the carry contract): path
 // locates the element within the payload (a FHIRPath-ish string, caller-
 // supplied — this function does not validate it), element is the ORIGINAL
 // element's JSON exactly as it appeared on the source-line payload (stored

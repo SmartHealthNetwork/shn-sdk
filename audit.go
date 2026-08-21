@@ -22,7 +22,7 @@ type AuditRecord struct {
 	SubjectPCI        string `json:"subjectPCI"`
 	PayloadBundleHash string `json:"payloadBundleHash"`
 
-	// RecordID is the emitter-minted unique id (ULID; HA design spec §5.1).
+	// RecordID is the emitter-minted unique id (ULID; minted by the emitter, never by the chain).
 	// APPENDED LAST with omitempty: records without one produce byte-identical
 	// canonical content to the pre-recordId format, so all existing signatures
 	// keep verifying. Do NOT move this field.
@@ -50,7 +50,7 @@ type signableAuditContent struct {
 	SubjectPCI        string `json:"subjectPCI"`
 	PayloadBundleHash string `json:"payloadBundleHash"`
 
-	// RecordID is the emitter-minted unique id (ULID; HA design spec §5.1).
+	// RecordID is the emitter-minted unique id (ULID; minted by the emitter, never by the chain).
 	// APPENDED LAST with omitempty: records without one produce byte-identical
 	// canonical content to the pre-recordId format, so all existing signatures
 	// keep verifying. Do NOT move this field.

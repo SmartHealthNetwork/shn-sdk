@@ -50,8 +50,8 @@ type ResponderConfig struct {
 	// responder) — safe default for existing constructors. See NewFeedFrameResolver.
 	ResolveFrames func(holderID string) []string
 
-	// StampContractVersion opts this Responder into the contractVersion stamp (spec 2026-08-10
-	// §4, published-SDK parity — v0.38.0): every SUCCESS (2xx) framed answer gets
+	// StampContractVersion opts this Responder into the contractVersion stamp (multi-version contracts design,
+	// published-SDK parity — v0.38.0): every SUCCESS (2xx) framed answer gets
 	// a FrameHeaderContractVersion header. The TOKEN is computed internally, per
 	// leg, from the request's TransactionType (contractTokenForTxType — the SAME
 	// mapping RunPriorAuth's originator side uses to build its expectedToken:
@@ -280,7 +280,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// RECEIVER OBLIGATION (spec 2026-08-11 slice 4, published-SDK parity —
+	// RECEIVER OBLIGATION (request-frame contract, published-SDK parity —
 	// v0.38.0): this build self-declares requestFrames v1 at registration
 	// (RegistrationWithDeclared/Registration — SupportedRequestFrames defaults ON),
 	// so it MUST accept BOTH framed and bare inbound requests. Decode-on-magic —
@@ -307,7 +307,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		plaintext = body
 	}
 
-	// Frame negotiation (spec 2026-07-17): frame the response leg iff the requester
+	// Frame negotiation (message-frame contract): frame the response leg iff the requester
 	// advertises v1 — capability is two-sided (the responder only frames to a peer
 	// that declared it can decode). nil ResolveFrames ⇒ never frame (legacy-only).
 	framed := r.cfg.ResolveFrames != nil && SupportsMessageFrameV1(r.cfg.ResolveFrames(env.Metadata.Sender))

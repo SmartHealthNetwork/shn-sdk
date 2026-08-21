@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// responder_requestframe_test.go — the Responder's RECEIVER OBLIGATION (spec
-// 2026-08-11 slice 4, published-SDK parity — v0.38.0): this SDK self-declares
+// responder_requestframe_test.go — the Responder's RECEIVER OBLIGATION (request-frame
+// contract, published-SDK parity — v0.38.0): this SDK self-declares
 // requestFrames v1 at registration (always on — SupportedRequestFrames), so it
 // MUST decode BOTH a framed and a bare inbound request identically. Decoding does
 // NOT depend on ResolveFrames/StampContractVersion — those gate the RESPONSE leg;
@@ -99,7 +99,7 @@ func TestResponderUnframesInboundFramedPASRequest(t *testing.T) {
 }
 
 // TestResponderRejectsCorruptInboundFrame is the request-frame receiver's rejection row
-// (CLAUDE.md: every guard ships its rejection test): a payload beginning with the
+// (every guard ships its rejection test): a payload beginning with the
 // frame magic byte but failing DecodeHTTPFrame (unsupported version) is a 400,
 // exactly like a corrupt envelope at step 2 — never silently passed through to a
 // handler as opaque bytes.

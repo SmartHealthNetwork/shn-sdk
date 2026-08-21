@@ -9,7 +9,7 @@ import (
 // TestHealthPackageIsStdlibOnly pins sdk/health to the standard library. The
 // health payload contract must stay dependency-free: it is mounted on every
 // service including partner-run gateways, and dependency-lightness is the
-// reason it lives in the sdk at all (spec §5.5). The module-wide
+// reason it lives in the sdk at all. The module-wide
 // TestNoForbiddenDependencies does NOT enforce this (it allows fhir-models,
 // x/crypto module-wide), hence this per-package gate.
 func TestHealthPackageIsStdlibOnly(t *testing.T) {

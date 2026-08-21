@@ -7,7 +7,7 @@ import (
 )
 
 // The emitter sits in every probe path and the published SDK: stdlib-only by
-// policy, same gate as sdk/health (spec §4).
+// policy, same gate as sdk/health.
 func TestMetricsPackageIsStdlibOnly(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").Output()
 	if err != nil {

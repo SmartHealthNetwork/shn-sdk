@@ -52,7 +52,7 @@ func TestHTTPFrameRoundTrip(t *testing.T) {
 	}
 }
 
-// Rejection table — every decode guard ships its rejection row (CLAUDE.md discipline).
+// Rejection table — every decode guard ships its rejection row.
 func TestDecodeHTTPFrameRejects(t *testing.T) {
 	valid, _ := EncodeHTTPFrame(400, "application/json", []byte(`{"error":"x"}`))
 	hdrLen := func(n uint32) []byte { b := make([]byte, 4); binary.BigEndian.PutUint32(b, n); return b }
@@ -87,9 +87,9 @@ func TestDecodeHTTPFrameDropsNonAllowlistedHeaders(t *testing.T) {
 	}
 }
 
-// TestEncodeHTTPFrameHeaders_ContractVersion: the slice-3 allowlist widening
-// (spec 2026-08-10 §4 "frame header carries the full token"; the 2026-07-17
-// frame spec §3 names widening a documented spec change). The contractVersion
+// TestEncodeHTTPFrameHeaders_ContractVersion: the contractVersion allowlist widening
+// (the multi-version contracts design: the frame header carries the full token;
+// the message-frame contract names widening a documented change). The contractVersion
 // header round-trips produce→consume; the legacy Content-Type-only encoder is
 // byte-unchanged; a non-allowlisted header is refused at ENCODE (producing a
 // header the consumer would strip is a caller bug, not a silent drop).
@@ -187,8 +187,8 @@ func TestUnframeAnswer(t *testing.T) {
 	}
 }
 
-// TestUnframeAnswer_StampVerify covers the contractVersion stamp-verify rows (spec 2026-08-10
-// §4, published-SDK parity — v0.38.0): unframeAnswer(frame, expectedToken)
+// TestUnframeAnswer_StampVerify covers the contractVersion stamp-verify rows (multi-version contracts design,
+// published-SDK parity — v0.38.0): unframeAnswer(frame, expectedToken)
 // verbatim-mirrors the gateway's response-leg verify (gateway/engine/gateway.go
 // roundTripInner) — non-empty expectation + present stamp + MISMATCH → reject;
 // matching stamp → accept; ABSENT stamp is always tolerated regardless of

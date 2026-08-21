@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// responder_frame_test.go — the Responder's message-frame behavior (spec
-// 2026-07-17-opaque-payload-frame-design.md): a frame-capable requester
+// responder_frame_test.go — the Responder's message-frame behavior (the
+// opaque-payload message-frame contract): a frame-capable requester
 // (ResolveFrames advertises "v1") gets application answers — success AND app
 // non-2xx errors — sealed as a v1 HTTP frame carrying the application status,
 // relayed 200-to-Hub; a legacy requester (nil ResolveFrames) gets the

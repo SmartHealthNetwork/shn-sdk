@@ -8,11 +8,10 @@ import (
 
 // maxErrLen bounds the stored error string: /health payloads are public on
 // some services, and error chains can drag long URLs along. Coarse beats
-// complete here (spec §5.1 non-sensitivity rule).
+// complete here (the /health non-sensitivity rule).
 const maxErrLen = 200
 
-// PollerCell is the shared status cell for background feed pollers (design
-// spec §5.2): the three registrar-poller code paths record attempts into a
+// PollerCell is the shared status cell for background feed pollers: the three registrar-poller code paths record attempts into a
 // cell and register cell.Check on their service's health Registry. All record
 // methods are NIL-SAFE so call sites can thread an optional *PollerCell
 // without branching.

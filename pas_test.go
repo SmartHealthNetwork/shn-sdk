@@ -1647,7 +1647,7 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_True(t *testing.T) {
 	// PasCoverageEvaluator falls through to A3 "Not Required" for EVERY code (live-proven
 	// against br-payer a8bece4: absolute beneficiary → A3; relative → A1). Claim.patient
 	// stays absolute (the PAS reference resolver needs it; cqf extracts the id part for
-	// the subject, so absolute there is harmless). Spec §2A.4 layer-3.
+	// the subject, so absolute there is harmless).
 	var coverageResource json.RawMessage
 	for _, e := range bundle.Entry {
 		var rt struct {
@@ -1684,7 +1684,7 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_True(t *testing.T) {
 	// anchor for br-payer's `First([ServiceRequest])` retrieve. The HomeHealthAssessment (G0151)
 	// rule gates its coverage-info on `Coverage is not null and Service Request is not null`, so
 	// an absolute SR.subject breaks the [ServiceRequest] compartment match → A3 instead of A4
-	// (live-proven vs br-payer a8bece4). Spec §2A.4 layer-3.
+	// (live-proven vs br-payer a8bece4).
 	var srResource json.RawMessage
 	for _, e := range bundle.Entry {
 		var rt struct {

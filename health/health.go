@@ -1,6 +1,6 @@
 // Package health provides the SHN /health contract: a small check registry and
-// an HTTP handler emitting the shared JSON shape every SHN service serves
-// (design spec §5.1). Payloads are non-sensitive BY CONSTRUCTION — statuses,
+// an HTTP handler emitting the shared JSON shape every SHN service serves.
+// Payloads are non-sensitive BY CONSTRUCTION — statuses,
 // timestamps, counts, coarse error strings only; never key material, config
 // values, or internal hostnames. Several services expose /health publicly, so
 // every check added anywhere must honor this rule.

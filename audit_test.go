@@ -32,7 +32,7 @@ func TestAuditAppendRequestJSON(t *testing.T) {
 
 // TestSignableContent_EmptyRecordIDBytesUnchanged pins the EXACT pre-recordId
 // canonical bytes: any record without a recordId must keep producing them
-// forever, or every existing chain signature breaks (HA spec §5.1).
+// forever, or every existing chain signature breaks (the audit-chain canonical-bytes rule).
 func TestSignableContent_EmptyRecordIDBytesUnchanged(t *testing.T) {
 	got := string(SignableContent(AuditRecord{
 		Timestamp:         "2026-07-21T12:00:00Z",

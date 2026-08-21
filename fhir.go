@@ -442,7 +442,7 @@ func BuildPatientAccessCapabilityStatement(created time.Time, declared []string)
 		Date:        created.UTC().Format(time.RFC3339),
 		Kind:        fhir.CapabilityStatementKindInstance,
 		FhirVersion: fhir.FHIRVersion4_0_1,
-		// Versioned IG canonical(s) (spec 2026-08-10 §3): the "|<version>" suffix
+		// Versioned IG canonical(s): the "|<version>" suffix
 		// pins the generation, one per declared pa.pdex line, matching HRex's
 		// #major.minor endpoint-code convention.
 		ImplementationGuide: igs,
@@ -474,7 +474,7 @@ func BuildPatientAccessCapabilityStatement(created time.Time, declared []string)
 
 // BuildProviderIngressCapabilityStatement returns the provider gateway's
 // Da Vinci ingress CapabilityStatement, served at GET /metadata on the
-// ingress edge (FR-37 per-role statements; spec 2026-08-10 §3 path 3). It
+// ingress edge (FR-37 per-role statements). It
 // declares the CRD/DTR/PAS generation(s) the deployment DECLARES (not merely
 // natively builds) via versioned IG canonicals, and the two FHIR operations the
 // ingress serves. CRD is CDS Hooks, not FHIR REST — it is named in documentation

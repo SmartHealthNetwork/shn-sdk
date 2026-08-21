@@ -77,7 +77,7 @@ test, run against both `2.1/` and `2.2/`:
 
 | File | Line-gated by | Covering test |
 |---|---|---|
-| `<line>/questionnaireresponse.json` | DTR `AutoFillAtLine` — origin-code + qr-coverage/qr-context shape (2.2 delta). | `TestVectorFillQuestionnaireAtLineReproduce` |
+| `<line>/questionnaireresponse.json` | DTR `FillQuestionnaireAtLine` — origin-code + qr-coverage/qr-context shape (2.2 delta). | `TestVectorFillQuestionnaireAtLineReproduce` |
 | `<line>/claimresponse-approved.json` | PAS `BuildClaimResponseAtLine` — documented "interface symmetry" (no structural delta at ANY line); still emitted per line for a complete, predictable per-line file set. | `TestVectorClaimResponseAtLineConsume` |
 | `<line>/claimresponse-pended.json` | PAS `BuildPendedResponseAtLine` — response `Bundle.identifier` becomes mandatory at 2.2. | `TestVectorPendedAtLineConsume` |
 | `<line>/claimresponse-denied-uc08.json` | PAS `BuildDeniedResponseAtLine` — same "interface symmetry" note as approved. | `TestVectorDeniedAtLineConsume` |

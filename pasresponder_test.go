@@ -663,3 +663,328 @@ func TestSandboxAdjudicate_RepeatingGroupElsewhereIsFine(t *testing.T) {
 		t.Fatalf("outcome = %v, want PASApproved", got.Outcome)
 	}
 }
+
+// -- Sole-adjudicator behaviour rows (ported from the retired substrate-side twin) --
+//
+// internal/pas.Adjudicate was a hand-maintained twin of SandboxAdjudicate with
+// no production caller; the live prior-auth path is gateway/engine/adjudicator.go
+// → SandboxAdjudicate. When the twin was deleted its behaviour rows moved here
+// rather than disappearing, so every rule the sandbox adjudicator enforces
+// (R1 operative report, R2 clinician attestation FR-16, R3 patient attestation
+// FR-27, the lumbar-MRI baseline) keeps a test that fails when the rule does.
+
+// TestSandboxAdjudicate_MissingWeeksItemDenies: a QR with no
+// conservative-therapy-weeks item reads weeks as 0 → denied, never approved by
+// a zero-value accident in the other direction.
+func TestSandboxAdjudicate_MissingWeeksItemDenies(t *testing.T) {
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"prior-imaging","answer":[{"valueBoolean":true}]}]}`)
+	dec, err := SandboxAdjudicate(qr, false, testNow, nil)
+	if err != nil || dec.Outcome != PASDenied {
+		t.Fatalf("missing weeks item: outcome=%v err=%v, want PASDenied", dec.Outcome, err)
+	}
+}
+
+// TestSandboxAdjudicate_OperativeReportClearsPriorSurgeryPend (R1 clears):
+// prior-surgery=true WITH hasDiagnosticReport=true → approved.
+func TestSandboxAdjudicate_OperativeReportClearsPriorSurgeryPend(t *testing.T) {
+	dec, err := SandboxAdjudicate(priorSurgeryQRJSON(), true, testNow, nil)
+	if err != nil || dec.Outcome != PASApproved || dec.PreAuthRef == "" {
+		t.Fatalf("prior surgery + operative report: outcome=%v ref=%q err=%v, want PASApproved", dec.Outcome, dec.PreAuthRef, err)
+	}
+}
+
+// TestSandboxAdjudicate_LumbarBaselineApproves: no pend trigger, weeks>=6, an
+// unrelated answered item → approved (the lumbar-MRI auto-approval baseline
+// must not regress as rules are added).
+func TestSandboxAdjudicate_LumbarBaselineApproves(t *testing.T) {
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},` +
+		`{"linkId":"prior-imaging","answer":[{"valueBoolean":true}]}]}`)
+	dec, err := SandboxAdjudicate(qr, false, testNow, nil)
+	if err != nil || dec.Outcome != PASApproved {
+		t.Fatalf("lumbar-MRI baseline must approve; outcome=%v err=%v", dec.Outcome, err)
+	}
+}
+
+// TestSandboxAdjudicate_AttestationWithoutAnswerPends (FR-16): the clinician
+// attestation extension on an ANSWERLESS functional-status item must still
+// pend — metadata alone approves nothing; the attestation has to cover a value.
+func TestSandboxAdjudicate_AttestationWithoutAnswerPends(t *testing.T) {
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},` +
+		`{"linkId":"high-disability","answer":[{"valueBoolean":true}]},` +
+		`{"linkId":"functional-status-oswestry","extension":[{"url":"` + ClinicianAttestationExt + `"}]}]}`)
+	dec, err := SandboxAdjudicate(qr, false, testNow, nil)
+	if err != nil || dec.Outcome != PASPended {
+		t.Fatalf("attestation without answer must pend; outcome=%v err=%v", dec.Outcome, err)
+	}
+}
+
+// attestedOswestryItem returns a functional-status-oswestry item with a
+// non-empty answer and a clinician attestation whose NPI/text/date
+// sub-extensions are individually omittable — FR-16 requires all three.
+func attestedOswestryItem(withNPI, withText, withDate bool) string {
+	var sub []string
+	if withNPI {
+		sub = append(sub, `{"url":"npi","valueString":"1999999999"}`)
+	}
+	if withText {
+		sub = append(sub, `{"url":"text","valueString":"I attest these are my findings."}`)
+	}
+	if withDate {
+		sub = append(sub, `{"url":"date","valueDate":"2026-06-05"}`)
+	}
+	return `{"linkId":"functional-status-oswestry","answer":[{"valueString":"42"}],"extension":[{"url":"` +
+		ClinicianAttestationExt + `","extension":[` + strings.Join(sub, ",") + `]}]}`
+}
+
+// TestSandboxAdjudicate_WellFormedAttestationApproves (FR-16): a non-empty
+// answer with NPI+text+date approves a high-disability claim.
+func TestSandboxAdjudicate_WellFormedAttestationApproves(t *testing.T) {
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},` +
+		`{"linkId":"high-disability","answer":[{"valueBoolean":true}]},` +
+		attestedOswestryItem(true, true, true) + `]}`)
+	dec, err := SandboxAdjudicate(qr, false, testNow, nil)
+	if err != nil || dec.Outcome != PASApproved {
+		t.Fatalf("attested answer must approve; outcome=%v err=%v", dec.Outcome, err)
+	}
+}
+
+// TestSandboxAdjudicate_MalformedAttestationPends (FR-16): an attestation
+// missing ANY of NPI/text/date is malformed and must not approve.
+func TestSandboxAdjudicate_MalformedAttestationPends(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		npi, text, date bool
+	}{
+		{"no npi", false, true, true},
+		{"no text", true, false, true},
+		{"no date", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+				`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},` +
+				`{"linkId":"high-disability","answer":[{"valueBoolean":true}]},` +
+				attestedOswestryItem(tc.npi, tc.text, tc.date) + `]}`)
+			dec, err := SandboxAdjudicate(qr, false, testNow, nil)
+			if err != nil || dec.Outcome != PASPended {
+				t.Fatalf("%s: malformed attestation must pend; outcome=%v err=%v", tc.name, dec.Outcome, err)
+			}
+		})
+	}
+}
+
+// TestSandboxAdjudicate_PatientReportedPendsThenApproves (R3, FR-27):
+// patient-reported-required=true with weeks>=6 and NO patient signature →
+// pended with a needed item; the same QR with the patient Author's Signature on
+// functional-status-oswestry (the real PHG-built item) → approved.
+func TestSandboxAdjudicate_PatientReportedPendsThenApproves(t *testing.T) {
+	qrPended := []byte(`{"resourceType":"QuestionnaireResponse","item":[
+		{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},
+		{"linkId":"patient-reported-required","answer":[{"valueBoolean":true}]},
+		{"linkId":"functional-status-oswestry","answer":[{"valueString":"42"}]}]}`)
+	dec, err := SandboxAdjudicate(qrPended, false, testNow, nil)
+	if err != nil {
+		t.Fatalf("adjudicate pended: %v", err)
+	}
+	if dec.Outcome != PASPended || len(dec.NeededItems) == 0 {
+		t.Fatalf("got %v needed=%v; want PASPended with a needed item", dec.Outcome, dec.NeededItems)
+	}
+	item, err := BuildPatientAttestedItem("functional-status-oswestry", "42", "Patient/MBR-PATIENT-REPORTED", "2026-06-04")
+	if err != nil {
+		t.Fatalf("BuildPatientAttestedItem: %v", err)
+	}
+	qrApproved := []byte(`{"resourceType":"QuestionnaireResponse","item":[
+		{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},
+		{"linkId":"patient-reported-required","answer":[{"valueBoolean":true}]},` + string(item) + `]}`)
+	dec2, err := SandboxAdjudicate(qrApproved, false, testNow, nil)
+	if err != nil {
+		t.Fatalf("adjudicate approved: %v", err)
+	}
+	if dec2.Outcome != PASApproved || dec2.PreAuthRef == "" {
+		t.Fatalf("got %v preAuth=%q; want PASApproved with an auth number", dec2.Outcome, dec2.PreAuthRef)
+	}
+}
+
+// TestSandboxAdjudicate_ClinicianAttestationDoesNotSatisfyPatientPend is the
+// forged-source independence guard (FR-27): where the policy requires a
+// PATIENT signature, a CLINICIAN attestation (the clinician-amend item, via
+// BuildManualAttestedItem) must still pend. The two attestation kinds are
+// checked independently; a provider presenting a clinician item in place of the
+// patient's cannot clear the patient-reported pend. This is the sole
+// enforcement point — the PHG builds the patient attestation request-scoped and
+// persists nothing (OWD-8), so the only forgery vector is a provider-built fake
+// ClaimUpdate, caught here.
+func TestSandboxAdjudicate_ClinicianAttestationDoesNotSatisfyPatientPend(t *testing.T) {
+	clinicianItem, err := BuildManualAttestedItem("functional-status-oswestry", "42",
+		Attestation{NPI: "1999999999", Text: "I attest these are my clinical findings.", When: "2026-06-04"})
+	if err != nil {
+		t.Fatalf("BuildManualAttestedItem: %v", err)
+	}
+	qrForged := []byte(`{"resourceType":"QuestionnaireResponse","item":[
+		{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},
+		{"linkId":"patient-reported-required","answer":[{"valueBoolean":true}]},` +
+		string(clinicianItem) + `]}`)
+	dec, err := SandboxAdjudicate(qrForged, false, testNow, nil)
+	if err != nil {
+		t.Fatalf("forged-source: %v", err)
+	}
+	if dec.Outcome != PASPended || len(dec.NeededItems) == 0 {
+		t.Fatalf("forged-source: got %v needed=%v; want PASPended — a clinician attestation must NOT satisfy a patient-reported pend", dec.Outcome, dec.NeededItems)
+	}
+}
+
+// -- Ambiguity refusals, swept over every read linkId at every depth --
+
+// adjudicationShapes returns the same clinical content in four QR shapes:
+// flat, nested under a group item (item.item), nested under another item's
+// answer (item.answer.item), and three levels deep alternating the two axes.
+// Every axis contentReferences back to QuestionnaireResponse.item, so all four
+// describe the same facts and the adjudicator must treat them identically.
+//
+// "deep-alternating" is the only row that discriminates a ONE-LEVEL flatten: a
+// walk descending a single level per axis satisfies the other three and still
+// loses everything below depth 1. Its path is group → answer → group → content,
+// so it also proves the walk switches axes mid-descent.
+func adjudicationShapes(flatItemsJSON string) map[string][]byte {
+	return map[string][]byte{
+		"flat": []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` + flatItemsJSON + `]}`),
+		"nested-group": []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+			`{"linkId":"shape-grp","item":[` + flatItemsJSON + `]}]}`),
+		"nested-answer": []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+			`{"linkId":"shape-parent","answer":[{"valueBoolean":true,"item":[` + flatItemsJSON + `]}]}]}`),
+		"deep-alternating": []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+			`{"linkId":"shape-deep-grp","item":[` +
+			`{"linkId":"shape-deep-q","answer":[{"valueBoolean":true,"item":[` +
+			`{"linkId":"shape-deep-grp2","item":[` + flatItemsJSON + `]}]}]}` +
+			`]}]}`),
+	}
+}
+
+// adjudicationShapeNames is the sweep every ambiguity row runs. One list, so a
+// shape cannot be added to adjudicationShapes and silently never swept.
+var adjudicationShapeNames = []string{"flat", "nested-group", "nested-answer", "deep-alternating"}
+
+// ambiguityRows is one row per read linkId, driven through BOTH ambiguity
+// shapes by the two sweeps below:
+//
+//	items   — two ITEMS share the linkId (a repeating group); the consuming
+//	          switch would otherwise be last-write-wins.
+//	answers — ONE item carries two ANSWERS (a repeating item, cardinality 0..*);
+//	          the rules would otherwise read Answer[0] and discard the rest.
+//
+// Both are "a decision derived from data the payload does not actually assert",
+// and both must be refused, naming the linkId. The values deliberately
+// conflict so a guard that compared values instead of counting would still be
+// exercised — but counting is the rule: two answers on an item the rules
+// model as single-valued is ambiguous regardless of whether they agree.
+//
+// Hand-listed, and checked below against the adjudicator's own read set, so a
+// sixth read linkId added to the rules without a row here reds the sweep
+// instead of going untested.
+var ambiguityRows = []struct{ linkID, a, b string }{
+	{"conservative-therapy-weeks", `{"valueInteger":2}`, `{"valueInteger":8}`},
+	{"prior-surgery", `{"valueBoolean":true}`, `{"valueBoolean":false}`},
+	{"high-disability", `{"valueBoolean":true}`, `{"valueBoolean":false}`},
+	{"patient-reported-required", `{"valueBoolean":true}`, `{"valueBoolean":false}`},
+	{"functional-status-oswestry", `{"valueString":"mild"}`, `{"valueString":"severe"}`},
+}
+
+// TestSandboxAdjudicate_AmbiguityRowsCoverTheReadSet pins the hand-listed rows
+// to the adjudicator's read set in both directions.
+func TestSandboxAdjudicate_AmbiguityRowsCoverTheReadSet(t *testing.T) {
+	listed := map[string]bool{}
+	for _, r := range ambiguityRows {
+		listed[r.linkID] = true
+	}
+	if !reflect.DeepEqual(listed, sandboxAdjudicationReadLinkIDs) {
+		t.Fatalf("ambiguityRows %v != adjudication read set %v — every read linkId needs an ambiguity row", listed, sandboxAdjudicationReadLinkIDs)
+	}
+}
+
+// TestSandboxAdjudicate_DuplicateItemRefusedOnEveryReadLinkID: two items
+// sharing a read linkId → refused, naming the linkId, at every depth.
+func TestSandboxAdjudicate_DuplicateItemRefusedOnEveryReadLinkID(t *testing.T) {
+	for _, r := range ambiguityRows {
+		items := `{"linkId":"` + r.linkID + `","answer":[` + r.a + `]},{"linkId":"` + r.linkID + `","answer":[` + r.b + `]}`
+		for _, shape := range adjudicationShapeNames {
+			t.Run(r.linkID+"/"+shape, func(t *testing.T) {
+				dec, err := SandboxAdjudicate(adjudicationShapes(items)[shape], false, testNow, seededReader())
+				assertAmbiguityRefusal(t, dec, err, r.linkID, "repeating group")
+			})
+		}
+	}
+}
+
+// TestSandboxAdjudicate_MultiAnswerRefusedOnEveryReadLinkID: ONE item carrying
+// two answers on a read linkId → refused, naming the linkId, at every depth.
+// Before this guard the rules read Answer[0] and silently decided a prior
+// authorization on one of two contradicting clinical facts with err == nil.
+func TestSandboxAdjudicate_MultiAnswerRefusedOnEveryReadLinkID(t *testing.T) {
+	for _, r := range ambiguityRows {
+		items := `{"linkId":"` + r.linkID + `","answer":[` + r.a + `,` + r.b + `]}`
+		for _, shape := range adjudicationShapeNames {
+			t.Run(r.linkID+"/"+shape, func(t *testing.T) {
+				dec, err := SandboxAdjudicate(adjudicationShapes(items)[shape], false, testNow, seededReader())
+				assertAmbiguityRefusal(t, dec, err, r.linkID, "2 answers")
+			})
+		}
+	}
+}
+
+// TestSandboxAdjudicate_MultiAnswerRefusedEvenWhenAnswersAgree: the rule is
+// cardinality, not disagreement. Two identical answers on a single-valued
+// adjudication input are still a repeating item the rules do not model; picking
+// one "because they agree" is a judgment the adjudicator must not make.
+func TestSandboxAdjudicate_MultiAnswerRefusedEvenWhenAnswersAgree(t *testing.T) {
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6},{"valueInteger":6}]}]}`)
+	dec, err := SandboxAdjudicate(qr, false, testNow, seededReader())
+	assertAmbiguityRefusal(t, dec, err, "conservative-therapy-weeks", "2 answers")
+}
+
+// TestSandboxAdjudicate_MultiAnswerElsewhereIsFine is the restraint half: a
+// multi-answer item the rules do NOT read is legal FHIR, none of this
+// adjudicator's business, and must not become an error.
+func TestSandboxAdjudicate_MultiAnswerElsewhereIsFine(t *testing.T) {
+	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},` +
+		`{"linkId":"prior-imaging-modalities","answer":[{"valueString":"xray"},{"valueString":"ct"}]}]}`)
+	dec, err := SandboxAdjudicate(qr, false, testNow, seededReader())
+	if err != nil {
+		t.Fatalf("a multi-answer item the rules do not read must not be an error: %v", err)
+	}
+	if dec.Outcome != PASApproved {
+		t.Fatalf("outcome = %v, want PASApproved", dec.Outcome)
+	}
+}
+
+// assertAmbiguityRefusal asserts the (decision, error) pair is a refusal that
+// names linkID and the ambiguity kind, with the package prefix exactly once.
+func assertAmbiguityRefusal(t *testing.T, dec PASDecision, err error, linkID, kind string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("adjudicated an ambiguous QR (outcome %v) instead of refusing", dec.Outcome)
+	}
+	if !strings.Contains(err.Error(), linkID) {
+		t.Errorf("refusal does not name %q: %v", linkID, err)
+	}
+	if !strings.Contains(err.Error(), kind) {
+		t.Errorf("refusal does not say %q: %v", kind, err)
+	}
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("refusal does not say it is ambiguous: %v", err)
+	}
+	// The package prefix appears ONCE: SandboxAdjudicate wraps the inner error,
+	// so a prefixed inner error would read "shnsdk: SandboxAdjudicate: shnsdk: …".
+	if strings.Count(err.Error(), "shnsdk:") != 1 {
+		t.Errorf("refusal repeats its package prefix: %v", err)
+	}
+	// Not a real decision: the refusal's outcome is PASDenied only as a
+	// never-read placeholder, and callers must check err first.
+	if dec.Outcome != PASDenied {
+		t.Errorf("refusal outcome = %v, want the PASDenied placeholder", dec.Outcome)
+	}
+}

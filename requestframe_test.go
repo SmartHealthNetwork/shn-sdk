@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Request frames (spec 2026-08-11 slice 4): requestFrames is the additive registry capability
+// Request frames: requestFrames is the additive registry capability
 // that gates REQUEST-payload framing. It defaults ON for SHN builds — auto-stamped
 // at registration exactly like MessageFrames.
 
