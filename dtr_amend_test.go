@@ -315,3 +315,95 @@ func TestAmendQRWithItem_LegacySupersedesAtDepth(t *testing.T) {
 		t.Fatalf("attested value did not supersede the placeholder: %s", got)
 	}
 }
+
+// adaptiveHHAJSON is the shape a Da Vinci payer serves for an SDC ADAPTIVE
+// questionnaire: the questionnaireAdaptive extension, and only the first
+// top-level group delivered (the later, enableWhen-gated groups arrive through
+// $next-question as answers accumulate). The item a clinician later attests
+// ("3.2", inside group "3") is therefore NOT in the tree the client holds.
+const adaptiveHHAJSON = `{
+  "resourceType": "Questionnaire",
+  "url": "http://example.org/fhir/Questionnaire/HomeHealthAssessment",
+  "status": "active",
+  "extension": [{"url": "http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-questionnaireAdaptive", "valueBoolean": true}],
+  "item": [
+    {"linkId": "1", "type": "group", "text": "Service Category Selection", "item": [
+      {"linkId": "1.1", "type": "choice", "text": "What category of home health service is being requested?", "required": true}
+    ]}
+  ]
+}`
+
+// TestAmendQRWithItemIn_AdaptiveQuestionnaire: on an adaptive questionnaire the
+// delivered tree is partial BY DESIGN, so "not an item of the questionnaire" does
+// not mean "not an item of the questionnaire" — it means "not delivered yet". An
+// absent item whose group has not been delivered is appended at the top level
+// (the only placement the client can make honestly; the source questionnaire's
+// group for it is unknown client-side). A refusal here returned 500 on the
+// clinician-attestation resume against a real Da Vinci payer. Non-adaptive
+// questionnaires keep the refusal: there the tree is complete and an unknown
+// linkId is a caller error. An adaptive item that IS delivered is still placed
+// by the tree, and an existing occurrence is still superseded in place.
+func TestAmendQRWithItemIn_AdaptiveQuestionnaire(t *testing.T) {
+	base := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+		`{"linkId":"1","item":[{"linkId":"1.1","answer":[{"valueCoding":{"system":"http://snomed.info/sct","code":"91251008"}}]}]}]}`)
+	item, err := BuildManualAttestedItem("3.2", "Impaired ambulation", Attestation{NPI: "1999999999", Text: "attest", When: "2026-08-21"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("undelivered group on an adaptive questionnaire: appended at the top level", func(t *testing.T) {
+		got, err := AmendQRWithItemIn(base, []byte(adaptiveHHAJSON), item)
+		if err != nil {
+			t.Fatalf("AmendQRWithItemIn on an adaptive questionnaire refused an undelivered item: %v", err)
+		}
+		top := decodeQRItems(t, got)
+		if got := strings.Join(linkIDs(top), ","); got != "1,3.2" {
+			t.Fatalf("top-level items = %s, want 1,3.2", got)
+		}
+	})
+
+	t.Run("same tree WITHOUT the adaptive extension: still refused", func(t *testing.T) {
+		q := strings.Replace(adaptiveHHAJSON, `"extension": [{"url": "http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-questionnaireAdaptive", "valueBoolean": true}],`, "", 1)
+		if !strings.Contains(q, `"item"`) || strings.Contains(q, "questionnaireAdaptive") {
+			t.Fatal("control questionnaire not built")
+		}
+		if _, err := AmendQRWithItemIn(base, []byte(q), item); err == nil || !strings.Contains(err.Error(), "3.2") {
+			t.Fatalf("want the unknown-linkId refusal on a non-adaptive questionnaire, got %v", err)
+		}
+	})
+
+	t.Run("adaptive, item delivered: placed by the tree, not appended", func(t *testing.T) {
+		delivered := strings.Replace(adaptiveHHAJSON, `]}
+  ]
+}`, `]},
+    {"linkId": "3", "type": "group", "text": "Physical Therapy Assessment", "item": [
+      {"linkId": "3.1", "type": "string"}, {"linkId": "3.2", "type": "text"}, {"linkId": "3.3", "type": "text"}
+    ]}
+  ]
+}`, 1)
+		if !strings.Contains(delivered, `"linkId": "3.2"`) {
+			t.Fatal("delivered questionnaire not built")
+		}
+		got, err := AmendQRWithItemIn(base, []byte(delivered), item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hits, _ := findQRItem(decodeQRItems(t, got), "3.2", nil)
+		if len(hits) != 1 || strings.Join(hits[0], "/") != "3/3.2" {
+			t.Fatalf("delivered adaptive item placed at %v, want 3/3.2", hits)
+		}
+	})
+
+	t.Run("adaptive, item already present at depth: superseded in place, not appended", func(t *testing.T) {
+		qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
+			`{"linkId":"3","item":[{"linkId":"3.2","answer":[{"valueString":"old"}]}]}]}`)
+		got, err := AmendQRWithItemIn(qr, []byte(adaptiveHHAJSON), item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hits, _ := findQRItem(decodeQRItems(t, got), "3.2", nil)
+		if len(hits) != 1 || strings.Join(hits[0], "/") != "3/3.2" || strings.Contains(string(got), `"old"`) {
+			t.Fatalf("supersede at depth on an adaptive questionnaire: hits=%v qr=%s", hits, got)
+		}
+	})
+}

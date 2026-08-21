@@ -732,7 +732,16 @@ func AmendQRWithItem(qrJSON, itemJSON []byte) ([]byte, error) {
 //     under answer.item, and a missing or multiple parent answer is refused, never
 //     fabricated or chosen. Within its group the item is inserted in questionnaire
 //     order, so the QR keeps mirroring the questionnaire after the amendment.
-//   - A linkId the questionnaire does not define is refused.
+//   - A linkId the questionnaire does not define is refused — UNLESS the questionnaire
+//     is an SDC ADAPTIVE one (sdc-questionnaire-questionnaireAdaptive). An adaptive
+//     questionnaire is delivered in parts: the payer's $questionnaire-package carries
+//     the first group(s) and later, enableWhen-gated groups arrive through
+//     $next-question as answers accumulate, so "not in the tree" means "not
+//     delivered yet", not "not an item". The item's eventual group is unknown to the
+//     client, and the only honest placement is the top level; it is appended there.
+//     (A refusal here returned 500 on the clinician-attestation resume against a
+//     real Da Vinci payer whose HomeHealthAssessment is adaptive.) An adaptive item
+//     that HAS been delivered is still placed by the tree.
 //
 // Appending at the top level was wrong for any grouped questionnaire — including
 // every Da Vinci reference questionnaire, whose attested items live under groups.
@@ -766,14 +775,6 @@ func AmendQRWithItemIn(qrJSON, questionnaireJSON, itemJSON []byte) ([]byte, erro
 	if newLink == "" {
 		return nil, fmt.Errorf("dtr: amend qr: amended item has no linkId")
 	}
-	path, ok := questionnaireItemPath(q.Item, newLink)
-	if !ok {
-		canonical := ""
-		if q.Url != nil {
-			canonical = *q.Url
-		}
-		return nil, fmt.Errorf("dtr: amend qr: item %q is not an item of questionnaire %q", newLink, canonical)
-	}
 
 	// Unmarshal the existing item array (may be absent / null).
 	var items []json.RawMessage
@@ -783,6 +784,8 @@ func AmendQRWithItemIn(qrJSON, questionnaireJSON, itemJSON []byte) ([]byte, erro
 		}
 	}
 
+	// Supersede FIRST: an existing occurrence is replaced where it sits regardless
+	// of what the (possibly partial, adaptive) questionnaire tree says about it.
 	items, n, err := qrSupersede(items, newLink, itemJSON)
 	if err != nil {
 		return nil, fmt.Errorf("dtr: amend qr: %w", err)
@@ -791,9 +794,23 @@ func AmendQRWithItemIn(qrJSON, questionnaireJSON, itemJSON []byte) ([]byte, erro
 	case n > 1:
 		return nil, fmt.Errorf("dtr: amend qr: %d items share linkId %q (a repeating group): which one the amendment supersedes is ambiguous", n, newLink)
 	case n == 0:
-		items, err = qrPlace(items, path, itemJSON)
-		if err != nil {
-			return nil, fmt.Errorf("dtr: amend qr: %w", err)
+		path, ok := questionnaireItemPath(q.Item, newLink)
+		switch {
+		case ok:
+			items, err = qrPlace(items, path, itemJSON)
+			if err != nil {
+				return nil, fmt.Errorf("dtr: amend qr: %w", err)
+			}
+		case questionnaireIsAdaptive(q):
+			// Undelivered group of an adaptive questionnaire: the top level is the
+			// only placement the client can make (see the doc comment).
+			items = append(items, json.RawMessage(itemJSON))
+		default:
+			canonical := ""
+			if q.Url != nil {
+				canonical = *q.Url
+			}
+			return nil, fmt.Errorf("dtr: amend qr: item %q is not an item of questionnaire %q", newLink, canonical)
 		}
 	}
 
@@ -807,6 +824,23 @@ func AmendQRWithItemIn(qrJSON, questionnaireJSON, itemJSON []byte) ([]byte, erro
 		return nil, fmt.Errorf("dtr: amend qr: marshal qr: %w", err)
 	}
 	return raw, nil
+}
+
+// sdcQuestionnaireAdaptiveExt marks an SDC adaptive questionnaire — one whose items
+// are delivered incrementally through $next-question, so the tree a client holds
+// at any moment may be a prefix of the source questionnaire's.
+const sdcQuestionnaireAdaptiveExt = "http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-questionnaireAdaptive"
+
+// questionnaireIsAdaptive reports whether q carries the SDC questionnaireAdaptive
+// extension (any value: the extension's presence is the declaration; a payer that
+// serves the whole tree still marks it, and the tree then simply contains the item).
+func questionnaireIsAdaptive(q fhir.Questionnaire) bool {
+	for _, e := range q.Extension {
+		if e.Url == sdcQuestionnaireAdaptiveExt {
+			return true
+		}
+	}
+	return false
 }
 
 // qrPathStep is one level of an item's ancestry in a Questionnaire, root first,
