@@ -3,7 +3,13 @@
 // github.com/HL7-DaVinci/test-data / br-provider @ 43a4806, server/src/main/resources/seed-data/):
 // the HomeOxygen personas (o2billy/o2jane — Patient + Coverage#cms + Observations + the order) and
 // the home-health service persona (G0151/G0155/G0180 modeled as a ServiceRequest). The clinical
-// codes are augmented to the values these personas exercise (E0431, G0151). Synthetic data only — no PHI.
+// codes are augmented to the values these personas exercise (E0431, G0151). The home-health
+// attestation personas (uc04/uc06/uc07) additionally carry the clinician's functional assessment
+// (a ClinicalImpression) and the plan-of-care goals (a Goal), both referenced from
+// ServiceRequest.supportingInfo — a home PT referral carries them beside the order, and the
+// HomeHealthAssessment's Physical Therapy group requires them (3.2 / 3.3); seeding them lets a
+// gateway attest the whole delivered group from the record rather than invent a value. Synthetic
+// data only — no PHI.
 
 package shnsdk
 

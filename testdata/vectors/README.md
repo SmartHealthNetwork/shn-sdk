@@ -82,8 +82,8 @@ test, run against both `2.1/` and `2.2/`:
 | `<line>/claimresponse-pended.json` | PAS `BuildPendedResponseAtLine` — response `Bundle.identifier` becomes mandatory at 2.2. | `TestVectorPendedAtLineConsume` |
 | `<line>/claimresponse-denied-uc08.json` | PAS `BuildDeniedResponseAtLine` — same "interface symmetry" note as approved. | `TestVectorDeniedAtLineConsume` |
 
-Minted by the SAME substrate generator (`tools/goldengen`'s `writePerLineVectors`),
-under the SAME fixed `vecClock`. `sdk/vectors_test.go`'s `TestVector*AtLine*`
+Minted by the SAME substrate golden-corpus generator that produces every other
+vector in this directory, under the SAME fixed `vecClock`. `sdk/vectors_test.go`'s `TestVector*AtLine*`
 tests extend the existing per-file read idiom — there is no directory-walking
 vector loader in the SDK module (by design: the SDK never imports `internal/`,
 and a walker would need to invent its own per-line file-class taxonomy that the

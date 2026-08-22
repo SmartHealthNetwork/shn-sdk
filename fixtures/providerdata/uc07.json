@@ -158,6 +158,56 @@
       }
     },
     {
+      "fullUrl": "ClinicalImpression/ci-mbrpduc07-pt",
+      "resource": {
+        "resourceType": "ClinicalImpression",
+        "id": "ci-mbrpduc07-pt",
+        "status": "completed",
+        "description": "Home physical therapy functional assessment",
+        "subject": {
+          "reference": "Patient/MBR-PD-UC07"
+        },
+        "problem": [
+          {
+            "reference": "Condition/cond-mbrpduc07-m6281"
+          }
+        ],
+        "summary": "Deconditioning with generalized muscle weakness; ambulation limited to short household distances with a front-wheeled walker and supervision."
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ClinicalImpression/ci-mbrpduc07-pt"
+      }
+    },
+    {
+      "fullUrl": "Goal/goal-mbrpduc07-pt",
+      "resource": {
+        "resourceType": "Goal",
+        "id": "goal-mbrpduc07-pt",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-goal"
+          ]
+        },
+        "lifecycleStatus": "active",
+        "description": {
+          "text": "Return to independent household ambulation and stair negotiation with a handrail within 6 weeks of skilled home physical therapy."
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC07"
+        },
+        "addresses": [
+          {
+            "reference": "Condition/cond-mbrpduc07-m6281"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Goal/goal-mbrpduc07-pt"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc07-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -197,6 +247,14 @@
         "reasonReference": [
           {
             "reference": "Condition/cond-mbrpduc07-m6281"
+          }
+        ],
+        "supportingInfo": [
+          {
+            "reference": "ClinicalImpression/ci-mbrpduc07-pt"
+          },
+          {
+            "reference": "Goal/goal-mbrpduc07-pt"
           }
         ]
       },

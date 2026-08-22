@@ -158,6 +158,56 @@
       }
     },
     {
+      "fullUrl": "ClinicalImpression/ci-mbrpduc06-pt",
+      "resource": {
+        "resourceType": "ClinicalImpression",
+        "id": "ci-mbrpduc06-pt",
+        "status": "completed",
+        "description": "Home physical therapy functional assessment",
+        "subject": {
+          "reference": "Patient/MBR-PD-UC06"
+        },
+        "problem": [
+          {
+            "reference": "Condition/cond-mbrpduc06-m6281"
+          }
+        ],
+        "summary": "Generalized lower-extremity weakness with reduced endurance; ambulates short household distances with a walker and standby assistance; unable to rise from a chair without arm support."
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ClinicalImpression/ci-mbrpduc06-pt"
+      }
+    },
+    {
+      "fullUrl": "Goal/goal-mbrpduc06-pt",
+      "resource": {
+        "resourceType": "Goal",
+        "id": "goal-mbrpduc06-pt",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-goal"
+          ]
+        },
+        "lifecycleStatus": "active",
+        "description": {
+          "text": "Regain independent sit-to-stand transfers and community-distance ambulation with a walker within 6 weeks of skilled home physical therapy."
+        },
+        "subject": {
+          "reference": "Patient/MBR-PD-UC06"
+        },
+        "addresses": [
+          {
+            "reference": "Condition/cond-mbrpduc06-m6281"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Goal/goal-mbrpduc06-pt"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc06-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -197,6 +247,14 @@
         "reasonReference": [
           {
             "reference": "Condition/cond-mbrpduc06-m6281"
+          }
+        ],
+        "supportingInfo": [
+          {
+            "reference": "ClinicalImpression/ci-mbrpduc06-pt"
+          },
+          {
+            "reference": "Goal/goal-mbrpduc06-pt"
           }
         ]
       },
