@@ -1,8 +1,10 @@
 package shnsdk
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,13 +42,13 @@ func buildConformantCRD(t *testing.T, member, cpt string) []byte {
 	return req
 }
 
-// answeredQR builds an answered sandbox lumbar QR for the demo persona with the given clinical
+// answeredQR builds an answered demo lumbar QR for the demo persona with the given clinical
 // context (so a test can drive approve / pend by choosing the inputs).
 func answeredQR(t *testing.T, member string, cc ClinicalContext, now time.Time) []byte {
 	t.Helper()
 	patientRef := "Patient/" + member
 	coverageRef := "Coverage/" + member
-	qrJSON, err := FillQuestionnaire(SandboxLumbarQuestionnaire(), cc, QRContext{
+	qrJSON, err := FillQuestionnaire(demoLumbarQuestionnaire(), cc, QRContext{
 		PatientRef:  patientRef,
 		CoverageRef: coverageRef,
 		OrderRef:    "ServiceRequest/sr-" + member,
@@ -83,13 +85,42 @@ func buildConformantClaim(t *testing.T, member, corr string, qrJSON []byte, now 
 	return bundle
 }
 
+// buildConformantClaimAbsolute is buildConformantClaim in the REFERENCE-PAYER-CONFORMANT form —
+// the shape RunPriorAuth now emits (PayerOrgEntry + AbsoluteRefs). Its point here is the
+// reference spellings, not the payer Organization: Claim.patient comes out absolute while
+// ServiceRequest.subject stays relative, because the latter is a patient-compartment anchor.
+func buildConformantClaimAbsolute(t *testing.T, member, corr string, qrJSON []byte, now time.Time) []byte {
+	t.Helper()
+	patientRef := "Patient/" + member
+	srJSON, err := BuildServiceRequest("72148", "MRI lumbar spine without contrast", "M54.16", patientRef)
+	if err != nil {
+		t.Fatalf("BuildServiceRequest: %v", err)
+	}
+	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{
+		QR:            qrJSON,
+		SR:            srJSON,
+		PatientRef:    patientRef,
+		CoverageRef:   "Coverage/" + member,
+		MemberID:      member,
+		Corr:          corr,
+		Created:       now,
+		PayerOrgEntry: true,
+		AbsoluteRefs:  true,
+		Payer:         CMSPayerIdentity,
+	})
+	if err != nil {
+		t.Fatalf("BuildConformantClaimBundle(absolute): %v", err)
+	}
+	return bundle
+}
+
 // ---- TestResponder_CRD ----
 
 // TestResponder_CRD proves the conformant crd-order-select dispatch: PA-required happy path +
 // the rejection rows the deleted minimized test covered.
 func TestResponder_CRD(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	_, srv := h.makeResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now})
+	_, srv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
 
 	t.Run("pa-required", func(t *testing.T) {
 		req := buildConformantCRD(t, "MBR-001", "72148")
@@ -106,13 +137,13 @@ func TestResponder_CRD(t *testing.T) {
 		if !cov.PARequired() {
 			t.Errorf("PARequired = false, want true; cov=%+v", cov)
 		}
-		if !cov.NeedsDTR() || cov.Questionnaires[0] != QuestionnaireCanonicalLumbarMRI {
-			t.Errorf("questionnaire = %v, want %q", cov.Questionnaires, QuestionnaireCanonicalLumbarMRI)
+		if !cov.NeedsDTR() || cov.Questionnaires[0] != SupportedQuestionnaireCanonical {
+			t.Errorf("questionnaire = %v, want %q", cov.Questionnaires, SupportedQuestionnaireCanonical)
 		}
 	})
 
 	t.Run("no-pa-required", func(t *testing.T) {
-		req := buildConformantCRD(t, "MBR-001", "99999") // a CPT the sandbox does not gate
+		req := buildConformantCRD(t, "MBR-001", "99999") // a CPT the test policy does not gate
 		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-nopa-1", req)
 		resp := postInbound(t, srv, envBytes, hubHdr)
 		body := readBody(t, resp)
@@ -128,11 +159,58 @@ func TestResponder_CRD(t *testing.T) {
 		}
 	})
 
+	t.Run("hcpcs-order-pa-required", func(t *testing.T) {
+		// A HCPCS-system draft order round-trips through the Responder the same as CPT:
+		// ParseServiceRequestProductCoding is system-agnostic (CPT or HCPCS), so the
+		// procedure code reaches Adjudicator.OrderSelect regardless of which allowlisted
+		// system it arrived on — the mirror image of the Originator's ProcedureSystem field.
+		member, patientRef := "MBR-001", "Patient/MBR-001"
+		srJSON, err := BuildServiceRequestCoded(systemHCPCS, "G0151", "Home health PT, each 15 minutes", "M54.16", patientRef)
+		if err != nil {
+			t.Fatalf("BuildServiceRequestCoded: %v", err)
+		}
+		covJSON, err := BuildCoverageWithPayer(patientRef, member, CMSPayerIdentity)
+		if err != nil {
+			t.Fatalf("BuildCoverageWithPayer: %v", err)
+		}
+		req, err := BuildConformantOrderSelectRequest(srJSON, covJSON, patientRef)
+		if err != nil {
+			t.Fatalf("BuildConformantOrderSelectRequest: %v", err)
+		}
+		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-hcpcs-1", req)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
+		}
+		cov, err := ParseCards(h.openResponse(t, body))
+		if err != nil {
+			t.Fatalf("ParseCards: %v", err)
+		}
+		if !cov.PARequired() {
+			t.Errorf("PARequired = false, want true (HCPCS G0151); cov=%+v", cov)
+		}
+		if !cov.NeedsDTR() || cov.Questionnaires[0] != SupportedQuestionnaireCanonical {
+			t.Errorf("questionnaire = %v, want %q", cov.Questionnaires, SupportedQuestionnaireCanonical)
+		}
+	})
+
 	t.Run("malformed-no-SR", func(t *testing.T) {
 		// A CDS Hooks request with an empty draftOrders Bundle → no ServiceRequest → 400.
 		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-garbage-1", []byte(`{"context":{"draftOrders":{"resourceType":"Bundle","type":"collection","entry":[]}}}`))
 		resp := postInbound(t, srv, envBytes, hubHdr)
 		assertError(t, resp, readBody(t, resp), http.StatusBadRequest, "parse order-select failed")
+	})
+
+	t.Run("unrecognized-code-system", func(t *testing.T) {
+		// A code.coding present but on neither allowlisted system (CPT/HCPCS) is an honest
+		// no-coding, not a wrong adjudication (FR-36 allowlist) — legible 400 naming the cause.
+		srJSON, _ := BuildServiceRequestCoded("http://loinc.org", "12345-6", "not a procedure system", "M54.16", "Patient/MBR-001")
+		covJSON, _ := BuildCoverageWithPayer("Patient/MBR-001", "MBR-001", CMSPayerIdentity)
+		req, _ := BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-001")
+		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-badsystem-1", req)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		assertError(t, resp, readBody(t, resp), http.StatusBadRequest, "parse order procedure coding failed: shnsdk: ServiceRequest has no {CPT,HCPCS} procedure coding")
 	})
 
 	t.Run("inconsistent-patient", func(t *testing.T) {
@@ -152,7 +230,7 @@ func TestResponder_CRD(t *testing.T) {
 // the rejection rows (malformed bundle → 400; adjudicator error → 422).
 func TestResponder_PASSubmit(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	_, srv := h.makeResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now})
+	_, srv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
 
 	t.Run("approve", func(t *testing.T) {
 		qr := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 8}, h.now)
@@ -176,7 +254,7 @@ func TestResponder_PASSubmit(t *testing.T) {
 	})
 
 	t.Run("pend", func(t *testing.T) {
-		// PriorSurgery without a DiagnosticReport → sandbox pends (FR-20).
+		// PriorSurgery without a DiagnosticReport → the test policy pends (FR-20).
 		qr := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 8, PriorSurgery: true}, h.now)
 		bundle := buildConformantClaim(t, "MBR-001", "pas-pend-1", qr, h.now)
 		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-pend-1", bundle)
@@ -195,7 +273,7 @@ func TestResponder_PASSubmit(t *testing.T) {
 	})
 
 	t.Run("deny", func(t *testing.T) {
-		// Conservative therapy < 6 weeks → sandbox denies.
+		// Conservative therapy < 6 weeks → the test policy denies.
 		qr := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 4}, h.now)
 		bundle := buildConformantClaim(t, "MBR-001", "pas-deny-1", qr, h.now)
 		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-deny-1", bundle)
@@ -234,6 +312,78 @@ func TestResponder_PASSubmit(t *testing.T) {
 		assertError(t, resp, readBody(t, resp), http.StatusForbidden, "inconsistent patient in PAS bundle")
 	})
 
+	// ---- the fence compares MEMBER IDENTITY, not reference SPELLING ----
+	//
+	// A conformant PAS bundle legally carries one patient in two spellings: bundle-internal
+	// references are absolutized so a real payer can resolve them, while the patient-compartment
+	// anchors (ServiceRequest.subject, Coverage.beneficiary) deliberately stay relative so the
+	// payer's `context Patient` retrieves still match. Claim.patient is absolute; SR.subject is
+	// not. A fence that compared raw strings read that as two patients and refused a valid
+	// bundle — which is exactly what took the separated-stack SDK-responder lane down.
+	//
+	// These rows pin BOTH halves: the valid mixed-spelling bundle is accepted, AND a genuinely
+	// different member is still refused in every spelling combination. The second half is the
+	// one that matters: tolerance of spelling must not become tolerance of a different patient.
+
+	t.Run("mixed-spelling-same-patient-accepted", func(t *testing.T) {
+		// The exact shape RunPriorAuth now puts on the wire: absolute Claim.patient +
+		// QuestionnaireResponse.subject, relative ServiceRequest.subject, one member.
+		qr := answeredQR(t, "MBR-001", DemoLumbarContext(), h.now)
+		bundle := buildConformantClaimAbsolute(t, "MBR-001", "pas-abs-1", qr, h.now)
+		if !strings.Contains(string(bundle), `"reference":"https://shn.example/fhir/Patient/MBR-001"`) {
+			t.Fatalf("fixture is not exercising the absolute spelling — the row would pass for the wrong reason")
+		}
+		if !strings.Contains(string(bundle), `"reference":"Patient/MBR-001"`) {
+			t.Fatalf("fixture carries no relative anchor — the row would pass for the wrong reason")
+		}
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-abs-1", bundle)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (one patient in two legal spellings is one patient); body: %s", resp.StatusCode, body)
+		}
+		res, err := parsePASOutcome(h.openResponse(t, body))
+		if err != nil {
+			t.Fatalf("parsePASOutcome: %v", err)
+		}
+		if res.Outcome != "approved" {
+			t.Errorf("outcome = %q, want approved", res.Outcome)
+		}
+	})
+
+	// One row per spelling combination, each a DIFFERENT member on the ServiceRequest. None may
+	// be accepted: if any is, the fence has stopped fencing.
+	for _, tc := range []struct{ name, claimRef, srRef string }{
+		{"absolute-claim-relative-sr", "https://shn.example/fhir/Patient/MBR-001", "Patient/MBR-OTHER"},
+		{"relative-claim-absolute-sr", "Patient/MBR-001", "https://shn.example/fhir/Patient/MBR-OTHER"},
+		{"both-absolute", "https://shn.example/fhir/Patient/MBR-001", "https://other.example/fhir/Patient/MBR-OTHER"},
+		{"different-bases-same-mismatch", "https://a.example/fhir/Patient/MBR-001", "https://b.example/fhir/Patient/MBR-OTHER"},
+	} {
+		t.Run("mismatch-"+tc.name+"-403", func(t *testing.T) {
+			mismatch := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
+				{"resource":{"resourceType":"Claim","patient":{"reference":"` + tc.claimRef + `"}}},
+				{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"` + tc.srRef + `"}}}
+			]}`)
+			envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-mismatch-"+tc.name, mismatch)
+			resp := postInbound(t, srv, envBytes, hubHdr)
+			assertError(t, resp, readBody(t, resp), http.StatusForbidden, "inconsistent patient in PAS bundle")
+		})
+	}
+
+	t.Run("non-patient-reference-cannot-collide-403", func(t *testing.T) {
+		// The identity read returns a reference with no "Patient/" segment verbatim, so a
+		// Group/<member> subject can never be mistaken for Patient/<member> even though the ids
+		// are identical. Without this row, a future "just take the last path segment" rewrite of
+		// the extraction would look equivalent and silently open exactly that hole.
+		mismatch := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
+			{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-001"}}},
+			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Group/MBR-001"}}}
+		]}`)
+		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-mismatch-group", mismatch)
+		resp := postInbound(t, srv, envBytes, hubHdr)
+		assertError(t, resp, readBody(t, resp), http.StatusForbidden, "inconsistent patient in PAS bundle")
+	})
+
 	t.Run("qr-missing-subject-403", func(t *testing.T) {
 		// A QR present but subjectless → reject (a subjectless QR could approve a Claim for a
 		// different patient). Mirrors the deleted bindBundleSubject's REQUIRED-QR-subject arm.
@@ -250,7 +400,7 @@ func TestResponder_PASSubmit(t *testing.T) {
 	t.Run("adjudicator-error-422", func(t *testing.T) {
 		// An Adjudicator whose PriorAuth returns an error → the handler maps it to 422 with the
 		// error text (mirrors the substrate gateway). Uses a dedicated error-returning adjudicator
-		// (the sandbox only errors on un-buildable QR JSON, which the builder rejects first).
+		// (the test policy only errors on un-buildable QR JSON, which the builder rejects first).
 		_, errSrv := h.makeResponderSrv(t, responderIdent, &errPriorAuthAdjudicator{})
 		qr := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 8}, h.now)
 		bundle := buildConformantClaim(t, "MBR-001", "pas-err-1", qr, h.now)
@@ -261,15 +411,15 @@ func TestResponder_PASSubmit(t *testing.T) {
 }
 
 // errPriorAuthAdjudicator returns an error from PriorAuth (the 422 path); the other methods
-// mirror the sandbox so non-PAS legs still work if ever invoked.
+// mirror the PA lane so non-PAS legs still work if ever invoked.
 type errPriorAuthAdjudicator struct{}
 
 func (errPriorAuthAdjudicator) Eligibility(_ string) (bool, string) { return true, "" }
 func (errPriorAuthAdjudicator) OrderSelect(cpt string) (bool, string) {
-	return cpt == "72148", QuestionnaireCanonicalLumbarMRI
+	return cpt == "72148", SupportedQuestionnaireCanonical
 }
 func (errPriorAuthAdjudicator) Questionnaire(_ string) ([]byte, bool) {
-	return SandboxLumbarQuestionnaire(), true
+	return demoLumbarQuestionnaire(), true
 }
 func (errPriorAuthAdjudicator) PriorAuth(_ []byte, _ bool) (PASDecision, error) {
 	return PASDecision{}, errAdjudicationUnavailable
@@ -317,7 +467,7 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 // Provenance) approves — and the key FR-21/FR-32 rejection rows.
 func TestResponder_PASUpdate(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	_, srv := h.makeResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now})
+	_, srv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
 
 	// The QR that pends on submit (PriorSurgery, no DR) and approves on update (DR added).
 	pendQR := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 8, PriorSurgery: true}, h.now)
@@ -369,6 +519,81 @@ func TestResponder_PASUpdate(t *testing.T) {
 		resp := postInbound(t, srv, envBytes, hubHdr)
 		assertError(t, resp, readBody(t, resp), http.StatusForbidden, "ClaimUpdate missing original-claim reference (Claim.related)")
 	})
+
+	// ---- the FR-32 supplemental-data fence matches the TARGET, not its SPELLING ----
+	//
+	// The reference-payer-conformant lane absolutizes bundle references, which rewrites
+	// Provenance.target to its absolute fullUrl while the fence assembles the wanted target
+	// from the bare resource id. Tolerating that is required (the acceptance half is proven
+	// end-to-end by TestPriorAuthClientIntoResponder_PendedThenResumed, which drives the real
+	// client's own amendment through this fence). These rows are the other half: a Provenance
+	// that attributes something ELSE is still refused, in either spelling. Without them, the
+	// tolerance could widen into "any target will do" and nothing would notice.
+
+	for _, tc := range []struct{ name, target string }{
+		{"relative-wrong-id", "DiagnosticReport/dr-SOMEONE-ELSE"},
+		{"absolute-wrong-id", "https://shn.example/fhir/DiagnosticReport/dr-SOMEONE-ELSE"},
+		{"right-id-wrong-type", "QuestionnaireResponse/dr-MBR-001"},
+		{"suffix-lookalike-type", "https://shn.example/fhir/SupplementalDiagnosticReport/dr-MBR-001"},
+	} {
+		t.Run("provenance-targets-"+tc.name+"-403", func(t *testing.T) {
+			// Each row pends its OWN claim first, so the refusal below is attributable to the
+			// Provenance target and not to a missing pend (which answers 409, a different
+			// guard) — and so the rows cannot interfere with each other through the ledger.
+			origCorr := "upd-orig-prov-" + tc.name
+			submit := buildConformantClaim(t, "MBR-001", origCorr, pendQR, h.now)
+			sEnv, sHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", origCorr, submit)
+			sResp := postInbound(t, srv, sEnv, sHdr)
+			sBody := readBody(t, sResp)
+			if sResp.StatusCode != http.StatusOK {
+				t.Fatalf("setup submit status = %d, want 200; body: %s", sResp.StatusCode, sBody)
+			}
+			if res, _ := parsePASOutcome(h.openResponse(t, sBody)); res.Outcome != "pended" {
+				t.Fatalf("setup submit outcome = %q, want pended", res.Outcome)
+			}
+
+			corr := "upd-prov-" + tc.name
+			update := buildConformantUpdate(t, "MBR-001", corr, origCorr, pendQR, h.now)
+			update = retargetProvenance(t, update, tc.target)
+			envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", corr, update)
+			resp := postInbound(t, srv, envBytes, hubHdr)
+			assertError(t, resp, readBody(t, resp), http.StatusForbidden, "ClaimUpdate Provenance does not target the supplemental data")
+		})
+	}
+}
+
+// retargetProvenance rewrites the Provenance entry's target[0].reference — one mutation on top
+// of a real builder's output, never a hand-typed bundle.
+func retargetProvenance(t *testing.T, bundleJSON []byte, target string) []byte {
+	t.Helper()
+	var bundle map[string]any
+	if err := json.Unmarshal(bundleJSON, &bundle); err != nil {
+		t.Fatalf("retargetProvenance: unmarshal: %v", err)
+	}
+	entries, _ := bundle["entry"].([]any)
+	done := false
+	for _, e := range entries {
+		em, _ := e.(map[string]any)
+		res, _ := em["resource"].(map[string]any)
+		if res == nil || res["resourceType"] != "Provenance" {
+			continue
+		}
+		targets, _ := res["target"].([]any)
+		if len(targets) == 0 {
+			t.Fatal("retargetProvenance: Provenance carries no target[]")
+		}
+		t0, _ := targets[0].(map[string]any)
+		t0["reference"] = target
+		done = true
+	}
+	if !done {
+		t.Fatal("retargetProvenance: bundle carries no Provenance entry")
+	}
+	out, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("retargetProvenance: marshal: %v", err)
+	}
+	return out
 }
 
 // ---- TestResponder_FullPAChain ----
@@ -379,7 +604,7 @@ func TestResponder_PASUpdate(t *testing.T) {
 // this Responder (the integration that exercises the conformant Responder PA cases end to end).
 func TestResponder_FullPAChain(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	_, srv := h.makeResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now})
+	_, srv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
 
 	// LEG 1 — CRD order-select → PA-required cards.
 	crdReq := buildConformantCRD(t, "MBR-COVERED", "72148")

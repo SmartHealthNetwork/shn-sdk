@@ -27,7 +27,7 @@ func demoConformantOrderSelect(t *testing.T) []byte {
 }
 
 // demoConformantClaim builds the conformant PAS $submit Claim Bundle the Originator sends for
-// the demo persona, with an answered QR (sandbox lumbar questionnaire).
+// the demo persona, with an answered QR (demo lumbar questionnaire).
 func demoConformantClaim(t *testing.T) []byte {
 	t.Helper()
 	patientRef := "Patient/MBR-COVERED"
@@ -36,7 +36,7 @@ func demoConformantClaim(t *testing.T) []byte {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	qrJSON, err := FillQuestionnaire(SandboxLumbarQuestionnaire(), ClinicalContext{
+	qrJSON, err := FillQuestionnaire(demoLumbarQuestionnaire(), ClinicalContext{
 		ConservativeTherapyWeeks: 8,
 	}, QRContext{
 		PatientRef:  patientRef,

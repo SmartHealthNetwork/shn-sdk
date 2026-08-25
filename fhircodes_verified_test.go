@@ -37,6 +37,10 @@ func TestStandardCodesVerified(t *testing.T) {
 			"Diagnostic imaging study", "tx.fhir.org $lookup 2026-06-13"},
 		{"ReportOperativeNoteLOINC", shnsdk.ReportOperativeNoteLOINC, "11504-8", shnsdk.SystemLOINC,
 			"Surgical operation note", "tx.fhir.org $lookup 2026-06-13"},
+		{"OxygenSaturationLOINC", shnsdk.OxygenSaturationLOINC, "59408-5", shnsdk.SystemLOINC,
+			"Oxygen saturation in Arterial blood by Pulse oximetry", "the live reference payer's own HomeOxygenDispatchPrepopulation CQL library + test/tworilive TestTwoRI_ProviderData_UC03"},
+		{"ArterialPaO2LOINC", shnsdk.ArterialPaO2LOINC, "2703-7", shnsdk.SystemLOINC,
+			"Oxygen [Partial pressure] in Arterial blood", "the live reference payer's own HomeOxygenDispatchPrepopulation CQL library + test/tworilive TestTwoRI_ProviderData_UC03"},
 	}
 	for _, c := range cases {
 		c := c

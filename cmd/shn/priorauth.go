@@ -22,7 +22,7 @@ import (
 )
 
 // resolveTestPayer resolves Payer{ID,EncPub,AuthzPub} + Endpoints for the given
-// payer-identity claim (nil ⇒ legacy sandboxResponders path — spec R4; the caller
+// payer-identity claim (nil ⇒ legacy demoResponders path — spec R4; the caller
 // prints the visibility note when legacy is true). Shared by `shn priorauth` and
 // its `resume` subcommand; doctor shares the underlying resolvePersonaPayer.
 func resolveTestPayer(ctx context.Context, c *http.Client, disc shnsdk.Discovery, pid *shnsdk.PayerIdentifier, cmd string, stderr io.Writer) (shnsdk.Payer, shnsdk.Endpoints, bool, int) {
@@ -96,7 +96,7 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 	// Locate the persona to source DOB/Family from (the order itself is the fixed
 	// test order for this member).
 	var persona shnsdk.DiscoveryPersona
-	for _, p := range disc.SandboxPersonas {
+	for _, p := range disc.DemoPersonas {
 		if p.MemberID == *member {
 			persona = p
 			break
@@ -112,7 +112,7 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 		return rc
 	}
 	if legacy {
-		fmt.Fprintln(stderr, "shn priorauth: note: resolved via sandboxResponders — network predates persona payerId")
+		fmt.Fprintln(stderr, "shn priorauth: note: resolved via demoResponders — network predates persona payerId")
 	}
 
 	devID, err := loadIdentity(keysDir, *id)
@@ -124,15 +124,24 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 		devID.Clock = doctorClock
 	}
 
-	cc, ok := shnsdk.SandboxContextFor(*member)
-	if !ok {
-		fmt.Fprintf(stderr, "shn priorauth: no test clinical context for member %q\n", *member)
-		return exitUsage
+	// The persona's OWN advertised order (T14 fix round 9, ruling 2026-08-24): "a payer
+	// verdict is a function of the ORDER CODE... a descriptor that advertises a
+	// per-persona VERDICT while leaving the ORDER generic is incomplete by
+	// construction." No fallback order — a persona advertising expectedPriorAuth with
+	// no Order is a descriptor bug, surfaced rather than papered over. Clinical is left
+	// zero-value: every mirrored family decides its verdict off the order code alone,
+	// never off the QR's answered content. ProceedOnNotCovered so a persona whose plan
+	// excludes the service comes back with the payer's FORMAL determination rather than
+	// stopping at the advisory card.
+	if persona.Order == nil {
+		fmt.Fprintf(stderr, "shn priorauth: persona %q advertises no order (network descriptor is incomplete)\n", *member)
+		return 1
 	}
-	cpt, display, icd := shnsdk.SandboxUC03Order()
 	req := shnsdk.PriorAuthRequest{
 		Member: *member, DOB: persona.DOB, Family: persona.Family, NPI: "",
-		Clinical: cc, ProcedureCPT: cpt, ProcedureDisplay: display, DiagnosisICD10: icd,
+		ProcedureSystem: persona.Order.System, ProcedureCPT: persona.Order.Code,
+		ProcedureDisplay: persona.Order.Display, DiagnosisICD10: persona.Order.Diagnosis,
+		ProceedOnNotCovered: true,
 	}
 	res, err := devID.RunPriorAuth(ctx, c, ep, payer, req)
 	if err != nil {
@@ -153,7 +162,7 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "outcome=pended needed=%s resume=%s\n", neededCodes(res.NeededItems), *resumeOut)
-		fmt.Fprintf(stdout, "resume with: shn priorauth resume --resume %s --sandbox-supplemental --discovery <url> --id <id> -keys <dir>\n", *resumeOut)
+		fmt.Fprintf(stdout, "resume with: shn priorauth resume --resume %s --report-id <id> --report-cpt <cpt> --discovery <url> --id <id> -keys <dir>\n", *resumeOut)
 	case "denied":
 		reasonCode, rationale, appeal := "", "", ""
 		if res.Denial != nil {
@@ -174,8 +183,9 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 }
 
 // cmdPriorAuthResume implements `shn priorauth resume`: load a resume handle, run the
-// pended→amend ClaimUpdate, print the resumed outcome. --sandbox-supplemental supplies
-// the SDK's SandboxUC04Report; otherwise the supplemental facts come from flags.
+// pended→amend ClaimUpdate, print the resumed outcome. The supplemental facts come from
+// flags — the caller names the evidence they actually hold (v0.46.0 removed the
+// fixture-supplemental shortcut that stamped a canned report instead).
 func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("priorauth resume", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -184,8 +194,7 @@ func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 	id := fs.String("id", "", "your registered holder id (required)")
 	keys := fs.String("keys", "", "key directory holding your signing+encryption keys")
 	out := fs.String("out", ".", "alias for --keys (key directory)")
-	sandboxSupp := fs.Bool("sandbox-supplemental", false, "use the SDK's SandboxUC04Report supplemental")
-	reportID := fs.String("report-id", "", "supplemental DiagnosticReport id (when not --sandbox-supplemental)")
+	reportID := fs.String("report-id", "", "supplemental DiagnosticReport id (required)")
 	cpt := fs.String("report-cpt", "", "supplemental procedure CPT")
 	display := fs.String("report-display", "", "supplemental procedure display")
 	agent := fs.String("provenance-agent", "", "FR-32 provenance source, e.g. Organization/<id>")
@@ -205,12 +214,7 @@ func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "shn priorauth resume: read resume handle %q: %v\n", *resumePath, err)
 		return 1
 	}
-	var supp shnsdk.SupplementalReport
-	if *sandboxSupp {
-		supp = shnsdk.SandboxUC04Report()
-	} else {
-		supp = shnsdk.SupplementalReport{ReportID: *reportID, CPT: *cpt, Display: *display, ProvenanceAgent: *agent}
-	}
+	supp := shnsdk.SupplementalReport{ReportID: *reportID, CPT: *cpt, Display: *display, ProvenanceAgent: *agent}
 
 	ctx := context.Background()
 	c := http.DefaultClient
@@ -231,7 +235,7 @@ func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 		return rc
 	}
 	if legacy {
-		fmt.Fprintln(stderr, "shn priorauth resume: note: resolved via sandboxResponders — network predates persona payerId")
+		fmt.Fprintln(stderr, "shn priorauth resume: note: resolved via demoResponders — network predates persona payerId")
 	}
 
 	devID, err := loadIdentity(keysDir, *id)

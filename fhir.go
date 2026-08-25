@@ -110,11 +110,24 @@ func ParseEligibilityResponse(b []byte) (covered bool, reason string, err error)
 // internal/fhirmap.BuildEligibilityResponse with identical field shapes — proven by
 // the cross-module parity test (test/sdkparity/fhir_parity_test.go).
 //
+// insurer names the member's real Coverage payor — the promoted engine handler
+// derives it from SoR.OpenCoverage via shnsdk.ParsePayerIdentifier, one Coverage
+// read feeding both the verdict and the identity. It is stamped as a LOGICAL reference
+// (Reference.identifier), the standard FHIR idiom for an identifier known but not locally
+// resolvable as a URL. A ZERO-VALUE insurer (both System and Value empty) preserves
+// today's byte-identical output — the pre-insurer literal Reference{Reference:
+// "Organization/payer"} — for callers not yet threading a real Coverage-derived identity
+// (sdk/responder.go's standalone Responder has no Coverage/SoR of its own; parity safety).
+//
 // The "req-" prefix on the request reference is applied here so callers pass only the
 // bare correlationID. created is supplied by the caller so the resource is
 // byte-deterministic for a given clock.
-func BuildEligibilityResponse(correlationID, patientRef string, covered bool, reason string, created time.Time) ([]byte, error) {
+func BuildEligibilityResponse(correlationID, patientRef string, covered bool, reason string, insurer PayerIdentifier, created time.Time) ([]byte, error) {
 	member := strings.TrimPrefix(patientRef, "Patient/")
+	insurerRef := fhir.Reference{Reference: strPtr("Organization/payer")}
+	if insurer.System != "" || insurer.Value != "" {
+		insurerRef = fhir.Reference{Identifier: &fhir.Identifier{System: strPtr(insurer.System), Value: strPtr(insurer.Value)}}
+	}
 	resp := fhir.CoverageEligibilityResponse{
 		Status:  fhir.FinancialResourceStatusCodesActive,
 		Purpose: []fhir.EligibilityResponsePurpose{fhir.EligibilityResponsePurposeBenefits},
@@ -122,7 +135,7 @@ func BuildEligibilityResponse(correlationID, patientRef string, covered bool, re
 		Created: created.UTC().Format(time.RFC3339),
 		Request: fhir.Reference{Reference: strPtr("CoverageEligibilityRequest/req-" + correlationID)},
 		Outcome: fhir.ClaimProcessingCodesComplete,
-		Insurer: fhir.Reference{Reference: strPtr("Organization/payer")},
+		Insurer: insurerRef,
 		Insurance: []fhir.CoverageEligibilityResponseInsurance{{
 			Coverage: fhir.Reference{Reference: strPtr("Coverage/" + member)},
 			Inforce:  boolPtr(covered),
@@ -133,13 +146,13 @@ func BuildEligibilityResponse(correlationID, patientRef string, covered bool, re
 	// ("Attribute value must not be empty"), which a real $validate egress gate
 	// rejects. A not-covered member with no reason (e.g. no Coverage found at all)
 	// must still produce a valid resource: omit the field. This is the LIVE path
-	// (gateway/engine/adjudicator.go's sandboxResponder.Handle calls this copy, not
-	// internal/fhirmap's) — ported-copy drift between this function and
-	// internal/fhirmap.BuildEligibilityResponse is exactly how the MBR-UC04/MBR-UC08
-	// empty-disposition 502s reached production while the substrate twin looked
-	// fine; keep both guards in sync (test/sdkparity's TestEligibilityResponseParity
-	// proves byte-parity, but only for the cases it exercises — check it when
-	// changing either copy).
+	// (the promoted gateway/engine/inbound.go handleEligibilityInbound calls
+	// this copy directly, not internal/fhirmap's) — ported-copy drift between this
+	// function and internal/fhirmap.BuildEligibilityResponse is exactly how the
+	// MBR-UC04/MBR-UC08 empty-disposition 502s reached production while the substrate
+	// twin looked fine; keep both guards in sync (test/sdkparity's
+	// TestEligibilityResponseParity proves byte-parity, but only for the cases it
+	// exercises — check it when changing either copy).
 	if !covered && reason != "" {
 		resp.Disposition = strPtr(reason)
 	}

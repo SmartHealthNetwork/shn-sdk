@@ -87,7 +87,7 @@ func TestResponderFramesAppErrorForCapableRequester(t *testing.T) {
 // capable requester as frame(200, body, ct=application/fhir+json).
 func TestResponderFramesSuccessForCapableRequester(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	srv := h.makeFramedResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now}, framesV1)
+	srv := h.makeFramedResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now}, framesV1)
 
 	cer, err := BuildEligibilityRequest("MBR-001", "9999999999", h.now)
 	if err != nil {
@@ -131,7 +131,7 @@ func TestResponderLegacyWhenNoResolver(t *testing.T) {
 	// Success: nil ResolveFrames ⇒ the opened plaintext is the bare FHIR payload,
 	// NOT a v1 frame.
 	t.Run("success stays bare", func(t *testing.T) {
-		srv := h.makeFramedResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now}, nil)
+		srv := h.makeFramedResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now}, nil)
 		cer, err := BuildEligibilityRequest("MBR-001", "9999999999", h.now)
 		if err != nil {
 			t.Fatalf("BuildEligibilityRequest: %v", err)
@@ -176,7 +176,7 @@ func TestResponderLegacyWhenNoResolver(t *testing.T) {
 // though the requester advertises v1.
 func TestResponderMechanicalErrorsStayBare(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	srv := h.makeFramedResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now}, framesV1)
+	srv := h.makeFramedResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now}, framesV1)
 
 	cer, err := BuildEligibilityRequest("MBR-001", "9999999999", h.now)
 	if err != nil {

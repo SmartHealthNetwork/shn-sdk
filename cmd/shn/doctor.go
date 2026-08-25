@@ -121,12 +121,12 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 
 	// A5. Resolve each advertised persona's test counterparty from the directory
 	// (persona payerId → holder-attested payerIds; legacy descriptors fall back to
-	// sandboxResponders — R4). Runs over ALL advertised personas: network health is
+	// demoResponders — R4). Runs over ALL advertised personas: network health is
 	// a property of the advertised fixture set, independent of --persona filtering.
 	payerFor := map[string]holderEntry{} // member id → resolved payer
 	payerEnc := map[string]*[32]byte{}   // holder id → decoded enc key
 	legacy := false
-	for _, p := range disc.SandboxPersonas {
+	for _, p := range disc.DemoPersonas {
 		h, viaLegacy, diag := resolvePersonaPayer(disc, p.PayerID, holders)
 		if diag != "" {
 			return fail(exitNetworkHealth, "%s", diag)
@@ -142,7 +142,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		payerFor[p.MemberID] = h
 	}
 	if legacy {
-		fmt.Fprintln(stdout, "⚠ test counterparty resolved via sandboxResponders — network predates persona payerId")
+		fmt.Fprintln(stdout, "⚠ test counterparty resolved via demoResponders — network predates persona payerId")
 		pass("test counterparty resolved via legacy responders (%d payer(s))", len(payerEnc))
 	} else {
 		pass("test counterparties resolve in the directory (%d payer(s))", len(payerEnc))
@@ -174,7 +174,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// B2. Run eligibility per seeded persona; assert the coverage outcome.
-	personas := disc.SandboxPersonas
+	personas := disc.DemoPersonas
 	if *persona != "" {
 		filtered := personas[:0:0]
 		for _, p := range personas {
@@ -209,17 +209,19 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 
 	// B3. Prior-authorization — runs AFTER the eligibility loop (eligibility-first).
 	// For each persona advertising an expected PA outcome, run the CRD→DTR→PAS round-trip
-	// and assert the outcome. The clinical ANSWERS (per-scenario, via SandboxContextFor)
-	// drive the outcome — not the member id (FR-35). A pended persona additionally
-	// resumes with the sandbox supplemental and asserts the post-amend outcome.
-	cpt, display, icd := shnsdk.SandboxUC03Order()
+	// and assert the outcome. T14 fix round 9 (ruling 2026-08-24): the order comes from
+	// the PERSONA'S OWN descriptor entry, not a single generic fill — "a payer verdict
+	// is a function of the ORDER CODE... a descriptor that advertises a per-persona
+	// VERDICT while leaving the ORDER generic is incomplete by construction." A pended
+	// persona additionally resumes with a named supplemental report and asserts the
+	// post-amend outcome. ProceedOnNotCovered so a persona advertising a denial is
+	// carried to the payer's FORMAL determination, not stopped at the card.
 	for _, p := range personas {
 		if p.ExpectedPriorAuth == "" {
 			continue
 		}
-		cc, ok := shnsdk.SandboxContextFor(p.MemberID)
-		if !ok {
-			return fail(exitNetworkHealth, "priorauth %s: no test clinical context", p.MemberID)
+		if p.Order == nil {
+			return fail(exitOutcome, "priorauth %s: advertises expectedPriorAuth %q but no order (network descriptor is incomplete)", p.MemberID, p.ExpectedPriorAuth)
 		}
 		h := payerFor[p.MemberID]
 		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub}
@@ -228,10 +230,12 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 			DOB:              p.DOB,
 			Family:           p.Family,
 			NPI:              "",
-			Clinical:         cc,
-			ProcedureCPT:     cpt,
-			ProcedureDisplay: display,
-			DiagnosisICD10:   icd,
+			ProcedureSystem:  p.Order.System,
+			ProcedureCPT:     p.Order.Code,
+			ProcedureDisplay: p.Order.Display,
+			DiagnosisICD10:   p.Order.Diagnosis,
+
+			ProceedOnNotCovered: true,
 		})
 		if err != nil {
 			return fail(exitNetworkHealth, "priorauth %s: round-trip failed: %v", p.MemberID, err)
@@ -242,15 +246,23 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		pass("priorauth %s: %s", p.MemberID, res.Outcome)
 
 		// Resume stage (pended→amend): if the persona advertises a post-amend outcome,
-		// the pended result must carry needed items + a resume handle; resume with the
-		// sandbox supplemental and assert the post-amend outcome.
+		// the pended result must carry needed items + a resume handle; resume with a
+		// supplemental report attributed to the SAME order the persona pended on
+		// (never a fixed/hardcoded family — a persona's amend evidence must match the
+		// order it is evidence for) and assert the post-amend outcome.
 		if p.ExpectedAfterAmend == "" {
 			continue
 		}
 		if res.Outcome != "pended" || len(res.NeededItems) == 0 || res.Resume == nil {
 			return fail(exitOutcome, "priorauth %s: expected a pended result with needed items + resume handle, got %+v", p.MemberID, res)
 		}
-		amended, err := devID.ResumePriorAuth(ctx, c, ep, payer, *res.Resume, shnsdk.SandboxUC04Report())
+		supp := shnsdk.SupplementalReport{
+			ReportID:        "dr-" + p.MemberID + "-operative",
+			CPT:             p.Order.Code,
+			Display:         p.Order.Display,
+			ProvenanceAgent: "Organization/provider",
+		}
+		amended, err := devID.ResumePriorAuth(ctx, c, ep, payer, *res.Resume, supp)
 		if err != nil {
 			return fail(exitNetworkHealth, "priorauth %s: resume round-trip failed: %v", p.MemberID, err)
 		}
@@ -288,7 +300,7 @@ type holderEntry struct {
 // payerIds (FR-G41 semantics; unique by AI-G12): exactly one match, role payer.
 // Zero or multiple matches REFUSE (returned diagnostic) — never pick silently,
 // never fall back on this branch (fallback would mask an AI-G12 regression).
-// payerId absent → legacy path: SandboxResponders[0] (legacy=true; caller prints
+// payerId absent → legacy path: DemoResponders[0] (legacy=true; caller prints
 // the visibility line).
 func resolvePersonaPayer(disc shnsdk.Discovery, pid *shnsdk.PayerIdentifier, holders map[string]holderEntry) (holderEntry, bool, string) {
 	if pid != nil {
@@ -313,12 +325,12 @@ func resolvePersonaPayer(disc shnsdk.Discovery, pid *shnsdk.PayerIdentifier, hol
 			return holderEntry{}, false, fmt.Sprintf("test counterparty %s|%s resolves to %d holders — payer-identity uniqueness (AI-G12) violated", pid.System, pid.Value, len(matches))
 		}
 	}
-	if len(disc.SandboxResponders) == 0 {
-		return holderEntry{}, false, "network advertises no test counterparty (no persona payerId, no sandboxResponders)"
+	if len(disc.DemoResponders) == 0 {
+		return holderEntry{}, false, "network advertises no test counterparty (no persona payerId, no demoResponders)"
 	}
-	h, ok := holders[disc.SandboxResponders[0].HolderID]
+	h, ok := holders[disc.DemoResponders[0].HolderID]
 	if !ok {
-		return holderEntry{}, false, fmt.Sprintf("test payer %q not registered in /holders", disc.SandboxResponders[0].HolderID)
+		return holderEntry{}, false, fmt.Sprintf("test payer %q not registered in /holders", disc.DemoResponders[0].HolderID)
 	}
 	return h, true, ""
 }

@@ -19,12 +19,12 @@ import (
 	"golang.org/x/crypto/nacl/box"
 )
 
-// fakeSandbox stands up the full sandbox discovery surface `shn doctor` probes:
+// fakeNetwork stands up the full network discovery surface `shn doctor` probes:
 // accountsvc /discovery, authz /authorize + /pubkey, registrar /holders, and hub
 // /route. The /authorize + /route legs reimplement just enough of the substrate to
 // drive RunEligibility hermetically (mirrors sdk/originate_test.go's fakeSubstrate,
 // which is unexported in package shnsdk so cannot be reused here directly).
-type fakeSandbox struct {
+type fakeNetwork struct {
 	signPriv     ed25519.PrivateKey // authz token signing key
 	signPub      ed25519.PublicKey  // served at /pubkey
 	payerEnc     *[32]byte          // payer X25519 priv (opens the request)
@@ -51,7 +51,7 @@ type fakeSandbox struct {
 	// Outcome "no-pa-required". With a persona that expects "approved" this is a clean
 	// outcome MISMATCH (no error), exercising doctor's exitOutcome PA branch.
 	paNotRequired bool
-	// emptyResponders makes discovery advertise SandboxResponders: [] — no legacy
+	// emptyResponders makes discovery advertise DemoResponders: [] — no legacy
 	// fallback available. Combined with personas carrying no payerId, this drives
 	// resolvePersonaPayer's "no test counterparty" refusal (R3/R4 boundary).
 	emptyResponders bool
@@ -70,7 +70,7 @@ var paResponseOp = map[string]string{
 	"pas-claim-update":        "pas-update-response",
 }
 
-func (f *fakeSandbox) mint(tok shnsdk.Token) shnsdk.Token {
+func (f *fakeNetwork) mint(tok shnsdk.Token) shnsdk.Token {
 	c := tok
 	c.Signature = nil
 	b, _ := json.Marshal(c)
@@ -78,7 +78,7 @@ func (f *fakeSandbox) mint(tok shnsdk.Token) shnsdk.Token {
 	return tok
 }
 
-func (f *fakeSandbox) authorizeHandler(w http.ResponseWriter, r *http.Request) {
+func (f *fakeNetwork) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	var req shnsdk.AuthorizeRequest
 	body, _ := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -102,19 +102,19 @@ func (f *fakeSandbox) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"token": tok})
 }
 
-func (f *fakeSandbox) pubkeyHandler(w http.ResponseWriter, r *http.Request) {
+func (f *fakeNetwork) pubkeyHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"pubkey": base64.StdEncoding.EncodeToString(f.signPub),
 	})
 }
 
-func (f *fakeSandbox) holdersHandler(w http.ResponseWriter, r *http.Request) {
+func (f *fakeNetwork) holdersHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(f.holders)
 }
 
-func (f *fakeSandbox) routeHandler(w http.ResponseWriter, r *http.Request) {
+func (f *fakeNetwork) routeHandler(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt32(&f.routeHits, 1)
 	body, _ := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
 	env, err := shnsdk.DecodeEnvelope(body)
@@ -175,7 +175,7 @@ func (f *fakeSandbox) routeHandler(w http.ResponseWriter, r *http.Request) {
 // it); the three PA legs → CRD cards (PA required) → the lumbar-MRI questionnaire →
 // an approved (or, when paDeny, denied) ClaimResponse. Mirrors the SDK's own
 // paFakeSubstrate.payloadFor so the doctor fake drives the same RunPriorAuth wiring.
-func (f *fakeSandbox) payloadFor(txType string, reqPlain []byte) []byte {
+func (f *fakeNetwork) payloadFor(txType string, reqPlain []byte) []byte {
 	switch txType {
 	case "coverage-eligibility":
 		covered := !strings.Contains(strings.ToUpper(string(reqPlain)), "NOTCOVERED")
@@ -253,7 +253,7 @@ func (f *fakeSandbox) payloadFor(txType string, reqPlain []byte) []byte {
 // start wires the four fakes onto a single httptest server (one origin: doctor
 // treats --discovery as the accountsvc base, and discovery's endpoints point back
 // at this same origin). Returns the server.
-func (f *fakeSandbox) start(t *testing.T) *httptest.Server {
+func (f *fakeNetwork) start(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/authorize", f.authorizeHandler)
@@ -274,7 +274,7 @@ func (f *fakeSandbox) start(t *testing.T) *httptest.Server {
 			responders = nil
 		}
 		disc := shnsdk.Discovery{
-			Sandbox:             true,
+			Demo:                true,
 			SyntheticDataOnly:   true,
 			WireProtocolVersion: wire,
 			Endpoints: shnsdk.DiscoveryEndpoints{
@@ -283,8 +283,8 @@ func (f *fakeSandbox) start(t *testing.T) *httptest.Server {
 				Registrar: srv.URL,
 			},
 			AuthzPublicKeyURL: srv.URL + "/pubkey",
-			SandboxResponders: responders,
-			SandboxPersonas:   f.personas,
+			DemoResponders:    responders,
+			DemoPersonas:      f.personas,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(disc)
@@ -292,10 +292,10 @@ func (f *fakeSandbox) start(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// newFakeSandbox builds a fully-wired healthy sandbox plus a dev keys dir, returning
-// the sandbox, the dev's holder id, and the keys dir. The dev id is present+active in
+// newFakeNetwork builds a fully-wired healthy fake network plus a dev keys dir, returning
+// the fake network, the dev's holder id, and the keys dir. The dev id is present+active in
 // /holders by default.
-func newFakeSandbox(t *testing.T) (*fakeSandbox, string, string) {
+func newFakeNetwork(t *testing.T) (*fakeNetwork, string, string) {
 	t.Helper()
 	signPub, signPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -319,12 +319,12 @@ func newFakeSandbox(t *testing.T) (*fakeSandbox, string, string) {
 	}
 
 	cms := shnsdk.CMSPayerIdentity
-	f := &fakeSandbox{
+	f := &fakeNetwork{
 		signPriv: signPriv, signPub: signPub,
 		payerEnc: payerPriv, payerPub: payerPub,
 		payerID: "payer", now: now,
 		personas: []shnsdk.DiscoveryPersona{
-			{MemberID: "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson", ExpectedEligibility: "covered", ExpectedPriorAuth: "approved", PayerID: &cms},
+			{MemberID: "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson", ExpectedEligibility: "covered", ExpectedPriorAuth: "approved", PayerID: &cms, Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "L8000", Display: "Breast prosthesis, mastectomy bra", Diagnosis: "Z90.10"}},
 			{MemberID: "MBR-NOTCOVERED", DOB: "1975-04-02", Family: "Johansson", ExpectedEligibility: "not-covered", PayerID: &cms},
 		},
 	}
@@ -336,14 +336,14 @@ func newFakeSandbox(t *testing.T) (*fakeSandbox, string, string) {
 	return f, devID, dir
 }
 
-// doctorClock pins the doctor's eligibility legs to the sandbox clock. doctor reads it
+// doctorClock pins the doctor's eligibility legs to the fake network's clock. doctor reads it
 // to let tests drive a fixed-clock substrate.
 func init() { doctorClock = func() time.Time { return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC) } }
 
 func TestDoctor_HappyPath(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	srv := f.start(t)
-	// The sandbox enc pub must be the dev's actual pub so the response seals back.
+	// The fake network's enc pub must be the dev's actual pub so the response seals back.
 	id, err := loadIdentity(dir, devID)
 	if err != nil {
 		t.Fatalf("loadIdentity: %v", err)
@@ -371,7 +371,7 @@ func TestDoctor_HappyPath(t *testing.T) {
 // returns "no-pa-required" while the persona expects "approved" — a clean outcome
 // MISMATCH (no error) → doctor exits exitOutcome with a got/want message.
 func TestDoctor_PriorAuthMismatch(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	srv := f.start(t)
 	id, _ := loadIdentity(dir, devID)
 	f.requesterEnc = id.EncPub
@@ -390,7 +390,7 @@ func TestDoctor_PriorAuthMismatch(t *testing.T) {
 // eligibility outcome mismatches, doctor exits the eligibility code and the PA line
 // never appears (the run returns on the first eligibility failure).
 func TestDoctor_EligibilityBeforePriorAuth(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	srv := f.start(t)
 	id, _ := loadIdentity(dir, devID)
 	f.requesterEnc = id.EncPub
@@ -410,7 +410,7 @@ func TestDoctor_EligibilityBeforePriorAuth(t *testing.T) {
 }
 
 func TestDoctor_VersionUnsupported_FailsBeforeEligibility(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	f.discWireVersion = "9.9.9"
 	srv := f.start(t)
 	id, _ := loadIdentity(dir, devID)
@@ -429,10 +429,10 @@ func TestDoctor_VersionUnsupported_FailsBeforeEligibility(t *testing.T) {
 }
 
 // TestDoctor_LegacyResponderNotRegisteredRefused (R4 legacy branch): personas carry no
-// payerId (legacy descriptor) AND the advertised SandboxResponders[0] holder is absent
+// payerId (legacy descriptor) AND the advertised DemoResponders[0] holder is absent
 // from /holders → refuse, never silently proceed with an unresolved payer.
 func TestDoctor_LegacyResponderNotRegisteredRefused(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	for i := range f.personas {
 		f.personas[i].PayerID = nil
 	}
@@ -458,10 +458,10 @@ func TestDoctor_LegacyResponderNotRegisteredRefused(t *testing.T) {
 }
 
 // TestDoctor_NoTestCounterpartyAdvertisedRefused (R3/R4 boundary): personas carry no
-// payerId AND the descriptor advertises no SandboxResponders either — nothing to
+// payerId AND the descriptor advertises no DemoResponders either — nothing to
 // resolve, legacy or directory → refuse.
 func TestDoctor_NoTestCounterpartyAdvertisedRefused(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	for i := range f.personas {
 		f.personas[i].PayerID = nil
 	}
@@ -477,7 +477,7 @@ func TestDoctor_NoTestCounterpartyAdvertisedRefused(t *testing.T) {
 	if code != exitNetworkHealth {
 		t.Fatalf("doctor exit=%d, want exitNetworkHealth=%d\nstdout=%s\nstderr=%s", code, exitNetworkHealth, stdout, stderr)
 	}
-	if !strings.Contains(stdout+stderr, "network advertises no test counterparty (no persona payerId, no sandboxResponders)") {
+	if !strings.Contains(stdout+stderr, "network advertises no test counterparty (no persona payerId, no demoResponders)") {
 		t.Errorf("message should report the no-counterparty refusal: %s %s", stdout, stderr)
 	}
 	if strings.Contains(stdout, "PASS") {
@@ -488,7 +488,7 @@ func TestDoctor_NoTestCounterpartyAdvertisedRefused(t *testing.T) {
 // TestDoctor_DirectoryResolutionLine: directory resolution is the default path when
 // personas advertise a payerId — the happy-path output names it, not the legacy path.
 func TestDoctor_DirectoryResolutionLine(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	srv := f.start(t)
 	id, err := loadIdentity(dir, devID)
 	if err != nil {
@@ -503,7 +503,7 @@ func TestDoctor_DirectoryResolutionLine(t *testing.T) {
 	if !strings.Contains(stdout, "test counterparties resolve in the directory (1 payer") {
 		t.Errorf("stdout should report the directory-resolution pass line: %s", stdout)
 	}
-	if strings.Contains(stdout, "resolved via sandboxResponders") {
+	if strings.Contains(stdout, "resolved via demoResponders") {
 		t.Errorf("stdout must not mention the legacy fallback on the directory-resolution path: %s", stdout)
 	}
 }
@@ -512,7 +512,7 @@ func TestDoctor_DirectoryResolutionLine(t *testing.T) {
 // PASS with the R4 visibility line and the legacy-phrased pass line (not the directory
 // phrasing).
 func TestDoctor_LegacyFallbackVisible(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	// Zero out PayerID on every fixture persona — the network predates persona payerId.
 	for i := range f.personas {
 		f.personas[i].PayerID = nil
@@ -528,7 +528,7 @@ func TestDoctor_LegacyFallbackVisible(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("doctor exit=%d (want %d)\nstdout=%s\nstderr=%s", code, exitOK, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "resolved via sandboxResponders — network predates persona payerId") {
+	if !strings.Contains(stdout, "resolved via demoResponders — network predates persona payerId") {
 		t.Errorf("stdout should report the R4 visibility line: %s", stdout)
 	}
 	if !strings.Contains(stdout, "resolved via legacy responders") {
@@ -542,7 +542,7 @@ func TestDoctor_LegacyFallbackVisible(t *testing.T) {
 // TestDoctor_PayerIDNoMatchRefused (R3): the advertised payerId matches zero /holders
 // rows → refuse, never fall back.
 func TestDoctor_PayerIDNoMatchRefused(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	// Mutate the payer holder row's declared payerIds value off the persona's payerId.
 	f.holders[0]["payerIds"] = []map[string]string{{"system": shnsdk.CMSPayerIdentity.System, "value": "99999"}}
 	srv := f.start(t)
@@ -567,7 +567,7 @@ func TestDoctor_PayerIDNoMatchRefused(t *testing.T) {
 // TestDoctor_PayerIDMultiMatchRefused (R3/AI-G12): the advertised payerId matches TWO
 // /holders rows → refuse, never pick.
 func TestDoctor_PayerIDMultiMatchRefused(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	cms := shnsdk.CMSPayerIdentity
 	payerRow := f.holders[0]
 	f.holders = append(f.holders, map[string]any{
@@ -597,7 +597,7 @@ func TestDoctor_PayerIDMultiMatchRefused(t *testing.T) {
 // TestDoctor_PayerIDWrongRoleRefused: the single matching holder row is not role=payer
 // → refuse with the role mismatch named.
 func TestDoctor_PayerIDWrongRoleRefused(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	f.holders[0]["role"] = "provider"
 	srv := f.start(t)
 	id, err := loadIdentity(dir, devID)
@@ -619,7 +619,7 @@ func TestDoctor_PayerIDWrongRoleRefused(t *testing.T) {
 }
 
 func TestDoctor_DevIDAbsentFromHolders(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	srv := f.start(t)
 	id, _ := loadIdentity(dir, devID)
 	f.requesterEnc = id.EncPub
@@ -636,7 +636,7 @@ func TestDoctor_DevIDAbsentFromHolders(t *testing.T) {
 }
 
 func TestDoctor_OutcomeMismatch(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	srv := f.start(t)
 	id, _ := loadIdentity(dir, devID)
 	f.requesterEnc = id.EncPub
@@ -655,12 +655,12 @@ func TestDoctor_OutcomeMismatch(t *testing.T) {
 }
 
 // TestDoctor_PriorAuthPendedResume: a pended persona pends, doctor resumes with the
-// sandbox supplemental, and the post-amend outcome is approved → exitOK.
+// demo supplemental, and the post-amend outcome is approved → exitOK.
 func TestDoctor_PriorAuthPendedResume(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	f.paPended = true
 	f.personas = []shnsdk.DiscoveryPersona{
-		{MemberID: "MBR-UC04", DOB: "1982-11-03", Family: "Chen", ExpectedEligibility: "covered", ExpectedPriorAuth: "pended", ExpectedAfterAmend: "approved"},
+		{MemberID: "MBR-UC04", DOB: "1982-11-03", Family: "Chen", ExpectedEligibility: "covered", ExpectedPriorAuth: "pended", ExpectedAfterAmend: "approved", Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "G0151", Display: "Services of a qualified physical therapist in the home health setting, each 15 minutes", Diagnosis: "I63.9"}},
 	}
 	srv := f.start(t)
 	id, err := loadIdentity(dir, devID)
@@ -684,10 +684,10 @@ func TestDoctor_PriorAuthPendedResume(t *testing.T) {
 // TestDoctor_PriorAuthDenied: a denied persona (A3 review action) → exitOK (the outcome
 // matches the persona's ExpectedPriorAuth "denied").
 func TestDoctor_PriorAuthDenied(t *testing.T) {
-	f, devID, dir := newFakeSandbox(t)
+	f, devID, dir := newFakeNetwork(t)
 	f.paUC08Denied = true
 	f.personas = []shnsdk.DiscoveryPersona{
-		{MemberID: "MBR-UC08", DOB: "1971-02-09", Family: "Okafor", ExpectedEligibility: "covered", ExpectedPriorAuth: "denied"},
+		{MemberID: "MBR-UC08", DOB: "1971-02-09", Family: "Okafor", ExpectedEligibility: "covered", ExpectedPriorAuth: "denied", Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "J3490", Display: "Unclassified drugs - investigational gene therapy agent", Diagnosis: "D57.1"}},
 	}
 	srv := f.start(t)
 	id, err := loadIdentity(dir, devID)

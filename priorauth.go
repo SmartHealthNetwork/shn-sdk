@@ -14,30 +14,47 @@ import (
 )
 
 // PriorAuthRequest is the dev-VISIBLE input to RunPriorAuth: the member to prior-auth
-// FOR, the ordering NPI, the clinical answers that drive the DTR fill / adjudication
-// outcome, AND the order being prior-authed (procedure + diagnosis). By design,
-// the values that drive the outcome are visible inputs — the order details
-// and the clinical context are both supplied here, never hardcoded inside RunPriorAuth.
-// SandboxUC03Order + SandboxUC03Context provide the MBR-COVERED→approved values.
+// FOR, the ordering NPI, the clinical answers that fill the DTR questionnaire, AND the
+// order being prior-authed (procedure + diagnosis). By design, the values a payer reads
+// are visible inputs — the order details and the clinical context are both supplied
+// here, never hardcoded inside RunPriorAuth. DemoLumbarContext supplies a complete demo
+// clinical fill; the order itself should name one of the reference payer's advertised
+// families (e.g. L8000/E0431), never a code the network does not handle.
+//
+// A conformant payer keys its verdict on the ORDER (the requested-service code) and its
+// own policy, never on this SDK's fixture answers; the clinical context exists so the
+// QuestionnaireResponse this flow puts on the wire carries real, attributable content.
 type PriorAuthRequest struct {
 	Member string
 	DOB    string
 	Family string
 	NPI    string
-	// Clinical drives the DTR FillQuestionnaire answers (and thus the payer's outcome).
+	// Clinical drives the DTR FillQuestionnaire answers.
 	Clinical ClinicalContext
-	// The order being prior-authed (sandbox defaults via SandboxUC03Order).
+	// The order being prior-authed. ProcedureSystem is the code SYSTEM: "" defaults to
+	// CPT (systemCPT) so every EXISTING caller that set
+	// only ProcedureCPT/ProcedureDisplay/DiagnosisICD10 is unaffected. Set it to the HCPCS
+	// system URI to prior-auth one of the mirrored families (E0250/L8000/G0151/J3490) — a
+	// discovery descriptor's advertised persona.Order names both the system and the code.
+	ProcedureSystem  string
 	ProcedureCPT     string
 	ProcedureDisplay string
 	DiagnosisICD10   string
+	// ProceedOnNotCovered keeps the flow running past a CRD card that says the service
+	// is NOT covered, so the requester gets the payer's FORMAL determination (a PAS
+	// denial with its rationale) rather than stopping at the advisory card. Default
+	// false: a not-covered card is terminal and RunPriorAuth returns Outcome
+	// "not-covered" (the originator's own stop, no PAS leg). Same semantics as the
+	// substrate originator's proceedOnNotCovered.
+	ProceedOnNotCovered bool
 }
 
-// SandboxUC03Context returns the ClinicalContext that drives the sandbox
-// MBR-COVERED path to "approved": 6 weeks of conservative therapy (≥6), prior
-// imaging present, no neuro deficit. These mirror the substrate's MBR-COVERED
-// clinical fixture (internal/gateway holderdata) so the SDK fills the questionnaire
-// with answers the sandbox payer adjudicates as approved.
-func SandboxUC03Context() ClinicalContext {
+// DemoLumbarContext returns the complete ClinicalContext for the demo lumbar-MRI
+// questionnaire: 6 weeks of conservative therapy, prior imaging present, no neuro
+// deficit. It fills every leaf the demo questionnaire declares, so the QR this SDK puts
+// on the wire is fully answered and every answer carries its DTR information-origin
+// attribution. It is fixture data for the demo questionnaire — not a policy input.
+func DemoLumbarContext() ClinicalContext {
 	return ClinicalContext{
 		ConditionCode:            "M51.16",
 		ConditionRef:             "Condition/cond-m5116",
@@ -51,48 +68,27 @@ func SandboxUC03Context() ClinicalContext {
 	}
 }
 
-// SandboxUC04Context drives the sandbox MBR-UC04 path to PENDED on exchange-1: the
-// auto-approval answers PLUS PriorSurgery=true, which the payer pends awaiting an
-// operative DiagnosticReport. weeks=6 means it APPROVES once that report is attached
-// via the ClaimUpdate. Mirrors the substrate MBR-UC04 fixture (internal/gateway/holderdata.go).
-func SandboxUC04Context() ClinicalContext {
-	cc := SandboxUC03Context()
+// DemoLumbarContextPriorSurgery is DemoLumbarContext plus a prior lumbar surgery — the
+// fill a member with an operative history produces. It is the context the pended→amend
+// exercise uses, because the amend carries that surgery's operative DiagnosticReport (a
+// SupplementalReport you build yourself — this package ships no fixture constructor for
+// one); the PEND itself comes from the payer's own policy on the order, never from this
+// field.
+func DemoLumbarContextPriorSurgery() ClinicalContext {
+	cc := DemoLumbarContext()
 	cc.PriorSurgery = true
 	cc.PriorSurgeryRef = "Procedure/proc-laminectomy"
 	return cc
 }
 
-// SandboxUC08Context drives the sandbox MBR-UC08 path to DENIED: only 4 weeks of
-// conservative therapy (< 6), no prior surgery, not high-disability → the payer denies.
-// Mirrors the substrate MBR-UC08 fixture.
-func SandboxUC08Context() ClinicalContext {
-	cc := SandboxUC03Context()
+// DemoLumbarContextShortTherapy is DemoLumbarContext with only 4 weeks of conservative
+// therapy — the fill a member early in their treatment course produces. Kept as a
+// SECOND, materially different fill so callers can exercise the questionnaire with more
+// than one answer set; it is not a verdict lever.
+func DemoLumbarContextShortTherapy() ClinicalContext {
+	cc := DemoLumbarContext()
 	cc.ConservativeTherapyWeeks = 4
 	return cc
-}
-
-// SandboxContextFor returns the sandbox ClinicalContext for a known sandbox member —
-// the ONE place persona→answers is paired (so the CLI/doctor cannot mispair). The
-// ANSWERS, not the member id, drive the payer's outcome (FR-35): MBR-COVERED →
-// approved, MBR-UC04 → pended (then approved on amend), MBR-UC08 → denied. ok=false
-// for an unknown member.
-func SandboxContextFor(memberID string) (ClinicalContext, bool) {
-	switch memberID {
-	case "MBR-COVERED":
-		return SandboxUC03Context(), true
-	case "MBR-UC04":
-		return SandboxUC04Context(), true
-	case "MBR-UC08":
-		return SandboxUC08Context(), true
-	default:
-		return ClinicalContext{}, false
-	}
-}
-
-// SandboxUC03Order returns the sandbox prior-auth order: a lumbar-spine MRI without
-// contrast (CPT 72148 / ICD-10-CM M51.16), the order that requires PA in the sandbox.
-func SandboxUC03Order() (cpt, display, icd10 string) {
-	return "72148", "MRI lumbar spine w/o contrast", "M51.16"
 }
 
 // RunPriorAuth runs a full prior-authorization through the substrate — the
@@ -121,14 +117,24 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 
 	// The CRD-leg inputs: the draft order (ServiceRequest) + the Coverage prefetch.
 	// Built from the dev-visible order in req, not hardcoded.
-	srJSON, err := BuildServiceRequest(req.ProcedureCPT, req.ProcedureDisplay, req.DiagnosisICD10, patientRef)
+	procSystem := req.ProcedureSystem
+	if procSystem == "" {
+		procSystem = systemCPT // backward-compat default (older callers never set this)
+	}
+	srJSON, err := BuildServiceRequestCoded(procSystem, req.ProcedureCPT, req.ProcedureDisplay, req.DiagnosisICD10, patientRef)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: build service request: %w", err)
 	}
 	// The Coverage's urn:shn:coverage MB identifier carries the BARE member id (the
 	// identifier-semantics rule); coverageRef above stays the REFERENCE-shaped value the
 	// QRContext/insurance roles need.
-	covJSON, err := BuildCoverage(patientRef, req.Member)
+	// The CRD prefetch Coverage must NAME its payer. A real payer's coverage-requirements
+	// service reads Coverage.payor to decide whose rules apply and refuses a payor it cannot
+	// identify, so the generic unidentified Organization reference this leg used to send is
+	// rejected outright — the whole prior-auth then fails at leg 1, before any of the PA
+	// flow runs. BuildCoverageWithPayer carries the contained payer Organization with the
+	// same identity every later leg of this flow already stamps.
+	covJSON, err := BuildCoverageWithPayer(patientRef, req.Member, CMSPayerIdentity)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: build coverage: %w", err)
 	}
@@ -148,6 +154,19 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: parse cards: %w", err)
 	}
+	// A NOT-COVERED verdict is its own outcome, distinct from "no PA needed" — both
+	// skip the PA legs, but one says "go ahead, no authorization required" and the other
+	// says "this plan does not cover this service". Collapsing them (as this flow did
+	// before v0.46.0) reported a coverage refusal as a green no-PA-required.
+	if cov.Covered == CoveredNotCovered {
+		if !req.ProceedOnNotCovered {
+			return PriorAuthResult{Outcome: "not-covered"}, nil
+		}
+		// Proceed to get the payer's FORMAL determination. A not-covered card carries no
+		// questionnaire, so there is no DTR leg to run: submit the claim as-is and let the
+		// payer's ClaimResponse carry the denial and its rationale.
+		return id.submitPriorAuthClaim(ctx, c, ep, payer, pci, req, srJSON, patientRef, coverageRef, nil)
+	}
 	if !cov.PARequired() {
 		// No PA needed for this order — terminal, short-circuit (no DTR/PAS legs).
 		return PriorAuthResult{Outcome: "no-pa-required"}, nil
@@ -157,13 +176,13 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	}
 	canonical := StripCanonicalVersion(cov.Questionnaires[0])
 
-	// LEG 2 — DTR questionnaire fetch + local auto-fill. covJSON (built above for the
-	// CRD prefetch) carries no id — sdk.BuildCoverage's output is id-less by design
-	// (Coverage.id is a server-assigned identity, not something a requester mints).
-	// A 2.2 (qr-required) responder derives the QR shell's coverage reference from
-	// Coverage.id and fails closed without one, so the fetch leg needs its
-	// OWN id-stamped copy — reuse withResourceID (sdk/crd.go) rather than mutate
-	// covJSON, which the CRD leg above already sent unstamped.
+	// LEG 2 — DTR questionnaire fetch + local auto-fill. A 2.2 (qr-required) responder
+	// derives the QR shell's coverage reference from Coverage.id and fails closed without a
+	// STABLE, request-specific one, so the fetch leg needs its own id-stamped copy — reuse
+	// withResourceID (sdk/crd.go) rather than mutate covJSON, which the CRD leg above already
+	// sent as built. (covJSON does carry an id of its own: BuildCoverageWithPayer stamps the
+	// builder's fixed conformant id. Stamping a member-derived one here keeps the fetch leg's
+	// coverage reference distinguishable per request rather than reusing one constant.)
 	dtrCovJSON, err := withResourceID(covJSON, "coverage-"+req.Member)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: stamp coverage id: %w", err)
@@ -193,17 +212,38 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		// the CRD card advertised, else the payer swapped questionnaires under us.
 		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: fetched questionnaire %q != advertised canonical %q", fetchedURL, canonical)
 	}
-	qrJSON, err := FillQuestionnaire(questionnaireJSON, req.Clinical, QRContext{
+	qc := QRContext{
 		PatientRef:  patientRef,
 		CoverageRef: coverageRef,
 		OrderRef:    "ServiceRequest/sr-" + req.Member,
 		Authored:    id.now(),
-	})
+	}
+	// Auto-fill ONLY the one questionnaire this package ships prefill logic for. A payer
+	// running real Da Vinci advertises its OWN questionnaires; for those the honest answer
+	// is a zero-answer shell naming what the payer advertised, never invented answers
+	// (BuildQuestionnaireResponseShell). The clinician — or an operated $populate engine on
+	// the requester's side — authors the content.
+	var qrJSON []byte
+	if fetchedURL == SupportedQuestionnaireCanonical {
+		qrJSON, err = FillQuestionnaire(questionnaireJSON, req.Clinical, qc)
+	} else {
+		qrJSON, err = BuildQuestionnaireResponseShell(questionnaireJSON, qc)
+	}
 	if err != nil {
-		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: fill questionnaire: %w", err)
+		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: build questionnaire response: %w", err)
 	}
 
 	// LEG 3 — PAS submit.
+	return id.submitPriorAuthClaim(ctx, c, ep, payer, pci, req, srJSON, patientRef, coverageRef, qrJSON)
+}
+
+// submitPriorAuthClaim is RunPriorAuth's LEG 3: build the conformant PAS $submit bundle
+// and run the sealed pas-claim round-trip, returning the parsed outcome (with a resume
+// handle on a pend). qrJSON may be nil — a payer whose card advertised no questionnaire
+// gets a claim with no QuestionnaireResponse entry (the builder's documented
+// no-questionnaire lane), which is the shape the ProceedOnNotCovered path submits to
+// obtain a FORMAL determination after an advisory not-covered card.
+func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci string, req PriorAuthRequest, srJSON []byte, patientRef, coverageRef string, qrJSON []byte) (PriorAuthResult, error) {
 	var pasCorrRaw [16]byte
 	if _, err := rand.Read(pasCorrRaw[:]); err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: generate claim correlation id: %w", err)
@@ -217,7 +257,17 @@ func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		MemberID:    req.Member,
 		Corr:        pasCorr,
 		Created:     id.now(),
-		Payer:       CMSPayerIdentity,
+		// The same reason ResumePriorAuth carries these: a real payer resolves
+		// Claim.insurer and Coverage.payor against the bundle it was handed and refuses
+		// a reference it cannot find, so the generic unresolvable payer Organization
+		// this leg used to send is rejected before adjudication. These make the bundle
+		// this builder's reference-payer-conformant form — payer Organization as a
+		// resolvable entry, absolute references, and the Claim item stamped with the
+		// ORDER's own procedure code rather than the builder's placeholder, which is
+		// what a code-keyed payer decides on.
+		PayerOrgEntry: true,
+		AbsoluteRefs:  true,
+		Payer:         CMSPayerIdentity,
 	})
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: build claim bundle: %w", err)
@@ -448,18 +498,6 @@ type SupplementalReport struct {
 	ProvenanceAgent string // FR-32 source attribution, e.g. "Organization/<holderID>" — REQUIRED
 }
 
-// SandboxUC04Report returns the operative DiagnosticReport + provenance facts that
-// drive MBR-UC04's pend to "approved". Mirrors the substrate fixture
-// (SupplementalReport("MBR-UC04") → fhirmap.BuildDiagnosticReport).
-func SandboxUC04Report() SupplementalReport {
-	return SupplementalReport{
-		ReportID:        "dr-uc04-operative",
-		CPT:             "72148",
-		Display:         "MRI lumbar spine w/o contrast",
-		ProvenanceAgent: "Organization/provider",
-	}
-}
-
 // ResumePriorAuth drives the exchange-2 ClaimUpdate from a pended PA's resume
 // handle: validate supp (ProvenanceAgent present → else error, no wire) → build the
 // operative DiagnosticReport + Provenance → BuildConformantClaimUpdateBundle (reusing the
@@ -507,7 +545,21 @@ func (id Identity) ResumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 		Corr:             updateCorr,
 		OriginalCorr:     resume.OriginalCorrelationID,
 		Created:          id.now(),
-		Payer:            CMSPayerIdentity,
+		// A Da Vinci PAS amended re-POST is not merely "the submit bundle again": the
+		// payer has to be able to find the authorization being amended, and to be told
+		// that the amendment carries NEW information rather than restating the old.
+		// Those are Claim.related[0].claim.reference resolving to the prior Claim as an
+		// in-bundle entry, and the PAS infoChanged item extension. Without them a real
+		// payer either refuses the update outright (the prior Claim is unresolvable) or
+		// carries the prior decision forward unchanged, so a genuinely-answered
+		// amendment comes back still pended — the documented resume flow would never
+		// reach a determination. Setting these makes the bundle this builder's
+		// reference-payer-conformant form, which also resolves the payor and the insurer
+		// against real bundle entries and stamps the Claim item with the ORDER's own
+		// procedure code instead of the builder's placeholder.
+		PayerOrgEntry: true,
+		AbsoluteRefs:  true,
+		Payer:         CMSPayerIdentity,
 	})
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: build claim update bundle: %w", err)

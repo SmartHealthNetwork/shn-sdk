@@ -10,7 +10,7 @@ package shnsdk
 
 const (
 	// MemberSystem is the Patient.identifier system used to resolve a member to a Patient
-	// (sandbox convention; realistic Coverage-driven resolution is additive).
+	// (demo convention; realistic Coverage-driven resolution is additive).
 	MemberSystem = "urn:shn:member"
 
 	// Standard terminology systems.
@@ -49,6 +49,29 @@ const (
 	// TestStandardCodesVerified (FR-36: codes are validated, never hallucinated).
 	ProcLaminectomySNOMED     = "387731002" // Laminectomy
 	ProcMicrodiscectomySNOMED = "178625001" // Primary lumbar microdiscectomy
+
+	// HomeOxygen-family LOINC codes (R3 — UC-03's re-key). These are not merely
+	// tx.fhir.org-verified: they are the EXACT codes the real Da Vinci reference payer's own
+	// HomeOxygenDispatchPrepopulation CQL library reads (internal/brpayermirror's captured
+	// Questionnaire-HomeOxygen.json items 2.2/2.3 cite them by initialExpression), confirmed
+	// live by test/tworilive's TestTwoRI_ProviderData_UC03 (2.2==87 off 59408-5, 2.3==53 off
+	// 2703-7). Pinned by TestStandardCodesVerified.
+	OxygenSaturationLOINC = "59408-5" // Oxygen saturation in Arterial blood by Pulse oximetry
+	ArterialPaO2LOINC     = "2703-7"  // Oxygen [Partial pressure] in Arterial blood
+)
+
+// DemoUC03OxygenSaturationPct / DemoUC03ArterialPaO2mmHg are the SHARED demo-lane
+// HomeOxygen facts for MBR-D-UC03 (R3, register §11 ruling (b)): the value
+// internal/fhirseed.go SEEDS as her real Observation AND the value the hermetic operated
+// $populate fixture (internal/brpayermirror's populate_loopback.go) computes for her —
+// ONE fact, not two independently-maintained numbers that could silently drift apart
+// (the anti-pattern this slice exists to rule out). Deliberately distinct from the live
+// reference payer's real values for MBR-OX (86/54) and MBR-PD-UC03 (87/53) — see
+// internal/fhirseed.go's demoClinicalSeeds comment — so no test can pass off a shared
+// canned book across all three oxygen personas.
+const (
+	DemoUC03OxygenSaturationPct = 89
+	DemoUC03ArterialPaO2mmHg    = 56
 )
 
 // ReportValueSet is the set of LOINC document/report codes the gateway treats as

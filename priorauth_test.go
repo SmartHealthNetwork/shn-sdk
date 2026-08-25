@@ -70,6 +70,12 @@ type paFakeSubstrate struct {
 	// dtr-questionnaire-fetch leg — the responder/fetch adoption test below reads
 	// it to assert RunPriorAuth's fetch request carries an id-bearing Coverage.
 	capturedDTRFetch []byte
+
+	// capturedCRDRequest records the opened (unframed) request plaintext of the
+	// crd-order-select leg — TestRunPriorAuth_ProcedureSystem reads it to assert the
+	// ServiceRequest RunPriorAuth built carries the code SYSTEM PriorAuthRequest.
+	// ProcedureSystem was set to (or the CPT backward-compat default).
+	capturedCRDRequest []byte
 }
 
 // responseOpFor mirrors hubsvc.responseOp: the op the response-leg token is pinned
@@ -192,6 +198,9 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 		if txType == "dtr-questionnaire-fetch" {
 			f.capturedDTRFetch = append([]byte(nil), reqPlain...)
 		}
+		if txType == "crd-order-select" {
+			f.capturedCRDRequest = append([]byte(nil), reqPlain...)
+		}
 
 		respOp, ok := paResponseOp[txType]
 		if !ok {
@@ -286,14 +295,14 @@ func signPubOf(priv ed25519.PrivateKey) ed25519.PublicKey {
 	return priv.Public().(ed25519.PublicKey)
 }
 
-func sandboxPARequest() PriorAuthRequest {
-	cpt, display, icd10 := SandboxUC03Order()
+func demoPARequest() PriorAuthRequest {
+	cpt, display, icd10 := demoLumbarOrder()
 	return PriorAuthRequest{
 		Member:           "MBR-COVERED",
 		DOB:              "1975-04-02",
 		Family:           "Johansson",
 		NPI:              "9999999999",
-		Clinical:         SandboxUC03Context(),
+		Clinical:         DemoLumbarContext(),
 		ProcedureCPT:     cpt,
 		ProcedureDisplay: display,
 		DiagnosisICD10:   icd10,
@@ -313,7 +322,7 @@ func TestRunPriorAuth_Approved(t *testing.T) {
 	}
 	id, ep, payer, _ := newPATestRig(t, f)
 
-	res, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, sandboxPARequest())
+	res, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest())
 	if err != nil {
 		t.Fatalf("RunPriorAuth: %v", err)
 	}
@@ -349,9 +358,85 @@ func TestRunPriorAuth_Approved(t *testing.T) {
 	if cov.ID == "" {
 		t.Error("fetch Coverage carries no id, want a stamped id (coverage-<member>)")
 	}
-	if len(cov.Identifier) != 1 || cov.Identifier[0].Value != sandboxPARequest().Member {
-		t.Errorf("fetch Coverage identifier value = %+v, want bare member %q", cov.Identifier, sandboxPARequest().Member)
+	if len(cov.Identifier) != 1 || cov.Identifier[0].Value != demoPARequest().Member {
+		t.Errorf("fetch Coverage identifier value = %+v, want bare member %q", cov.Identifier, demoPARequest().Member)
 	}
+}
+
+// TestRunPriorAuth_ProcedureSystem is the plumb-through test PriorAuthRequest.
+// ProcedureSystem shipped without: the ServiceRequest RunPriorAuth actually puts on the
+// wire must carry the code system the caller set (a mirrored HCPCS family, for instance),
+// and an unset ProcedureSystem must default to CPT — same two rows
+// TestBuildPADecisionEOB_ProcedureSystem already pins for the pre-existing
+// PADecisionEOBParams.ProcedureSystem, applied to the new field. Reproduces (and closes) the
+// review's mutation: forcing ProcedureSystem to be ignored left every existing test green,
+// because none of them inspected the wire bytes this test now does.
+func TestRunPriorAuth_ProcedureSystem(t *testing.T) {
+	t.Run("explicit HCPCS system flows to the built ServiceRequest", func(t *testing.T) {
+		system := crdRequestOrderSystem(t, PriorAuthRequest{
+			Member: "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
+			ProcedureSystem:  "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+			ProcedureCPT:     "G0151",
+			ProcedureDisplay: "Services of a qualified physical therapist in the home health setting, each 15 minutes",
+			DiagnosisICD10:   "I63.9",
+		})
+		if system != "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets" {
+			t.Fatalf("built ServiceRequest code system = %q, want HCPCS", system)
+		}
+	})
+	t.Run("empty ProcedureSystem defaults to CPT (backward-compatible)", func(t *testing.T) {
+		system := crdRequestOrderSystem(t, demoPARequest()) // ProcedureSystem unset
+		if system != "http://www.ama-assn.org/go/cpt" {
+			t.Fatalf("built ServiceRequest code system = %q, want CPT default", system)
+		}
+	})
+}
+
+// crdRequestOrderSystem drives RunPriorAuth's CRD leg for req and returns the
+// code.coding[0].system of the ServiceRequest it actually sent — captured off the WIRE
+// (paFakeSubstrate.capturedCRDRequest), not re-derived, so this proves what RunPriorAuth
+// really built rather than what it was merely asked to build.
+func crdRequestOrderSystem(t *testing.T, req PriorAuthRequest) string {
+	t.Helper()
+	_, signPriv, _ := ed25519.GenerateKey(rand.Reader)
+	payerPub, payerPriv, _ := box.GenerateKey(rand.Reader)
+	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+
+	f := &paFakeSubstrate{
+		signPriv: signPriv, payerEnc: payerPriv, payerPub: payerPub,
+		payerID: "payer", now: now, paRequired: false, // no-pa-required short-circuit: only the CRD leg matters here
+	}
+	id, ep, payer, _ := newPATestRig(t, f)
+
+	if _, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, req); err != nil {
+		t.Fatalf("RunPriorAuth: %v", err)
+	}
+	if len(f.capturedCRDRequest) == 0 {
+		t.Fatal("no crd-order-select request was captured")
+	}
+	var crdReq struct {
+		Context struct {
+			DraftOrders struct {
+				Entry []struct {
+					Resource struct {
+						Code struct {
+							Coding []struct {
+								System string `json:"system"`
+							} `json:"coding"`
+						} `json:"code"`
+					} `json:"resource"`
+				} `json:"entry"`
+			} `json:"draftOrders"`
+		} `json:"context"`
+	}
+	if err := json.Unmarshal(f.capturedCRDRequest, &crdReq); err != nil {
+		t.Fatalf("unmarshal captured crd-order-select request: %v", err)
+	}
+	entries := crdReq.Context.DraftOrders.Entry
+	if len(entries) == 0 || len(entries[0].Resource.Code.Coding) == 0 {
+		t.Fatalf("captured crd-order-select request carries no draft-order coding: %s", f.capturedCRDRequest)
+	}
+	return entries[0].Resource.Code.Coding[0].System
 }
 
 // TestRunPriorAuth_NoPARequired proves the CRD no-PA branch short-circuits: when the
@@ -394,7 +479,7 @@ func TestRunPriorAuth_NoPARequired(t *testing.T) {
 	res, err := id.RunPriorAuth(context.Background(), http.DefaultClient,
 		Endpoints{HubURL: hubSrv.URL, AuthzURL: authzSrv.URL},
 		Payer{ID: "payer", EncPub: payerPub, AuthzPub: signPubOf(signPriv)},
-		sandboxPARequest())
+		demoPARequest())
 	if err != nil {
 		t.Fatalf("RunPriorAuth: %v", err)
 	}
@@ -420,7 +505,7 @@ func TestRunPriorAuth_LegAttributedError(t *testing.T) {
 	}
 	id, ep, payer, _ := newPATestRig(t, f)
 
-	_, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, sandboxPARequest())
+	_, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest())
 	if err == nil {
 		t.Fatal("RunPriorAuth should fail when the CRD leg returns malformed cards")
 	}
@@ -429,10 +514,10 @@ func TestRunPriorAuth_LegAttributedError(t *testing.T) {
 	}
 }
 
-func TestSandboxUC04Report(t *testing.T) {
-	r := SandboxUC04Report()
+func TestDemoSupplementalReportFixture(t *testing.T) {
+	r := demoSupplementalReport()
 	if r.ReportID == "" || r.CPT == "" || r.ProvenanceAgent == "" {
-		t.Fatalf("SandboxUC04Report incomplete: %+v", r)
+		t.Fatalf("demoSupplementalReport incomplete: %+v", r)
 	}
 }
 
@@ -480,7 +565,7 @@ func TestRunPriorAuth_FramedAppError(t *testing.T) {
 	id, ep, payer, _ := newPATestRig(t, f)
 	payer.MessageFrames = []string{"v1"}
 
-	_, err = id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, sandboxPARequest())
+	_, err = id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest())
 	var ae *AppAnswerError
 	if !errors.As(err, &ae) {
 		t.Fatalf("RunPriorAuth error = %v, want errors.As *AppAnswerError", err)
@@ -493,27 +578,23 @@ func TestRunPriorAuth_FramedAppError(t *testing.T) {
 	}
 }
 
-func TestSandboxContexts(t *testing.T) {
-	uc04 := SandboxUC04Context()
-	if !uc04.PriorSurgery {
-		t.Error("SandboxUC04Context: PriorSurgery must be true (the pend trigger)")
+func TestDemoLumbarContexts(t *testing.T) {
+	base := DemoLumbarContext()
+	if base.ConservativeTherapyWeeks != 6 || !base.PriorImaging || base.NeuroDeficit {
+		t.Errorf("DemoLumbarContext: %+v, want the complete 6-week/prior-imaging/no-deficit fill", base)
 	}
-	if uc04.ConservativeTherapyWeeks != 6 {
-		t.Errorf("SandboxUC04Context: weeks = %d, want 6 (approves after amend)", uc04.ConservativeTherapyWeeks)
+	surgery := DemoLumbarContextPriorSurgery()
+	if !surgery.PriorSurgery || surgery.PriorSurgeryRef == "" {
+		t.Error("DemoLumbarContextPriorSurgery: PriorSurgery + its source reference must both be set")
 	}
-	uc08 := SandboxUC08Context()
-	if uc08.ConservativeTherapyWeeks != 4 {
-		t.Errorf("SandboxUC08Context: weeks = %d, want 4 (the deny variant)", uc08.ConservativeTherapyWeeks)
+	if surgery.ConservativeTherapyWeeks != base.ConservativeTherapyWeeks {
+		t.Errorf("DemoLumbarContextPriorSurgery: weeks = %d, want the base fill's %d (it varies ONE fact)", surgery.ConservativeTherapyWeeks, base.ConservativeTherapyWeeks)
 	}
-	if uc08.PriorSurgery || uc08.HighDisability {
-		t.Error("SandboxUC08Context: must not set PriorSurgery/HighDisability (those pend, not deny)")
+	short := DemoLumbarContextShortTherapy()
+	if short.ConservativeTherapyWeeks != 4 {
+		t.Errorf("DemoLumbarContextShortTherapy: weeks = %d, want 4 (a materially different second fill)", short.ConservativeTherapyWeeks)
 	}
-	for _, member := range []string{"MBR-COVERED", "MBR-UC04", "MBR-UC08"} {
-		if _, ok := SandboxContextFor(member); !ok {
-			t.Errorf("SandboxContextFor(%q): ok=false, want a context", member)
-		}
-	}
-	if _, ok := SandboxContextFor("MBR-UNKNOWN"); ok {
-		t.Error("SandboxContextFor(unknown): ok=true, want false")
+	if short.PriorSurgery {
+		t.Error("DemoLumbarContextShortTherapy: must vary ONLY the therapy weeks")
 	}
 }

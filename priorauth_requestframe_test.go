@@ -36,7 +36,7 @@ func TestRunPriorAuth_FramesRequestsToDeclaringPayer(t *testing.T) {
 	id, ep, payer, _ := newPATestRig(t, f)
 	payer.RequestFrames = []string{RequestFrameV1}
 
-	res, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, sandboxPARequest())
+	res, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest())
 	if err != nil {
 		t.Fatalf("RunPriorAuth: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRunPriorAuth_BareRequestsToNonDeclaringPayer(t *testing.T) {
 	}
 	id, ep, payer, _ := newPATestRig(t, f) // payer.RequestFrames left nil (zero value)
 
-	res, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, sandboxPARequest())
+	res, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest())
 	if err != nil {
 		t.Fatalf("RunPriorAuth: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestRunPriorAuth_ResponseStampVerify(t *testing.T) {
 			}
 			id, ep, payer, _ := newPATestRig(t, f)
 
-			res, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, sandboxPARequest())
+			res, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest())
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("RunPriorAuth: expected a contract-version mismatch error, got nil")

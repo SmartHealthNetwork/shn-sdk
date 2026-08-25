@@ -55,16 +55,18 @@ func (r *Responder) handleCRD(plaintext []byte, claimedContract string) handlerR
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "inconsistent patient in order-select"}
 	}
 
-	// SCOPE BOUNDARY (deferral D-PCB-1): the SDK Responder is CPT-only by design. HCPCS personas are
-	// handled by the gateway/sandbox path, not here. Do not route a HCPCS persona
-	// through this Responder without generalizing this parse to
-	// ParseServiceRequestProductCoding — it would 400 here.
-	cpt, err := ParseServiceRequestCPT(srJSON)
+	// Procedure coding is system-agnostic here (CPT or HCPCS): ParseServiceRequestProductCoding
+	// accepts either allowlisted system (FR-36), so a HCPCS-ordering partner (e.g. an
+	// Originator built with ProcedureSystem set to HCPCS) round-trips through this Responder
+	// the same as a CPT order. Adjudicator.OrderSelect's parameter is an opaque procedure code —
+	// it was never actually CPT-typed, only ever CPT-fed; closing this parse-side gap needed no
+	// interface change (Adjudicator growth stays additive-only; see its doc comment).
+	_, code, _, err := ParseServiceRequestProductCoding(srJSON)
 	if err != nil {
-		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse CPT failed"}
+		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse order procedure coding failed: " + err.Error()}
 	}
 
-	paRequired, canonical := r.cfg.Adjudicator.OrderSelect(cpt)
+	paRequired, canonical := r.cfg.Adjudicator.OrderSelect(code)
 	cov := CardCoverage{Covered: CoveredCovered}
 	if paRequired {
 		cov.PANeeded, cov.Questionnaires = PANeededAuthNeeded, []string{canonical}
@@ -204,7 +206,21 @@ func (r *Responder) handlePASUpdate(plaintext []byte, tok Token, corr string, no
 	}
 	targeted := false
 	for _, ref := range facts.provenanceTargets {
-		if ref == wantTarget {
+		// Tolerate the reference-payer-conformant lane's ABSOLUTE refs: absolutizeBundleRefs
+		// rewrites Provenance.target to its absolute fullUrl (".../DiagnosticReport/<id>") so a
+		// real Da Vinci payer can resolve it, while wantTarget is assembled from the bare id.
+		// Match the relative form OR any ref ending in "/<wantTarget>" — the same
+		// absolutization tolerance as pasMemberFromRef, and the same reasoning: the property is
+		// "the Provenance attributes THIS supplemental resource", not "the reference is spelled
+		// the way we assembled it". A Provenance targeting a different resource still fails,
+		// because the id differs; and the leading "/" keeps a longer type name (…SomeDiagnostic
+		// Report/<id>) from satisfying the suffix.
+		//
+		// Identical to the substrate gateway's conformantPASUpdateBind
+		// (gateway/engine/pas_native.go), which already carries this tolerance with its own
+		// regression guard. The two fences are twins and must decide the same bundle the same
+		// way — this one had been left behind.
+		if ref == wantTarget || strings.HasSuffix(ref, "/"+wantTarget) {
 			targeted = true
 			break
 		}

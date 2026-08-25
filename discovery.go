@@ -3,12 +3,12 @@ package shnsdk
 // Discovery is the SHN network discovery descriptor (accountsvc GET /discovery): the
 // machine-readable, FR-37 conformance surface for the sealed-envelope protocol. It is
 // SUFFICIENT to drive the loop — endpoints + AuthzPublicKeyURL + persona payerId
-// (legacy descriptors: SandboxResponders) resolve the Payer{ID,EncPub,AuthzPub}
+// (legacy descriptors: DemoResponders) resolve the Payer{ID,EncPub,AuthzPub}
 // RunEligibility needs (the holder matched via the registrar /holders feed; AuthzPub
 // from /pubkey). No keys are embedded (no drift).
 // MUST stay wire-identical to the substrate's accountsvc.Discovery (test/sdkparity).
 type Discovery struct {
-	Sandbox             bool              `json:"sandbox"`
+	Demo                bool              `json:"demo"`
 	SyntheticDataOnly   bool              `json:"syntheticDataOnly"`
 	WireProtocolVersion string            `json:"wireProtocolVersion"`
 	IGVersions          map[string]string `json:"igVersions"`
@@ -38,11 +38,11 @@ type Discovery struct {
 	// zero-config gateway image MUST use this URL so it validates against our
 	// published profiles without any extra env. Empty ⇒ not advertised.
 	// Producer: internal/accountsvc/discovery.go.
-	FHIRValidateURL   string               `json:"fhirValidateURL,omitempty"`
-	SandboxResponders []DiscoveryResponder `json:"sandboxResponders"`
-	Operations        []DiscoveryOp        `json:"operations"`
-	SandboxPersonas   []DiscoveryPersona   `json:"sandboxPersonas"`
-	Docs              string               `json:"docs"`
+	FHIRValidateURL string               `json:"fhirValidateURL,omitempty"`
+	DemoResponders  []DiscoveryResponder `json:"demoResponders"`
+	Operations      []DiscoveryOp        `json:"operations"`
+	DemoPersonas    []DiscoveryPersona   `json:"demoPersonas"`
+	Docs            string               `json:"docs"`
 	// PublishedVersions are the live SDK/gateway/kit version pins this network
 	// deployment was built against, derived at image build time from
 	// repo-tracked pins — never hand-set.
@@ -116,6 +116,29 @@ type DiscoveryPersona struct {
 	// payerIds in the public /holders feed (FR-G41 semantics; unique by AI-G12).
 	// ADDITIVE optional field — an older consumer ignores it; does NOT bump
 	// wireProtocolVersion (ExpectedPriorAuth precedent). Absent ⇒ consumer falls
-	// back to sandboxResponders. Producer: internal/accountsvc/discovery.go.
+	// back to demoResponders. Producer: internal/accountsvc/discovery.go.
 	PayerID *PayerIdentifier `json:"payerId,omitempty"`
+	// Order is the persona's advertised prior-auth order: a payer verdict is a
+	// function of the ORDER CODE, so a descriptor that advertises a per-persona
+	// VERDICT while leaving the ORDER generic is incomplete by construction — it
+	// advertises an effect without its cause. Present
+	// (non-nil) exactly when ExpectedPriorAuth is non-empty — an eligibility-only
+	// persona (no PA leg) carries no order. ADDITIVE optional field — an older
+	// consumer ignores it; does NOT bump wireProtocolVersion (ExpectedPriorAuth
+	// precedent). Producer: internal/accountsvc/discovery.go, DERIVED from
+	// gateway/engine's DemoOrderCodes() — never a hand-copied second table.
+	Order *DiscoveryOrder `json:"order,omitempty"`
+}
+
+// DiscoveryOrder is a persona's advertised prior-auth order: the code SYSTEM (CPT or
+// HCPCS — feeds PriorAuthRequest.ProcedureSystem/BuildServiceRequestCoded), the
+// procedure CODE + DISPLAY, and the ICD-10-CM DIAGNOSIS. A partner drives RunPriorAuth
+// with exactly these four values for this persona, rather than a fixed generic order —
+// the mirrored reference-payer families decide their verdict off the code alone, so the
+// order and the advertised verdict must travel together.
+type DiscoveryOrder struct {
+	System    string `json:"system"`
+	Code      string `json:"code"`
+	Display   string `json:"display"`
+	Diagnosis string `json:"diagnosis"`
 }

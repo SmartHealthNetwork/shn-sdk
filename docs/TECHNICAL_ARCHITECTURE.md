@@ -139,12 +139,19 @@ The holder-side termination point, run once per holder with a configured role:
   client without bespoke integration.
 - **Payer** — receives substrate envelopes at its inbound endpoint and dispatches on
   transaction type: eligibility decisions, coverage-requirements cards, questionnaire serving,
-  prior-auth adjudication. Its decisioning is **pluggable**: the payer answers from a built-in
-  adjudicator, or — symmetrically to the provider's native ingress — **delegates the CRD, DTR,
-  and PAS legs outward to the holder's own Da Vinci-conformant payer system** (its
-  coverage-requirements rules engine, `$questionnaire-package` service, and PAS adjudication
-  endpoint) over authenticated SMART Backend Services, so a payer can keep its existing Da
-  Vinci stack as the source of truth for decisions. Additionally serves a conventional RESTful
+  prior-auth adjudication. It answers out of a **content occupant** — there is no built-in
+  adjudicator, and a payer gateway with no occupant configured refuses to boot rather than
+  serve an invented verdict. The published gateway binary's occupant is **native-forward**:
+  it delegates the eligibility, CRD, DTR, and PAS legs outward to the holder's own
+  Da Vinci-conformant payer system (its coverage-requirements rules engine,
+  `$questionnaire-package` service, and PAS adjudication endpoint) over authenticated SMART
+  Backend Services, so a payer keeps its existing Da Vinci stack as the source of truth for
+  decisions. A payer whose own decisioning has no separate Da Vinci endpoint to forward to
+  has two other options: build a custom binary against the gateway module and inject a Go
+  `engine.LegResponder` implementation directly (an in-process content occupant — not a
+  config-only path), or skip the gateway entirely and implement the wire protocol
+  natively with the public SDK's standalone `shnsdk.Responder` (a separate HTTP service, not
+  something injected into the gateway). Additionally serves a conventional RESTful
   **Patient Access API** (a published CapabilityStatement plus `ExplanationOfBenefit`
   read/search) gated by per-operation patient-access tokens.
 - **Facility** — responds to consent-gated federated record queries, re-checking consent

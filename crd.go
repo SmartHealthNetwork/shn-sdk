@@ -8,12 +8,6 @@ import (
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
 
-// QuestionnaireCanonicalLumbarMRI is the canonical URL for the lumbar MRI PA
-// questionnaire used in CDS Hooks card extensions. Mirrors
-// internal/crd.QuestionnaireCanonicalLumbarMRI byte-for-byte (parity proven by
-// test/sdkparity/crd_parity_test.go).
-const QuestionnaireCanonicalLumbarMRI = "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"
-
 // OrderSelectContext is the CDS Hooks context for an order-select hook invocation.
 // Ported standalone from internal/crd.OrderSelectContext with the SAME json tags so
 // the marshaled bytes are identical (test/sdkparity/crd_parity_test.go).
@@ -130,7 +124,7 @@ const (
 	// Conformant Coverage + contained cms-payer Organization (CMS-0057). The system is the
 	// NAIC Company Code OID (urn:oid:2.16.840.1.113883.6.300), HL7's registered namespace
 	// for US insurance-company identifiers; value "00001" is the Da Vinci br-payer RI's
-	// first plan id — a synthetic sandbox value, not an official NAIC-assigned code. These
+	// first plan id — a synthetic demo value, not an official NAIC-assigned code. These
 	// are fixed (deterministic) and match the conformant golden + the existing conformant
 	// goldens.
 	conformantCoverageID    = "c1"

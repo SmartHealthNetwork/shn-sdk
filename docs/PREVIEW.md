@@ -62,10 +62,10 @@ Private deployment? The binaries are served by your own portal host — substitu
 
 The preview environment publishes a machine-readable discovery descriptor — the
 conformance surface. It is **sufficient to drive the eligibility loop**: it lists the
-live endpoints, the test responders (the payer you exchange with), and the seeded
-personas with their expected eligibility outcomes. No keys are embedded; you resolve
-the payer's encryption key from the registrar feed and the Authorization Framework's
-verifying key from `authzPublicKeyURL`.
+live endpoints, the test responder (the payer you exchange with), and the seeded
+personas with their expected outcomes. No keys are embedded; you resolve the payer's
+encryption key from the registrar feed and the Authorization Framework's verifying key
+from `authzPublicKeyURL`.
 
 ```sh
 curl https://accounts.shn-preview.org/discovery
@@ -73,7 +73,7 @@ curl https://accounts.shn-preview.org/discovery
 
 ```json
 {
-  "sandbox": true,
+  "demo": true,
   "syntheticDataOnly": true,
   "wireProtocolVersion": "1.1.0",
   "endpoints": {
@@ -84,17 +84,34 @@ curl https://accounts.shn-preview.org/discovery
   },
   "authzPublicKeyURL": "https://authz.shn-preview.org/pubkey",
   "hubTransportKeyURL": "https://hub.shn-preview.org/transport-key",
-  "sandboxResponders": [{ "role": "payer", "holderId": "payer" }],
-  "sandboxPersonas": [
-    { "memberId": "MBR-COVERED",    "dob": "1975-04-02", "family": "Johansson", "expectedEligibility": "covered" },
-    { "memberId": "MBR-NOTCOVERED", "dob": "1980-09-15", "family": "Reyes",     "expectedEligibility": "not-covered" }
+  "demoResponders": [{ "role": "payer", "holderId": "conformance-payer" }],
+  "demoPersonas": [
+    { "memberId": "MBR-D-UC01",    "dob": "1972-03-14", "family": "Larsen",             "expectedEligibility": "covered" },
+    { "memberId": "MBR-D-UC01-NC", "dob": "1972-03-14", "family": "Larsen-Terminated",  "expectedEligibility": "not-covered" },
+    { "memberId": "MBR-D-UC04",    "dob": "1958-12-19", "family": "Okereke",            "expectedEligibility": "covered",
+      "expectedPriorAuth": "pended", "expectedAfterAmend": "approved",
+      "order": { "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", "code": "G0151", "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes", "diagnosis": "I63.9" } },
+    { "memberId": "MBR-D-UC08",    "dob": "1968-07-30", "family": "Delacroix",          "expectedEligibility": "covered",
+      "expectedPriorAuth": "denied",
+      "order": { "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", "code": "J3490", "display": "Unclassified drugs - investigational gene therapy agent", "diagnosis": "D57.1" } }
   ],
   "docs": "https://github.com/SmartHealthNetwork/shn-sdk/blob/main/docs/PREVIEW.md"
 }
 ```
 
-See `docs/PARTICIPANT_PROTOCOL.md` §discovery for the full field contract (how to
-resolve the payer `encPub` from `/holders` and the authz pub from `/pubkey`).
+Every persona also carries a `payerId` (the seeded member's Coverage payor identity),
+omitted above for brevity — see `docs/PARTICIPANT_PROTOCOL.md` §1a for the full field
+contract (how to resolve the payer's `encPub` from `/holders` by matching `payerId`,
+and the authz pub from `/pubkey`).
+
+**`conformance-payer` answers for every demo persona above (payer identifier `00001`).**
+Every adjudication these personas return — eligibility, CRD cards, DTR questionnaires,
+PAS verdicts — comes from the real Da Vinci reference payer, not a built-in stand-in;
+`conformance-payer` forwards natively to it. It is not the network's *only* payer
+holder — a second `role=payer` holder, `cambia-payer` (identifier `00200`), answers for
+a separate external-payer conformance lane with its own personas — but for every
+`MBR-D-*`/`MBR-*` demo persona this guide drives, `conformance-payer` is the one
+counterparty, and there is no built-in adjudication path behind it.
 
 ---
 
@@ -141,19 +158,20 @@ your registered identity. Resolve the payer encryption key (from the registrar
 
 ```sh
 shn eligibility --name acme-7f3a \
-  --member MBR-COVERED --dob 1975-04-02 --family Johansson \
+  --member MBR-D-UC01 --dob 1972-03-14 --family Larsen \
   --hub https://hub.shn-preview.org --authz https://authz.shn-preview.org \
-  --payer-id payer --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
+  --payer-id conformance-payer --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
 # → covered: true
 ```
 
-The not-covered persona returns the other branch:
+The not-covered persona returns the other branch (a terminated Coverage seeded for the
+same holder — a reason-bearing negative, not an absence):
 
 ```sh
 shn eligibility --name acme-7f3a \
-  --member MBR-NOTCOVERED --dob 1980-09-15 --family Reyes \
+  --member MBR-D-UC01-NC --dob 1972-03-14 --family Larsen-Terminated \
   --hub https://hub.shn-preview.org --authz https://authz.shn-preview.org \
-  --payer-id payer --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
+  --payer-id conformance-payer --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
 # → covered: false
 ```
 
@@ -162,147 +180,166 @@ shn eligibility --name acme-7f3a \
 ## 3a. Prior-authorization (the CRD → DTR → PAS chain)
 
 Once eligibility conforms, run a **prior-authorization** — the full Da Vinci
-CRD→DTR→PAS leg sequence — for the covered persona. `shn priorauth` resolves the
-discovery surface from the descriptor (same path as `shn doctor`), drives the
-fixed UC-03 order (a lumbar-spine MRI without contrast, CPT 72148 / ICD-10-CM M51.16),
-and prints the payer's outcome:
+CRD→DTR→PAS leg sequence — for `MBR-D-UC04`. `shn priorauth` resolves the discovery
+surface and the payer (same path as `shn doctor`), drives the persona's own advertised
+order (a HCPCS `G0151` home-health physical-therapy visit, ICD-10-CM `I63.9`), and
+prints the outcome:
 
 ```sh
-shn priorauth --member MBR-COVERED --discovery https://accounts.shn-preview.org \
+shn priorauth --member MBR-D-UC04 --discovery https://accounts.shn-preview.org \
   --id acme-7f3a -keys ./keys
-# → outcome=approved preAuthRef=… validUntil=…
+# → outcome=pended needed=<whatever the live payer's Task names> resume=shn-resume.json
+# → resume with: shn priorauth resume --resume shn-resume.json --report-id <id> --report-cpt <cpt> --discovery <url> --id <id> -keys <dir>
 ```
 
-**Why approved — the answers that drive the outcome.** The CRD card requires PA for
-this order, DTR fetches the lumbar-MRI questionnaire, and the SDK fills it from the
-UC-03 clinical context (`shnsdk.SandboxUC03Context()`). The load-bearing answers the
-test payer adjudicates on are:
+**Why pended — how the reference payer actually decides.** The demo persona roster
+rides four HCPCS families — `E0250`, `L8000`, `G0151`, `J3490` — and the reference
+payer's verdict is a **per-family determination**, pinned against the live Da Vinci
+reference payer (`internal/brpayermirror`'s hermetic mirror reproduces the exact same
+shapes). It is **not** a function of what your DTR questionnaire answers say: `G0151`
+(home-health PT) is a PA-required family the payer pends on the initial submit and
+resolves on a ClaimUpdate amendment. The CRD and DTR legs are still genuine Da Vinci
+wire traffic — the CRD card really does say PA is required, and the DTR leg really
+does fetch the payer's own questionnaire — but because the SDK doesn't know how to
+auto-fill a real payer's questionnaire, it submits an honest **zero-answer
+`QuestionnaireResponse` shell** naming exactly what the payer advertised
+(`status: "in-progress"`, no answers) rather than inventing clinical content. A
+production integration puts a clinician — or an operated SDC `$populate` engine — behind
+that fill step; the demo path proves the wire mechanics, not a canned answer set.
 
-| DTR answer | UC-03 value | Why it matters |
-|---|---|---|
-| Conservative therapy (weeks) | **6** (≥6 required) | Documents the payer's conservative-therapy threshold was met |
-| Prior imaging | **true** | Prior imaging is on file |
-| Neuro deficit | **false** | No red-flag neuro deficit forcing a different pathway |
-
-These mirror the substrate's MBR-COVERED clinical fixture, so the payer adjudicates the
-claim as **approved** with a `PreAuthRef`. **Change an answer and the adjudication
-changes** — e.g. drop the conservative-therapy weeks below the threshold and the same
-order no longer clears the payer's criteria. The answers are dev-visible inputs
-(`SandboxUC03Context`), never hardcoded inside the round-trip, precisely so an
-integrator can see *which* clinical facts carry the decision.
+**`needed=` is whatever the live payer's own pended Task names — not a fixed string.**
+On this preview environment the payer gateway native-forwards and relays the reference
+payer's pended Bundle **verbatim**; its `Task.input` names what it actually wants, coded
+`payer-url` and `questionnaires-needed` (a re-query URL and the still-outstanding
+questionnaire canonical), which is what your run prints. `pend-resolution-timer` is a
+synthetic label that exists only in the hermetic in-process mirror local/CI runs use
+(`internal/brpayermirror`) — it is not something the live reference payer ever puts on
+the wire.
 
 > **Outcome vocabulary:** `approved` | `no-pa-required` | `pended` | `denied`.
 > See `docs/PARTICIPANT_PROTOCOL.md` §7a.2 and §7b.
 
----
+Resume with the SDK's shipped supplemental evidence (a `DiagnosticReport` +
+`Provenance`). What actually makes a payer look at the claim again differs by lane, and
+`ResumePriorAuth` (what `shn priorauth resume` calls) does **not** set the Da Vinci PAS
+`infoChanged` item extension — confirmed by building the exact bundle it builds: it carries
+a `Provenance` entry, no `infoChanged` extension, and `Claim.related[0].claim` by
+`identifier`, not `reference`.
 
-## 3b. Per-scenario test contexts — answers drive the outcome
+- **Hermetic in-process mirror** (`internal/brpayermirror`, the `make up`/local-dev lane):
+  resolves the pend on **either** a `Provenance` entry **or** `infoChanged` on the Claim
+  item — `ResumePriorAuth`'s bundle carries `Provenance`, so it resolves via that branch.
+  **This is the lane the resume flow below is proven against.**
+- **Live reference payer** (native-forward — what this preview environment's
+  `conformance-payer` runs): re-evaluates ONLY on `infoChanged`
+  (`gateway/engine/nativepas.go`'s `requestClaimHasInfoChanged` gate checks our own
+  outbound request, before it even reaches the payer's response). `ResumePriorAuth`'s
+  bundle does not carry `infoChanged` — so on this lane, the amendment below does **not**
+  satisfy that gate and does not resolve.
 
-The network seeds **three test personas** for the prior-auth scenarios. The
-**answers (the clinical context), not the member id, drive the payer's adjudication**.
-This is the approved / pended / denied scenario design: the same member identifier with a
-different clinical context would produce a different outcome; it is the answer values
-the test payer evaluates.
-
-| Member | Context constructor | Expected outcome |
-|---|---|---|
-| `MBR-COVERED` | `SandboxUC03Context()` | `approved` |
-| `MBR-UC04` | `SandboxUC04Context()` | `pended` on exchange-1, then `approved` after the ClaimUpdate (UC-04) |
-| `MBR-UC08` | `SandboxUC08Context()` | `denied` |
-
-Use `SandboxContextFor(memberID)` to resolve the right context for a given member
-without hard-coding the pairing:
-
-```go
-cc, ok := shnsdk.SandboxContextFor("MBR-UC04")
-// cc == SandboxUC04Context(), ok == true
-```
-
-**The concrete answers that separate approved, pended, and denied:**
-
-| Answer | UC-03 (approved) | UC-04 (pended→approved) | UC-08 (denied) |
-|---|---|---|---|
-| Conservative therapy (weeks) | **6** (≥6) | **6** (≥6) | **4** (< 6) |
-| Prior imaging | true | true | true |
-| Neuro deficit | false | false | false |
-| Prior surgery | false | **true** | false |
-
-`SandboxUC08Context()` sets `ConservativeTherapyWeeks: 4` — one answer below the
-payer's 6-week threshold — and the same order that approves for UC-03 is denied.
-`SandboxUC04Context()` adds `PriorSurgery: true` to the UC-03 context, which the
-payer pends awaiting an operative DiagnosticReport.
-
-**Change one answer and watch the outcome change.** A dev can pass a modified
-`ClinicalContext` directly to `RunPriorAuth` — the clinical answers are dev-visible
-inputs (`PriorAuthRequest.Clinical`), never hidden inside the round-trip. For example,
-passing an `MBR-UC08` member with the UC-03 approved context would adjudicate
-*approved*: it is the `ConservativeTherapyWeeks: 4` answer that drives the denial,
-not the member id. This is the first thing a real integrator does to build confidence
-in the adjudication logic.
-
-### 3b-i. UC-04 pended → amend flow (CLI)
-
-Run with `MBR-UC04` to exercise the pended→amend path. The CLI prints the outcome
-and writes a serializable resume handle:
-
-```sh
-shn priorauth --member MBR-UC04 --discovery https://accounts.shn-preview.org \
-  --id acme-7f3a -keys ./keys
-# → outcome=pended needed=operative-diagnostic-report resume=shn-resume.json
-# → resume with: shn priorauth resume --resume shn-resume.json --sandbox-supplemental --discovery <url> --id <id> -keys <dir>
-```
-
-The resume handle (`shn-resume.json` by default; override with `--resume-out`) is a
-JSON file that carries the original submit correlation id, the subject PCI, and the
-QR/SR from exchange-1 — everything the ClaimUpdate needs. It JSON round-trips across
-process restarts, modelling the real pend→amend gap (hours to days).
-
-Resume with the test supplemental (the operative DiagnosticReport + Provenance
-that matches what the payer pended on):
-
-```sh
-shn priorauth resume --resume shn-resume.json --sandbox-supplemental \
-  --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
-# → outcome=approved preAuthRef=… validUntil=…
-```
-
-`--sandbox-supplemental` supplies `SandboxUC04Report()` — the pre-built operative
-report fixture. To supply your own supplemental:
+Either way, resolution is **not evidence-driven**: on the branch that does resolve, the
+payer re-pends (still A4) and its own pend-resolution **timer** is what later flips the
+claim to approved, independent of the supplemental report's specific content. `Provenance`
+is required regardless because FR-32 (SHN's own rule) says supplemental data must carry
+attribution — it is not a payer verdict input:
 
 ```sh
 shn priorauth resume --resume shn-resume.json \
-  --report-id dr-my-operative --report-cpt 72148 \
+  --report-id dr-uc04-operative --report-cpt 72148 \
   --report-display "MRI lumbar spine w/o contrast" \
   --provenance-agent "Organization/acme-7f3a" \
   --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
+# → outcome=approved preAuthRef=AUTH-1234 validUntil=… (proven against the hermetic
+#   mirror only — see below for this discovery URL's live network)
 ```
 
-The `--provenance-agent` flag is **required** when you supply your own supplemental
-instead of `--sandbox-supplemental` (supplemental data must carry provenance
-attribution; the SDK rejects it before sealing if the agent is absent).
+**Proven scope.** The `outcome=approved` line above is proven against the **hermetic
+in-process mirror** (`internal/brpayermirror`, what a local `make up` stack's
+`conformance-payer` runs) — `ResumePriorAuth`'s bundle satisfies that mirror's
+`Provenance` branch. It is **not** proven against `https://accounts.shn-preview.org`
+itself: that discovery URL's `conformance-payer` native-forwards to the live reference
+payer, whose own gate (`gateway/engine/nativepas.go`'s `requestClaimHasInfoChanged`)
+requires `infoChanged` on the amendment. `ResumePriorAuth` does not set `infoChanged`, so
+against the live network this same command does not resolve the pend — the leg stays
+pended (`422 "amendment still insufficient"`). Know which lane you're integrating
+against: a local/hermetic stack resumes as shown; the live native-forward network does
+not, today.
 
-### 3b-ii. UC-08 denied flow (CLI)
+`--provenance-agent` is **required** on every resume (supplemental data must carry
+provenance attribution; the SDK rejects it before sealing if the agent is absent —
+FR-32). `preAuthRef` is the reference payer's own authorization number,
+`AUTH-` followed by four digits — never the retired `PA-<hex>` shape.
 
-Run with `MBR-UC08` to exercise the denied path:
+---
+
+## 3b. The demo persona roster
+
+The network seeds **ten demo personas** — one per scenario (`MBR-D-UC01`…`MBR-D-UC08`),
+plus a not-covered/no-consent twin each for UC-01 and UC-05 (`MBR-D-UC01-NC`,
+`MBR-D-UC05-NC`). Only four are advertised on the discovery descriptor — the ones a bare
+`shn` CLI run can drive end to end, because `shn priorauth`/`shn doctor` resolve a
+persona's payer and order from the descriptor itself:
+
+| Member | DOB / family | Eligibility | Order (family) | Prior-auth outcome |
+|---|---|---|---|---|
+| `MBR-D-UC01` | 1972-03-14 / Larsen | covered | — | n/a (eligibility only) |
+| `MBR-D-UC01-NC` | 1972-03-14 / Larsen-Terminated | not-covered | — | n/a (eligibility only) |
+| `MBR-D-UC04` | 1958-12-19 / Okereke | covered | `G0151` | pended → **approved** on amend |
+| `MBR-D-UC08` | 1968-07-30 / Delacroix | covered | `J3490` | **denied** |
+
+The remaining **six** personas exercise the other two HCPCS families plus the CDex and
+patient-authored legs — **not** "the other two families" split evenly across them: only
+UC-02 rides `E0250` and only UC-03 rides `L8000`; UC-05, UC-05-NC, UC-06 and UC-07 all
+ride `G0151`, same as UC-04:
+
+| Member | DOB / family | Order (family) | What it exercises |
+|---|---|---|---|
+| `MBR-D-UC02` | 1965-06-11 / Fontaine | `E0250` | no PA required (order-select terminal) |
+| `MBR-D-UC03` | 1979-09-02 / Whitfield | `L8000` | approved outright |
+| `MBR-D-UC05` | 1963-02-27 / Marchetti | `G0151` | CDex federated query (consent granted) |
+| `MBR-D-UC05-NC` | 1963-02-27 / Marchetti-Noconsent | `G0151` | CDex federated query (no consent → denied) |
+| `MBR-D-UC06` | 1970-05-08 / Adeyemi | `G0151` | clinician manual-entry + amendment |
+| `MBR-D-UC07` | 1985-10-23 / Kowalczyk | `G0151` | patient-authored attestation |
+
+None of these six are reachable through `shn priorauth --member` today because they
+aren't in `demoPersonas`. The **SHN Kit** desktop app (see the callout at the top)
+drives all eight scenarios against the same reference payer with no CLI needed — though
+its rows drive a separate, older persona set (`MBR-COVERED` et al., still live and
+seeded), not these `MBR-D-*` ids. A Go participant can still reach any `MBR-D-*` persona
+directly with `Identity.RunPriorAuth`, supplying the member/DOB/family/order by hand
+instead of resolving them from the descriptor.
+
+### 3b-i. UC-08 denied flow (CLI)
+
+Run with `MBR-D-UC08`:
 
 ```sh
-shn priorauth --member MBR-UC08 --discovery https://accounts.shn-preview.org \
+shn priorauth --member MBR-D-UC08 --discovery https://accounts.shn-preview.org \
   --id acme-7f3a -keys ./keys
-# → outcome=denied reasonCode=A3 rationale="…"
+# → outcome=denied reasonCode=A2 rationale="…"
 # → appeal: …
 ```
 
-`reasonCode` is the PAS X12 review-action code for the denial. The conformant Da Vinci
-code is `A2` ("Not Certified"), which real payers emit; the preview environment
-currently returns the legacy `A3`, and the SDK parser treats both as denied. The rationale is the payer's
-`ClaimResponse.disposition`; the appeal line (if present) is the first `processNote`.
-There is no `preAuthRef` on a denied response.
+`J3490` is an excluded-service family: the CRD card itself comes back **not covered**,
+so (with `ProceedOnNotCovered` set, which the CLI always does) the flow submits the PAS
+claim straight through for the payer's **formal** determination — there is no DTR leg
+here at all. `reasonCode` is the PAS X12 review-action code for the denial. X12 306
+defines `A3` as "Not Certified" — the conformant denial code, which is what a
+locally-run stack (`make up`, holder `conformance-payer` served by the in-process
+`cmd/payermirror`) returns on this leg. **This cloud environment's** behavior differs:
+since UC-08 is a PA-spine leg native-forwarded to the real reference payer, and that RI
+denies with reviewActionCode `A2` (display "Not Certified" — a code/display
+self-contradiction in that RI, not a different conformant code), this preview
+environment returns `A2` on this leg. The SDK's parser accepts both `A3` and this
+observed `A2` shape as a denial — it never emits `A2` itself. The rationale is the
+payer's own `ClaimResponse.disposition`; the appeal line, if present, is the first
+`processNote`. There is no `preAuthRef` on a denied response.
 
 ---
 
 ## 3c. Run a payer responder (eligibility + full PA chain)
 
-If you are building a **payer** integration that receives eligibility queries and prior-authorization requests, you can stand up a responder endpoint using `shnsdk.Responder`. The responder serves `POST /substrate/inbound` with the same pipeline as the substrate's own gateway: `X-Hub-Assertion` verification first (before the body is read), then authz token verification, decryption, adjudication, and a sealed-and-authorized response — all in one call to `responder.Handler()`, minus the runtime FHIR $validate the operator-run gateways perform at their own edges (your response shape is parity-pinned against the substrate builder).
+If you are building a **payer** integration that receives eligibility queries and prior-authorization requests, you can stand up a responder endpoint using `shnsdk.Responder`. The responder serves `POST /substrate/inbound` with the same pipeline the network's own gateways use: `X-Hub-Assertion` verification first (before the body is read), then authz token verification, decryption, adjudication, and a sealed-and-authorized response — all in one call to `responder.Handler()`, minus the runtime FHIR $validate the operator-run gateways perform at their own edges (your response shape is parity-pinned against the network's own builders).
 
 **Register a payer-role client:**
 
@@ -339,29 +376,41 @@ import (
 
 type myAdjudicator struct{}
 
+// myQuestionnaireCanonical/myQuestionnaireJSON are YOUR OWN content — shn-sdk ships no
+// questionnaire fixture of its own for a responder to serve; every payer on the network
+// advertises and serves its own. In production, load this from your own content store.
+const myQuestionnaireCanonical = "https://your-payer.example.com/fhir/Questionnaire/breast-prosthesis-pa"
+
+var myQuestionnaireJSON = []byte(`{"resourceType":"Questionnaire","status":"active",` +
+	`"url":"` + myQuestionnaireCanonical + `","item":[` +
+	`{"linkId":"medical-necessity","type":"text","text":"Medical necessity statement"}]}`)
+
 func (myAdjudicator) Eligibility(memberID string) (bool, string) {
 	return true, "" // your coverage logic; (false, "reason") to deny
 }
 
-// OrderSelect decides whether a CPT needs prior auth and which questionnaire applies.
-func (myAdjudicator) OrderSelect(cpt string) (bool, string) {
-	if cpt == "72148" { // lumbar-spine MRI — the UC-03 test order
-		return true, shnsdk.QuestionnaireCanonicalLumbarMRI
+// OrderSelect decides whether an order needs prior auth and which questionnaire applies.
+// code is opaque here — CPT or HCPCS, whichever system the draft order's ServiceRequest
+// used.
+func (myAdjudicator) OrderSelect(code string) (bool, string) {
+	if code == "L8000" { // breast prosthesis, mastectomy bra — an ADVERTISED HCPCS family
+		return true, myQuestionnaireCanonical
 	}
 	return false, ""
 }
 
 // Questionnaire returns the FHIR Questionnaire for a canonical you advertise.
 func (myAdjudicator) Questionnaire(canonical string) ([]byte, bool) {
-	if canonical == shnsdk.QuestionnaireCanonicalLumbarMRI {
-		return shnsdk.SandboxLumbarQuestionnaire(), true // serve your own in production
+	if canonical == myQuestionnaireCanonical {
+		return myQuestionnaireJSON, true
 	}
 	return nil, false
 }
 
 // PriorAuth adjudicates a PAS submission (and ClaimUpdate re-adjudication).
+// This is a placeholder — replace it with your own utilization-review policy.
 func (myAdjudicator) PriorAuth(qrJSON []byte, hasDiagnosticReport bool) (shnsdk.PASDecision, error) {
-	return shnsdk.SandboxAdjudicate(qrJSON, hasDiagnosticReport, time.Now(), nil) // replace with your policy
+	return shnsdk.PASDecision{Outcome: shnsdk.PASApproved, PreAuthRef: "AUTH-0001", ValidUntil: "2027-01-01"}, nil
 }
 
 func main() {
@@ -464,20 +513,27 @@ expiry, and jti-once — before the body is read.
 
 `shn doctor` is the one-command self-validate: it fetches the discovery descriptor and
 runs eligibility against **every** seeded persona using your own registered identity,
-asserting the expected coverage outcome — **and** runs the UC-03 prior-authorization
-for the persona that advertises an expected PA outcome, asserting it. A green `doctor`
-means **both** eligibility AND prior-auth conform. It needs no FHIR validator — the
-substrate validates server-side.
+asserting the expected coverage outcome — **and** runs prior-authorization for every
+persona that advertises an expected PA outcome (resuming a pend where one is
+advertised), asserting each. A green `doctor` means **both** eligibility AND
+prior-auth conform, against the real reference payer. It needs no FHIR validator — the
+network validates server-side.
 
 ```sh
 shn doctor --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
-# ✓ network discovery reachable …
+# ✓ network discovery reachable (…)
 # ✓ wire protocol "1.1.0" supported
+# ✓ authz verifying key fetched
+# ✓ registrar /holders feed fetched (N holders)
 # ✓ test counterparties resolve in the directory (1 payer(s))
 # ✓ your client "acme-7f3a" is registered
-# ✓ MBR-COVERED: covered=true (expected "covered")
-# ✓ MBR-NOTCOVERED: covered=false (expected "not-covered")
-# ✓ priorauth MBR-COVERED: approved
+# ✓ MBR-D-UC01: covered=true (expected "covered")
+# ✓ MBR-D-UC01-NC: covered=false (expected "not-covered")
+# ✓ MBR-D-UC04: covered=true (expected "covered")
+# ✓ MBR-D-UC08: covered=true (expected "covered")
+# ✓ priorauth MBR-D-UC04: pended
+# ✓ priorauth MBR-D-UC04: after amend approved
+# ✓ priorauth MBR-D-UC08: denied
 # PASS
 ```
 
@@ -492,7 +548,7 @@ can tell whose problem a failure is:
 | 30 | your registration | your client isn't in `/holders` (run `shn register`, or it was revoked) |
 | 40 | outcome | an eligibility run returned the wrong coverage, or a prior-auth run returned the wrong outcome |
 
-Run a single persona with `--persona MBR-COVERED`.
+Run a single persona with `--persona MBR-D-UC01`.
 
 ---
 

@@ -54,6 +54,16 @@ func ParsePayerIdentifier(coverageJSON []byte, resolveRef func(ref string) ([]by
 	return PayerIdentifier{}, false
 }
 
+// ParseOrganizationIdentifier extracts the first (system,value) identifier from a
+// standalone Organization resource — a payer's SELF-read of its own well-known
+// Organization (e.g. Organization/payer), as opposed to ParsePayerIdentifier's
+// Coverage.payor resolution. Used when a member has NO Coverage record at all: there is
+// no payor to parse, so the insurer instead names the payer's own identity. ok=false when
+// the resource isn't an Organization or carries no identifier.
+func ParseOrganizationIdentifier(orgJSON []byte) (PayerIdentifier, bool) {
+	return orgIdentifier(orgJSON, "")
+}
+
 type identifier struct {
 	System string `json:"system"`
 	Value  string `json:"value"`

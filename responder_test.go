@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -134,7 +135,7 @@ func buildValidForward(
 // ---- test Adjudicator ----
 
 // testAdjudicator is the B1 eligibility adjudicator. The PA-chain methods
-// use sandbox defaults so existing eligibility tests are unaffected.
+// use demo defaults so existing eligibility tests are unaffected.
 type testAdjudicator struct {
 	covered bool
 	reason  string
@@ -146,46 +147,120 @@ func (a *testAdjudicator) Eligibility(_ string) (bool, string) {
 
 func (a *testAdjudicator) OrderSelect(cpt string) (bool, string) {
 	if cpt == "72148" {
-		return true, QuestionnaireCanonicalLumbarMRI
+		return true, SupportedQuestionnaireCanonical
 	}
 	return false, ""
 }
 
 func (a *testAdjudicator) Questionnaire(canonical string) ([]byte, bool) {
-	if canonical == QuestionnaireCanonicalLumbarMRI {
-		return SandboxLumbarQuestionnaire(), true
+	if canonical == SupportedQuestionnaireCanonical {
+		return demoLumbarQuestionnaire(), true
 	}
 	return nil, false
 }
 
 func (a *testAdjudicator) PriorAuth(qrJSON []byte, hasDR bool) (PASDecision, error) {
-	return SandboxAdjudicate(qrJSON, hasDR, time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC), nil)
+	return testPriorAuthDecision(qrJSON, hasDR, time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC))
 }
 
-// sandboxTestAdjudicator is the full sandbox adjudicator used in PA-chain tests.
-// It delegates to the same sandbox helpers the sample participant uses.
-type sandboxTestAdjudicator struct {
+// paTestAdjudicator is the Adjudicator the PA-chain tests plug into the Responder.
+//
+// It exists to EXERCISE the Responder's PAS response shapes (approved / pended /
+// approved-on-amend / denied) — it is not, and never was, a payer. The package used to
+// export a policy for this; it left the published API
+// with the retired payer stub (spec R2/§13.2), so the fixture the Responder tests need lives
+// here, in the test binary, where nobody can mistake it for a reference implementation.
+type paTestAdjudicator struct {
 	now time.Time
 }
 
-func (a *sandboxTestAdjudicator) Eligibility(_ string) (bool, string) { return true, "" }
+// testPriorAuthDecision is this test binary's stand-in PA policy: fewer than six weeks of
+// conservative therapy denies; a prior surgery with no operative DiagnosticReport pends
+// (and approves once the amend supplies one); anything else approves. Deliberately tiny —
+// the assertions it serves are about the Responder's WIRE behaviour, not about policy.
+func testPriorAuthDecision(qrJSON []byte, hasDiagnosticReport bool, now time.Time) (PASDecision, error) {
+	var qr struct {
+		Item []testQRItem `json:"item"`
+	}
+	if err := json.Unmarshal(qrJSON, &qr); err != nil {
+		return PASDecision{Outcome: PASDenied}, fmt.Errorf("test adjudicator: parse QR: %w", err)
+	}
+	weeks, priorSurgery := 0, false
+	for _, it := range flattenTestQRItems(qr.Item) {
+		if len(it.Answer) == 0 {
+			continue
+		}
+		switch it.LinkId {
+		case "conservative-therapy-weeks":
+			if it.Answer[0].ValueInteger != nil {
+				weeks = *it.Answer[0].ValueInteger
+			} else if it.Answer[0].ValueDecimal != nil {
+				weeks = int(*it.Answer[0].ValueDecimal)
+			}
+		case "prior-surgery":
+			if it.Answer[0].ValueBoolean != nil {
+				priorSurgery = *it.Answer[0].ValueBoolean
+			}
+		}
+	}
+	switch {
+	case priorSurgery && !hasDiagnosticReport:
+		return PASDecision{Outcome: PASPended, NeededItems: []string{"operative-diagnostic-report"}}, nil
+	case weeks < 6:
+		return PASDecision{Outcome: PASDenied}, nil
+	default:
+		return PASDecision{
+			Outcome:    PASApproved,
+			PreAuthRef: fmt.Sprintf("PA-%012x", now.Unix()),
+			ValidUntil: now.AddDate(0, 0, 90).Format("2006-01-02"),
+		}, nil
+	}
+}
 
-func (a *sandboxTestAdjudicator) OrderSelect(cpt string) (bool, string) {
-	if cpt == "72148" {
-		return true, QuestionnaireCanonicalLumbarMRI
+// testQRItem is the QR item shape testPriorAuthDecision reads. Named (not inline) because
+// QuestionnaireResponse.item is self-recursive on BOTH nesting axes.
+type testQRItem struct {
+	LinkId string `json:"linkId"`
+	Answer []struct {
+		ValueInteger *int         `json:"valueInteger"`
+		ValueDecimal *float64     `json:"valueDecimal"`
+		ValueBoolean *bool        `json:"valueBoolean"`
+		Item         []testQRItem `json:"item"`
+	} `json:"answer"`
+	Item []testQRItem `json:"item"`
+}
+
+// flattenTestQRItems returns every item at every depth, on both nesting axes.
+func flattenTestQRItems(items []testQRItem) []testQRItem {
+	var out []testQRItem
+	for _, it := range items {
+		out = append(out, it)
+		out = append(out, flattenTestQRItems(it.Item)...)
+		for _, a := range it.Answer {
+			out = append(out, flattenTestQRItems(a.Item)...)
+		}
+	}
+	return out
+}
+
+func (a *paTestAdjudicator) Eligibility(_ string) (bool, string) { return true, "" }
+
+func (a *paTestAdjudicator) OrderSelect(cpt string) (bool, string) {
+	if cpt == "72148" || cpt == "G0151" {
+		return true, SupportedQuestionnaireCanonical
 	}
 	return false, ""
 }
 
-func (a *sandboxTestAdjudicator) Questionnaire(canonical string) ([]byte, bool) {
-	if canonical == QuestionnaireCanonicalLumbarMRI {
-		return SandboxLumbarQuestionnaire(), true
+func (a *paTestAdjudicator) Questionnaire(canonical string) ([]byte, bool) {
+	if canonical == SupportedQuestionnaireCanonical {
+		return demoLumbarQuestionnaire(), true
 	}
 	return nil, false
 }
 
-func (a *sandboxTestAdjudicator) PriorAuth(qrJSON []byte, hasDR bool) (PASDecision, error) {
-	return SandboxAdjudicate(qrJSON, hasDR, a.now, nil)
+func (a *paTestAdjudicator) PriorAuth(qrJSON []byte, hasDR bool) (PASDecision, error) {
+	return testPriorAuthDecision(qrJSON, hasDR, a.now)
 }
 
 // ---- helpers ----
@@ -1156,11 +1231,11 @@ func assertError(t *testing.T, resp *http.Response, body []byte, wantStatus int,
 // TestResponder_DTR proves the dtr-questionnaire-fetch dispatch: happy path + rejections.
 func TestResponder_DTR(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	adj := &sandboxTestAdjudicator{now: h.now}
+	adj := &paTestAdjudicator{now: h.now}
 	_, srv := h.makeResponderSrv(t, responderIdent, adj)
 
 	t.Run("happy path → $questionnaire-package round-trips", func(t *testing.T) {
-		fetchPayload, err := BuildQuestionnaireFetch(QuestionnaireCanonicalLumbarMRI)
+		fetchPayload, err := BuildQuestionnaireFetch(SupportedQuestionnaireCanonical)
 		if err != nil {
 			t.Fatalf("BuildQuestionnaireFetch: %v", err)
 		}
@@ -1181,8 +1256,8 @@ func TestResponder_DTR(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseQuestionnaireURL: %v", err)
 		}
-		if url != QuestionnaireCanonicalLumbarMRI {
-			t.Errorf("canonical = %q, want %q", url, QuestionnaireCanonicalLumbarMRI)
+		if url != SupportedQuestionnaireCanonical {
+			t.Errorf("canonical = %q, want %q", url, SupportedQuestionnaireCanonical)
 		}
 	})
 
@@ -1202,55 +1277,409 @@ func TestResponder_DTR(t *testing.T) {
 	})
 }
 
-// TestSandboxAdjudicate_HighDisabilityUnattested: high-disability=true without
-// clinician attestation → PASPended.
-func TestSandboxAdjudicate_HighDisabilityUnattested(t *testing.T) {
-	// Build a QR with high-disability=true but no clinician-attestation extension.
-	qr, _ := json.Marshal(map[string]interface{}{
-		"resourceType": "QuestionnaireResponse",
-		"status":       "completed",
-		"item": []map[string]interface{}{
-			{
-				"linkId": "conservative-therapy-weeks",
-				"answer": []map[string]interface{}{{"valueInteger": 6}},
-			},
-			{
-				"linkId": "high-disability",
-				"answer": []map[string]interface{}{{"valueBoolean": true}},
-			},
-		},
-	})
-	dec, err := SandboxAdjudicate(qr, false, time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC), nil)
-	if err != nil {
-		t.Fatalf("SandboxAdjudicate: %v", err)
+// ---- FR-16/FR-27 attestation conformance fence (parity with the substrate
+// gateway's gateway/engine/attestfence_test.go — the two fences are twins on
+// purpose, so their rejection rows are too) ----
+
+// fenceWrapQRItemBundle wraps a single QuestionnaireResponse.item (produced by a
+// real builder, or a plain system-sourced item literal) into the minimal
+// conformant PAS Bundle shape fenceAttestedItems walks. No extension URL is
+// hand-typed here — only generic FHIR envelope keys.
+func fenceWrapQRItemBundle(t *testing.T, itemJSON []byte) []byte {
+	t.Helper()
+	var item map[string]any
+	if err := json.Unmarshal(itemJSON, &item); err != nil {
+		t.Fatalf("fenceWrapQRItemBundle: unmarshal item: %v", err)
 	}
-	if dec.Outcome != PASPended {
-		t.Errorf("Outcome = %v, want PASPended (high-disability unattested)", dec.Outcome)
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "collection",
+		"entry": []any{map[string]any{"resource": map[string]any{
+			"resourceType": "QuestionnaireResponse",
+			"status":       "completed",
+			"item":         []any{item},
+		}}},
+	}
+	raw, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("fenceWrapQRItemBundle: marshal bundle: %v", err)
+	}
+	return raw
+}
+
+// fenceWrapTwoQRItemBundle wraps TWO QuestionnaireResponse.item values into a
+// Bundle carrying TWO separate QuestionnaireResponse entries (first, second) —
+// the hand-built-bundle shape the FR-16/FR-27 fence must walk in full, not
+// only its first entry.
+func fenceWrapTwoQRItemBundle(t *testing.T, firstItemJSON, secondItemJSON []byte) []byte {
+	t.Helper()
+	qrEntry := func(itemJSON []byte) map[string]any {
+		var item map[string]any
+		if err := json.Unmarshal(itemJSON, &item); err != nil {
+			t.Fatalf("fenceWrapTwoQRItemBundle: unmarshal item: %v", err)
+		}
+		return map[string]any{"resource": map[string]any{
+			"resourceType": "QuestionnaireResponse",
+			"status":       "completed",
+			"item":         []any{item},
+		}}
+	}
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "collection",
+		"entry":        []any{qrEntry(firstItemJSON), qrEntry(secondItemJSON)},
+	}
+	raw, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("fenceWrapTwoQRItemBundle: marshal bundle: %v", err)
+	}
+	return raw
+}
+
+// TestFenceAttestedItems_SecondQREntryFenced closes the multi-QR bypass: a
+// hand-built bundle can carry a SECOND QuestionnaireResponse bundle entry, and
+// the fence must walk it exactly as it walks the first. Parity with the
+// substrate gateway's identical row (gateway/engine/attestfence_test.go) — the
+// two fences are twins on purpose, so their rejection rows are too.
+func TestFenceAttestedItems_SecondQREntryFenced(t *testing.T) {
+	att := Attestation{NPI: "1999999999", Text: "I attest these are my clinical findings.", When: "2026-06-04"}
+
+	cleanFirst, err := BuildManualAttestedItem("functional-status-oswestry", "42", att)
+	if err != nil {
+		t.Fatalf("BuildManualAttestedItem (first, clean): %v", err)
+	}
+
+	t.Run("second-qr-defective-rejects", func(t *testing.T) {
+		defectiveSecond, err := BuildManualAttestedItem("functional-status-oswestry", "43", att)
+		if err != nil {
+			t.Fatalf("BuildManualAttestedItem (second, defective): %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(defectiveSecond, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		delete(m, "extension")
+		defectiveSecond, err = json.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		reason, ok := fenceAttestedItems(fenceWrapTwoQRItemBundle(t, cleanFirst, defectiveSecond))
+		if ok {
+			t.Fatalf("second QR entry carries an unattested clinician item: want ok=false, got accept")
+		}
+		if !strings.Contains(reason, "FR-16") {
+			t.Fatalf("reject reason %q does not name FR-16", reason)
+		}
+	})
+
+	t.Run("two-clean-qr-entries-pass", func(t *testing.T) {
+		cleanSecond, err := BuildManualAttestedItem("functional-status-oswestry", "43", att)
+		if err != nil {
+			t.Fatalf("BuildManualAttestedItem (second, clean): %v", err)
+		}
+		reason, ok := fenceAttestedItems(fenceWrapTwoQRItemBundle(t, cleanFirst, cleanSecond))
+		if !ok {
+			t.Fatalf("two clean QR entries: want ok=true, got reject reason=%q", reason)
+		}
+	})
+}
+
+// fenceDropSubExtension deletes the sub-extension whose url == sub from the
+// item-level extension whose url == parent — the "field absent" mutation, twin
+// of the "field present but blank" one an empty Attestation field produces.
+func fenceDropSubExtension(t *testing.T, itemJSON []byte, parent, sub string) []byte {
+	t.Helper()
+	var item map[string]any
+	if err := json.Unmarshal(itemJSON, &item); err != nil {
+		t.Fatalf("fenceDropSubExtension: unmarshal: %v", err)
+	}
+	dropped := false
+	extAny, _ := item["extension"].([]any)
+	for _, e := range extAny {
+		em, ok := e.(map[string]any)
+		if !ok || em["url"] != parent {
+			continue
+		}
+		subAny, _ := em["extension"].([]any)
+		kept := make([]any, 0, len(subAny))
+		for _, s := range subAny {
+			sm, ok := s.(map[string]any)
+			if ok && sm["url"] == sub {
+				dropped = true
+				continue
+			}
+			kept = append(kept, s)
+		}
+		em["extension"] = kept
+	}
+	if !dropped {
+		t.Fatalf("fenceDropSubExtension: sub-extension %q not found under %q", sub, parent)
+	}
+	raw, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("fenceDropSubExtension: marshal: %v", err)
+	}
+	return raw
+}
+
+// TestFenceAttestedItems_ClinicianContent proves this module's fence enforces
+// FR-16's CONTENT, not merely the presence of an element with the right url: an
+// attestation whose NPI, text or date is blank or absent attests nothing and is
+// rejected, naming FR-16 and the offending field. One row per mandated field in
+// both mutation forms, the wholly-empty attestation that motivated the guard,
+// and a positive control proving a well-formed attestation still passes.
+func TestFenceAttestedItems_ClinicianContent(t *testing.T) {
+	const (
+		goodNPI  = "1999999999"
+		goodText = "I attest these are my clinical findings."
+		goodWhen = "2026-06-04"
+	)
+	good := Attestation{NPI: goodNPI, Text: goodText, When: goodWhen}
+
+	t.Run("complete-attestation-passes", func(t *testing.T) {
+		item, err := BuildManualAttestedItem("functional-status-oswestry", "42", good)
+		if err != nil {
+			t.Fatalf("BuildManualAttestedItem: %v", err)
+		}
+		if reason, ok := fenceAttestedItems(fenceWrapQRItemBundle(t, item)); !ok {
+			t.Fatalf("complete attestation: want ok=true, got reject reason=%q", reason)
+		}
+	})
+
+	t.Run("no-attestation-extension-rejects", func(t *testing.T) {
+		item, err := BuildManualAttestedItem("functional-status-oswestry", "42", good)
+		if err != nil {
+			t.Fatalf("BuildManualAttestedItem: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(item, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		delete(m, "extension")
+		stripped, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		reason, ok := fenceAttestedItems(fenceWrapQRItemBundle(t, stripped))
+		if ok {
+			t.Fatalf("attestation extension stripped: want ok=false, got accept")
+		}
+		if !strings.Contains(reason, "FR-16") {
+			t.Fatalf("reject reason %q does not name FR-16", reason)
+		}
+	})
+
+	for _, tc := range []struct {
+		field string
+		att   Attestation
+	}{
+		{"npi", Attestation{NPI: "", Text: goodText, When: goodWhen}},
+		{"text", Attestation{NPI: goodNPI, Text: "", When: goodWhen}},
+		{"date", Attestation{NPI: goodNPI, Text: goodText, When: ""}},
+	} {
+		t.Run("blank-"+tc.field+"-rejects", func(t *testing.T) {
+			item, err := BuildManualAttestedItem("functional-status-oswestry", "42", tc.att)
+			if err != nil {
+				t.Fatalf("BuildManualAttestedItem: %v", err)
+			}
+			reason, ok := fenceAttestedItems(fenceWrapQRItemBundle(t, item))
+			if ok {
+				t.Fatalf("attestation with blank %q: want ok=false, got accept", tc.field)
+			}
+			if !strings.Contains(reason, "FR-16") || !strings.Contains(reason, tc.field) {
+				t.Fatalf("reject reason %q does not name both FR-16 and %q", reason, tc.field)
+			}
+		})
+
+		t.Run("absent-"+tc.field+"-rejects", func(t *testing.T) {
+			item, err := BuildManualAttestedItem("functional-status-oswestry", "42", good)
+			if err != nil {
+				t.Fatalf("BuildManualAttestedItem: %v", err)
+			}
+			mutated := fenceDropSubExtension(t, item, ClinicianAttestationExt, tc.field)
+			reason, ok := fenceAttestedItems(fenceWrapQRItemBundle(t, mutated))
+			if ok {
+				t.Fatalf("attestation with %q deleted: want ok=false, got accept", tc.field)
+			}
+			if !strings.Contains(reason, "FR-16") || !strings.Contains(reason, tc.field) {
+				t.Fatalf("reject reason %q does not name both FR-16 and %q", reason, tc.field)
+			}
+		})
+	}
+
+	t.Run("all-fields-blank-rejects", func(t *testing.T) {
+		item, err := BuildManualAttestedItem("functional-status-oswestry", "42", Attestation{})
+		if err != nil {
+			t.Fatalf("BuildManualAttestedItem: %v", err)
+		}
+		reason, ok := fenceAttestedItems(fenceWrapQRItemBundle(t, item))
+		if ok {
+			t.Fatalf("wholly empty attestation: want ok=false, got accept")
+		}
+		if !strings.Contains(reason, "FR-16") {
+			t.Fatalf("reject reason %q does not name FR-16", reason)
+		}
+	})
+}
+
+// fenceBlankSignatureField blanks one string field of the FR-27 valueSignature —
+// "when" / "data" directly, "who.reference" through the nested object, and
+// "type" by emptying the coding array.
+func fenceBlankSignatureField(t *testing.T, itemJSON []byte, field string) []byte {
+	t.Helper()
+	var item map[string]any
+	if err := json.Unmarshal(itemJSON, &item); err != nil {
+		t.Fatalf("fenceBlankSignatureField: unmarshal: %v", err)
+	}
+	blanked := false
+	extAny, _ := item["extension"].([]any)
+	for _, e := range extAny {
+		em, ok := e.(map[string]any)
+		if !ok || em["url"] != QRSignatureExt {
+			continue
+		}
+		value, ok := em["valueSignature"].(map[string]any)
+		if !ok {
+			continue
+		}
+		switch field {
+		case "type":
+			value["type"] = []any{}
+		case "who.reference":
+			who, _ := value["who"].(map[string]any)
+			if who == nil {
+				t.Fatalf("fenceBlankSignatureField: valueSignature has no who")
+			}
+			who["reference"] = ""
+		default:
+			value[field] = ""
+		}
+		blanked = true
+	}
+	if !blanked {
+		t.Fatalf("fenceBlankSignatureField: no patient signature extension found")
+	}
+	raw, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("fenceBlankSignatureField: marshal: %v", err)
+	}
+	return raw
+}
+
+// TestFenceAttestedItems_PatientContent is the FR-27 twin: a
+// questionnaireresponse-signature whose typed assertion, timestamp, signer or
+// identity token is blank is not an attestation, and is rejected. Positive
+// control included.
+func TestFenceAttestedItems_PatientContent(t *testing.T) {
+	build := func(t *testing.T) []byte {
+		t.Helper()
+		item, err := BuildPatientAttestedItem("functional-status-oswestry", "42", "Patient/MBR-UC07", "2026-06-04")
+		if err != nil {
+			t.Fatalf("BuildPatientAttestedItem: %v", err)
+		}
+		return item
+	}
+
+	t.Run("complete-signature-passes", func(t *testing.T) {
+		if reason, ok := fenceAttestedItems(fenceWrapQRItemBundle(t, build(t))); !ok {
+			t.Fatalf("complete patient attestation: want ok=true, got reject reason=%q", reason)
+		}
+	})
+
+	// who.reference's wantSubstr is "who", not "who.reference": since Task D (register §15(b))
+	// the fence accepts FHIR R4's two legal forms for Signature.who (reference OR identifier),
+	// so blanking ONLY who.reference — leaving who with neither a usable reference nor an
+	// identifier — is refused under the combined "who" reason. See TestFenceWhoUsable for the
+	// fence's actual new decision boundary (both legal forms, the identifier-empty-value
+	// refusal, and the identifier-only acceptance).
+	fields := []struct{ field, wantSubstr string }{
+		{"type", "type"},
+		{"when", "when"},
+		{"who.reference", "who"},
+		{"data", "data"},
+	}
+	for _, tc := range fields {
+		t.Run("blank-"+tc.field+"-rejects", func(t *testing.T) {
+			mutated := fenceBlankSignatureField(t, build(t), tc.field)
+			reason, ok := fenceAttestedItems(fenceWrapQRItemBundle(t, mutated))
+			if ok {
+				t.Fatalf("patient attestation with blank %q: want ok=false, got accept", tc.field)
+			}
+			if !strings.Contains(reason, "FR-27") || !strings.Contains(reason, tc.wantSubstr) {
+				t.Fatalf("reject reason %q does not name both FR-27 and %q", reason, tc.wantSubstr)
+			}
+		})
 	}
 }
 
-// TestSandboxAdjudicate_PatientReportedRequired_Unattested: patient-reported-required=true
-// without patient signature → PASPended.
-func TestSandboxAdjudicate_PatientReportedRequired_Unattested(t *testing.T) {
-	qr, _ := json.Marshal(map[string]interface{}{
-		"resourceType": "QuestionnaireResponse",
-		"status":       "completed",
-		"item": []map[string]interface{}{
-			{
-				"linkId": "conservative-therapy-weeks",
-				"answer": []map[string]interface{}{{"valueInteger": 6}},
-			},
-			{
-				"linkId": "patient-reported-required",
-				"answer": []map[string]interface{}{{"valueBoolean": true}},
-			},
-		},
+// TestFenceWhoUsable is the sdk twin of gateway/engine's TestFenceWhoUsable (register §15(b) /
+// Task D): the FR-27 fence's decision boundary for Signature.who now accepts FHIR R4's two
+// legal forms — reference OR identifier — rather than reference-only. who absent, or with
+// neither a usable reference nor a usable identifier, is still refused; an identifier with an
+// empty "value" is refused (Task D's ruling: "value" is required, "system" is not); and a who
+// carrying ONLY an identifier (no reference at all) — the shape a conformant partner PHG such
+// as DHIN's may legally send — is accepted.
+func TestFenceWhoUsable(t *testing.T) {
+	setWho := func(t *testing.T, who map[string]any) []byte {
+		t.Helper()
+		item, err := BuildPatientAttestedItem("functional-status-oswestry", "42", "Patient/MBR-UC07", "2026-06-04")
+		if err != nil {
+			t.Fatalf("BuildPatientAttestedItem: %v", err)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(item, &parsed); err != nil {
+			t.Fatalf("unmarshal built item: %v", err)
+		}
+		extAny, _ := parsed["extension"].([]any)
+		found := false
+		for _, e := range extAny {
+			em, ok := e.(map[string]any)
+			if !ok || em["url"] != QRSignatureExt {
+				continue
+			}
+			value, ok := em["valueSignature"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if who == nil {
+				delete(value, "who")
+			} else {
+				value["who"] = who
+			}
+			found = true
+		}
+		if !found {
+			t.Fatalf("setWho: no patient signature extension found")
+		}
+		raw, err := json.Marshal(parsed)
+		if err != nil {
+			t.Fatalf("marshal mutated item: %v", err)
+		}
+		return raw
+	}
+
+	rejects := map[string]map[string]any{
+		"who-absent":                           nil,
+		"who-empty-object":                     {},
+		"who-neither-reference-nor-identifier": {"type": "Practitioner"},
+		"who-identifier-empty-value":           {"identifier": map[string]any{"system": "urn:dhin:signer", "value": ""}},
+	}
+	for name, who := range rejects {
+		t.Run(name+"-rejects", func(t *testing.T) {
+			reason, ok := fenceAttestedItems(fenceWrapQRItemBundle(t, setWho(t, who)))
+			if ok {
+				t.Fatalf("who=%v: want ok=false, got accept", who)
+			}
+			if !strings.Contains(reason, "FR-27") || !strings.Contains(reason, "who") {
+				t.Fatalf("reject reason %q does not name both FR-27 and \"who\"", reason)
+			}
+		})
+	}
+
+	t.Run("who-identifier-only-accepts", func(t *testing.T) {
+		who := map[string]any{"identifier": map[string]any{"system": "urn:dhin:signer", "value": "dhin-signer-88f21c"}}
+		if reason, ok := fenceAttestedItems(fenceWrapQRItemBundle(t, setWho(t, who))); !ok {
+			t.Fatalf("who carrying only an identifier (no reference): want ok=true, got reject reason=%q", reason)
+		}
 	})
-	dec, err := SandboxAdjudicate(qr, false, time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC), nil)
-	if err != nil {
-		t.Fatalf("SandboxAdjudicate: %v", err)
-	}
-	if dec.Outcome != PASPended {
-		t.Errorf("Outcome = %v, want PASPended (patient-reported unattested)", dec.Outcome)
-	}
 }

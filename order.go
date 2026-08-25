@@ -41,12 +41,22 @@ const (
 	systemSHNCoverage = "urn:shn:coverage"
 )
 
-// BuildServiceRequest builds a DRAFT order (CDS Hooks order-select context): a FHIR
-// R4 ServiceRequest with status "draft", intent "order", the given CPT procedure
-// code + display, the ICD-10-CM diagnosis as reasonCode, and the patient subject.
-// Reimplements internal/fhirmap.BuildServiceRequest standalone (no internal/ import);
-// test/sdkparity asserts byte-identity with the substrate for the same inputs.
-func BuildServiceRequest(cptCode, display, dxCode, patientRef string) ([]byte, error) {
+// BuildServiceRequestCoded builds a DRAFT order (CDS Hooks order-select context) with an
+// EXPLICIT procedure code system (CPT or HCPCS): a FHIR R4 ServiceRequest with status
+// "draft", intent "order", the given procedure code + display, the ICD-10-CM diagnosis
+// as reasonCode, and the patient subject.
+//
+// Pulled in from gateway/engine/order_build.go —
+// deferral D-PCB-1 ("build-side product-coding gap": shnsdk.BuildServiceRequest was
+// CPT-system-locked, so the published SDK could not build an HCPCS order — the mirrored
+// families E0250/L8000/G0151/J3490 are ALL HCPCS). That gateway-local stub's own comment
+// named the closing condition exactly: "When a real partner consumer needs to build
+// HCPCS orders via the SDK, lift this into sdk/order.go (additive)" — this round's
+// descriptor-driven persona order is that real consumer. test/sdkparity/
+// order_coded_parity_test.go now asserts THIS function is byte-identical to
+// gateway/engine's own BuildServiceRequestCoded (the deferral's own promised guard),
+// closing D-PCB-1 rather than leaving the gateway-local copy as the only implementation.
+func BuildServiceRequestCoded(system, code, display, dxCode, patientRef string) ([]byte, error) {
 	sr := fhir.ServiceRequest{
 		Meta:   &fhir.Meta{Profile: []string{profileUSCoreServiceRequest}},
 		Status: fhir.RequestStatusDraft,
@@ -54,8 +64,8 @@ func BuildServiceRequest(cptCode, display, dxCode, patientRef string) ([]byte, e
 		Code: &fhir.CodeableConcept{
 			Coding: []fhir.Coding{
 				{
-					System:  strPtr(systemCPT),
-					Code:    strPtr(cptCode),
+					System:  strPtr(system),
+					Code:    strPtr(code),
 					Display: strPtr(display),
 				},
 			},
@@ -75,6 +85,17 @@ func BuildServiceRequest(cptCode, display, dxCode, patientRef string) ([]byte, e
 		},
 	}
 	return json.Marshal(sr)
+}
+
+// BuildServiceRequest builds a DRAFT order (CDS Hooks order-select context): a FHIR
+// R4 ServiceRequest with status "draft", intent "order", the given CPT procedure
+// code + display, the ICD-10-CM diagnosis as reasonCode, and the patient subject.
+// Reimplements internal/fhirmap.BuildServiceRequest standalone (no internal/ import);
+// test/sdkparity asserts byte-identity with the substrate for the same inputs. Thin
+// CPT-only wrapper over BuildServiceRequestCoded (unchanged signature/behavior — every
+// existing caller of THIS function is unaffected by the D-PCB-1 pull-in above).
+func BuildServiceRequest(cptCode, display, dxCode, patientRef string) ([]byte, error) {
+	return BuildServiceRequestCoded(systemCPT, cptCode, display, dxCode, patientRef)
 }
 
 // BuildCoverage builds a valid R4 Coverage conforming to us-core-coverage (US Core

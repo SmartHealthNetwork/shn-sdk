@@ -6,14 +6,14 @@ import (
 	"testing"
 )
 
-// nestedSandboxQuestionnaireJSON is the sandbox lumbar-MRI questionnaire with its
+// nestedDemoQuestionnaireJSON is the demo lumbar-MRI questionnaire with its
 // items grouped the way real Da Vinci payer questionnaires group them: two
 // top-level `group` items, one of which holds a further group (depth 3 on the
 // item.item axis), plus a `display` item that carries no answer. Same canonical,
 // same leaf linkIds, same leaf order as the flat shape — only the structure
-// differs. (A flat sandbox corpus hid one-level item walkers for a whole release
+// differs. (A flat corpus hid one-level item walkers for a whole release
 // line; this is the shape the builder must mirror.)
-const nestedSandboxQuestionnaireJSON = `{
+const nestedDemoQuestionnaireJSON = `{
   "resourceType": "Questionnaire",
   "id": "pa-lumbar-mri",
   "url": "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri",
@@ -93,16 +93,16 @@ func originSource(t *testing.T, it qrItemProbe) string {
 	return ""
 }
 
-// TestFillQuestionnaire_MirrorsNestedGroups: the sandbox fill must reproduce the
+// TestFillQuestionnaire_MirrorsNestedGroups: the demo fill must reproduce the
 // questionnaire's group structure in the QR — groups recurse (depth 3 on the
 // item.item axis), display items vanish, a group with no answered leaf is
 // omitted (never an empty shell), and leaf order within each group is kept.
-// The sandbox fill used to iterate q.Item once: a group linkId had no answer
+// The demo fill used to iterate q.Item once: a group linkId had no answer
 // mapping, so every nested leaf was silently dropped and the QR came back with
 // zero items.
 func TestFillQuestionnaire_MirrorsNestedGroups(t *testing.T) {
 	t.Run("covered persona: only the clinical-history branch answers", func(t *testing.T) {
-		qr, err := FillQuestionnaire([]byte(nestedSandboxQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
+		qr, err := FillQuestionnaire([]byte(nestedDemoQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
 		if err != nil {
 			t.Fatalf("FillQuestionnaire: %v", err)
 		}
@@ -140,7 +140,7 @@ func TestFillQuestionnaire_MirrorsNestedGroups(t *testing.T) {
 		cc := mbrCoveredCC()
 		cc.HighDisability = true
 		cc.HighDisabilityRef = "Observation/obs-odi"
-		qr, err := FillQuestionnaire([]byte(nestedSandboxQuestionnaireJSON), cc, mbrCoveredQC())
+		qr, err := FillQuestionnaire([]byte(nestedDemoQuestionnaireJSON), cc, mbrCoveredQC())
 		if err != nil {
 			t.Fatalf("FillQuestionnaire: %v", err)
 		}
@@ -157,7 +157,7 @@ func TestFillQuestionnaire_MirrorsNestedGroups(t *testing.T) {
 	})
 
 	t.Run("2.2 line: the auto-client origin code reaches nested answers", func(t *testing.T) {
-		qr, err := FillQuestionnaireAtLine("2.2", []byte(nestedSandboxQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
+		qr, err := FillQuestionnaireAtLine("2.2", []byte(nestedDemoQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
 		if err != nil {
 			t.Fatalf("FillQuestionnaireAtLine(2.2): %v", err)
 		}
@@ -171,7 +171,7 @@ func TestFillQuestionnaire_MirrorsNestedGroups(t *testing.T) {
 	})
 }
 
-// TestFillQuestionnaire_UnknownLinkIdFailsLoud: the sandbox fill is fenced to ONE
+// TestFillQuestionnaire_UnknownLinkIdFailsLoud: the demo fill is fenced to ONE
 // canonical whose leaves it knows by linkId. A leaf it does not know — at any
 // depth — is fixture drift, and the fill must refuse rather than emit a
 // quietly incomplete QR (the same silence the nested-item walkers closed on the
@@ -196,8 +196,8 @@ func TestFillQuestionnaire_UnknownLinkIdFailsLoud(t *testing.T) {
 		name string
 		q    []byte
 	}{
-		{"top level", inject(t, sandboxQuestionnaireJSON, func(items []any) []any { return append(items, unknown) })},
-		{"inside a group", inject(t, nestedSandboxQuestionnaireJSON, func(items []any) []any {
+		{"top level", inject(t, demoQuestionnaireJSON, func(items []any) []any { return append(items, unknown) })},
+		{"inside a group", inject(t, nestedDemoQuestionnaireJSON, func(items []any) []any {
 			g := items[1].(map[string]any)
 			g["item"] = append(g["item"].([]any), unknown)
 			return items
@@ -220,7 +220,7 @@ func TestFillQuestionnaire_UnknownLinkIdFailsLoud(t *testing.T) {
 
 	// Restraint: an unknown GROUP linkId is structure, not an answer — it must
 	// recurse, not error. (A payer may regroup leaves without changing them.)
-	regrouped := inject(t, sandboxQuestionnaireJSON, func(items []any) []any {
+	regrouped := inject(t, demoQuestionnaireJSON, func(items []any) []any {
 		return []any{map[string]any{"linkId": "everything", "type": "group", "item": items}}
 	})
 	qr, err := FillQuestionnaire(regrouped, mbrCoveredCC(), mbrCoveredQC())

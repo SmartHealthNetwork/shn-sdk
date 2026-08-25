@@ -71,7 +71,7 @@ func conformantOrderSelectCoverageAndPatient(body []byte) (covJSON []byte, patie
 // conformantPASSubjects also carries srJSON/member; the SDK Responder needs the patient ref and
 // the QR/DR facts).
 type conformantClaimSubmit struct {
-	claimPatient string // Claim.patient.reference (the bound member, "Patient/<member>")
+	claimPatient string // Claim.patient.reference — "Patient/<member>" or "<base>/Patient/<member>" (see pasMemberFromRef)
 	srSubject    string // ServiceRequest.subject.reference (REQUIRED — intra-bundle bind)
 	qrJSON       []byte // the QuestionnaireResponse resource, or nil (optional on this leg)
 	qrSubject    string // QuestionnaireResponse.subject.reference, or "" if no QR
@@ -146,29 +146,58 @@ func parseConformantClaimSubmit(body []byte) (conformantClaimSubmit, bool) {
 // when the derived PCI != token subject. The SDK Responder has no registry; that defense-in-depth
 // layer is structurally unavailable here. ALL bundle-internal consistency checks ARE enforced.
 func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg string) {
-	member := strings.TrimPrefix(cs.claimPatient, "Patient/")
-	if strings.TrimPrefix(cs.srSubject, "Patient/") != member {
+	member := pasMemberFromRef(cs.claimPatient)
+	if pasMemberFromRef(cs.srSubject) != member {
 		return 403, "inconsistent patient in PAS bundle"
 	}
 	if cs.qrJSON != nil {
 		if cs.qrSubject == "" {
 			return 403, "PAS bundle QuestionnaireResponse missing subject"
 		}
-		if strings.TrimPrefix(cs.qrSubject, "Patient/") != member {
+		if pasMemberFromRef(cs.qrSubject) != member {
 			return 403, "inconsistent patient in PAS bundle"
 		}
 	}
-	if cs.hasDR && strings.TrimPrefix(cs.drSubject, "Patient/") != member {
+	if cs.hasDR && pasMemberFromRef(cs.drSubject) != member {
 		return 403, "inconsistent patient in PAS bundle"
 	}
 	return 0, ""
 }
 
-// conformantBundleMember returns the bare member id ("Patient/" stripped) bound by a
-// conformantClaimSubmit. Small helper so the Responder/ledger key on the same canonical member
-// the engine binds.
+// pasMemberFromRef reads the bare member id out of a patient reference in EITHER spelling a
+// conformant PAS bundle may legally carry: the relative "Patient/<member>", or the absolute
+// "<base>/Patient/<member>" that BuildConformantClaimBundle emits under AbsoluteRefs (a real Da
+// Vinci payer resolves relative references against its OWN server base, so bundle-internal ones
+// must be absolute for it to find them at all).
+//
+// That absolutization is deliberately NOT uniform, and cannot be made so: the patient-compartment
+// ANCHOR references — Coverage.beneficiary and ServiceRequest/DeviceRequest.subject — stay
+// relative, because a payer's Rule CQL retrieves those resources in `context Patient` and an
+// absolute anchor breaks the compartment match. So one correct bundle legitimately spells the
+// SAME patient two ways, and Claim.patient is one of the absolute ones.
+//
+// The consistency fence's property is "the same MEMBER", not "the same string", so it has to
+// compare identities rather than spellings: a raw prefix trim reads two spellings of one patient
+// as two patients and refuses a valid bundle. This is NOT a relaxation of the fence. A reference
+// naming a genuinely different member still mismatches in either spelling, and a non-Patient
+// reference (no "Patient/" segment) is returned verbatim, so it cannot collide with a member id.
+//
+// Identical to the substrate gateway's own pasMemberFromRef (gateway/engine/pas_native.go), which
+// already resolved this for the native lane. The two fences are twins on purpose and must decide
+// the same bundle the same way.
+func pasMemberFromRef(ref string) string {
+	if i := strings.LastIndex(ref, "Patient/"); i >= 0 {
+		return ref[i+len("Patient/"):]
+	}
+	return ref
+}
+
+// conformantBundleMember returns the bare member id bound by a conformantClaimSubmit, in either
+// reference spelling (see pasMemberFromRef). Small helper so the Responder/ledger key on the same
+// canonical member the engine binds — a ledger keyed on the raw reference would file one patient
+// under two keys depending on which lane submitted.
 func conformantBundleMember(cs conformantClaimSubmit) string {
-	return strings.TrimPrefix(cs.claimPatient, "Patient/")
+	return pasMemberFromRef(cs.claimPatient)
 }
 
 // conformantUpdateFacts holds the cross-resource FR-21/FR-32 facts the CONFORMANT

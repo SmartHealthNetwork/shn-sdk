@@ -11,10 +11,10 @@ import (
 )
 
 // SupportedQuestionnaireCanonical is the ONE DTR questionnaire FillQuestionnaire
-// recognizes: the sandbox lumbar-MRI PA questionnaire. It MUST equal the
+// recognizes: the demo lumbar-MRI PA questionnaire. It MUST equal the
 // substrate's dtr.LumbarMRICanonical / crd.QuestionnaireCanonicalLumbarMRI so the
-// SDK fills exactly the questionnaire the sandbox payer returns. FillQuestionnaire
-// FAILS LOUDLY on any other canonical (it is a sandbox-targeted stub, not a general
+// SDK fills exactly the questionnaire the substrate's demo DTR serves. FillQuestionnaire
+// FAILS LOUDLY on any other canonical (it is fenced to the demo questionnaire, not a general
 // SDC engine).
 const SupportedQuestionnaireCanonical = "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"
 
@@ -68,7 +68,7 @@ func questionnaireResponseEntryFullURL(questionnaireResponse []byte) (string, er
 }
 
 // ClinicalContext is the provider-LOCAL clinical data FillQuestionnaire answers
-// from (the sandbox auto-approval fields). The *Ref fields are carried even
+// from (the demo questionnaire's answer fields). The *Ref fields are carried even
 // though the auto information-origin extension no longer emits a sourceReference
 // (DTR 2.0.1 source="auto" carries only the source sub-extension).
 type ClinicalContext struct {
@@ -87,6 +87,18 @@ type ClinicalContext struct {
 	// (patient portal attestation flow). When set, FillQuestionnaire emits the
 	// patient-reported-required=true trigger item.
 	PatientReported bool
+
+	// HomeOxygen-family Observation-backed facts (R3 — UC-03's re-key onto
+	// HomeOxygenDispatch). Unlike the lumbar fields above, these are NOT read by
+	// shnsdk.FillQuestionnaire (that filler stays fenced to the lumbar canonical) — they
+	// exist so a caller can independently cross-check an operated-$populate-computed QR
+	// answer against the member's OWN seeded Observation before attributing it Origin="auto"
+	// (gateway/engine's homeOxygenAutoFillEvidence). "" means no seeded Observation for the
+	// member — the honest answer is "unattributed", never fabricated.
+	OxygenSaturationPct string // item 2.2, whole-number percent as a decimal string
+	OxygenSaturationRef string // the seeded Observation's own reference
+	ArterialPaO2mmHg    string // item 2.3, whole-number mmHg as a decimal string
+	ArterialPaO2Ref     string // the seeded Observation's own reference
 }
 
 // QRContext carries the DTR context the QuestionnaireResponse is completed in: the
@@ -151,7 +163,7 @@ func BuildQuestionnaireFetchWithCoverage(canonical string, coverageJSON []byte) 
 // "resource":<questionnaire>}]} (Go sorts map keys, so the wire is
 // {"entry":[{"fullUrl":<url>,"resource":<q>}],"resourceType":"Bundle","type":"collection"}).
 // A FHIR collection Bundle requires every entry to carry a fullUrl (IG-HAPI $validate
-// enforces it); the Questionnaire's canonical url is the entry identity. The sandbox
+// enforces it); the Questionnaire's canonical url is the entry identity. The demo
 // payer carries no dependent Libraries/ValueSets, so this wrap is honestly deps-free; a
 // real partner's package carries them. Use BuildQuestionnairePackageAtLine to target
 // 2.1/2.2 (DTR package differential: DTR 2.2 requires a QuestionnaireResponse entry too).
@@ -202,11 +214,25 @@ func buildQuestionnairePackage(def DTRDef, questionnaire, questionnaireResponse 
 }
 
 // ExtractQuestionnaireFromPackage pulls the first Questionnaire entry out of a Da Vinci
-// $questionnaire-package response Bundle, returning its bytes VERBATIM. STRICT and
+// $questionnaire-package response, returning its bytes VERBATIM. STRICT and
 // package-ONLY: the SDK consumer expects the uniform package shape (§6.2), so a bare
 // Questionnaire — which has no entry array — naturally yields no Questionnaire entry and
 // errors. There is NO dual-shape tolerance branch by design (full-uniform contract).
+//
+// data may be EITHER a bare collection Bundle OR a Parameters resource profiled on
+// dtr-qpackage-output-parameters (a conformant Da Vinci payer's $questionnaire-package
+// response shape, which the gateway relays VERBATIM on ingress): the collection Bundle
+// then lives at parameter[name=="packagebundle"].resource. unwrapPackageParameters
+// normalises the Parameters wrapper to its inner Bundle bytes before the walk below,
+// so both shapes are handled by the ONE bundle-walk. Mirrors
+// gateway/engine/davincimap.go's unwrapQuestionnairePackage and
+// gateway/scenariodriver/brprovider.go's packageBundleResource — same shape, no third
+// unwrap variant.
 func ExtractQuestionnaireFromPackage(data []byte) ([]byte, error) {
+	data, err := unwrapPackageParameters(data)
+	if err != nil {
+		return nil, err
+	}
 	var bundle struct {
 		Entry []struct {
 			Resource json.RawMessage `json:"resource"`
@@ -229,6 +255,38 @@ func ExtractQuestionnaireFromPackage(data []byte) ([]byte, error) {
 	return nil, fmt.Errorf("shnsdk: $questionnaire-package response contains no Questionnaire")
 }
 
+// unwrapPackageParameters normalises the two $questionnaire-package response shapes a
+// conformant Da Vinci payer may return: a bare collection Bundle (resourceType=="Bundle"),
+// returned byte-identical, or a Parameters resource profiled on
+// dtr-qpackage-output-parameters, whose inner collection Bundle lives at
+// parameter[name=="packagebundle"].resource and is returned in its place. A Parameters
+// wrapper with no packagebundle parameter errors legibly rather than falling through to
+// the bundle-walk's generic "no Questionnaire" message. Malformed JSON is left for the
+// caller's own json.Unmarshal to surface. Mirrors
+// gateway/engine/davincimap.go's unwrapQuestionnairePackage and
+// gateway/scenariodriver/brprovider.go's packageBundleResource.
+func unwrapPackageParameters(raw []byte) ([]byte, error) {
+	var top struct {
+		ResourceType string `json:"resourceType"`
+		Parameter    []struct {
+			Name     string          `json:"name"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"parameter"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return raw, nil // malformed — let the downstream bundle-walk surface the error
+	}
+	if top.ResourceType != "Parameters" {
+		return raw, nil // bare Bundle (or anything else) — byte-identical pass-through
+	}
+	for _, p := range top.Parameter {
+		if p.Name == "packagebundle" && len(p.Resource) > 0 {
+			return p.Resource, nil
+		}
+	}
+	return nil, fmt.Errorf("shnsdk: Parameters carries no packagebundle Bundle")
+}
+
 // ParseQuestionnaireURL returns the url field from a marshalled FHIR Questionnaire.
 // Ported standalone from internal/dtr.ParseQuestionnaireURL: errors if the
 // resourceType is not "Questionnaire" or the url is absent/empty.
@@ -249,11 +307,11 @@ func ParseQuestionnaireURL(data []byte) (string, error) {
 	return *probe.URL, nil
 }
 
-// FillQuestionnaire fills the sandbox DTR questionnaire into a conformant
+// FillQuestionnaire fills the demo DTR questionnaire into a conformant
 // QuestionnaireResponse (answers + provider-LOCAL information-origin attribution).
-// It is the ONE sandbox QR builder: the gateway's managed populator, the conformance
-// corpus generator, and its stale-guard all call it. SANDBOX-TARGETED STUB (DEF): NOT a
-// general SDC engine — it handles the sandbox questionnaire's known items. It MUST
+// It is the ONE demo-questionnaire QR builder: the gateway's managed populator, the conformance
+// corpus generator, and its stale-guard all call it. DEMO-QUESTIONNAIRE-FENCED (DEF): NOT a
+// general SDC engine — it handles the demo questionnaire's known items. It MUST
 // FAIL LOUDLY (a clear error naming the supported canonical) on a questionnaire whose
 // canonical/url it does not recognize, and NEVER emit a half-filled QR. It is
 // FillQuestionnaireAtLine("2.0", …), byte-identical (regression-fenced by
@@ -279,7 +337,7 @@ func fillQuestionnaire(def DTRDef, questionnaireJSON []byte, cc ClinicalContext,
 		return nil, fmt.Errorf("shnsdk: FillQuestionnaire: parse questionnaire: %w", err)
 	}
 
-	// Fail loud on an unrecognized questionnaire: the sandbox stub only knows the
+	// Fail loud on an unrecognized questionnaire: the demo fill only knows the
 	// lumbar-MRI questionnaire's items. NEVER emit a half-filled QR — return (nil, err)
 	// before constructing anything.
 	got := ""
@@ -287,7 +345,7 @@ func fillQuestionnaire(def DTRDef, questionnaireJSON []byte, cc ClinicalContext,
 		got = *q.Url
 	}
 	if got != SupportedQuestionnaireCanonical {
-		return nil, fmt.Errorf("shnsdk: FillQuestionnaire: unsupported questionnaire %q (sandbox supports %q)", got, SupportedQuestionnaireCanonical)
+		return nil, fmt.Errorf("shnsdk: FillQuestionnaire: unsupported questionnaire %q (the only supported canonical is %q)", got, SupportedQuestionnaireCanonical)
 	}
 
 	// ONE structure-driven walk (shared with FillQuestionnaireFromAnswers): groups
@@ -301,7 +359,7 @@ func fillQuestionnaire(def DTRDef, questionnaireJSON []byte, cc ClinicalContext,
 	items, err := walkQuestionnaireItems(q.Item, func(qi fhir.QuestionnaireItem) (fhir.QuestionnaireResponseItemAnswer, bool, error) {
 		answer, known, answered := answerFor(qi.LinkId, cc)
 		if !known {
-			return fhir.QuestionnaireResponseItemAnswer{}, false, fmt.Errorf("unknown item %q in sandbox questionnaire %q (the sandbox fill knows its leaves by linkId and never half-fills)", qi.LinkId, SupportedQuestionnaireCanonical)
+			return fhir.QuestionnaireResponseItemAnswer{}, false, fmt.Errorf("unknown item %q in demo questionnaire %q (the demo fill knows its leaves by linkId and never half-fills)", qi.LinkId, SupportedQuestionnaireCanonical)
 		}
 		if !answered {
 			return fhir.QuestionnaireResponseItemAnswer{}, false, nil
@@ -329,13 +387,13 @@ func fillQuestionnaire(def DTRDef, questionnaireJSON []byte, cc ClinicalContext,
 	return raw, nil
 }
 
-// answerFor maps a sandbox leaf linkId to a QR answer from LOCAL data. Three-way,
+// answerFor maps a demo-questionnaire leaf linkId to a QR answer from LOCAL data. Three-way,
 // not two-way, because the walker must tell "this stub does not know the leaf"
 // apart from "the stub knows it and has nothing local to say":
 //
-//   - known=false: the linkId is not a sandbox leaf at all — fixture drift, refused
+//   - known=false: the linkId is not a demo-questionnaire leaf at all — fixture drift, refused
 //     by the caller (never a silent skip);
-//   - known=true, answered=false: a sandbox leaf with no local value — a negative
+//   - known=true, answered=false: a demo-questionnaire leaf with no local value — a negative
 //     trigger flag, or functional-status-oswestry, which has no local source and is
 //     supplied by the clinician/patient attestation — OMITTED, never fabricated;
 //   - known=true, answered=true: the answer.
@@ -425,148 +483,6 @@ func dtrQRContextExtensions(def DTRDef, qc QRContext) []fhir.Extension {
 			Display: strPtr("Information needed for a prior authorization"),
 		}}}},
 	}
-}
-
-// sandboxLumbarQuestionnaireBytes holds the precomputed sandbox lumbar-MRI
-// questionnaire bytes. Computed once at package init and served as fresh copies by
-// SandboxLumbarQuestionnaire. The fixture is a fixed, compile-time-known struct, so
-// json.Marshal cannot fail — a failure would be a programmer error and panics (matching
-// the substrate's dtr.QuestionnaireFor panic posture).
-var sandboxLumbarQuestionnaireBytes []byte
-
-// cqlLibraryCanonical is the operated-CQL-engine Library the questionnaire's cqf-library points at.
-// MUST MATCH gateway/fhirseed.SandboxLumbarLibrary's Library.url — pinned by the substrate drift
-// test TestSDKQuestionnaireCanonicalMatchesLibrary.
-const cqlLibraryCanonical = "http://smarthealth.network/fhir/Library/LumbarMRICQL"
-
-// cqlQuestionnaireExtensions builds the questionnaire-level SDC extension for CQL-backed
-// population: cqf-library → the operated CQL Library. Byte-parallel with internal/dtr.
-//
-// NO launchContext: the operated $populate engine binds the CQL `context Patient` from the
-// `subject` parameter (validated against HAPI CR — population works with subject alone). The SDC
-// launchContext CodeSystem is also unresolvable by the US-Core runtime egress validator (it errors
-// on the unknown code system) — so omitting it keeps the questionnaire egress-validatable without
-// entangling the validator role with SDC. Declaring launchContext is a deferred realism item.
-func cqlQuestionnaireExtensions() []fhir.Extension {
-	return []fhir.Extension{
-		{Url: "http://hl7.org/fhir/StructureDefinition/cqf-library", ValueCanonical: strPtr(cqlLibraryCanonical)},
-	}
-}
-
-// initialExpression builds the per-item SDC initialExpression (text/cql) referencing a define in
-// the LumbarMRICQL Library.
-func initialExpression(define string) []fhir.Extension {
-	return []fhir.Extension{{
-		Url:             "http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-initialExpression",
-		ValueExpression: &fhir.Expression{Language: "text/cql", Expression: strPtr(define)},
-	}}
-}
-
-func init() {
-	q := fhir.Questionnaire{
-		Id:      strPtr("pa-lumbar-mri"),
-		Url:     strPtr(QuestionnaireCanonicalLumbarMRI),
-		Version: strPtr("1.0.0"),
-		Status:  fhir.PublicationStatusActive,
-		// CQL-backed DTR questionnaire (operated $populate engine populates each item from the
-		// LumbarMRICQL Library; FillQuestionnaire ignores these extensions and fills by linkId).
-		// Byte-parallel with internal/dtr.QuestionnaireFor.
-		Extension: cqlQuestionnaireExtensions(),
-		// GROUPED the way real Da Vinci payer questionnaires are grouped (the captured
-		// reference-implementation package nests to depth 2; this fixture nests to depth
-		// 3 on the item.item axis): a flat fixture hid every one-level item walker for
-		// a whole release line. Leaf linkIds, order, texts, and CQL initialExpressions
-		// are unchanged — only the structure is new. No group repeats (a repeating
-		// group would legitimately yield duplicate linkIds, which the adjudicator
-		// refuses as ambiguous; that refusal is exercised by its own tests, not here).
-		Item: []fhir.QuestionnaireItem{
-			{
-				LinkId: "clinical-history",
-				Type:   fhir.QuestionnaireItemTypeGroup,
-				Text:   strPtr("Clinical history"),
-				Item: []fhir.QuestionnaireItem{
-					{
-						LinkId:    "conservative-therapy-weeks",
-						Type:      fhir.QuestionnaireItemTypeInteger,
-						Text:      strPtr("Weeks of conservative therapy completed"),
-						Extension: initialExpression("ConservativeTherapyWeeks"),
-					},
-					{
-						LinkId:    "neuro-deficit",
-						Type:      fhir.QuestionnaireItemTypeBoolean,
-						Text:      strPtr("Progressive neurological deficit present?"),
-						Extension: initialExpression("NeuroDeficit"),
-					},
-					{
-						LinkId: "prior-treatment",
-						Type:   fhir.QuestionnaireItemTypeGroup,
-						Text:   strPtr("Prior treatment"),
-						Item: []fhir.QuestionnaireItem{
-							{
-								LinkId:    "prior-imaging",
-								Type:      fhir.QuestionnaireItemTypeBoolean,
-								Text:      strPtr("Prior imaging performed?"),
-								Extension: initialExpression("PriorImaging"),
-							},
-							{
-								LinkId:    "prior-surgery",
-								Type:      fhir.QuestionnaireItemTypeBoolean,
-								Text:      strPtr("Prior lumbar surgery?"),
-								Extension: initialExpression("PriorSurgery"),
-							},
-						},
-					},
-				},
-			},
-			{
-				LinkId: "functional-status",
-				Type:   fhir.QuestionnaireItemTypeGroup,
-				Text:   strPtr("Functional status"),
-				Item: []fhir.QuestionnaireItem{
-					{
-						LinkId:    "high-disability",
-						Type:      fhir.QuestionnaireItemTypeBoolean,
-						Text:      strPtr("High disability index flag?"),
-						Extension: initialExpression("HighDisability"),
-					},
-					{
-						// Patient attestation trigger flag: when true, the functional-status-oswestry
-						// item must be patient-attested. Absent / false means no patient-authorship
-						// leg is needed (auto-approval and clinician-attestation paths are unchanged).
-						LinkId:    "patient-reported-required",
-						Type:      fhir.QuestionnaireItemTypeBoolean,
-						Text:      strPtr("Patient-reported functional status required?"),
-						Extension: initialExpression("PatientReportedRequired"),
-					},
-					{
-						// No initialExpression — clinician/patient attestation (filled by the
-						// attestation resume flow, not the operated engine).
-						LinkId: "functional-status-oswestry",
-						Type:   fhir.QuestionnaireItemTypeText,
-						Text:   strPtr("Oswestry disability index (clinician-attested)"),
-					},
-				},
-			},
-		},
-	}
-	raw, err := json.Marshal(q)
-	if err != nil {
-		panic("shnsdk: marshal fixed sandbox lumbar questionnaire fixture: " + err.Error())
-	}
-	sandboxLumbarQuestionnaireBytes = raw
-}
-
-// SandboxLumbarQuestionnaire returns the FHIR Questionnaire JSON for the sandbox
-// lumbar-MRI PA questionnaire. SANDBOX fixture — exported so reference
-// adjudicators (tests, feedsmoke, the quickstart) can serve the sandbox PA flow; a
-// real payer serves its own questionnaires from its Adjudicator. The bytes are
-// byte-identical to dtr.QuestionnaireFor(crd.QuestionnaireCanonicalLumbarMRI)
-// (proven by test/sdkparity/dtr_parity_test.go). Each call returns a fresh copy so
-// callers may mutate the slice without affecting future calls.
-func SandboxLumbarQuestionnaire() []byte {
-	cp := make([]byte, len(sandboxLumbarQuestionnaireBytes))
-	copy(cp, sandboxLumbarQuestionnaireBytes)
-	return cp
 }
 
 func intPtr(i int) *int    { return &i }
@@ -1180,7 +1096,7 @@ func ValidatePatientAnswer(linkID, answer string) error {
 		// HomeHealthAssessment free-text functional-status item ("Functional limitations",
 		// type text, 0-CQL) — the patient-authored narrative provider-data UC-07 attests. The
 		// conformance constraint for a free-text item is a non-empty answer: the patient-authorship
-		// signer must not attest an empty functional-status item. (The composite/sandbox UC-07 path
+		// signer must not attest an empty functional-status item. (The reference-payer UC-07 path
 		// uses functional-status-oswestry above; this rule is the provider-data HHA analog.)
 		if strings.TrimSpace(answer) == "" {
 			return fmt.Errorf("patient answer for %s (HHA functional-status) must not be empty", linkID)
@@ -1189,4 +1105,31 @@ func ValidatePatientAnswer(linkID, answer string) error {
 	default:
 		return fmt.Errorf("no attestation rule for patient item %q", linkID)
 	}
+}
+
+// BuildQuestionnaireResponseShell builds an in-progress, ZERO-ANSWER QuestionnaireResponse
+// for a questionnaire this SDK cannot auto-fill locally.
+//
+// A payer that runs real Da Vinci advertises ITS OWN questionnaires; only the one canonical
+// this package ships prefill logic for (SupportedQuestionnaireCanonical) can be answered
+// from a ClinicalContext. For anything else the honest answer is a shell: it names the
+// questionnaire the payer advertised and the patient it is about, asserts no answers, and
+// leaves the clinician (or an operated $populate engine on the requester's own side) to
+// author the content. It is exactly the posture an operated SDC $populate takes against a
+// questionnaire that carries no prepopulation logic — never invented answers.
+func BuildQuestionnaireResponseShell(questionnaireJSON []byte, qc QRContext) ([]byte, error) {
+	url, err := ParseQuestionnaireURL(questionnaireJSON)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: BuildQuestionnaireResponseShell: %w", err)
+	}
+	if qc.PatientRef == "" {
+		return nil, fmt.Errorf("shnsdk: BuildQuestionnaireResponseShell: PatientRef is required (the QR's subject)")
+	}
+	return json.Marshal(map[string]any{
+		"resourceType":  "QuestionnaireResponse",
+		"status":        "in-progress",
+		"questionnaire": url,
+		"subject":       map[string]string{"reference": qc.PatientRef},
+		"authored":      qc.Authored.UTC().Format(time.RFC3339),
+	})
 }

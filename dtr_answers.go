@@ -26,7 +26,11 @@ type AnswerCoding struct{ System, Code, Display string }
 // FillQuestionnaireFromAnswers builds a conformant QuestionnaireResponse for ANY
 // questionnaire by walking its item tree and filling each leaf from `answers` (keyed
 // by linkId). It is the generic, structure-driven analog of FillQuestionnaire for
-// MANUAL questionnaires (no CQL):
+// MANUAL questionnaires (no CQL) — use it ONLY when `answers` values are genuinely
+// entered by a human operator (a clinician or a patient), never for values a system
+// derived from a clinical record (use FillQuestionnaireFromAutoAnswers for that — the
+// stamp must name who/what actually produced the value, per FR-16/FR-17; register
+// §15(a)):
 //
 //   - group items: recurse, mirroring the questionnaire's nesting in the QR;
 //   - display items: skipped (no answer);
@@ -39,7 +43,13 @@ type AnswerCoding struct{ System, Code, Display string }
 //
 // author is the Practitioner reference that recorded the manual answers (e.g.
 // "Practitioner/1234567890"). It is required: dtrx-1 mandates an author sub-extension
-// when source="manual". An empty author returns an error.
+// when source="manual". An empty author returns an error. NOTE: source="manual" alone
+// is not FR-16-conformant for a clinician/patient author — the fence
+// (gateway/engine/attestfence.go) additionally requires a COMPLETE attestation
+// extension (shnsdk.BuildManualAttestedItem / BuildPatientAttestedItem) whenever
+// author names a Practitioner/Patient; this generic filler does not add one, so a
+// genuinely clinician/patient-authored fill needs its own attestation step layered on
+// top (the pattern gateway/engine/originate_uc03_oxygen.go's 6.1 item uses).
 //
 // The QR carries subject=qc.PatientRef, the versioned questionnaire canonical,
 // authored, and the DTR qr-context extensions (reuses dtrQRContextExtensions). Unlike
@@ -67,15 +77,72 @@ func fillQuestionnaireFromAnswers(def DTRDef, questionnaireJSON []byte, answers 
 	if author == "" {
 		return nil, fmt.Errorf("shnsdk: FillQuestionnaireFromAnswers: author is required (dtrx-1: source=\"manual\" answers must name an author)")
 	}
+	raw, err := buildQRFromAnswers(def, questionnaireJSON, answers, qc, func() fhir.Extension {
+		return clinicianOriginExtension(author)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: FillQuestionnaireFromAnswers: %w", err)
+	}
+	return raw, nil
+}
+
+// FillQuestionnaireFromAutoAnswers is FillQuestionnaireFromAnswers's auto-populated
+// twin (register §15(a)): the SAME structure-driven walker, filling each leaf from
+// `answers` keyed by linkId, but stamping source="auto"/"auto-client" (FR-17's auto
+// class, def.AutoOriginSourceCode — the same code FillQuestionnaireAtLine's CQL fill
+// stamps) instead of source="manual". No author sub-extension: DTR's auto/auto-client
+// source carries only the "source" sub-extension (dtrx-1's author mandate applies only
+// to source="manual"). Use this — never FillQuestionnaireFromAnswers — when `answers`
+// values are derived from a clinical record or other system data the deriving system
+// already possesses (e.g. a value read off a seeded FHIR order, or a fact the
+// requesting/responding system already knows to be true, such as "no PA exists yet"
+// at $questionnaire-package time); a genuinely human-operator-entered value belongs on
+// FillQuestionnaireFromAnswers instead, with its own FR-16/FR-27 attestation layered
+// on top. Same honesty guard as FillQuestionnaireFromAnswers: a required leaf with no
+// supplied answer is a hard error, never fabricated.
+func FillQuestionnaireFromAutoAnswers(questionnaireJSON []byte, answers map[string]Answer, qc QRContext) ([]byte, error) {
+	return FillQuestionnaireFromAutoAnswersAtLine("2.0", questionnaireJSON, answers, qc)
+}
+
+// FillQuestionnaireFromAutoAnswersAtLine is FillQuestionnaireFromAutoAnswers
+// parameterized by DTR line ("2.0", "2.1", "2.2"). Unknown line -> error (fail-closed,
+// never a silent 2.0 fallback). The auto/auto-client source code migration is per-line
+// (def.AutoOriginSourceCode); the qr-context/qr-coverage differential is shared with
+// FillQuestionnaireFromAnswersAtLine (dtrQRContextExtensions).
+func FillQuestionnaireFromAutoAnswersAtLine(line string, questionnaireJSON []byte, answers map[string]Answer, qc QRContext) ([]byte, error) {
+	def, ok := DTRLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: FillQuestionnaireFromAutoAnswersAtLine: unknown DTR line %q", line)
+	}
+	return fillQuestionnaireFromAutoAnswers(def, questionnaireJSON, answers, qc)
+}
+
+func fillQuestionnaireFromAutoAnswers(def DTRDef, questionnaireJSON []byte, answers map[string]Answer, qc QRContext) ([]byte, error) {
+	raw, err := buildQRFromAnswers(def, questionnaireJSON, answers, qc, func() fhir.Extension {
+		return originExtension(def)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: FillQuestionnaireFromAutoAnswers: %w", err)
+	}
+	return raw, nil
+}
+
+// buildQRFromAnswers is the shared body of fillQuestionnaireFromAnswers and
+// fillQuestionnaireFromAutoAnswers: parse the questionnaire, walk its item tree
+// filling each leaf from `answers`, stamp every filled answer with originExt() (the
+// ONLY thing the manual and auto variants differ on), and marshal the QR. Errors are
+// returned UNWRAPPED — each caller wraps with its own function name for a legible
+// trace.
+func buildQRFromAnswers(def DTRDef, questionnaireJSON []byte, answers map[string]Answer, qc QRContext, originExt func() fhir.Extension) ([]byte, error) {
 	var q fhir.Questionnaire
 	if err := json.Unmarshal(questionnaireJSON, &q); err != nil {
-		return nil, fmt.Errorf("shnsdk: FillQuestionnaireFromAnswers: parse questionnaire: %w", err)
+		return nil, fmt.Errorf("parse questionnaire: %w", err)
 	}
 
 	// Walk the item tree and collect QR items. Error on any required leaf without an answer.
-	items, err := fillItems(q.Item, answers, author)
+	items, err := fillItems(q.Item, answers, originExt)
 	if err != nil {
-		return nil, fmt.Errorf("shnsdk: FillQuestionnaireFromAnswers: %w", err)
+		return nil, err
 	}
 
 	authored := qc.Authored.UTC().Format(time.RFC3339)
@@ -89,16 +156,17 @@ func fillQuestionnaireFromAnswers(def DTRDef, questionnaireJSON []byte, answers 
 	}
 	raw, err := json.Marshal(qr)
 	if err != nil {
-		return nil, fmt.Errorf("shnsdk: FillQuestionnaireFromAnswers: marshal questionnaire response: %w", err)
+		return nil, fmt.Errorf("marshal questionnaire response: %w", err)
 	}
 	return raw, nil
 }
 
-// fillItems walks the questionnaire's item tree with the ONE shared walker and
-// fills each leaf from `answers` with source="manual" + author (dtrx-1); required
-// leaves without an answer produce an error (the honesty guard); optional ones are
-// omitted.
-func fillItems(qItems []fhir.QuestionnaireItem, answers map[string]Answer, author string) ([]fhir.QuestionnaireResponseItem, error) {
+// fillItems walks the questionnaire's item tree with the ONE shared walker and fills
+// each leaf from `answers`, stamping the answer with originExt() (source="manual"+
+// author for a human-entered fill, source="auto"/"auto-client" for a system-derived
+// one — the caller decides which); required leaves without an answer produce an error
+// (the honesty guard); optional ones are omitted.
+func fillItems(qItems []fhir.QuestionnaireItem, answers map[string]Answer, originExt func() fhir.Extension) ([]fhir.QuestionnaireResponseItem, error) {
 	return walkQuestionnaireItems(qItems, func(qi fhir.QuestionnaireItem) (fhir.QuestionnaireResponseItemAnswer, bool, error) {
 		a, ok := answers[qi.LinkId]
 		if !ok || !answerHasValue(a) {
@@ -113,10 +181,7 @@ func fillItems(qItems []fhir.QuestionnaireItem, answers map[string]Answer, autho
 		if err != nil {
 			return fhir.QuestionnaireResponseItemAnswer{}, false, fmt.Errorf("item %q: %w", qi.LinkId, err)
 		}
-		// Stamp source="manual" + author (dtrx-1) — recorded human entry, not
-		// CQL-computed "auto". Reuses clinicianOriginExtension which already
-		// builds the conformant source + nested author sub-extension.
-		qrAnswer.Extension = []fhir.Extension{clinicianOriginExtension(author)}
+		qrAnswer.Extension = []fhir.Extension{originExt()}
 		return qrAnswer, true, nil
 	})
 }
@@ -128,7 +193,7 @@ func fillItems(qItems []fhir.QuestionnaireItem, answers map[string]Answer, autho
 type leafFiller func(qi fhir.QuestionnaireItem) (answer fhir.QuestionnaireResponseItemAnswer, answered bool, err error)
 
 // walkQuestionnaireItems is the ONE structure-driven walk every QR builder in this
-// module shares (FillQuestionnaire's sandbox fill and FillQuestionnaireFromAnswers'
+// module shares (FillQuestionnaire's demo fill and FillQuestionnaireFromAnswers'
 // manual fill differ only in their leafFiller). It mirrors the questionnaire's
 // nesting into the QR on BOTH axes FHIR nests on:
 //

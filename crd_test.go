@@ -85,7 +85,7 @@ func TestParseOrderSelectRequest_Rejects(t *testing.T) {
 // TestBuildCards covers the PA-required and no-PA branches, and verifies that
 // ParseCards round-trips each branch correctly.
 func TestBuildCards(t *testing.T) {
-	const canon = QuestionnaireCanonicalLumbarMRI
+	const canon = SupportedQuestionnaireCanonical
 
 	// PA-required branch.
 	b, err := BuildCards(CardCoverage{Covered: "covered", PANeeded: "auth-needed", Questionnaires: []string{canon}})
@@ -124,7 +124,7 @@ func TestBuildCards(t *testing.T) {
 // fail closed on an unrecognized line, matching the AtLine convention already
 // established for PAS/DTR.
 func TestBuildCardsAtLine_RegressionFenceAndRejection(t *testing.T) {
-	cov := CardCoverage{Covered: "covered", PANeeded: "auth-needed", Questionnaires: []string{QuestionnaireCanonicalLumbarMRI}}
+	cov := CardCoverage{Covered: "covered", PANeeded: "auth-needed", Questionnaires: []string{SupportedQuestionnaireCanonical}}
 	legacy, err := BuildCards(cov)
 	if err != nil {
 		t.Fatalf("BuildCards: %v", err)

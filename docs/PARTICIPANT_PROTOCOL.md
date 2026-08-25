@@ -62,7 +62,7 @@ Returns (the Accounts service, `accounts.<apex>`):
 
 ```json
 {
-  "sandbox": true,
+  "demo": true,
   "syntheticDataOnly": true,
   "wireProtocolVersion": "1.1.0",
   "igVersions": { "uscore": "6.1.0", "crd": "2.0.1", "dtr": "2.0.1", "pas": "2.0.1", "pdex": "2.1.0" },
@@ -76,33 +76,37 @@ Returns (the Accounts service, `accounts.<apex>`):
   },
   "authzPublicKeyURL": "https://authz.<apex>/pubkey",
   "hubTransportKeyURL": "https://hub.<apex>/transport-key",
-  "sandboxResponders": [{ "role": "payer", "holderId": "payer" }],
+  "demoResponders": [{ "role": "payer", "holderId": "conformance-payer" }],
   "operations": [ { "frame": "provider-tpo", "operation": "eligibility-inquiry", "transactionType": "coverage-eligibility" }, … ],
-  "sandboxPersonas": [
-    { "memberId": "MBR-COVERED",    "dob": "1975-04-02", "family": "Johansson", "expectedEligibility": "covered",     "payerId": { "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00001" } },
-    { "memberId": "MBR-NOTCOVERED", "dob": "1980-09-15", "family": "Reyes",     "expectedEligibility": "not-covered", "payerId": { "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00001" } }
+  "demoPersonas": [
+    { "memberId": "MBR-D-UC01",    "dob": "1972-03-14", "family": "Larsen",            "expectedEligibility": "covered",     "payerId": { "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00001" } },
+    { "memberId": "MBR-D-UC01-NC", "dob": "1972-03-14", "family": "Larsen-Terminated", "expectedEligibility": "not-covered", "payerId": { "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00001" } }
   ],
   "docs": "https://github.com/SmartHealthNetwork/shn-sdk/blob/main/docs/PREVIEW.md"
 }
 ```
 
+Two of the four advertised personas (`MBR-D-UC04`, `MBR-D-UC08`) also carry
+`expectedPriorAuth`, `expectedAfterAmend`, and `order` — see §7a/§7b and
+`docs/PREVIEW.md` §1 for the full four-persona descriptor.
+
 ### Fields
 
 | Field | Meaning |
 |---|---|
-| `sandbox` | Always `true` for the preview substrate. |
+| `demo` | Always `true` on the preview network's descriptor. |
 | `syntheticDataOnly` | Always `true` — **synthetic personas only, never production PHI**. |
 | `wireProtocolVersion` | The wire-protocol version the network speaks (see below). A consumer rejects a descriptor whose version it does not support **before** running any leg. |
-| `igVersions` | Pinned IG versions the substrate validates against (server-side gate). |
+| `igVersions` | Pinned IG versions the network validates against (server-side gate). |
 | `contractVersions` | Legacy — no longer populated in the network descriptor: participant declarations are participant truth, carried per-participant in the registrar feed (§2.3) and the directory (§3). Field retained for wire compatibility. |
 | `igVersionsByLine` | Per-line IG pin sets: each contract line (`"2.0"`, `"2.1"`, `"2.2"`) maps to the IG versions that line validates against — same keys and composition as `igVersions`, which remains the 2.0-line snapshot. Additive field. |
 | `bridgedContractVersions` | Contract lines the network's gateways can build or bridge (version-matched routing and translation, §8.6) — the network's contract capability surface. Additive field. |
 | `endpoints.{hub,authz,registrar,patientAccess}` | The live participant-facing base URLs. `hub` is where you originate a leg (`POST /route`); `authz` mints/serves tokens; `registrar` serves the holder feed; `patientAccess` is the FHIR/Patient-Access surface (`GET /metadata`). |
 | `authzPublicKeyURL` | Where to fetch the Authorization Framework Ed25519 verifying key (`{authz}/pubkey`). |
 | `hubTransportKeyURL` | Where to fetch the Hub's Ed25519 transport verifying key (`{hub}/transport-key` → `{"pubkey": "<base64 ed25519>"}`). Responders use this key to verify `X-Hub-Assertion` on every inbound forward (§6.2a). |
-| `sandboxResponders[]` | Legacy responder hint (`role` + `holderId`). Deprecated — as of sdk v0.41.0 the shn CLI resolves test counterparties from the directory (`sandboxPersonas[].payerId` → holder-attested `payerIds`, §3); the field is still populated for older consumers and stops only on a future explicit ruling. Do not build new consumers. |
-| `operations[]` | The advertised `(frame, operation, transactionType)` triples the substrate authorizes. |
-| `sandboxPersonas[]` | The seeded synthetic patients and their `expectedEligibility` (`"covered"` \| `"not-covered"`) — the inputs + expected outcomes `shn doctor` asserts. Each persona also carries `payerId` — the seeded member's Coverage payor identity; resolve your test counterparty by matching it against holder-attested `payerIds` in `/holders` (§3). |
+| `demoResponders[]` | Responder-hint fallback (`role` + `holderId`) for a consumer whose descriptor parser predates `demoPersonas[].payerId`. Every persona in the current descriptor carries a `payerId`, so a current consumer resolves the test counterparty from the directory (`demoPersonas[].payerId` → holder-attested `payerIds`, §3) and never needs this field; it stays populated for that older path. Do not build new consumers against it. |
+| `operations[]` | The advertised `(frame, operation, transactionType)` triples the network authorizes. |
+| `demoPersonas[]` | The seeded synthetic patients and their `expectedEligibility` (`"covered"` \| `"not-covered"`) — the inputs + expected outcomes `shn doctor` asserts. Each persona also carries `payerId` — the seeded member's Coverage payor identity; resolve your test counterparty by matching it against holder-attested `payerIds` in `/holders` (§3). A persona that also carries `expectedPriorAuth` additionally names its own prior-auth `order` (system/code/display/diagnosis) — the order a payer verdict is a function of. |
 | `docs` | Getting-started URL (`docs/PREVIEW.md`). |
 
 **No keys are embedded** in the descriptor (so it cannot drift from the live keys).
@@ -172,7 +176,7 @@ requests/hour); tripping the cap returns `429`.
 
 ### 2.1 Holder record
 
-Every substrate participant is a **holder**. A holder record
+Every network participant is a **holder**. A holder record
 carries exactly these fields:
 
 ```go
@@ -214,7 +218,7 @@ Admission is static. The operator produces a
 }
 ```
 
-`manifest.json` is **public**. It is the substrate's trust root for the session:
+`manifest.json` is **public**. It is the network's trust root for the session:
 every participant reads it at startup to populate their registry and to learn the
 Authorization Framework's verifying key (`authzPub`).
 
@@ -512,7 +516,7 @@ the holder side:
 
 - **Keep the old `encPub` private key loaded for ~one poll interval** so you can
   still decrypt envelopes a counterparty addressed to the now-stale `encPub` before
-  it observed the new one. The payload-blind substrate never holds your enc private
+  it observed the new one. The payload-blind network never holds your enc private
   key, so this overlap is entirely a holder-operational responsibility.
 - **Tolerate/retry transient assertion-auth blips** until the new `signPub`
   propagates — an in-flight leg may be briefly rejected mid-convergence.
@@ -618,7 +622,7 @@ to `null`. Do **not** include the signature field in the signing payload. The
 `jti` **is** part of the signing payload (it is set before signing — see §3.5).
 
 **`jti` — unique per-assertion id (REQUIRED).** Every assertion carries a `jti`: a
-unique identifier, stamped before signing so the signature covers it. The substrate's own assertion-issuing logic generates a random 16-byte `jti` (base64url, unpadded);
+unique identifier, stamped before signing so the signature covers it. The network's own assertion-issuing logic generates a random 16-byte `jti` (base64url, unpadded);
 an direct-integration participant minting assertions by hand must do the same. An assertion
 **without** a `jti` is rejected (`"holderauth: missing jti"`). This is the SMART
 `private_key_jwt` `jti` claim.
@@ -698,11 +702,11 @@ Example assertion (pre-base64):
 
 ## 3a. SHN ↔ OAuth/SMART concept mapping
 
-The substrate's credentialing contract maps onto familiar OAuth 2.0 / SMART
+The network's credentialing contract maps onto familiar OAuth 2.0 / SMART
 building blocks. The shapes are recognizable; the trust posture is deliberately
 narrower (no standing bearer token).
 
-| SHN substrate construct | OAuth / SMART analogue |
+| SHN network construct | OAuth / SMART analogue |
 |---|---|
 | Holder registration (`POST /register`, §2.3) | OAuth 2.0 Dynamic Client Registration (RFC 7591) — the registration body is the client-metadata shape |
 | Registration proof-of-possession (`pop`, §2.3) | A software-statement-style self-attestation of key control — but a bare Ed25519 PoP over the canonical payload, **not** a UDAP X.509 software statement |
@@ -720,7 +724,7 @@ registration (§2.4) stops all future per-operation authority at the source.
 
 ## 4. Authority flow
 
-Every substrate operation requires a scope-bound **authorization token** minted by
+Every network operation requires a scope-bound **authorization token** minted by
 the Authorization Framework. Tokens are per-leg: one token authorizes one envelope
 in one direction for one correlation.
 
@@ -844,7 +848,7 @@ Pass an empty string to skip a particular binding check — **except
 `wantPayloadHash`, which is STRICT**: every envelope leg binds a payload, so the
 receiver recomputes `sha256hex` over the ciphertext it received and asserts it
 equals `token.payloadHash`; an empty want or an empty token hash is REJECTED. This
-makes the substrate payload-blind AND payload-AUTHENTICATED: a payload
+makes the network payload-blind AND payload-AUTHENTICATED: a payload
 swapped in flight is cryptographically detected at the authorization check. On the
 **response leg**, also pass the **request** token's `subject` as `wantSubject`. A
 validly-signed token cannot be lifted into a different envelope, operation,
@@ -869,7 +873,7 @@ endpoint only if you need to refresh it without a manifest reload.
 
 ## 5. Envelope
 
-Each substrate hop is one **envelope**: cleartext routing
+Each network hop is one **envelope**: cleartext routing
 metadata plus an opaque, encrypted payload.
 
 ### 5.1 Metadata fields
@@ -1081,7 +1085,7 @@ re-fetch per request.
    the 5-minute clock-skew allowance (same bounds as §3.1).
 6. Assert the `jti` has not been seen before (one-time-use). Retain seen `jti`
    values for at least the maximum assertion lifetime (1 hour —
-   `MaxAssertionTTL`), not merely the 2-minute TTL: the substrate's own guard
+   `MaxAssertionTTL`), not merely the 2-minute TTL: the network's own guard
    retains for the full hour.
 
 > **Go participants:** `shnsdk.Responder` implements this full verification pipeline —
@@ -1492,7 +1496,7 @@ parse the `covered`/`not-covered` disposition.
 
 ## 7a. Prior-authorization — CRD → DTR → PAS
 
-Prior-authorization is **three substrate legs in sequence**, each an independent
+Prior-authorization is **three network legs in sequence**, each an independent
 originate round-trip exactly like the eligibility leg in §7 (resolve → seal →
 authorize-bound → route → verify-bound → open). Authority is evaluated **per leg**: a
 fresh per-leg correlation id, a fresh `payloadHash`-bound token, per-operation
@@ -1525,26 +1529,50 @@ Profiles per leg are in §8.2; the operation/frame rows are the CRD/DTR/PAS entr
 | `approved` | Claim adjudicated approved; a non-empty `PreAuthRef` (and `validUntil`) is returned | Implemented |
 | `no-pa-required` | The CRD leg determined no PA is needed (terminal at leg 1) | Implemented |
 | `pended` | Adjudication pending (needs review); resume via ClaimUpdate (§7b) | Implemented |
-| `denied` | Claim denied (explicit A3 review action; carries the denial rationale) | Implemented |
+| `denied` | Claim denied (a reviewActionCode `A3` "Not Certified" — the code this network's own PAS producer emits; the parser also accepts the reference payer's observed `A2` denial shape; carries the denial rationale) | Implemented |
 
 A client parsing a ClaimResponse that carries none of the explicit outcome signals
 gets an error rather than a silent mis-parse — the parser never infers an outcome
 from an ambiguous shape.
 
+An `approved` result may also carry `Partial:true` (+ `Disposition`, the payer's own
+disposition/display text): X12 306's `A2` means "Certified – partial", so a
+reviewActionCode `A2` that arrives WITH an authorization number parses as an approval,
+not a denial — `Partial` distinguishes it from a full `A1` certification. `A2` without a
+number still parses as `denied` (the observed reference-payer shape above); `A3` is
+always an unconditional denial. No producer on this network emits `A2` with a number
+today, so a partner should not expect to observe `Partial:true` from this network's
+current deployments — the field exists for spec-conformant callers/payers that do.
+
 ### 7a.3 One call vs. the manual leg-by-leg path
 
-The Go SDK runs the whole sequence in one call:
+The Go SDK runs the whole sequence in one call. This drives `MBR-D-UC04` (a `G0151`
+home-health PT order) — the reference payer pends this family on first submit, so this
+call returns `pended`, not `approved`; §7b resumes it:
 
 ```go
 res, err := id.RunPriorAuth(ctx, httpClient, endpoints, payer, shnsdk.PriorAuthRequest{
-    Member: "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson",
-    Clinical:         shnsdk.SandboxUC03Context(), // the answers that drive the outcome
-    ProcedureCPT:     "72148",                     // SandboxUC03Order()
-    ProcedureDisplay: "MRI lumbar spine w/o contrast",
-    DiagnosisICD10:   "M51.16",
+    Member: "MBR-D-UC04", DOB: "1958-12-19", Family: "Okereke",
+    ProcedureSystem:  "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+    ProcedureCPT:     "G0151",
+    ProcedureDisplay: "Services of a qualified physical therapist in the home health setting, each 15 minutes",
+    DiagnosisICD10:   "I63.9",
+    ProceedOnNotCovered: true,
 })
-// res.Outcome == "approved", res.PreAuthRef != ""
+// res.Outcome == "pended", res.Resume != nil (resume via ResumePriorAuth, §7b, to reach "approved")
 ```
+
+Note there is no `Clinical` field set. The reference payer's verdict for this family is
+a function of the order's HCPCS code, not of the DTR answers, and `RunPriorAuth` only
+auto-fills the one worked-example questionnaire it ships fixture logic for
+(`SupportedQuestionnaireCanonical`, the CPT-coded lumbar-MRI questionnaire from an
+earlier worked example — never something a real payer's own questionnaire canonical
+matches). For every other canonical — including every questionnaire the reference payer
+itself advertises — `RunPriorAuth` submits an honest **zero-answer
+`QuestionnaireResponse` shell** (`status: "in-progress"`, no `item[].answer`) naming
+exactly the canonical fetched, rather than inventing clinical content. A production
+integration puts real fill logic — a clinician or an operated SDC `$populate` engine —
+behind that step (see `docs/PREVIEW.md` §3a).
 
 A non-Go participant (or a Go participant that needs to inspect/modify an intermediate
 resource) drives the same three legs **manually** using the exported SDK builders/
@@ -1553,14 +1581,14 @@ the build/parse calls bracket the leg:
 
 ```
 # Leg inputs (built once from the dev-visible order):
-srJSON  = BuildServiceRequest(cpt, display, icd10, "Patient/MBR-COVERED")
-covJSON = BuildCoverage("Patient/MBR-COVERED", "MBR-COVERED")   # 2nd arg = the BARE member id
+srJSON  = BuildServiceRequestCoded(system, code, display, icd10, "Patient/MBR-D-UC04")
+covJSON = BuildCoverage("Patient/MBR-D-UC04", "MBR-D-UC04")   # 2nd arg = the BARE member id
                                                                 # (the urn:shn:coverage MB identifier
                                                                 #  value); a "Coverage/…" reference is
                                                                 #  refused
 
 # LEG 1 — CRD
-crdReq            = BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-COVERED")
+crdReq            = BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-D-UC04")
 crdResp           ← route(crd-order-select / crd-order-select → crd-cards, crdReq)
 cov               = ParseCards(crdResp)          # cov: CardCoverage. !cov.PARequired() ⇒ no-pa STOP; cov.Covered=="not-covered" ⇒ STOP
 canon             = cov.Questionnaires[0]        # DTR canonical (present when cov.NeedsDTR())
@@ -1570,19 +1598,20 @@ dtrReq   = BuildQuestionnaireFetch(canon)
 dtrResp  ← route(dtr-questionnaire-fetch / dtr-questionnaire-fetch → dtr-questionnaire, dtrReq)
 qJSON    = ExtractQuestionnaireFromPackage(dtrResp)  # DTR-fetch returns a $questionnaire-package Bundle
 url      = ParseQuestionnaireURL(qJSON)          # MUST equal canon (canonical-substitution guard)
-qrJSON   = FillQuestionnaire(qJSON, clinical, qrContext)     # fill LOCALLY from your data
+qrJSON   = FillQuestionnaire(qJSON, clinical, qrContext)     # ONLY valid when url == SupportedQuestionnaireCanonical;
+                                                              # otherwise BuildQuestionnaireResponseShell(qJSON, qrContext)
+                                                              # — an honest zero-answer shell, never invented content
 
 # LEG 3 — PAS
-bundle   = BuildConformantClaimBundle(ConformantClaimInputs{QR: qrJSON, SR: srJSON, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", MemberID: "MBR-COVERED", Corr: corrID, Created: now})
+bundle   = BuildConformantClaimBundle(ConformantClaimInputs{QR: qrJSON, SR: srJSON, PatientRef: "Patient/MBR-D-UC04", CoverageRef: "Coverage/MBR-D-UC04", MemberID: "MBR-D-UC04", Corr: corrID, Created: now})
 pasResp  ← route(pas-claim / pas-submit → pas-response, bundle)
 result   = ParseClaimResponse(pasResp)           # → {Outcome, PreAuthRef, ValidUntil}
 ```
 
 Each `route(...)` is the §7 originate sequence with that leg's `transactionType` /
 request `operation` / response `operation`; the `payloadHash`-bound token is minted per
-leg. The clinical answers that drive the outcome are dev-visible inputs to
-`FillQuestionnaire` (the conservative-therapy weeks, prior-imaging, neuro-deficit flags
-— see `docs/PREVIEW.md` §3a), never conjured inside the round-trip.
+leg. `PreAuthRef` on an approved outcome is the reference payer's own authorization
+number, shape `AUTH-NNNN`.
 
 ---
 
@@ -1609,8 +1638,24 @@ pended, needed, err := shnsdk.ParsePendedResponse(pasRespBytes)
 
 `ParsePendedResponse` inspects the response `resourceType`: a `"Bundle"` is pended;
 anything else is passed through to `ParseClaimResponse`. The `needed` slice is typed
-(`[]NeededItem{Code, Display}`) — `Code` is the `Task.input` value (e.g.
-`"operative-diagnostic-report"`) and `Display` is the `Task.input.type.text`.
+(`[]NeededItem{Code, Display}`) — `Code` reads only `Task.input[].valueString`, and
+`Display` reads only `Task.input[].type.text`; neither looks at `type.coding[].code`.
+What that produces depends on who built the Bundle:
+
+- **Relayed verbatim from the real reference payer** (the live network's
+  `conformance-payer`, native-forwarding): the real payer's `G0151` pend Task carries
+  two typed inputs — `payer-url` (a re-query URL) as `valueString`, and
+  `questionnaires-needed` (the still-outstanding questionnaire canonical) as
+  `valueCanonical`, with no `type.text` on either. Only `valueString` items survive this
+  parse, so `needed` comes back as **one item — the payer's own FHIR base URL, with an
+  empty `Display`** — e.g. `Code="http://localhost:8081/fhir" Display=""` against a live
+  captured reference-payer pended Task run through `ParsePendedResponse` directly. The
+  `questionnaires-needed` canonical does not survive this parse.
+- **A hermetic/local mirror** (`internal/brpayermirror`, `cmd/payermirror`) instead emits
+  its own synthetic Task carrying `"pend-resolution-timer"` in *both* `valueString` and
+  `type.text` — so on that lane `needed` is one item, `Code="pend-resolution-timer"
+  Display="pend-resolution-timer"`. That string is a mirror-only label, never something
+  the live reference payer puts on the wire.
 
 ### 7b.2 UC-04: exchange-2 ClaimUpdate (amend)
 
@@ -1645,18 +1690,47 @@ The update Bundle payload carries :
 ```go
 // resume is the PriorAuthResume written by RunPriorAuth when outcome=="pended".
 // supp carries the supplemental DiagnosticReport facts + the required ProvenanceAgent.
-supp := shnsdk.SupplementalReport{
-    ReportID:        "dr-uc04-operative",
-    CPT:             "72148",
-    Display:         "MRI lumbar spine w/o contrast",
-    ProvenanceAgent: "Organization/acme-7f3a",  // required
-}
+// SupplementalReport is a plain struct — build it yourself; shn-sdk ships no fixture
+// constructor for it. Its own CPT/display need not match the order's HCPCS code — G0151
+// is used here only because it is this worked example's own advertised family. The
+// G0151 family's resolution itself is NOT evidence-driven — on whichever lane actually
+// resolves it, the payer re-pends and its own pend-resolution timer is what later flips
+// the same claim to approved, independent of this report's specific content. Provenance
+// is required because FR-32 (SHN's own rule) says supplemental data must carry
+// attribution — not because either payer's verdict reads it.
+supp := shnsdk.SupplementalReport{ReportID: "dr-uc04-operative", CPT: "G0151", Display: "Home health services"}
+supp.ProvenanceAgent = "Organization/acme-7f3a" // required
 res, err := id.ResumePriorAuth(ctx, c, ep, payer, resume, supp)
-// res.Outcome == "approved", res.PreAuthRef != ""
+// res.Outcome == "approved", res.PreAuthRef != "" (shape AUTH-NNNN) — proven against the
+// hermetic in-process mirror; see the proven-scope statement immediately below for the
+// native-forward (live reference payer) lane, where this same call does not resolve.
 ```
 
 `ResumePriorAuth` validates `supp.ProvenanceAgent` before touching the wire — an
 absent agent returns an error immediately rather than a cryptic payer rejection.
+
+**What actually makes the payer re-evaluate, by lane — verified by building the exact
+bundle `ResumePriorAuth` builds.** That bundle carries a `Provenance` entry, no Da Vinci
+PAS `infoChanged` item extension, and `Claim.related[0].claim` keyed by `identifier`
+(never `reference`):
+
+- **Hermetic in-process mirror** (`internal/brpayermirror`, the `make up`/local-dev
+  lane): resolves on **either** a `Provenance` entry **or** `infoChanged` on the Claim
+  item (`amendmentRequestsResolution`). `ResumePriorAuth`'s bundle carries `Provenance`,
+  so it resolves via that branch on this lane.
+- **Live reference payer** (native-forward): the gateway's own gate
+  (`requestClaimHasInfoChanged`, `gateway/engine/nativepas.go`) checks the outbound
+  request for `infoChanged` before it will even poll for a timer-resolved approval — a
+  request without it gets `422 "amendment still insufficient"`, regardless of what the
+  payer itself does with it. `ResumePriorAuth`'s bundle does not carry `infoChanged`.
+
+**Proven scope.** `Identity.ResumePriorAuth` is proven to resolve a pend against the
+**hermetic in-process mirror** — its `Provenance` branch is satisfied. It is **not**
+proven, and as of this SDK version does **not**, resolve a pend against a **native-forward
+live reference payer**: that lane's own gate requires `infoChanged`, which
+`ResumePriorAuth` never sets, so the amendment gets `422 "amendment still insufficient"`
+and the pend stays open. If your integration targets a native-forward payer, `shn
+priorauth resume` / `Identity.ResumePriorAuth` does not complete this leg today.
 
 **Manual leg-by-leg path:**
 
@@ -1686,26 +1760,39 @@ pended claim). The `PriorAuthResume` struct persists it as `OriginalCorrelationI
 
 ### 7b.3 UC-08: denied PAS response
 
+`MBR-D-UC08`'s order (`J3490`, an excluded-service family) already comes back
+**not covered** on the CRD card — with `ProceedOnNotCovered` set, the flow submits the
+PAS claim straight through for the payer's formal determination, with **no DTR leg** at
+all (a not-covered card carries no questionnaire).
+
 A denial is a **bare `ClaimResponse`** (not a Bundle), `outcome=complete`, with the
-Da Vinci PAS reviewActionCode extension carrying `"A3"` (X12 306 "Not Certified").
-There is **no** `preAuthRef`; the rationale is in `ClaimResponse.disposition`; the
-appeal window is in `ClaimResponse.processNote[].text`.
+Da Vinci PAS reviewActionCode extension carrying a code. X12 306 defines `A3` as "Not
+Certified" — the conformant denial code, and the one this network's own PAS producer
+emits, including the hermetic mirror (`cmd/payermirror`, what `make up` boots). A
+`role=payer` holder that native-forwards to the real reference payer (the live preview
+network's `conformance-payer`) instead returns `"A2"` on this leg with display "Not
+Certified" — a code/display self-contradiction in that reference implementation, not a
+different conformant code; this network only ever PARSES it, never emits it. The parser
+accepts both `A3` and this observed `A2` shape as a denial signal. There is **no**
+`preAuthRef`; the rationale is in `ClaimResponse.disposition`; the appeal window is in
+`ClaimResponse.processNote[].text`.
 
 **Parse with `ParseClaimResponse`:**
 
 ```go
 result, err := shnsdk.ParseClaimResponse(claimRespBytes)
 // result.Outcome == "denied"
-// result.Denial.ReasonCode == "A3"
+// result.Denial.ReasonCode == "A2"
 // result.Denial.Rationale == "…" (ClaimResponse.disposition)
 // result.Denial.AppealNote == []string{"…"} (ClaimResponse.processNote[].text)
 ```
 
 `ParseClaimResponse` navigates
 `item[].adjudication[].extension[reviewAction].extension[reviewActionCode]` for the
-A3 code. It fails loud on an ambiguous shape — an outcome that is neither
+A3/A2 code. It fails loud on an ambiguous shape — an outcome that is neither
 `approved` (non-empty `preAuthRef` + `outcome=complete`) nor `denied` (reviewActionCode
-A3) returns an error rather than a silent mis-parse.
+A3, or the observed reference-payer A2 denial shape) returns an error rather than a
+silent mis-parse.
 
 **Response shape summary:**
 
@@ -1713,7 +1800,7 @@ A3) returns an error rather than a silent mis-parse.
 |---|---|---|
 | `approved` | Bare `ClaimResponse` | `outcome=complete` + non-empty `preAuthRef` |
 | `pended` | `Bundle` (ClaimResponse + Task) | Task.input enumerates needed items |
-| `denied` | Bare `ClaimResponse` | `outcome=complete` + reviewActionCode `A3`; no `preAuthRef` |
+| `denied` | Bare `ClaimResponse` | `outcome=complete` + reviewActionCode `A3` (or the observed reference-payer `A2` denial shape); no `preAuthRef` |
 
 Use `ParsePendedResponse` first (Bundle check), then `ParseClaimResponse` on
 the non-Bundle case — this is the dispatch `parsePASOutcome` implements internally
@@ -1725,16 +1812,16 @@ and `ResumePriorAuth` / `RunPriorAuth` call for you.
 
 ### 8.1 Two-gate posture
 
-All FHIR resources exchanged through the substrate must conform to their
-applicable IG profiles. The substrate enforces a **two-gate** posture:
+All FHIR resources exchanged through the network must conform to their
+applicable IG profiles. The network enforces a **two-gate** posture:
 
 1. **Runtime US Core validation** — every resource is validated against base R4 +
    US Core profiles at the gateway on egress (before sealing) and on ingress
    (after decrypting). Egress validation is load-bearing: an invalid resource
-   must never enter the substrate.
+   must never enter the network.
 
 2. **Da Vinci gap-report contract** — Da Vinci CRD/DTR/PAS-specific profile gaps
-   are tracked in the substrate's conformance gap report (maintained upstream).
+   are tracked in the network's conformance gap report (maintained upstream).
 
 ### 8.2 Profiles by transaction type
 
@@ -1750,7 +1837,7 @@ applicable IG profiles. The substrate enforces a **two-gate** posture:
 ### 8.3 Terminology
 
 Codes (LOINC, SNOMED-CT, ICD-10-CM, CPT) must be validated against the
-substrate's curated value sets or a terminology service. Do not synthesise or
+network's curated value sets or a terminology service. Do not synthesise or
 hallucinate codes; the FHIR validation gate — not the implementation — certifies
 conformance.
 
@@ -1788,7 +1875,7 @@ IG canonicals and profiles.
   no `implementationGuide`, no profiles, and no `rest[0].resource` entries —
   only that a JSON service exists here and where its real surface is
   documented. The Hub's two routes (`POST /route`, `GET /transport-key`) are
-  substrate wire contracts, not FHIR REST, and are described in
+  network wire contracts, not FHIR REST, and are described in
   `implementation.description` / `rest[0].documentation` instead.
 
 ### 8.5 Da Vinci well-known configuration (`GET /.well-known/davinci-configuration`)
@@ -2029,13 +2116,14 @@ property. Until then, build to the rule: preserve what you do not recognise.
   mechanism (§8.6) has always depended on: preserve extensions you do not recognise
   and return them unmodified, `shn-carried-content` specifically. Latent until the
   first non-native line is published; recorded now so participants build to it.
-- **2026-08-14 — Persona `payerId` + directory-resolved test counterparties (`sandboxPersonas[].payerId`, §1a).**
-  Additive, no `wireProtocolVersion` bump. Each advertised `sandboxPersonas[]` entry now
+- **2026-08-14 — Persona `payerId` + directory-resolved test counterparties (`demoPersonas[].payerId`, §1a;
+  the descriptor's demo fields carried a different prefix at the time, renamed since — §1a).**
+  Additive, no `wireProtocolVersion` bump. Each advertised `demoPersonas[]` entry now
   also carries `payerId` — the seeded member's Coverage payor identity (fixture truth). As
   of sdk v0.41.0, the `shn` CLI (`shn doctor`, `shn priorauth`) and cloudsmoke resolve their
   test counterparty by matching a persona's `payerId` against holder-attested `payerIds` in
-  the registrar `/holders` feed (§3), instead of the legacy `sandboxResponders[]` hint.
-  `sandboxResponders[]` is still populated for older consumers that have not migrated; see
+  the registrar `/holders` feed (§3), instead of the legacy `demoResponders[]` hint.
+  `demoResponders[]` is still populated for older consumers that have not migrated; see
   its field-table entry above for the deprecation note.
 - **2026-08-12 — Tri-line native builders + request frames (`requestFrames`, §6.3, §8.6).**
   Two additive changes, no `wireProtocolVersion` bump, no new frame version.
@@ -2077,7 +2165,7 @@ property. Until then, build to the rule: preserve what you do not recognise.
   Registration and rotation MAY carry a self-declared `contractVersions` array of
   `<contract>@<line>` tokens (grammar `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`, ≤16
   tokens, each 3–48 bytes), outside the PoP payload, and the `/holders` feed republishes
-  them verbatim. The discovery descriptor now also advertises the substrate's own
+  them verbatim. The discovery descriptor now also advertises the network's own
   native set (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1`, §1a). This is
   **additive** — no `wireProtocolVersion` bump — and tokens are self-asserted
   capability, not admission-verified identity (contrast the operator-vouched
@@ -2111,10 +2199,10 @@ property. Until then, build to the rule: preserve what you do not recognise.
   searchsetBundle)` (the completed-Task wrapper), `ExtractCDexEvidence(taskJSON)`, and
   `CDexTaskMeta{AuthoredOn, Requester, Owner}`; the shared `BuildRecordsBundle` / `AllowedTypes` US-Core
   searchset assembler is unchanged. The bespoke `BuildQuery` / `ParseQuery` / `ExtractOperativeEvidence`
-  are **REMOVED** (breaking). The substrate is unchanged: the `federated-query` op names, the
+  are **REMOVED** (breaking). The network is unchanged: the `federated-query` op names, the
   `consentRef`/`custodian` consent gate (§4–§5), payload-blind routing, and non-aggregation are the same —
   only the leg CONTENT became CDex; the purpose-of-use in the Task is partner-asserted and NOT load-bearing
-  for authorization (the substrate re-checks consent).
+  for authorization (the network re-checks consent).
 - **2026-06-18 — DTR-fetch returns a `$questionnaire-package`.** The `dtr-questionnaire-fetch`
   response is now a Da Vinci `$questionnaire-package` collection Bundle (the Questionnaire plus its
   dependent Libraries/ValueSets), not a bare Questionnaire — so the questionnaire's CQL/value-set
@@ -2122,27 +2210,30 @@ property. Until then, build to the rule: preserve what you do not recognise.
   `ExtractQuestionnaireFromPackage`; `Responder` wraps the Questionnaire into a package and
   `RunPriorAuth` extracts it before the canonical-substitution check + auto-fill. A manual
   leg-by-leg client MUST call `ExtractQuestionnaireFromPackage(dtrResp)` before
-  `ParseQuestionnaireURL`/`FillQuestionnaire`. The sandbox lumbar-MRI questionnaire is also
+  `ParseQuestionnaireURL`/`FillQuestionnaire`. The worked-example lumbar-MRI questionnaire is also
   CQL-backed (a `cqf-library` extension + a per-item SDC `initialExpression`), so an operated SDC
   `Questionnaire/$populate` CQL engine can populate it; `FillQuestionnaire` ignores those extensions
-  and fills by `linkId`, so the managed `QuestionnaireResponse` is byte-unchanged. `SandboxAdjudicate`
-  accepts `valueInteger` **or** `valueDecimal` for `conservative-therapy-weeks` (a `$populate` engine
-  emits a CQL numeric as `valueDecimal`).
+  and fills by `linkId`, so the managed `QuestionnaireResponse` is byte-unchanged. (The demo-fill
+  helper this shipped with — renamed since to `DemoLumbarContext`/`FillQuestionnaire`, §7a.3 —
+  accepted `valueInteger` **or** `valueDecimal` for `conservative-therapy-weeks`, a `$populate`
+  engine emitting a CQL numeric as `valueDecimal`.)
 - **2026-06-13 — PA-chain responder available.** `Adjudicator` grows three new methods —
   `OrderSelect(cpt string) (paRequired bool, questionnaireCanonical string)`,
   `Questionnaire(canonical string) (questionnaireJSON []byte, ok bool)`, and
   `PriorAuth(qrJSON []byte, hasDiagnosticReport bool) (PASDecision, error)` — served by
   `shnsdk.Responder` across four transaction types: `crd-order-select`,
-  `dtr-questionnaire-fetch`, `pas-claim`, `pas-claim-update`. Sandbox helpers:
-  `SandboxLumbarQuestionnaire()`, `SandboxAdjudicate(...)`, `QuestionnaireCanonicalLumbarMRI`,
-  `SandboxUC03Context()`, `SandboxUC03Order()`. The pended-claim ledger is per-process;
+  `dtr-questionnaire-fetch`, `pas-claim`, `pas-claim-update`. Demo/worked-example helpers
+  (renamed since to `Demo*`, then two of the three — `DemoLumbarQuestionnaire()` and
+  `QuestionnaireCanonicalLumbarMRI` — retired outright rather than shipped on a later
+  breaking release; `DemoLumbarContext()` still ships. See §3c/§7b.2 for a self-contained
+  worked example that does not depend on any of them): the pended-claim ledger is per-process;
   deployments needing durable pends across replicas front it with their own store. See
-  `docs/SANDBOX.md` §3c for the updated quickstart.
+  `docs/PREVIEW.md` §3c for the updated quickstart.
 - **2026-06-12 — Payer responder (eligibility) delivered.** `shnsdk.Responder` is now
   available in the public SDK (`github.com/SmartHealthNetwork/shn-sdk`). It implements
   the full inbound pipeline — `X-Hub-Assertion` verification (§6.2a) first, then authz
   token `VerifyBound`, decryption, `Adjudicator.Eligibility`, and a sealed-and-authorized
-  response — for the `coverage-eligibility` transaction type. See `docs/SANDBOX.md` §3c
+  response — for the `coverage-eligibility` transaction type. See `docs/PREVIEW.md` §3c
   for the quickstart.
 - **2026-06-12 — Inbound transport authentication (`X-Hub-Assertion`).** The Hub
   now signs every forward to `/substrate/inbound` with an `X-Hub-Assertion` header
@@ -2162,13 +2253,14 @@ property. Until then, build to the rule: preserve what you do not recognise.
   manual leg-by-leg path via the exported SDK builders
   (`BuildConformantOrderSelectRequest`→`ParseCards`→`BuildQuestionnaireFetch`→`ParseQuestionnaireURL`→`FillQuestionnaire`→`BuildConformantClaimBundle`→`ParseClaimResponse`)
   as the escape hatch beyond the one-call `shnsdk.Identity.RunPriorAuth`. `shn priorauth`
-  runs it; `shn doctor` now also validates it. See `docs/SANDBOX.md` §3a.
+  runs it; `shn doctor` now also validates it. See `docs/PREVIEW.md` §3a.
 - **2026-06-10 — Discovery descriptor.** Added §1a: `GET {accounts}/discovery`
-  serves a machine-readable descriptor (endpoints, sandbox responders, seeded personas,
-  `wireProtocolVersion`, `sandbox`/`syntheticDataOnly`). It is sufficient to drive the
+  serves a machine-readable descriptor (endpoints, demo responders, seeded personas,
+  `wireProtocolVersion`, `demo`/`syntheticDataOnly` — the demo-prefixed field names were
+  renamed since, §1a). It is sufficient to drive the
   loop — keys are resolved live (payer `encPub` from `/holders`, authz pub from
   `/pubkey`). `shn doctor` and a live deploy probe consume it. See
-  `docs/SANDBOX.md` for the getting-started path.
+  `docs/PREVIEW.md` for the getting-started path.
 - **2026-06-09 — BREAKING: authz token wire format changed (`payloadHash`).** The
   token now carries a signed `payloadHash` field — `sha256hex` (64 lowercase hex) of
   the envelope **ciphertext**. It is **REQUIRED on every envelope-borne operation**
@@ -2181,7 +2273,7 @@ property. Until then, build to the rule: preserve what you do not recognise.
   is now rejected. Contract: §4.1 (request), §4.2 (token struct), §4.4 (`VerifyBound`
   / `VerifyBoundNoPayload`).
 
-### What is implemented today (preview substrate)
+### What is implemented today (preview network)
 
 - **Static admission** — holders provisioned via an operator manifest bundle.
 - **Dynamic admission** — Trust-admin-gated `POST /register` (with
@@ -2199,17 +2291,17 @@ property. Until then, build to the rule: preserve what you do not recognise.
   written to `manifest.json` (public) and `secrets/` (private); the bundle now
   includes `adminPub` (Trust admin key for `POST /register`).
 - **Originator path** — a participant can call `POST {authz}/authorize` and
-  `POST {hub}/route` to originate substrate legs.
+  `POST {hub}/route` to originate network legs.
 - **Reference inbound receiver** — the Hub forwards to `POST {holder}/substrate/inbound`;
   the Smart Gateway implements this surface. An direct-integration participant implementing it
   natively must follow the protocol in §6.2.
 - **Reference direct-integration participant** — a reference implementation runs the full
   eligibility round-trip (both the covered and not-covered branches) and the
-  prior-auth round-trips (approved, pended, and denied) against the live substrate
+  prior-auth round-trips (approved, pended, and denied) against the live network
   by delegating to the public SDK (`shnsdk.RunEligibility` / `shnsdk.RunPriorAuth`),
   without importing any Smart Gateway internals on the originate path. Each run's
   `AuditEvent` is verified. The deploy pipeline runs all of these against the public
-  preview environment on every substrate deploy.
+  preview environment on every network deploy.
 
 ### What's coming next
 

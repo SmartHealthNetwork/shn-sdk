@@ -33,7 +33,7 @@ func (h *paTestHarness) buildFramedForwardEnv(t *testing.T, txType, txOp, corrID
 // exactly like the bare equivalent (TestResponder_CRD's pa-required row).
 func TestResponderUnframesInboundFramedRequest(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	_, srv := h.makeResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now})
+	_, srv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
 
 	req := buildConformantCRD(t, "MBR-001", "72148")
 	envBytes, hubHdr := h.buildFramedForwardEnv(t, "crd-order-select", "crd-order-select", "d9-crd-1", ContractPACRD20, req)
@@ -56,7 +56,7 @@ func TestResponderUnframesInboundFramedRequest(t *testing.T) {
 // like bare — the absence-tolerated precedent.
 func TestResponderUnframesInboundRequestWithNoVersionClaim(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	_, srv := h.makeResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now})
+	_, srv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
 
 	req := buildConformantCRD(t, "MBR-001", "72148")
 	envBytes, hubHdr := h.buildFramedForwardEnv(t, "crd-order-select", "crd-order-select", "d9-crd-noclaim-1", "", req)
@@ -79,7 +79,7 @@ func TestResponderUnframesInboundRequestWithNoVersionClaim(t *testing.T) {
 // outcome — the unframed body reaches handlePASSubmit's conformant bundle parser.
 func TestResponderUnframesInboundFramedPASRequest(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	_, srv := h.makeResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now})
+	_, srv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
 
 	qr := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 8}, h.now)
 	bundle := buildConformantClaim(t, "MBR-001", "d9-pas-1", qr, h.now)
@@ -105,7 +105,7 @@ func TestResponderUnframesInboundFramedPASRequest(t *testing.T) {
 // handler as opaque bytes.
 func TestResponderRejectsCorruptInboundFrame(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	_, srv := h.makeResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now})
+	_, srv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
 
 	corrupt := []byte{0x00, 0xFF, 0, 0, 0, 0} // bad frame version byte — mirrors TestUnframeAnswer's corrupt row
 	envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "d9-corrupt-1", corrupt)
@@ -119,7 +119,7 @@ func TestResponderRejectsCorruptInboundFrame(t *testing.T) {
 // sequence.
 func TestResponderRejectsCorruptInboundFrame_HeaderLenOverrun(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	_, srv := h.makeResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now})
+	_, srv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
 
 	corrupt := mustEncodeRawFrame(t, `{"status":200}`, nil)
 	corrupt = corrupt[:len(corrupt)-2] // truncate the header JSON mid-way → header len overrun

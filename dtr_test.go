@@ -8,15 +8,15 @@ import (
 	"time"
 )
 
-// sandboxQuestionnaireJSON is the FLAT variant of the sandbox lumbar-MRI
+// demoQuestionnaireJSON is the FLAT variant of the demo lumbar-MRI
 // prior-auth questionnaire: the supported canonical url + the seven leaves
-// FillQuestionnaire knows, with no groups. The shipped fixture
-// (SandboxLumbarQuestionnaire) GROUPS those same leaves — see
-// nestedSandboxQuestionnaireJSON in dtr_nested_test.go for that shape. The flat
+// FillQuestionnaire knows, with no groups. The test-only fixture
+// (demoLumbarQuestionnaire, lumbar_fixture_test.go) GROUPS those same leaves — see
+// nestedDemoQuestionnaireJSON in dtr_nested_test.go for that shape. The flat
 // variant stays here because the fill must keep working for a flat questionnaire
 // too (a payer may serve the leaves ungrouped), and the flat-shape tests below
 // pin exactly that.
-const sandboxQuestionnaireJSON = `{
+const demoQuestionnaireJSON = `{
   "resourceType": "Questionnaire",
   "id": "pa-lumbar-mri",
   "url": "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri",
@@ -83,10 +83,10 @@ func TestFillQuestionnaireFailsLoudOnUnknownCanonical(t *testing.T) {
 	}
 }
 
-// TestFillQuestionnaireHappyPath: the sandbox questionnaire fills into a non-empty
+// TestFillQuestionnaireHappyPath: the demo questionnaire fills into a non-empty
 // QR that unmarshals as a completed QuestionnaireResponse.
 func TestFillQuestionnaireHappyPath(t *testing.T) {
-	qr, err := FillQuestionnaire([]byte(sandboxQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
+	qr, err := FillQuestionnaire([]byte(demoQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
@@ -111,11 +111,11 @@ func TestFillQuestionnaireHappyPath(t *testing.T) {
 // TestFillQuestionnaireAtLine_RegressionFence: the legacy FillQuestionnaire is
 // byte-identical to AtLine("2.0") for the same inputs (per-line parity).
 func TestFillQuestionnaireAtLine_RegressionFence(t *testing.T) {
-	legacy, err := FillQuestionnaire([]byte(sandboxQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
+	legacy, err := FillQuestionnaire([]byte(demoQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	atLine, err := FillQuestionnaireAtLine("2.0", []byte(sandboxQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
+	atLine, err := FillQuestionnaireAtLine("2.0", []byte(demoQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC())
 	if err != nil {
 		t.Fatalf("FillQuestionnaireAtLine(2.0): %v", err)
 	}
@@ -126,7 +126,7 @@ func TestFillQuestionnaireAtLine_RegressionFence(t *testing.T) {
 
 // TestFillQuestionnaireAtLine_UnknownLineErrors: fail-closed rejection (per-line parity).
 func TestFillQuestionnaireAtLine_UnknownLineErrors(t *testing.T) {
-	if _, err := FillQuestionnaireAtLine("9.9", []byte(sandboxQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC()); err == nil {
+	if _, err := FillQuestionnaireAtLine("9.9", []byte(demoQuestionnaireJSON), mbrCoveredCC(), mbrCoveredQC()); err == nil {
 		t.Fatal("FillQuestionnaireAtLine(\"9.9\") = nil error, want an error")
 	}
 }
@@ -252,7 +252,7 @@ func TestFillQuestionnaireAtLine_CoverageAndOriginByLine(t *testing.T) {
 	cc := mbrCoveredCC()
 	qc := mbrCoveredQC()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
-		raw, err := FillQuestionnaireAtLine(line, []byte(sandboxQuestionnaireJSON), cc, qc)
+		raw, err := FillQuestionnaireAtLine(line, []byte(demoQuestionnaireJSON), cc, qc)
 		if err != nil {
 			t.Fatalf("FillQuestionnaireAtLine(%s): %v", line, err)
 		}
@@ -280,7 +280,7 @@ func TestFillQuestionnaireAtLine_IntendedUseSystemByLine(t *testing.T) {
 		"2.2": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/coverage-information-codes",
 	}
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
-		raw, err := FillQuestionnaireAtLine(line, []byte(sandboxQuestionnaireJSON), cc, qc)
+		raw, err := FillQuestionnaireAtLine(line, []byte(demoQuestionnaireJSON), cc, qc)
 		if err != nil {
 			t.Fatalf("FillQuestionnaireAtLine(%s): %v", line, err)
 		}
@@ -417,7 +417,7 @@ func TestBuildQuestionnairePackageAtLine_QRMissingIDErrors(t *testing.T) {
 }
 
 // TestBuildQuestionnaireFetchAndParseURL: the fetch request round-trips its canonical,
-// and ParseQuestionnaireURL reads the url out of the sandbox questionnaire.
+// and ParseQuestionnaireURL reads the url out of the demo questionnaire.
 func TestBuildQuestionnaireFetchAndParseURL(t *testing.T) {
 	fetch, err := BuildQuestionnaireFetch(SupportedQuestionnaireCanonical)
 	if err != nil {
@@ -431,7 +431,7 @@ func TestBuildQuestionnaireFetchAndParseURL(t *testing.T) {
 		t.Errorf("fetch canonical = %q, want %q", req.Canonical, SupportedQuestionnaireCanonical)
 	}
 
-	url, err := ParseQuestionnaireURL([]byte(sandboxQuestionnaireJSON))
+	url, err := ParseQuestionnaireURL([]byte(demoQuestionnaireJSON))
 	if err != nil {
 		t.Fatalf("ParseQuestionnaireURL: %v", err)
 	}
@@ -481,12 +481,13 @@ func TestBuildQuestionnaireFetchWithCoverage_EmptyCoverageErrors(t *testing.T) {
 	}
 }
 
-// TestSandboxLumbarQuestionnaire_Unmarshals: SandboxLumbarQuestionnaire returns bytes
-// that unmarshal as a fhir.Questionnaire whose canonical == QuestionnaireCanonicalLumbarMRI.
-func TestSandboxLumbarQuestionnaire_Unmarshals(t *testing.T) {
-	data := SandboxLumbarQuestionnaire()
+// TestDemoLumbarQuestionnaireFixture_Unmarshals: the sdk package's own test-only
+// demoLumbarQuestionnaire fixture returns bytes that unmarshal as a fhir.Questionnaire
+// whose canonical == SupportedQuestionnaireCanonical.
+func TestDemoLumbarQuestionnaireFixture_Unmarshals(t *testing.T) {
+	data := demoLumbarQuestionnaire()
 	if len(data) == 0 {
-		t.Fatal("SandboxLumbarQuestionnaire returned empty bytes")
+		t.Fatal("demoLumbarQuestionnaire returned empty bytes")
 	}
 
 	// Must unmarshal as fhir.Questionnaire (samply model).
@@ -496,41 +497,41 @@ func TestSandboxLumbarQuestionnaire_Unmarshals(t *testing.T) {
 		Version      *string `json:"version"`
 	}
 	if err := json.Unmarshal(data, &q); err != nil {
-		t.Fatalf("SandboxLumbarQuestionnaire does not unmarshal: %v", err)
+		t.Fatalf("demoLumbarQuestionnaire does not unmarshal: %v", err)
 	}
 	if q.ResourceType != "Questionnaire" {
 		t.Errorf("resourceType = %q, want Questionnaire", q.ResourceType)
 	}
 	if q.URL == nil || *q.URL == "" {
-		t.Fatal("SandboxLumbarQuestionnaire: url field is absent or empty")
+		t.Fatal("demoLumbarQuestionnaire: url field is absent or empty")
 	}
-	// The canonical (url|version when version is set) must equal QuestionnaireCanonicalLumbarMRI.
+	// The canonical (url|version when version is set) must equal SupportedQuestionnaireCanonical.
 	// questionnaireCanonical in the SDK appends "|version" when version is set; we test
 	// the raw url here (the canonical constant has no version suffix) and verify via
 	// ParseQuestionnaireURL which reads the url field directly.
 	got, err := ParseQuestionnaireURL(data)
 	if err != nil {
-		t.Fatalf("ParseQuestionnaireURL on SandboxLumbarQuestionnaire: %v", err)
+		t.Fatalf("ParseQuestionnaireURL on demoLumbarQuestionnaire: %v", err)
 	}
-	if got != QuestionnaireCanonicalLumbarMRI {
-		t.Errorf("canonical = %q, want %q", got, QuestionnaireCanonicalLumbarMRI)
+	if got != SupportedQuestionnaireCanonical {
+		t.Errorf("canonical = %q, want %q", got, SupportedQuestionnaireCanonical)
 	}
 }
 
-// TestSandboxLumbarQuestionnaire_FillAccepts: FillQuestionnaire accepts
-// SandboxLumbarQuestionnaire() and produces a non-empty completed QR, proving the
-// SDK's own autofill accepts the fixture.
-func TestSandboxLumbarQuestionnaire_FillAccepts(t *testing.T) {
-	data := SandboxLumbarQuestionnaire()
+// TestDemoLumbarQuestionnaireFixture_FillAccepts: FillQuestionnaire accepts
+// demoLumbarQuestionnaire() and produces a non-empty completed QR, proving the SDK's own
+// autofill accepts the fixture.
+func TestDemoLumbarQuestionnaireFixture_FillAccepts(t *testing.T) {
+	data := demoLumbarQuestionnaire()
 	qc := QRContext{
 		PatientRef:  "Patient/MBR-COVERED",
 		CoverageRef: "Coverage/MBR-COVERED",
 		OrderRef:    "ServiceRequest/sr-MBR-COVERED",
 		Authored:    mbrCoveredQC().Authored,
 	}
-	qr, err := FillQuestionnaire(data, SandboxUC03Context(), qc)
+	qr, err := FillQuestionnaire(data, DemoLumbarContext(), qc)
 	if err != nil {
-		t.Fatalf("FillQuestionnaire(SandboxLumbarQuestionnaire, SandboxUC03Context): %v", err)
+		t.Fatalf("FillQuestionnaire(demoLumbarQuestionnaire, DemoLumbarContext): %v", err)
 	}
 	if len(qr) == 0 {
 		t.Fatal("FillQuestionnaire returned empty QR")
@@ -554,20 +555,20 @@ func TestSandboxLumbarQuestionnaire_FillAccepts(t *testing.T) {
 	}
 }
 
-// TestSandboxLumbarQuestionnaire_DeterministicBytes: SandboxLumbarQuestionnaire is
+// TestDemoLumbarQuestionnaireFixture_DeterministicBytes: demoLumbarQuestionnaire is
 // deterministic — two calls return identical bytes.
-func TestSandboxLumbarQuestionnaire_DeterministicBytes(t *testing.T) {
-	a := SandboxLumbarQuestionnaire()
-	b := SandboxLumbarQuestionnaire()
+func TestDemoLumbarQuestionnaireFixture_DeterministicBytes(t *testing.T) {
+	a := demoLumbarQuestionnaire()
+	b := demoLumbarQuestionnaire()
 	if string(a) != string(b) {
-		t.Errorf("SandboxLumbarQuestionnaire is non-deterministic:\n a=%s\n b=%s", a, b)
+		t.Errorf("demoLumbarQuestionnaire is non-deterministic:\n a=%s\n b=%s", a, b)
 	}
 	// Verify callers get independent copies (mutation isolation).
 	if len(a) > 0 {
 		a[0] ^= 0xFF
-		c := SandboxLumbarQuestionnaire()
+		c := demoLumbarQuestionnaire()
 		if c[0] == a[0] {
-			t.Error("SandboxLumbarQuestionnaire shares underlying storage; mutation was visible to subsequent call")
+			t.Error("demoLumbarQuestionnaire shares underlying storage; mutation was visible to subsequent call")
 		}
 	}
 }
@@ -605,7 +606,7 @@ func TestBuildQuestionnairePackage_InvalidJSON(t *testing.T) {
 // TestBuildAndExtractQuestionnairePackage_RoundTrip: wrap then extract returns the
 // Questionnaire bytes verbatim.
 func TestBuildAndExtractQuestionnairePackage_RoundTrip(t *testing.T) {
-	q := SandboxLumbarQuestionnaire()
+	q := demoLumbarQuestionnaire()
 	pkg, err := BuildQuestionnairePackage(q)
 	if err != nil {
 		t.Fatalf("BuildQuestionnairePackage: %v", err)
@@ -639,12 +640,42 @@ func TestExtractQuestionnaireFromPackage_NoQuestionnaire(t *testing.T) {
 // a bare Questionnaire (no entry array) is NOT tolerated; it errors (no dual-shape
 // fallback). This is the full-uniform contract (§6.2).
 func TestExtractQuestionnaireFromPackage_BareQuestionnaireRejected(t *testing.T) {
-	got, err := ExtractQuestionnaireFromPackage(SandboxLumbarQuestionnaire())
+	got, err := ExtractQuestionnaireFromPackage(demoLumbarQuestionnaire())
 	if err == nil {
 		t.Fatalf("ExtractQuestionnaireFromPackage accepted a bare Questionnaire; full-uniform requires a package")
 	}
 	if got != nil {
 		t.Errorf("ExtractQuestionnaireFromPackage returned non-nil (%q) on a bare Questionnaire", got)
+	}
+}
+
+// TestExtractQuestionnaireFromPackage_ParametersWrapper: a conformant DTR
+// $questionnaire-package response profiled on dtr-qpackage-output-parameters — a
+// Parameters resource carrying the collection Bundle at
+// parameter[name=="packagebundle"].resource — is unwrapped to its inner Bundle
+// before the existing bundle-walk, so the Questionnaire entry is still found.
+func TestExtractQuestionnaireFromPackage_ParametersWrapper(t *testing.T) {
+	inner := `{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","id":"q1","url":"http://example.org/fhir/Questionnaire/HomeOxygenDispatch"}}]}`
+	wrapped := []byte(`{"resourceType":"Parameters","parameter":[{"name":"packagebundle","resource":` + inner + `}]}`)
+	q, err := ExtractQuestionnaireFromPackage(wrapped)
+	if err != nil {
+		t.Fatalf("wrapper: %v", err)
+	}
+	var got struct{ ResourceType, ID string }
+	_ = json.Unmarshal(q, &got)
+	if got.ResourceType != "Questionnaire" || got.ID != "q1" {
+		t.Fatalf("wrapper: got %+v", got)
+	}
+}
+
+// TestExtractQuestionnaireFromPackage_WrapperWithoutQuestionnaire_Rejected: a
+// Parameters{packagebundle} wrapper whose inner Bundle carries no Questionnaire
+// entry is rejected exactly like the bare-Bundle case — the unwrap does not weaken
+// the strict "must contain a Questionnaire" contract.
+func TestExtractQuestionnaireFromPackage_WrapperWithoutQuestionnaire_Rejected(t *testing.T) {
+	wrapped := []byte(`{"resourceType":"Parameters","parameter":[{"name":"packagebundle","resource":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Library","id":"l1"}}]}}]}`)
+	if _, err := ExtractQuestionnaireFromPackage(wrapped); err == nil {
+		t.Fatal("wrapper without a Questionnaire must be rejected")
 	}
 }
 
@@ -655,11 +686,11 @@ func TestExtractQuestionnaireFromPackage_Garbage(t *testing.T) {
 	}
 }
 
-// TestSandboxLumbarQuestionnaire_IsCQLBacked: the sandbox questionnaire carries the
+// TestDemoLumbarQuestionnaireFixture_IsCQLBacked: the demo questionnaire carries the
 // cqf-library + per-item initialExpression extensions so a real operated $populate engine
 // can populate it (the managed FillQuestionnaire ignores these and fills by linkId).
-func TestSandboxLumbarQuestionnaire_IsCQLBacked(t *testing.T) {
-	s := string(SandboxLumbarQuestionnaire())
+func TestDemoLumbarQuestionnaireFixture_IsCQLBacked(t *testing.T) {
+	s := string(demoLumbarQuestionnaire())
 	for _, want := range []string{
 		"cqf-library",
 		"Library/LumbarMRICQL",
@@ -682,7 +713,7 @@ func TestSandboxLumbarQuestionnaire_IsCQLBacked(t *testing.T) {
 }
 
 // TestValidatePatientAnswer covers both registered patient items: the Oswestry numeric item
-// (composite/sandbox UC-07) and the HomeHealthAssessment free-text functional-status item "3.2"
+// (the reference-payer UC-07 path) and the HomeHealthAssessment free-text functional-status item "3.2"
 // (provider-data UC-07, the patient-authored narrative). The "3.2" rule is load-bearing: the
 // phg patient-dtr responder calls ValidatePatientAnswer as the un-bypassable AI-10 signing guard,
 // so without a "3.2" rule the provider-data UC-07 patient-dtr leg is rejected at phg.
@@ -720,7 +751,7 @@ func TestValidatePatientAnswer(t *testing.T) {
 // supersedes whatever the populate step left there. Appending instead produced
 // two items carrying the same linkId with different answers, which is a
 // QuestionnaireResponse that asserts two conflicting values for one question —
-// and adjudication cannot resolve it, so SandboxAdjudicate refuses the whole
+// and adjudication cannot resolve it, so the reader refuses the whole
 // submission rather than guessing. The UC-06 clinician resume hit exactly that:
 // the populate step had already emitted a functional-status-oswestry item, the
 // attestation appended a second, and the prior-auth came back 422.
@@ -831,10 +862,14 @@ func TestAmendQRWithItemAppendsWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestAmendedQRAdjudicates is the end of the chain this exists to protect: the
-// amended QR must be adjudicable, not merely well-shaped. Before superseding it
-// carried two functional-status-oswestry items and SandboxAdjudicate refused it.
-func TestAmendedQRAdjudicates(t *testing.T) {
+// TestAmendedQRIsUnambiguousAfterSupersede is the end of the chain this exists to
+// protect: the amended QR must be READABLE, not merely well-shaped. Before superseding
+// it carried TWO functional-status-oswestry items — one clinical fact stated twice, which
+// no reader can resolve without arbitrarily picking one. The retired stub adjudicator
+// refused exactly that shape; the refusal was policy-shaped, the DEFECT is not, so the
+// property is asserted directly: exactly one occurrence survives, carrying the attested
+// value and its attestation.
+func TestAmendedQRIsUnambiguousAfterSupersede(t *testing.T) {
 	const linkID = "functional-status-oswestry"
 	qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
 		`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]},` +
@@ -850,11 +885,13 @@ func TestAmendedQRAdjudicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AmendQRWithItem: %v", err)
 	}
-	dec, err := SandboxAdjudicate(amended, false, testNow, bytes.NewReader([]byte("SEEDAM")))
-	if err != nil {
-		t.Fatalf("amended QR must be adjudicable, got error: %v", err)
+	if n := strings.Count(string(amended), `"`+linkID+`"`); n != 1 {
+		t.Fatalf("%s occurs %d times in the amended QR, want exactly 1 (an ambiguous QR is unreadable):\n%s", linkID, n, amended)
 	}
-	if dec.Outcome != PASApproved {
-		t.Fatalf("outcome = %v, want PASApproved (6 weeks + attested high-disability)", dec.Outcome)
+	if !strings.Contains(string(amended), `"valueString":"42"`) || strings.Contains(string(amended), "unsigned-auto") {
+		t.Fatalf("the attested value did not supersede the placeholder:\n%s", amended)
+	}
+	if !strings.Contains(string(amended), ClinicianAttestationExt) {
+		t.Fatalf("the surviving item lost its attestation:\n%s", amended)
 	}
 }

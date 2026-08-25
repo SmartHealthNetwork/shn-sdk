@@ -12,9 +12,29 @@ import (
 // PriorAuthResult is the prior-auth orchestrator outcome. Outcome is the SAME
 // vocabulary the discovery descriptor's expectedPriorAuth speaks.
 type PriorAuthResult struct {
-	Outcome    string // "approved" | "pended" | "denied" | "no-pa-required"
+	// Outcome is one of:
+	//   "approved" | "pended" | "denied" — the payer's PAS determination
+	//   "no-pa-required" — the CRD card said no prior authorization is needed
+	//   "not-covered"    — the CRD card said the plan does not cover this service and
+	//                      the request did not set ProceedOnNotCovered, so no PAS leg
+	//                      ran. DISTINCT from "no-pa-required" (v0.46.0): before the
+	//                      split, a coverage refusal reported as no-PA-required.
+	Outcome    string
 	PreAuthRef string // set when approved
 	ValidUntil string // set when approved
+
+	// Partial (v0.46.0, additive) is true when Outcome=="approved" but the payer's X12 306
+	// reviewActionCode was A2 ("Certified – partial") rather than a full certification: an
+	// authorization number WAS issued, but coverage is not complete. False (the zero value)
+	// for every full approval — it never leaks onto an A1/preAuthRef-only approved result.
+	// See ParseClaimResponse's doc comment: this branch is parse-side only, not currently
+	// live-proven against any producer this SDK can drive.
+	Partial bool
+	// Disposition (v0.46.0, additive) carries the payer's own free-text disposition/display
+	// text onto the result. Currently set only when Partial is true, so a partial
+	// certification's scope (what was and was not certified) is not lost — PriorAuthResult
+	// had no existing field that fit an approved-outcome's payer-sourced text.
+	Disposition string
 
 	// NeededItems + Resume are set when Outcome=="pended": the supplemental
 	// items the payer's Task enumerates, and a serializable handle to ResumePriorAuth.
@@ -36,8 +56,9 @@ type NeededItem struct {
 
 // Denial is the FR-22 denied-PA content, parsed from the PAS denied ClaimResponse
 // (reviewActionCode + disposition + processNote). ReasonCode is the actual PAS
-// reviewActionCode (X12 306) — "A2" (Not Certified) from a conformant payer like
-// br-payer, or the legacy "A3" SHN's sandbox still emits.
+// reviewActionCode (X12 306) — "A3" ("Not Certified"), the conformant denial code SHN's
+// own producer emits, or the real reference payer's (br-payer) observed "A2" denial shape
+// (a code/display self-contradiction in that RI — see sdk/pas.go's reviewAction* consts).
 type Denial struct {
 	ReasonCode string
 	Rationale  string   // ClaimResponse.disposition
@@ -63,7 +84,7 @@ type PriorAuthResume struct {
 	// counterparty from (persona payerId — stamped by the shn CLI before the
 	// handle is written). Resume re-resolves it through the directory with the
 	// same refusal semantics. ADDITIVE optional field: an older handle simply
-	// lacks it and resume falls back to the legacy sandboxResponders path.
+	// lacks it and resume falls back to the legacy demoResponders path.
 	// Local-file format (grow-only); NOT part of any signed/sealed wire payload.
 	PayerID *PayerIdentifier `json:"payerId,omitempty"`
 
@@ -111,29 +132,6 @@ func pasFullURLFor(resourceJSON []byte) (string, error) {
 		return "", fmt.Errorf("shnsdk: fullURLFor: resource missing resourceType (%q) or id (%q)", meta.ResourceType, meta.ID)
 	}
 	return pasBundleBaseURL + "/" + meta.ResourceType + "/" + meta.ID, nil
-}
-
-// pasEnsureID returns resourceJSON with "id" set to fallbackID if the JSON does
-// not already carry a non-empty id. Used by bundle builders to guarantee every
-// entry has a stable, resolvable id before computing its fullUrl. Ported standalone
-// from internal/pas.ensureID.
-func pasEnsureID(resourceJSON []byte, fallbackID string) ([]byte, error) {
-	var probe struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(resourceJSON, &probe); err != nil {
-		return nil, fmt.Errorf("shnsdk: ensureID: parse: %w", err)
-	}
-	if probe.ID != "" {
-		return resourceJSON, nil // already has an id
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(resourceJSON, &m); err != nil {
-		return nil, fmt.Errorf("shnsdk: ensureID: unmarshal map: %w", err)
-	}
-	idJSON, _ := json.Marshal(fallbackID)
-	m["id"] = json.RawMessage(idJSON)
-	return json.Marshal(m)
 }
 
 // pasInjectResourceType adds "resourceType":"<rt>" to a marshalled JSON object.
@@ -400,8 +398,8 @@ func addPASLineRelatedRelationship(claimJSON []byte, def PASDef) ([]byte, error)
 // #cms-payer Organization (mirroring BuildCoverageWithPayer), making the reference
 // resolvable by real payers that validate bundle-internal refs (e.g. real br-payer 400s
 // "Organization/payer not found"). When false (the default) the insurer stays the generic
-// "Organization/payer" — byte-identical to the sandbox-proven path. Set true ONLY for the
-// composite origination lane (OriginationProfile == "composite").
+// "Organization/payer" — byte-identical to the SHN-native path. Set true ONLY for the
+// reference-payer origination lane (targetsBrPayer: ORIGINATION_PROFILE=provider-data, and the Kit's conformant rows).
 //
 // AbsoluteRefs: when true every internal reference whose value matches a bundle-entry
 // relative form ("<resourceType>/<id>") is rewritten to its absolute fullUrl
@@ -409,8 +407,8 @@ func addPASLineRelatedRelationship(claimJSON []byte, def PASDef) ([]byte, error)
 // for real payers (e.g. real br-payer HAPI-1094 "not found") that do not resolve relative
 // refs against absolute entry fullUrls in a $submit collection bundle. Contained #fragment
 // refs and refs that do not match any bundle entry are left untouched. When false (the
-// default) the bundle is byte-identical to the sandbox-proven path. Set true ONLY for the
-// composite origination lane (OriginationProfile == "composite").
+// default) the bundle is byte-identical to the SHN-native path. Set true ONLY for the
+// reference-payer origination lane (targetsBrPayer: ORIGINATION_PROFILE=provider-data, and the Kit's conformant rows).
 type ConformantClaimInputs struct {
 	QR               []byte
 	SR               []byte
@@ -418,23 +416,24 @@ type ConformantClaimInputs struct {
 	CoverageRef      string
 	Corr             string
 	Created          time.Time
-	ContainedInsurer bool // composite lane only; false = byte-identical sandbox path
-	AbsoluteRefs     bool // composite lane only; false = byte-identical sandbox path
-	// PayerOrgEntry (composite lane): emit the cms-payer Organization as a resolvable bundle
+	ContainedInsurer bool // reference-payer lane only; false = byte-identical SHN-native path
+	AbsoluteRefs     bool // reference-payer lane only; false = byte-identical SHN-native path
+	// PayerOrgEntry (reference-payer lane): emit the cms-payer Organization as a resolvable bundle
 	// ENTRY (not contained) and repoint Coverage.payor + Claim.insurer at it. REQUIRED for a
 	// real Da Vinci PAS payer (br-payer): its PAS payor resolution (PayorIdentifierUtil →
 	// ResourceResolver.findInBundle) reads bundle ENTRIES only, so a contained #cms-payer
-	// yields 0 payor identifiers → empty PlanDefinition search → A3 "Not Required" for every
-	// code (the verdict CQL never fires). CRD is unaffected (it resolves contained fragments).
-	// Takes precedence over ContainedInsurer when both set. Default false = sandbox byte-identical.
+	// yields 0 payor identifiers → empty PlanDefinition search → A3 "Not Certified" (br-payer's
+	// no-match fallback) for every code (the verdict CQL never fires). CRD is unaffected (it
+	// resolves contained fragments).
+	// Takes precedence over ContainedInsurer when both set. Default false = SHN-native byte-identical.
 	PayerOrgEntry bool
 	// InfoChanged (single-shot resolve discriminator): when true the submit Claim's item[*]
 	// carries the Da Vinci PAS infoChanged item extension ({"url": pasInfoChangedExtensionURL,
-	// "valueCode": "changed"} — the SAME shape setPriorClaimReferenceAndInfoChanged appends on the
-	// composite UPDATE Claim). It is the gateway payer-side POLL DISCRIMINATOR, not a verdict input:
+	// "valueCode": "changed"} — the SAME shape the UPDATE builder appends unconditionally via
+	// appendInfoChangedToClaimItems). It is the gateway payer-side POLL DISCRIMINATOR, not a verdict input:
 	// the payer gate polls the timer-resolved terminal A1 (GET ClaimResponse/{id}) when the order is
 	// a single-shot ServiceRequest signalling "resolve to terminal" via this extension, instead of
-	// returning the A4 pend for a composite amendment leg. On a FRESH submit (no Claim.related[prior],
+	// returning the A4 pend for a reference-payer amendment leg. On a FRESH submit (no Claim.related[prior],
 	// which this builder never emits) infoChanged is benign on br-payer — its re-evaluation path is
 	// gated on a prior claim, absent here — so br-payer still does A4→timer→A1. Default false →
 	// byte-identical to every existing caller. NO prior-claim ref is added (this is a submit, not an
@@ -457,14 +456,15 @@ type ConformantClaimInputs struct {
 // BuildConformantClaimBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
 // Da Vinci $submit Claim Bundle — the only PA $submit contract (the minimized
 // BuildClaimBundle has been removed). The entry set is exactly what the
-// payer-side parseConformantPASSubjects (gateway/engine/pas_native.go) + the sandbox
+// payer-side parseConformantPASSubjects (gateway/engine/pas_native.go) + the SHN-native
 // adjudicator + `make validate` require, with NO br-payer foreign seed:
 //
-//	Claim (use preauthorization; item[].productOrService = CPT 72148 + extension-requestedService
-//	      → the ServiceRequest; insurer = generic Organization/payer),
+//	Claim (use preauthorization; item[].productOrService = the passed order's own code (CPT
+//	      72148 for this doc's example demo persona) + extension-requestedService → the
+//	      ServiceRequest; insurer = generic Organization/payer),
 //	Patient (minimal, id = the bound member),
 //	Coverage (contained cms-payer Org, payor → #cms-payer, beneficiary → member),
-//	ServiceRequest (the passed SR — CPT 72148, ICD-10 M51.16),
+//	ServiceRequest (the passed SR — CPT 72148, ICD-10 M51.16, for this doc's example),
 //	QuestionnaireResponse (the passed answered QR — id convergence-qr).
 //
 // meta.profile: the PAS $submit bundle + EVERY entry carry NO meta.profile (a Da
@@ -496,7 +496,8 @@ func BuildConformantClaimBundleAtLine(line string, in ConformantClaimInputs) ([]
 
 func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, error) {
 	// --- Claim: reuse the byte-parity-locked buildPASClaim, then post-process to carry
-	// the conformant CPT 72148 (buildPASClaim natively emits X12 1365 "Medical Care") +
+	// the order's own productOrService code (buildPASClaim natively emits X12 1365
+	// "Medical Care" there; setClaimItemProductFromSR below overrides it unconditionally) +
 	// the extension-requestedService → ServiceRequest. The id is overridden to the stable
 	// conformant id. ---
 	claimJSON, err := buildPASClaim(in.PatientRef, in.CoverageRef, in.Corr, in.Created)
@@ -517,19 +518,20 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: add line item detail: %w", err)
 	}
-	// Composite lane: override the hardcoded CPT 72148 with the order's actual code (the
-	// composite HCPCS code, e.g. L8000 or E0431) — br-payer keys PAS on Claim.item.productOrService.
-	if in.PayerOrgEntry {
-		claimJSON, err = setClaimItemProductFromSR(claimJSON, in.SR)
-		if err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant submit: set claim product from SR: %w", err)
-		}
+	// Every caller: set item[0].productOrService from the order's actual code (the order
+	// governs correctness, not just the reference-payer lane's HCPCS keying — every payer
+	// on this network decides on productOrService, so a caller with no PayerOrgEntry must
+	// still get the real requested service, not the X12 1365 placeholder buildPASClaim
+	// left there). Fails loud (not a silent placeholder) when the order carries no code.
+	claimJSON, err = setClaimItemProductFromSR(claimJSON, in.SR)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: set claim product from SR: %w", err)
 	}
-	// Composite lane: make the Claim insurer ref resolvable. PayerOrgEntry is the
+	// Reference-payer lane: make the Claim insurer ref resolvable. PayerOrgEntry is the
 	// br-payer-correct form — point insurer at the cms-payer Organization ENTRY added below
 	// (br-payer's PAS payor resolution reads bundle entries, not contained), and it takes
 	// precedence over the legacy ContainedInsurer (contained #cms-payer) approach. Both default
-	// false → the sandbox path stays byte-identical.
+	// false → the SHN-native path stays byte-identical.
 	switch {
 	case in.PayerOrgEntry:
 		claimJSON, err = repointInsurerToEntry(claimJSON)
@@ -572,7 +574,7 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: strip coverage meta: %w", err)
 	}
-	// Composite lane: repoint Coverage.payor at the cms-payer Organization ENTRY (added
+	// Reference-payer lane: repoint Coverage.payor at the cms-payer Organization ENTRY (added
 	// to the bundle below) and drop the contained #cms-payer. This is the load-bearing fix:
 	// br-payer's PAS payor lookup follows Coverage.payor → findInBundle (bundle entries only).
 	if in.PayerOrgEntry {
@@ -647,7 +649,7 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 		}
 		return fhir.BundleEntry{FullUrl: strPtr(u), Resource: json.RawMessage(resourceJSON)}, nil
 	}
-	// Composite lane: the cms-payer Organization is a first-class bundle ENTRY (the
+	// Reference-payer lane: the cms-payer Organization is a first-class bundle ENTRY (the
 	// payor refs above resolve to it). Build it here so entryFor stamps its absolute fullUrl,
 	// which absolutizeBundleRefs (when AbsoluteRefs) makes Coverage.payor/Claim.insurer match.
 	var payerOrgJSON []byte
@@ -687,9 +689,9 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	// Composite lane only: rewrite internal refs to their absolute fullUrl form so real
+	// Reference-payer lane only: rewrite internal refs to their absolute fullUrl form so real
 	// payers that do not resolve relative refs against absolute entry fullUrls accept the
-	// bundle (HAPI-1094). Default false keeps the sandbox path byte-identical.
+	// bundle (HAPI-1094). Default false keeps the SHN-native path byte-identical.
 	if in.AbsoluteRefs {
 		bundleOut, err = absolutizeBundleRefs(bundleOut)
 		if err != nil {
@@ -699,12 +701,16 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	return bundleOut, nil
 }
 
-// conformantizePASClaim takes buildPASClaim's output and (1) overrides item[0].
-// productOrService to the conformant CPT 72148 (buildPASClaim natively puts X12 1365
-// "Medical Care" there — see buildPASClaim's comment), (2) adds the Da Vinci PAS
-// extension-requestedService → the ServiceRequest on item[0], and (3) restamps the id to
-// the stable conformant id. The Claim's category (X12 1365), insurer (generic
-// Organization/payer), and all other fields stay buildPASClaim's. Deterministic.
+// conformantizePASClaim takes buildPASClaim's output and (1) adds the Da Vinci PAS
+// extension-requestedService → the ServiceRequest on item[0], and (2) restamps the id to
+// the stable conformant id. It does NOT touch item[0].productOrService — buildPASClaim
+// natively puts X12 1365 "Medical Care" there (see buildPASClaim's comment), and this
+// function leaves that as-is. Every caller of this function derives the real
+// productOrService from the order and stamps it via setClaimItemProductFromSR
+// immediately afterward, unconditionally — there is no placeholder service code that
+// survives to a payer; an order with no code fails loud there instead. The Claim's
+// category (X12 1365), insurer (generic Organization/payer), and all other fields stay
+// buildPASClaim's. Deterministic.
 func conformantizePASClaim(claimJSON []byte, serviceRequestRef string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(claimJSON, &m); err != nil {
@@ -714,11 +720,10 @@ func conformantizePASClaim(claimJSON []byte, serviceRequestRef string) ([]byte, 
 	idJSON, _ := json.Marshal(conformantPASClaimID)
 	m["id"] = idJSON
 
-	// Override item[0].productOrService → CPT 72148 + add extension-requestedService.
-	// Guard the missing-item case BEFORE unmarshal so a nil m["item"] yields a
-	// self-explanatory error rather than the opaque "unexpected end of JSON input"
-	// EOF (unreachable in practice — buildPASClaim always emits an item — but a
-	// public-SDK robustness nicety).
+	// Add extension-requestedService on item[0]. Guard the missing-item case BEFORE
+	// unmarshal so a nil m["item"] yields a self-explanatory error rather than the
+	// opaque "unexpected end of JSON input" EOF (unreachable in practice — buildPASClaim
+	// always emits an item — but a public-SDK robustness nicety).
 	if len(m["item"]) == 0 {
 		return nil, fmt.Errorf("claim has no item to conformantize")
 	}
@@ -729,16 +734,6 @@ func conformantizePASClaim(claimJSON []byte, serviceRequestRef string) ([]byte, 
 	if len(items) == 0 {
 		return nil, fmt.Errorf("claim has no item to conformantize")
 	}
-	cpt := fhir.CodeableConcept{Coding: []fhir.Coding{{
-		System:  strPtr(systemCPT),
-		Code:    strPtr("72148"),
-		Display: strPtr("MRI lumbar spine w/o contrast"),
-	}}}
-	cptJSON, err := json.Marshal(cpt)
-	if err != nil {
-		return nil, err
-	}
-	items[0]["productOrService"] = cptJSON
 	reqExt := []map[string]any{{
 		"url":            extReqService,
 		"valueReference": map[string]string{"reference": serviceRequestRef},
@@ -952,17 +947,20 @@ func orderEntryRef(order []byte) (id, ref string) {
 }
 
 // setClaimItemProductFromSR sets the Claim's item[0].productOrService to the order resource's
-// requested-service code. conformantizePASClaim hardcodes CPT 72148 (the sandbox lumbar code)
-// on the Claim item, but br-payer's PAS keys the PlanDefinition lookup on
+// requested-service code. buildPASClaim leaves X12 1365 "Medical Care" on the Claim item (its
+// own default line code), but br-payer's PAS keys the PlanDefinition lookup on
 // Claim.item.productOrService (PasSubmitService.evaluateAllItems — NOT the SR / requestedService
-// extension). The composite lane originates HCPCS codes (e.g. L8000) on the SR, so the Claim item
-// MUST carry the same code or br-payer adjudicates the wrong PlanDefinition.
+// extension). Every payer on this network decides on productOrService, so the Claim item MUST
+// carry the order's real code or the response is a determination about a different service, with
+// no error anywhere to notice it.
 //
 // Order-type-aware: for a DeviceRequest the code lives in codeCodeableConcept; for a
 // ServiceRequest (and any unrecognised type) it lives in code. The extension-requestedService
-// (added by conformantizePASClaim) is preserved. Composite-only; the sandbox SR is also CPT
-// 72148 so this would be a no-op there, but it is gated on the composite flag to keep the
-// sandbox bytes provably identical.
+// (added by conformantizePASClaim) is preserved. Called UNCONDITIONALLY by both
+// buildConformantClaimBundle and buildConformantClaimUpdateBundle — not gated on PayerOrgEntry.
+// PayerOrgEntry gates only the payer-Organization bundle-entry shape (contained vs. resolvable
+// entry); it must never again gate the correctness of the requested service. Fails loud
+// (rather than silently carrying forward the placeholder) when the order has no code.
 func setClaimItemProductFromSR(claimJSON, orderJSON []byte) ([]byte, error) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
@@ -1017,7 +1015,7 @@ func setClaimItemProductFromSR(claimJSON, orderJSON []byte) ([]byte, error) {
 
 // buildPayerOrgResource returns the standalone cms-payer Organization JSON (the same identity
 // BuildCoverageWithPayer/containInsurer splice as contained, but as a top-level resource for a
-// bundle ENTRY). The composite lane lifts the payer org out of contained into an entry because
+// bundle ENTRY). The reference-payer lane lifts the payer org out of contained into an entry because
 // br-payer's PAS payor resolution (findInBundle) reads bundle entries only. The identifier
 // system|value come from payer; the cosmetic id/name stay conformantPayerOrgID/Name.
 func buildPayerOrgResource(payer PayerIdentifier) ([]byte, error) {
@@ -1037,7 +1035,7 @@ func buildPayerOrgResource(payer PayerIdentifier) ([]byte, error) {
 	return pasInjectResourceType(orgJSON, "Organization")
 }
 
-// repointPayorToEntry rewrites a composite-lane Coverage so Coverage.payor[0] references the
+// repointPayorToEntry rewrites a reference-payer-lane Coverage so Coverage.payor[0] references the
 // cms-payer Organization ENTRY (Organization/cms-payer) instead of the contained #cms-payer, and
 // drops the now-redundant contained org. The Organization lives as a bundle entry
 // (buildPayerOrgResource); absolutizeBundleRefs then makes the ref the entry's absolute fullUrl so
@@ -1058,7 +1056,7 @@ func repointPayorToEntry(coverageJSON []byte) ([]byte, error) {
 	return json.Marshal(m)
 }
 
-// repointInsurerToEntry rewrites a composite-lane Claim so Claim.insurer references the cms-payer
+// repointInsurerToEntry rewrites a reference-payer-lane Claim so Claim.insurer references the cms-payer
 // Organization ENTRY (Organization/cms-payer), and drops any contained #cms-payer.
 func repointInsurerToEntry(claimJSON []byte) ([]byte, error) {
 	var m map[string]json.RawMessage
@@ -1195,7 +1193,7 @@ func dropContainedPayerOrg(m map[string]json.RawMessage) error {
 //   - All "reference" string fields anywhere in the JSON tree (nested objects + arrays)
 //     are visited recursively.
 //
-// Pure function — input is not mutated. Re-marshal determinism is fine (composite bundles
+// Pure function — input is not mutated. Re-marshal determinism is fine (reference-payer bundles
 // have no byte-parity golden). Called ONLY when AbsoluteRefs == true.
 func absolutizeBundleRefs(bundleJSON []byte) ([]byte, error) {
 	// Unmarshal the bundle into a generic map so we can walk the full tree.
@@ -1238,7 +1236,7 @@ func absolutizeBundleRefs(bundleJSON []byte) ([]byte, error) {
 	// in-memory patient-compartment retrieves match each resource on its Patient-anchor search
 	// param (Coverage→beneficiary, ServiceRequest/DeviceRequest→subject). An ABSOLUTE anchor
 	// ref breaks the compartment match → the retrieve is empty → no coverage-info extension →
-	// PasCoverageEvaluator falls through to A3 "Not Required" (live-proven vs br-payer a8bece4:
+	// PasCoverageEvaluator falls through to A3 "Not Certified" (live-proven vs br-payer a8bece4:
 	// absolute beneficiary → every code A3; absolute SR.subject → G0151 A3 instead of A4).
 	// Everything else MUST stay absolute: br-payer resolves relative refs against its own SERVER
 	// base, not the bundle fullUrls, so e.g. Claim.insurer→Organization/cms-payer and
@@ -1395,19 +1393,19 @@ func buildPASUpdateClaim(patientRef, coverageRef, correlationID, originalCorrela
 	return pasInjectResourceType(raw, "Claim")
 }
 
-// setPriorClaimReferenceAndInfoChanged makes the operative update Claim a CONFORMANT Da Vinci PAS
-// Claim Update that real br-payer ACCEPTS (composite lane only). Two changes:
-//   - Claim.related[0].claim.reference = priorClaimRef (the prior Claim BUNDLE ENTRY). br-payer's
-//     resolvePriorClaim (PasSubmitService.java:379-403) reads .reference, NOT .identifier, and 400s
-//     "The prior Claim referenced in Claim.related.claim must be included in the Bundle" without it.
-//     The existing .identifier is preserved.
-//   - Claim.item[*].extension += infoChanged ("changed"). br-payer re-evaluates an updated item only
-//     when it carries infoChanged (hasInfoChanged, PasSubmitService.java:316/449); otherwise it
-//     carries-forward the prior decision unchanged.
+// setPriorClaimReference repoints Claim.related[0].claim.reference at the prior Claim BUNDLE
+// ENTRY (reference-payer lane only — the non-PayerOrgEntry lane never adds that entry, so calling
+// this there would dangle; see the call site in buildConformantClaimUpdateBundle). br-payer's
+// resolvePriorClaim (PasSubmitService.java:379-403) reads .reference, NOT .identifier, and 400s
+// "The prior Claim referenced in Claim.related.claim must be included in the Bundle" without it.
+// The existing .identifier is preserved. infoChanged is a SEPARATE, unconditional concern (every
+// lane) — see appendInfoChangedToClaimItems; this function used to fold both together as
+// setPriorClaimReferenceAndInfoChanged, which forced infoChanged to share the reference's
+// PayerOrgEntry gate even though only the reference is lane-shape-dependent.
 //
-// Generic-map round-trip (composite has no byte-parity golden), mirroring containInsurer/
-// repointInsurerToEntry. Out of the sandbox path (gated on PayerOrgEntry at the call site).
-func setPriorClaimReferenceAndInfoChanged(claimJSON []byte, priorClaimRef string) ([]byte, error) {
+// Generic-map round-trip (the reference-payer lane has no byte-parity golden), mirroring containInsurer/
+// repointInsurerToEntry.
+func setPriorClaimReference(claimJSON []byte, priorClaimRef string) ([]byte, error) {
 	var claim map[string]interface{}
 	if err := json.Unmarshal(claimJSON, &claim); err != nil {
 		return nil, fmt.Errorf("unmarshal claim: %w", err)
@@ -1426,9 +1424,6 @@ func setPriorClaimReferenceAndInfoChanged(claimJSON []byte, priorClaimRef string
 	}
 	relClaim["reference"] = priorClaimRef
 
-	if err := appendInfoChangedToClaimItemsMap(claim); err != nil {
-		return nil, err
-	}
 	out, err := json.Marshal(claim)
 	if err != nil {
 		return nil, fmt.Errorf("marshal claim: %w", err)
@@ -1438,11 +1433,12 @@ func setPriorClaimReferenceAndInfoChanged(claimJSON []byte, priorClaimRef string
 
 // appendInfoChangedToClaimItems appends the Da Vinci PAS infoChanged item extension
 // ({"url": pasInfoChangedExtensionURL, "valueCode": "changed"}) to every Claim.item[*] of a
-// marshalled Claim JSON. It is the SINGLE source of the exact infoChanged extension shape — both
-// the composite UPDATE (setPriorClaimReferenceAndInfoChanged) and the single-shot SUBMIT
-// (BuildConformantClaimBundle InfoChanged) emit the identical element through it, so the gateway's
-// requestClaimHasInfoChanged poll discriminator fires the same way for both. Errors when the Claim
-// has no item[]. Generic-map round-trip (mirrors the other composite-lane post-processors).
+// marshalled Claim JSON. It is the SINGLE source of the exact infoChanged extension shape — the
+// UPDATE builder (buildConformantClaimUpdateBundle, unconditionally, every lane) and the
+// single-shot SUBMIT (BuildConformantClaimBundle InfoChanged) both emit the identical element
+// through it, so the gateway's requestClaimHasInfoChanged poll discriminator fires the same way
+// for both. Errors when the Claim has no item[]. Generic-map round-trip (mirrors the other
+// reference-payer-lane post-processors).
 func appendInfoChangedToClaimItems(claimJSON []byte) ([]byte, error) {
 	var claim map[string]interface{}
 	if err := json.Unmarshal(claimJSON, &claim); err != nil {
@@ -1459,9 +1455,10 @@ func appendInfoChangedToClaimItems(claimJSON []byte) ([]byte, error) {
 }
 
 // appendInfoChangedToClaimItemsMap mutates a decoded Claim map in place, appending the infoChanged
-// item extension to every item. Shared by the marshalled-bytes wrapper (appendInfoChangedToClaimItems,
-// the submit path) and setPriorClaimReferenceAndInfoChanged (the update path) so the extension shape
-// is defined once.
+// item extension to every item. Factored out of appendInfoChangedToClaimItems (its only caller) so
+// the extension shape has one definition even if a future generic-map caller needs it without a
+// marshal round-trip (setPriorClaimReference used to be such a caller, before infoChanged became
+// an unconditional, separate concern — see buildConformantClaimUpdateBundle).
 func appendInfoChangedToClaimItemsMap(claim map[string]interface{}) error {
 	items, _ := claim["item"].([]interface{})
 	if len(items) == 0 {
@@ -1482,7 +1479,7 @@ func appendInfoChangedToClaimItemsMap(claim map[string]interface{}) error {
 }
 
 // buildPriorClaimEntry synthesizes the prior Claim included as a resolvable bundle ENTRY on the
-// composite lane (see setPriorClaimReferenceAndInfoChanged). It is the original submit's claim:
+// reference-payer lane (see setPriorClaimReference). It is the original submit's claim:
 // br-payer's resolvePriorClaim finds it via related[0].claim.reference, then searches the stored
 // authorization by its FIRST identifier — so it carries urn:shn:correlation|OriginalCorr (the
 // initial submit's stored Claim identifier). br-payer reads only the identifier, but the bundle is
@@ -1532,10 +1529,10 @@ func buildPriorClaimEntry(patientRef, coverageRef, originalCorr string, created 
 // foreign seed.
 //
 // ContainedInsurer: same semantics as ConformantClaimInputs.ContainedInsurer — set true for
-// the composite lane so the update Claim's insurer is also resolvable.
+// the reference-payer lane so the update Claim's insurer is also resolvable.
 //
 // AbsoluteRefs: same semantics as ConformantClaimInputs.AbsoluteRefs — set true for the
-// composite lane so update bundle internal refs are absolute. Out-of-bundle refs (e.g.
+// reference-payer lane so update bundle internal refs are absolute. Out-of-bundle refs (e.g.
 // Provenance.agent Organization/provider or Practitioner/<npi>) are left untouched.
 type ConformantClaimUpdateInputs struct {
 	QR               []byte
@@ -1547,11 +1544,11 @@ type ConformantClaimUpdateInputs struct {
 	Corr             string // this amendment's correlation
 	OriginalCorr     string // → Claim.related[0].claim.identifier.value
 	Created          time.Time
-	ContainedInsurer bool // composite lane only; false = byte-identical sandbox path
-	AbsoluteRefs     bool // composite lane only; false = byte-identical sandbox path
+	ContainedInsurer bool // reference-payer lane only; false = byte-identical SHN-native path
+	AbsoluteRefs     bool // reference-payer lane only; false = byte-identical SHN-native path
 	// PayerOrgEntry: same semantics as ConformantClaimInputs.PayerOrgEntry — the cms-payer
 	// Organization is a resolvable bundle ENTRY (not contained) so br-payer's PAS re-evaluation
-	// of the update resolves the payor (findInBundle, entries only). Composite-only; precedence
+	// of the update resolves the payor (findInBundle, entries only). Reference-payer-lane-only; precedence
 	// over ContainedInsurer.
 	PayerOrgEntry bool
 	// Payer is the payer Organization identifier (system|value) — same semantics as
@@ -1603,8 +1600,8 @@ func BuildConformantClaimUpdateBundleAtLine(line string, in ConformantClaimUpdat
 
 func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs) ([]byte, error) {
 	// --- Claim: reuse buildPASUpdateClaim (emits related[] by OriginalCorr), then
-	// conformantize (CPT 72148 + extension-requestedService) and restamp id to the
-	// update-specific conformant id. ---
+	// conformantize (extension-requestedService; productOrService is set from the order
+	// below, unconditionally) and restamp id to the update-specific conformant id. ---
 	claimJSON, err := buildPASUpdateClaim(in.PatientRef, in.CoverageRef, in.Corr, in.OriginalCorr, in.Created)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: build claim: %w", err)
@@ -1631,15 +1628,14 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: add related relationship: %w", err)
 	}
-	// Composite lane: override the hardcoded CPT 72148 with the SR's actual code (the
-	// composite HCPCS code) — br-payer keys PAS on Claim.item.productOrService.
-	if in.PayerOrgEntry {
-		claimJSON, err = setClaimItemProductFromSR(claimJSON, in.SR)
-		if err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant update: set claim product from SR: %w", err)
-		}
+	// Every caller: set item[0].productOrService from the order's actual code — same
+	// unconditional derivation as the submit builder (see its comment). Fails loud when
+	// the order carries no code.
+	claimJSON, err = setClaimItemProductFromSR(claimJSON, in.SR)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: set claim product from SR: %w", err)
 	}
-	// Composite lane: PayerOrgEntry — insurer references the payer org ENTRY; takes
+	// Reference-payer lane: PayerOrgEntry — insurer references the payer org ENTRY; takes
 	// precedence over the legacy contained-insurer splice. Same as BuildConformantClaimBundle.
 	switch {
 	case in.PayerOrgEntry:
@@ -1653,18 +1649,33 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 			return nil, fmt.Errorf("shnsdk: conformant update: contain insurer: %w", err)
 		}
 	}
-	// Composite lane: make the amended re-POST a CONFORMANT Da Vinci PAS Claim Update that
-	// real br-payer ACCEPTS — Claim.related[0].claim.reference to the prior Claim ENTRY (added to
-	// the bundle below) + infoChanged on the item. br-payer's resolvePriorClaim
+	// infoChanged is UNCONDITIONAL — every lane (register R5/Task-A finding, 2026-08-25):
+	// PayerOrgEntry may gate only the payer-Organization bundle-entry SHAPE (contained vs
+	// resolvable), never correctness/conformance content — the same ruling as the §13
+	// productOrService fix above (setClaimItemProductFromSR runs unconditionally too). br-payer's
+	// hasInfoChanged (PasSubmitService.java:316/449) gates re-evaluation on this marker; a demo/
+	// hermetic amendment that never carried it was previously resolved ONLY by the mirror's own
+	// bare-Provenance tolerance (internal/brpayermirror), a shape no real Da Vinci PAS payer
+	// accepts. Converging here retires that tolerance's justification (see
+	// amendmentRequestsResolution).
+	claimJSON, err = appendInfoChangedToClaimItems(claimJSON)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: append infoChanged: %w", err)
+	}
+	// Reference-payer lane ONLY: repoint Claim.related[0].claim.reference at the prior Claim
+	// ENTRY (added to the bundle below, also PayerOrgEntry-gated). br-payer's resolvePriorClaim
 	// (PasSubmitService.java:379-403) reads .reference (NOT .identifier) and requires the prior
 	// Claim in-bundle (else HTTP 400 "The prior Claim referenced in Claim.related.claim must be
-	// included in the Bundle"); hasInfoChanged (:316/449) gates re-evaluation. The relative ref is
-	// absolutized to the entry's fullUrl by absolutizeBundleRefs (AbsoluteRefs) — what findInBundle
-	// keys on. Sandbox path keeps the lean identifier-only related (byte-identical to golden).
+	// included in the Bundle"). The relative ref is absolutized to the entry's fullUrl by
+	// absolutizeBundleRefs (AbsoluteRefs) — what findInBundle keys on. This part stays lane-gated
+	// (unlike infoChanged above) because it is NOT correctness content — it is a bundle-shape
+	// fact: the non-PayerOrgEntry (SHN-native/demo) lane never adds the prior Claim as a bundle
+	// entry (see below), so rewriting the reference there would DANGLE. That lane keeps the lean
+	// identifier-only related[0] buildPASUpdateClaim already set (byte-identical to golden).
 	if in.PayerOrgEntry {
-		claimJSON, err = setPriorClaimReferenceAndInfoChanged(claimJSON, "Claim/"+conformantPASClaimID)
+		claimJSON, err = setPriorClaimReference(claimJSON, "Claim/"+conformantPASClaimID)
 		if err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant update: prior-claim ref + infoChanged: %w", err)
+			return nil, fmt.Errorf("shnsdk: conformant update: prior-claim ref: %w", err)
 		}
 	}
 
@@ -1685,7 +1696,7 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: strip coverage meta: %w", err)
 	}
-	// Composite lane: repoint Coverage.payor at the cms-payer Organization ENTRY (added
+	// Reference-payer lane: repoint Coverage.payor at the cms-payer Organization ENTRY (added
 	// below) + drop the contained org, so br-payer's PAS update re-evaluation resolves the payor.
 	if in.PayerOrgEntry {
 		coverageJSON, err = repointPayorToEntry(coverageJSON)
@@ -1765,7 +1776,7 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	}
 	entries := make([]fhir.BundleEntry, 0, 8)
 	baseResources := [][]byte{claimJSON, patientJSON, coverageJSON, srJSON, qrJSON}
-	// Composite lane: add the cms-payer Organization as a resolvable bundle ENTRY so the
+	// Reference-payer lane: add the cms-payer Organization as a resolvable bundle ENTRY so the
 	// repointed Coverage.payor/Claim.insurer resolve (br-payer findInBundle, entries only).
 	if in.PayerOrgEntry {
 		payerOrgJSON, err := buildPayerOrgResource(in.Payer)
@@ -1828,7 +1839,7 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if err != nil {
 		return nil, err
 	}
-	// Composite lane only: same absolute-ref rewrite as BuildConformantClaimBundle.
+	// Reference-payer lane only: same absolute-ref rewrite as BuildConformantClaimBundle.
 	// Out-of-bundle refs (e.g. Provenance.agent Organization/provider or
 	// Practitioner/<npi>) are left untouched — they don't appear in the entry set.
 	if in.AbsoluteRefs {
@@ -1884,34 +1895,53 @@ func ParsePendedResponse(data []byte) (pended bool, needed []NeededItem, err err
 
 const (
 	// PAS reviewAction extension URLs (mirror internal/pas). The X12 review-action code
-	// system (https://codesystem.x12.org/005010/306) defines A2 = "Not Certified" (the
-	// DENIAL) and A3 = "Not Required" (no PA needed — NOT a denial). A real Da Vinci PAS
-	// payer (br-payer a8bece4) denies with A2. SHN's own sandbox producer historically
-	// emits A3 for its denials (a non-conformant legacy alias kept transitional here so the
-	// sandbox roundtrip and goldens stay green); the full A2/A3 reconciliation — make SHN
-	// EMIT A2 and demote A3 to its true "Not Required"/no-PA meaning — is a follow-up
-	// conformance slice (D-S2-5). The SDK only needs the two extension URLs + the code to
-	// PARSE a denial; the denied ClaimResponse's outcome stays "complete" — the
-	// reviewActionCode is the authoritative denial signal, not preAuthRef absence.
+	// system (https://codesystem.x12.org/005010/306) defines A1 = Certified in total,
+	// A2 = Certified – partial, A3 = Not Certified (the denial), A4 = Pended. There is no
+	// "Not Required" code in the A-series. SHN's own producer (sdk/pasresponder.go) emits
+	// the conformant A3 for its denials — this is correct, not a legacy stand-in for A2.
+	//
+	// The real reference payer (br-payer a8bece4) denies with reviewActionCode A2 but
+	// display text "Not Certified" — a code/display self-contradiction, i.e. a bug in the
+	// RI (worth reporting upstream to HL7 Da Vinci; see
+	// docs/workstreams/prior-authorization/mode-a-onboarding.md §"Denial review-action
+	// code" for the recorded divergence). The SDK PARSES A2-as-a-denial so it can read a
+	// real RI's output, but never EMITS it — SHN's own denials always carry A3.
+	//
+	// The SDK only needs the two extension URLs + the code to PARSE a denial; the denied
+	// ClaimResponse's outcome stays "complete" — the reviewActionCode is the authoritative
+	// denial signal, not preAuthRef absence.
 	reviewActionExtURL     = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction"
 	reviewActionCodeExtURL = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode"
-	reviewActionDeniedCode = "A2" // X12 "Not Certified" — the conformant denial code (br-payer)
-	// reviewActionDeniedCodeLegacy is SHN's own non-conformant sandbox denial code, accepted
-	// as a transitional alias until the D-S2-5 reconciliation flips the producer to A2.
-	reviewActionDeniedCodeLegacy = "A3"
+	// reviewActionDeniedCode is the X12-conformant denial code (A3, "Not Certified") — the
+	// code SHN's own producer emits and the one ParseClaimResponse treats as an
+	// unconditional denial regardless of any auth number present.
+	reviewActionDeniedCode = "A3"
+	// reviewActionDeniedCodeObservedRI is br-payer's own denial code (A2) — observed RI
+	// behavior, PARSED as a denial only when no auth number accompanies it (see
+	// ParseClaimResponse: a real X12-conformant sender using A2 means "Certified –
+	// partial", not a denial, and carries an auth number). Never emitted by SHN.
+	reviewActionDeniedCodeObservedRI = "A2"
 )
 
-// isReviewActionDenied reports whether an X12 reviewActionCode signals a denial: A2 ("Not
-// Certified", the conformant code br-payer emits) or the legacy A3 SHN's sandbox still emits.
-func isReviewActionDenied(code string) bool {
-	return code == reviewActionDeniedCode || code == reviewActionDeniedCodeLegacy
-}
-
 // ParseClaimResponse parses a bare PAS ClaimResponse into a PriorAuthResult by EXPLICIT
-// signals — approved, denied, and pended are each keyed on an explicit marker:
-//   - reviewActionCode == "A2" (X12 "Not Certified", the conformant denial; or the legacy
-//     sandbox alias "A3") ⇒ Outcome "denied" + Denial{ReasonCode, Rationale, AppealNote}.
-//   - non-empty preAuthRef AND outcome "complete" ⇒ Outcome "approved" + PreAuthRef + ValidUntil.
+// signals — approved, denied, partial, and pended are each keyed on an explicit marker:
+//   - reviewActionCode == "A3" (X12 "Not Certified", SHN's own conformant denial code) ⇒
+//     Outcome "denied" + Denial{ReasonCode, Rationale, AppealNote}, UNCONDITIONALLY — a
+//     "number" sub-extension present alongside it does not change this (see
+//     TestParseClaimResponse_DeniedWithNumberStaysDenied).
+//   - reviewActionCode == "A2" WITHOUT a "number" sub-extension (the observed br-payer
+//     denial shape — a code/display self-contradiction in that RI, see the reviewAction*
+//     const doc comment above) ⇒ Outcome "denied" + Denial{...}, same as A3.
+//   - reviewActionCode == "A2" WITH a "number" sub-extension present anywhere in the
+//     response ⇒ NOT a denial: X12 306 defines A2 as "Certified – partial", so this is a
+//     partial certification. Outcome "approved" + PreAuthRef (from the number) +
+//     Partial:true + Disposition (the payer's own disposition/display text, so the
+//     partial's scope is not lost). HONESTY NOTE: no producer this SDK can drive (SHN's
+//     own, or br-payer live) emits this shape — br-payer's only observed A2 is the
+//     no-number denial above. This branch is parse-side only, hermetically tested against
+//     synthetic fixtures, NOT live-proven against a real payer.
+//   - non-empty preAuthRef AND outcome "complete" (and no reviewActionCode A2/A3 above)
+//     ⇒ Outcome "approved" + PreAuthRef + ValidUntil.
 //   - anything else ⇒ error (fail loud on an ambiguous/malformed shape — never infer a
 //     confident outcome from absence).
 //
@@ -1951,11 +1981,20 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 		return PriorAuthResult{}, fmt.Errorf("shnsdk: parse ClaimResponse: %w", err)
 	}
 
-	// Denial: navigate item[].adjudication[].extension[reviewAction].extension[reviewActionCode]
-	// .valueCodeableConcept.coding[].code == "A3".
-	// Also collect the "number" sub-extension (real Da Vinci RI preAuthRef placement):
+	// Navigate item[].adjudication[].extension[reviewAction].extension[reviewActionCode]
+	// .valueCodeableConcept.coding[] for A3/A2, AND independently collect the "number"
+	// sub-extension (real Da Vinci RI preAuthRef placement):
 	// item[].adjudication[].extension[reviewAction].extension[url="number"].valueString.
+	//
+	// The code and the number can land on DIFFERENT item/adjudication/extension entries
+	// (observed in real RI output), so the walk collects BOTH across the entire response
+	// before any denial/partial/approved decision is made — deciding as soon as a code is
+	// seen (the old shape) would return on an A2 before a later-walked "number" entry was
+	// ever read, silently reporting a partial certification as a denial with the auth
+	// number discarded.
 	var reviewActionPreAuthRef string
+	var sawA3, sawA2 bool
+	var a3Code, a3Display, a2Code, a2Display string
 	for _, it := range probe.Item {
 		for _, adj := range it.Adjudication {
 			for _, ext := range adj.Extension {
@@ -1969,30 +2008,15 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 							continue
 						}
 						for _, c := range sub.ValueCodeableConcept.Coding {
-							if isReviewActionDenied(c.Code) {
-								notes := make([]string, 0, len(probe.ProcessNote))
-								for _, n := range probe.ProcessNote {
-									if n.Text != "" {
-										notes = append(notes, n.Text)
-									}
+							switch c.Code {
+							case reviewActionDeniedCode: // "A3"
+								if !sawA3 {
+									sawA3, a3Code, a3Display = true, c.Code, c.Display
 								}
-								// Rationale = the payer's disposition; fall back to the
-								// reviewActionCode display ("Not Certified") when absent — a
-								// conformant payer (br-payer) carries no disposition/processNote on
-								// a coverage-exclusion A2, so the reviewAction display is its only
-								// denial text. A denial always surfaces SOME payer-sourced reason.
-								rationale := probe.Disposition
-								if rationale == "" {
-									rationale = c.Display
+							case reviewActionDeniedCodeObservedRI: // "A2"
+								if !sawA2 {
+									sawA2, a2Code, a2Display = true, c.Code, c.Display
 								}
-								return PriorAuthResult{
-									Outcome: "denied",
-									Denial: &Denial{
-										ReasonCode: c.Code, // the ACTUAL review code (A2 br-payer / A3 sandbox legacy)
-										Rationale:  rationale,
-										AppealNote: notes,
-									},
-								}, nil
 							}
 						}
 					case "number":
@@ -2006,6 +2030,75 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 				}
 			}
 		}
+	}
+
+	// dispositionText builds the payer-sourced rationale/disposition: probe.Disposition,
+	// falling back to the reviewActionCode's own display (e.g. "Not Certified") when
+	// absent — a conformant payer (br-payer) carries no disposition/processNote on a
+	// coverage-exclusion A2, so the reviewAction display is its only denial text.
+	dispositionText := func(display string) string {
+		if probe.Disposition != "" {
+			return probe.Disposition
+		}
+		return display
+	}
+	processNotes := func() []string {
+		notes := make([]string, 0, len(probe.ProcessNote))
+		for _, n := range probe.ProcessNote {
+			if n.Text != "" {
+				notes = append(notes, n.Text)
+			}
+		}
+		return notes
+	}
+
+	// A3 is SHN's own X12-conformant denial code — unconditional. A "number" sub-extension
+	// present alongside it does NOT flip this to approved (see
+	// TestParseClaimResponse_DeniedWithNumberStaysDenied): A3 has no "partial" reading in
+	// X12 306, so a number riding along with it is not this function's to interpret.
+	if sawA3 {
+		return PriorAuthResult{
+			Outcome: "denied",
+			Denial: &Denial{
+				ReasonCode: a3Code,
+				Rationale:  dispositionText(a3Display),
+				AppealNote: processNotes(),
+			},
+		}, nil
+	}
+
+	if sawA2 {
+		if reviewActionPreAuthRef != "" {
+			// A2 WITH an auth number: this is NOT a denial. X12 306 defines A2 as
+			// "Certified – partial" — an authorization WAS issued, just not in full. See
+			// the ParseClaimResponse doc comment for the honesty note: no producer this
+			// SDK can drive emits this shape today (br-payer's only observed A2 carries no
+			// number); this branch is parse-side only, proven by
+			// TestParseClaimResponse_A2CertifiedPartial, not live.
+			validUntil := ""
+			if probe.PreAuthPeriod != nil {
+				validUntil = probe.PreAuthPeriod.End
+			}
+			return PriorAuthResult{
+				Outcome:     "approved",
+				PreAuthRef:  reviewActionPreAuthRef,
+				ValidUntil:  validUntil,
+				Partial:     true,
+				Disposition: dispositionText(a2Display),
+			}, nil
+		}
+		// A2 WITHOUT an auth number: the observed br-payer denial shape — a code/display
+		// self-contradiction in that RI (code A2, "Certified – partial", but display "Not
+		// Certified"). We parse it as a denial so we can read a real RI's output; SHN
+		// itself never emits this.
+		return PriorAuthResult{
+			Outcome: "denied",
+			Denial: &Denial{
+				ReasonCode: a2Code,
+				Rationale:  dispositionText(a2Display),
+				AppealNote: processNotes(),
+			},
+		}, nil
 	}
 
 	// Approved: explicit preAuthRef (top-level SHN convention) OR reviewAction "number"

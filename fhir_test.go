@@ -159,7 +159,7 @@ func TestBuildEligibilityResponse(t *testing.T) {
 	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
 
 	// covered=true round-trip.
-	b, err := BuildEligibilityResponse("corr-1", "Patient/MBR-1", true, "", t0)
+	b, err := BuildEligibilityResponse("corr-1", "Patient/MBR-1", true, "", PayerIdentifier{}, t0)
 	if err != nil {
 		t.Fatalf("BuildEligibilityResponse(covered): %v", err)
 	}
@@ -172,7 +172,7 @@ func TestBuildEligibilityResponse(t *testing.T) {
 	}
 
 	// covered=false with reason round-trip.
-	b2, err := BuildEligibilityResponse("corr-2", "Patient/MBR-2", false, "not a member", t0)
+	b2, err := BuildEligibilityResponse("corr-2", "Patient/MBR-2", false, "not a member", PayerIdentifier{}, t0)
 	if err != nil {
 		t.Fatalf("BuildEligibilityResponse(not-covered): %v", err)
 	}
@@ -188,11 +188,11 @@ func TestBuildEligibilityResponse(t *testing.T) {
 	}
 
 	// Determinism: two calls with same args → byte-identical output.
-	b3, err := BuildEligibilityResponse("corr-det", "Patient/MBR-DET", true, "", t0)
+	b3, err := BuildEligibilityResponse("corr-det", "Patient/MBR-DET", true, "", PayerIdentifier{}, t0)
 	if err != nil {
 		t.Fatalf("BuildEligibilityResponse(det-1): %v", err)
 	}
-	b4, err := BuildEligibilityResponse("corr-det", "Patient/MBR-DET", true, "", t0)
+	b4, err := BuildEligibilityResponse("corr-det", "Patient/MBR-DET", true, "", PayerIdentifier{}, t0)
 	if err != nil {
 		t.Fatalf("BuildEligibilityResponse(det-2): %v", err)
 	}
@@ -210,11 +210,12 @@ func TestBuildEligibilityResponse(t *testing.T) {
 // disposition as an empty string. disposition is 0..1 in R4; an empty-string value
 // is an invalid FHIR primitive ("Attribute value must not be empty") that a real
 // $validate egress gate rejects. This is the copy production payer-gw actually
-// calls (gateway/engine/adjudicator.go's sandboxResponder.Handle -> shnsdk.BuildEligibilityResponse),
-// so this guard — not the substrate twin's — is the one that matters live.
+// calls (the promoted gateway/engine/inbound.go handleEligibilityInbound ->
+// shnsdk.BuildEligibilityResponse directly), so this guard — not the substrate
+// twin's — is the one that matters live.
 func TestBuildEligibilityResponse_NoReasonOmitsDisposition(t *testing.T) {
 	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
-	b, err := BuildEligibilityResponse("c1", "Patient/MBR-UC08", false, "", t0)
+	b, err := BuildEligibilityResponse("c1", "Patient/MBR-UC08", false, "", PayerIdentifier{}, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,6 +235,47 @@ func TestBuildEligibilityResponse_NoReasonOmitsDisposition(t *testing.T) {
 	}
 	if reason != "" {
 		t.Fatalf("reason = %q, want empty", reason)
+	}
+}
+
+// TestBuildEligibilityResponse_InsurerParitySafety is the explicit parity-safety
+// assertion the breaking insurer parameter requires: a zero-value
+// insurer must marshal EXACTLY today's hardcoded Reference{Reference:
+// "Organization/payer"} — byte-identical output for callers not yet threading a
+// real Coverage-derived identity (e.g. sdk/responder.go's standalone Responder,
+// which has no Coverage/SoR of its own) — while a real (system,value) insurer
+// marshals as a logical reference (Reference.identifier), never the literal.
+func TestBuildEligibilityResponse_InsurerParitySafety(t *testing.T) {
+	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
+
+	zero, err := BuildEligibilityResponse("corr-1", "Patient/MBR-1", true, "", PayerIdentifier{}, t0)
+	if err != nil {
+		t.Fatalf("BuildEligibilityResponse(zero-value insurer): %v", err)
+	}
+	if !strings.Contains(string(zero), `"insurer":{"reference":"Organization/payer"}`) {
+		t.Fatalf("zero-value insurer = %s, want the literal Organization/payer reference", zero)
+	}
+
+	derived, err := BuildEligibilityResponse("corr-1", "Patient/MBR-1", true, "", CMSPayerIdentity, t0)
+	if err != nil {
+		t.Fatalf("BuildEligibilityResponse(derived insurer): %v", err)
+	}
+	if strings.Contains(string(derived), "Organization/payer") {
+		t.Fatalf("Coverage-derived insurer must not carry the deleted literal: %s", derived)
+	}
+	var m struct {
+		Insurer struct {
+			Identifier struct {
+				System string `json:"system"`
+				Value  string `json:"value"`
+			} `json:"identifier"`
+		} `json:"insurer"`
+	}
+	if err := json.Unmarshal(derived, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Insurer.Identifier.System != CMSPayerIdentity.System || m.Insurer.Identifier.Value != CMSPayerIdentity.Value {
+		t.Fatalf("insurer.identifier = %+v, want %+v", m.Insurer.Identifier, CMSPayerIdentity)
 	}
 }
 

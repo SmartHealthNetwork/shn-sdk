@@ -51,7 +51,7 @@ func (h *paTestHarness) makeStampedResponderSrv(t *testing.T, responderIdent Ide
 // but never stamped.
 func TestResponderStampsPerLegContractVersion(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	srv := h.makeStampedResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now}, framesV1, true)
+	srv := h.makeStampedResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now}, framesV1, true)
 
 	t.Run("crd leg stamped pa.crd@2.0", func(t *testing.T) {
 		req := buildConformantCRD(t, "MBR-001", "72148")
@@ -148,7 +148,7 @@ func TestResponderStampContractVersionAppErrorNeverStamped(t *testing.T) {
 // as before v0.38.0.
 func TestResponderStampContractVersionDefaultFalseByteIdentical(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
-	srv := h.makeStampedResponderSrv(t, responderIdent, &sandboxTestAdjudicator{now: h.now}, framesV1, false)
+	srv := h.makeStampedResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now}, framesV1, false)
 
 	qr := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 8}, h.now)
 	bundle := buildConformantClaim(t, "MBR-001", "nostamp-pas-1", qr, h.now)

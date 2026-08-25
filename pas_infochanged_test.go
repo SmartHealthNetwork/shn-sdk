@@ -85,7 +85,7 @@ func TestBuildConformantClaimBundle_InfoChangedDefaultByteIdentical(t *testing.T
 	if !bytes.Equal(a, b) {
 		t.Fatalf("InfoChanged false != unset: bundles differ\n unset=%s\n false=%s", a, b)
 	}
-	// The default-false bundle MUST carry NO infoChanged extension (so composite UC-04's
+	// The default-false bundle MUST carry NO infoChanged extension (so reference-payer UC-04's
 	// submit, which does not set InfoChanged, stays in the payer-gw pend lane).
 	if claimItemHasInfoChanged(t, a) {
 		t.Fatalf("default (InfoChanged:false) bundle unexpectedly carries the infoChanged item extension:\n%s", a)
@@ -104,7 +104,7 @@ func TestBuildConformantClaimBundle_InfoChangedTrueCarriesExtension(t *testing.T
 	if !claimItemHasInfoChanged(t, bundleJSON) {
 		t.Fatalf("InfoChanged:true bundle missing the infoChanged item extension:\n%s", bundleJSON)
 	}
-	// The extension value mirrors setPriorClaimReferenceAndInfoChanged: valueCode "changed".
+	// The extension value mirrors the update builder's appendInfoChangedToClaimItems: valueCode "changed".
 	// And a fresh submit must NOT carry Claim.related[prior].
 	var b struct {
 		Entry []struct {
@@ -135,7 +135,7 @@ func TestBuildConformantClaimBundle_InfoChangedTrueCarriesExtension(t *testing.T
 			for _, ext := range it.Extension {
 				if ext.URL == pasInfoChangedExtensionURL {
 					if ext.ValueCode != "changed" {
-						t.Fatalf("infoChanged valueCode = %q, want %q (mirror setPriorClaimReferenceAndInfoChanged)", ext.ValueCode, "changed")
+						t.Fatalf("infoChanged valueCode = %q, want %q (mirror appendInfoChangedToClaimItems)", ext.ValueCode, "changed")
 					}
 					sawChanged = true
 				}

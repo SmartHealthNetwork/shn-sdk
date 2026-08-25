@@ -76,7 +76,7 @@ func FetchHolders(ctx context.Context, c *http.Client, registrarURL string) ([]H
 
 // NewFeedEncResolver returns a resolve-by-holder-id func backed by the live
 // /holders feed. It re-fetches on every call — deliberately simple for B1 (a
-// sandbox responder answers at human cadence); add caching when volume warrants
+// demo responder answers at human cadence); add caching when volume warrants
 // (additive).
 func NewFeedEncResolver(c *http.Client, registrarURL string) func(holderID string) (*[32]byte, bool) {
 	return func(holderID string) (*[32]byte, bool) {

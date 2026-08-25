@@ -49,7 +49,7 @@ func attestedOswestry(t *testing.T) []byte {
 // when the populated QR already held the item's unanswered shell at depth —
 // two items with one linkId, which the adjudicator refuses as ambiguous.
 func TestAmendQRWithItem_PlacesByQuestionnaire(t *testing.T) {
-	q := []byte(nestedSandboxQuestionnaireJSON)
+	q := []byte(nestedDemoQuestionnaireJSON)
 
 	t.Run("into an existing group, after its answered sibling", func(t *testing.T) {
 		cc := mbrCoveredCC()
@@ -142,7 +142,7 @@ func TestAmendQRWithItem_PlacesByQuestionnaire(t *testing.T) {
 	t.Run("flat questionnaire: appended last, as before", func(t *testing.T) {
 		qr := []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","item":[` +
 			`{"linkId":"conservative-therapy-weeks","answer":[{"valueInteger":6}]}]}`)
-		top := mustAmend(t, qr, []byte(sandboxQuestionnaireJSON), attestedOswestry(t))
+		top := mustAmend(t, qr, []byte(demoQuestionnaireJSON), attestedOswestry(t))
 		if got := strings.Join(linkIDs(top), ","); got != "conservative-therapy-weeks,functional-status-oswestry" {
 			t.Fatalf("flat amend = %s", got)
 		}
@@ -189,7 +189,7 @@ func TestAmendQRWithItem_AnswerAxis(t *testing.T) {
 
 // TestAmendQRWithItem_Refusals: the inputs the amend must not guess about.
 func TestAmendQRWithItem_Refusals(t *testing.T) {
-	q := []byte(nestedSandboxQuestionnaireJSON)
+	q := []byte(nestedDemoQuestionnaireJSON)
 	qr, err := FillQuestionnaire(q, mbrCoveredCC(), mbrCoveredQC())
 	if err != nil {
 		t.Fatal(err)
@@ -224,53 +224,62 @@ func TestAmendQRWithItem_Refusals(t *testing.T) {
 	}
 }
 
-// TestAmendedNestedQRAdjudicates closes the loop the amend exists for: the
-// nested, amended QR is what the sandbox adjudicator reads — a UC-06 pend
-// (high-disability, unattested) must approve once the attested item is placed
-// at depth, and a UC-07 pend (patient-reported-required) must approve once the
-// patient-attested item is placed at depth.
-func TestAmendedNestedQRAdjudicates(t *testing.T) {
-	q := []byte(nestedSandboxQuestionnaireJSON)
-	t.Run("clinician (UC-06 shape)", func(t *testing.T) {
-		cc := mbrCoveredCC()
-		cc.HighDisability = true
-		qr, err := FillQuestionnaire(q, cc, mbrCoveredQC())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if dec, err := SandboxAdjudicate(qr, false, testNow, nil); err != nil || dec.Outcome != PASPended {
-			t.Fatalf("unattested nested QR must pend: out=%v err=%v", dec.Outcome, err)
-		}
-		amended, err := AmendQRWithItemIn(qr, q, attestedOswestry(t))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if dec, err := SandboxAdjudicate(amended, false, testNow, nil); err != nil || dec.Outcome != PASApproved {
-			t.Fatalf("attested nested QR must approve: out=%v err=%v", dec.Outcome, err)
-		}
-	})
-	t.Run("patient (UC-07 shape)", func(t *testing.T) {
-		cc := mbrCoveredCC()
-		cc.PatientReported = true
-		qr, err := FillQuestionnaire(q, cc, mbrCoveredQC())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if dec, err := SandboxAdjudicate(qr, false, testNow, nil); err != nil || dec.Outcome != PASPended {
-			t.Fatalf("unattested nested QR must pend: out=%v err=%v", dec.Outcome, err)
-		}
-		item, err := BuildPatientAttestedItem("functional-status-oswestry", "42", "Patient/MBR-COVERED", "2026-08-21")
-		if err != nil {
-			t.Fatal(err)
-		}
-		amended, err := AmendQRWithItemIn(qr, q, item)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if dec, err := SandboxAdjudicate(amended, false, testNow, nil); err != nil || dec.Outcome != PASApproved {
-			t.Fatalf("patient-attested nested QR must approve: out=%v err=%v", dec.Outcome, err)
-		}
-	})
+// TestAmendedNestedQRCarriesAttestationAtDepth closes the loop the amend exists for.
+//
+// It used to close it through a verdict: the retired stub adjudicator PENDED the
+// unattested QR and APPROVED the amended one. That policy is gone (spec R2/R8 — verdicts
+// are the payer's, keyed on the order, and no fixture policy in this module gets to
+// pretend otherwise), so the property is asserted where it actually lives: the amended
+// item lands AT DEPTH, under the questionnaire's own group, carrying its attestation —
+// which is exactly what a reader (the FR-16/FR-27 conformance fence at the inbound gate)
+// walks the tree to find. A top-level append, the bug this test was written for, still
+// fails it.
+func TestAmendedNestedQRCarriesAttestationAtDepth(t *testing.T) {
+	q := []byte(nestedDemoQuestionnaireJSON)
+	// The attestation extension URLs a conformance reader keys on. Asserted against the
+	// amended BYTES because qrItemProbe deliberately models only linkId/answer/nesting.
+	const (
+		clinicianExt = ClinicianAttestationExt
+		signatureExt = QRSignatureExt
+	)
+	patientItem, err := BuildPatientAttestedItem("functional-status-oswestry", "42", "Patient/MBR-COVERED", "2026-08-21")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*ClinicalContext)
+		item    []byte
+		wantExt string
+	}{
+		{"clinician (UC-06 shape)", func(cc *ClinicalContext) { cc.HighDisability = true }, attestedOswestry(t), clinicianExt},
+		{"patient (UC-07 shape)", func(cc *ClinicalContext) { cc.PatientReported = true }, patientItem, signatureExt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cc := mbrCoveredCC()
+			tc.mutate(&cc)
+			qr, err := FillQuestionnaire(q, cc, mbrCoveredQC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			amended, err := AmendQRWithItemIn(qr, q, tc.item)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(amended), tc.wantExt) {
+				t.Fatalf("amended QR carries no %s attestation:\n%s", tc.wantExt, amended)
+			}
+			hits, _ := findQRItem(decodeQRItems(t, amended), "functional-status-oswestry", nil)
+			if len(hits) != 1 {
+				t.Fatalf("functional-status-oswestry occurs %d times, want exactly 1: %v", len(hits), hits)
+			}
+			// AT DEPTH: the questionnaire nests this leaf under a group, so the path a
+			// reader walks must have ancestors — a top-level append would be len 1.
+			if len(hits[0]) < 2 {
+				t.Fatalf("amended item landed at the top level (path %v), not under its questionnaire group", hits[0])
+			}
+		})
+	}
 }
 
 // TestAmendQRWithItem_SupersedeAnswerAxis: supersede reaches items under an

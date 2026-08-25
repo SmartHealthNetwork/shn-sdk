@@ -585,3 +585,199 @@ func TestFillQuestionnaireFromAnswers_ManualNotAuto(t *testing.T) {
 		t.Errorf("ManualNotAuto: QR contains source=auto; must NOT stamp auto for manual-entry answers: %s", s)
 	}
 }
+
+// checkAutoOriginExtension is FillQuestionnaireFromAutoAnswers's counterpart to
+// checkManualOriginExtension: an answer's Extension slice must carry exactly the DTR
+// information-origin extension with source==wantCode ("auto" at 2.0/2.1, "auto-client"
+// at 2.2) and NO author sub-extension — dtrx-1's author mandate is source="manual"-only
+// (register §15(a): a system-derived answer must not carry a human-authorship claim).
+func checkAutoOriginExtension(t *testing.T, label string, exts []answerExtShape, wantCode string) {
+	t.Helper()
+	foundSource := false
+	for _, ext := range exts {
+		if ext.Url != informationOriginExt {
+			continue
+		}
+		for _, sub := range ext.Extension {
+			if sub.Url == "source" {
+				if sub.ValueCode != wantCode {
+					t.Errorf("%s: information-origin source = %q, want %q", label, sub.ValueCode, wantCode)
+				} else {
+					foundSource = true
+				}
+			}
+			if sub.Url == "author" {
+				t.Errorf("%s: information-origin extension carries an author sub-extension; source=%q must not claim a human author", label, wantCode)
+			}
+		}
+	}
+	if !foundSource {
+		t.Errorf("%s: answer missing information-origin extension with source=%q", label, wantCode)
+	}
+}
+
+// TestFillQuestionnaireFromAutoAnswers_Boolean is FillQuestionnaireFromAnswers_Boolean's
+// auto-populated twin: same L8000-shaped questionnaire and answer, but via
+// FillQuestionnaireFromAutoAnswers. Asserts the same QR shape (nesting, subject,
+// canonical, authored, qr-context) EXCEPT the answer's information-origin extension,
+// which must be source="auto" with NO author sub-extension.
+func TestFillQuestionnaireFromAutoAnswers_Boolean(t *testing.T) {
+	bTrue := true
+	answers := map[string]Answer{
+		"1.2": {Boolean: &bTrue},
+	}
+	qc := sharedQC()
+	raw, err := FillQuestionnaireFromAutoAnswers([]byte(l8000Questionnaire), answers, qc)
+	if err != nil {
+		t.Fatalf("FillQuestionnaireFromAutoAnswers: %v", err)
+	}
+
+	var qr struct {
+		ResourceType string `json:"resourceType"`
+		Item         []struct {
+			LinkId string `json:"linkId"`
+			Item   []struct {
+				LinkId string `json:"linkId"`
+				Answer []struct {
+					ValueBoolean *bool            `json:"valueBoolean"`
+					Extension    []answerExtShape `json:"extension"`
+				} `json:"answer"`
+			} `json:"item"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(raw, &qr); err != nil {
+		t.Fatalf("QR does not unmarshal: %v", err)
+	}
+	if qr.ResourceType != "QuestionnaireResponse" {
+		t.Errorf("resourceType = %q, want QuestionnaireResponse", qr.ResourceType)
+	}
+	if len(qr.Item) != 1 || len(qr.Item[0].Item) != 1 {
+		t.Fatalf("unexpected item shape: %+v", qr.Item)
+	}
+	item12 := qr.Item[0].Item[0]
+	if item12.LinkId != "1.2" {
+		t.Errorf("child item linkId = %q, want 1.2", item12.LinkId)
+	}
+	if len(item12.Answer) != 1 || item12.Answer[0].ValueBoolean == nil || !*item12.Answer[0].ValueBoolean {
+		t.Fatalf("answer = %+v, want valueBoolean=true", item12.Answer)
+	}
+	checkAutoOriginExtension(t, "item 1.2", item12.Answer[0].Extension, "auto")
+}
+
+// TestFillQuestionnaireFromAutoAnswers_HonestyRejection: the honesty guard (a required
+// leaf with no supplied answer is a hard error) applies identically to the auto path —
+// a system that cannot derive a required value must refuse, never fabricate.
+func TestFillQuestionnaireFromAutoAnswers_HonestyRejection(t *testing.T) {
+	qr, err := FillQuestionnaireFromAutoAnswers([]byte(requiredLeafQuestionnaire), map[string]Answer{}, sharedQC())
+	if err == nil {
+		t.Errorf("HonestyRejection: want an error for required leaf with no answer, got nil")
+	}
+	if qr != nil {
+		t.Errorf("HonestyRejection: want nil QR, got non-nil %q", qr)
+	}
+}
+
+// TestFillQuestionnaireFromAutoAnswers_OptionalItemOmitted mirrors the manual variant's
+// same-named test: a non-required leaf with no supplied answer is silently omitted.
+func TestFillQuestionnaireFromAutoAnswers_OptionalItemOmitted(t *testing.T) {
+	qr, err := FillQuestionnaireFromAutoAnswers([]byte(optionalLeafQuestionnaire), map[string]Answer{}, sharedQC())
+	if err != nil {
+		t.Fatalf("OptionalItemOmitted: unexpected error: %v", err)
+	}
+	var probe struct {
+		ResourceType string `json:"resourceType"`
+		Item         []any  `json:"item"`
+	}
+	if err := json.Unmarshal(qr, &probe); err != nil {
+		t.Fatalf("OptionalItemOmitted: QR does not unmarshal: %v", err)
+	}
+	if len(probe.Item) != 0 {
+		t.Errorf("OptionalItemOmitted: expected 0 items in QR (optional, no answer), got %d", len(probe.Item))
+	}
+}
+
+// TestFillQuestionnaireFromAutoAnswersAtLine_RegressionFence: the legacy
+// FillQuestionnaireFromAutoAnswers is byte-identical to AtLine("2.0") (per-line parity,
+// mirroring FillQuestionnaireFromAnswersAtLine_RegressionFence).
+func TestFillQuestionnaireFromAutoAnswersAtLine_RegressionFence(t *testing.T) {
+	bTrue := true
+	answers := map[string]Answer{"1.2": {Boolean: &bTrue}}
+	qc := sharedQC()
+	legacy, err := FillQuestionnaireFromAutoAnswers([]byte(l8000Questionnaire), answers, qc)
+	if err != nil {
+		t.Fatalf("FillQuestionnaireFromAutoAnswers: %v", err)
+	}
+	atLine, err := FillQuestionnaireFromAutoAnswersAtLine("2.0", []byte(l8000Questionnaire), answers, qc)
+	if err != nil {
+		t.Fatalf("FillQuestionnaireFromAutoAnswersAtLine(2.0): %v", err)
+	}
+	if string(legacy) != string(atLine) {
+		t.Fatalf("FillQuestionnaireFromAutoAnswers != FillQuestionnaireFromAutoAnswersAtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
+	}
+}
+
+// TestFillQuestionnaireFromAutoAnswersAtLine_UnknownLineErrors: fail-closed rejection
+// (per-line parity, mirroring FillQuestionnaireFromAnswersAtLine_UnknownLineErrors).
+func TestFillQuestionnaireFromAutoAnswersAtLine_UnknownLineErrors(t *testing.T) {
+	bTrue := true
+	answers := map[string]Answer{"1.2": {Boolean: &bTrue}}
+	if _, err := FillQuestionnaireFromAutoAnswersAtLine("9.9", []byte(l8000Questionnaire), answers, sharedQC()); err == nil {
+		t.Fatal("FillQuestionnaireFromAutoAnswersAtLine(\"9.9\") = nil error, want an error")
+	}
+}
+
+// TestFillQuestionnaireFromAutoAnswersAtLine_OriginCodeByLine asserts the auto/auto-client
+// source-code migration (DTRDef.AutoOriginSourceCode) applies to this filler exactly as it
+// does to FillQuestionnaireAtLine's CQL fill: "auto" at 2.0/2.1, "auto-client" at 2.2, and
+// NEVER an author sub-extension at any line.
+func TestFillQuestionnaireFromAutoAnswersAtLine_OriginCodeByLine(t *testing.T) {
+	bTrue := true
+	answers := map[string]Answer{"1.2": {Boolean: &bTrue}}
+	qc := sharedQC()
+	for _, tc := range []struct{ line, wantCode string }{
+		{"2.0", "auto"}, {"2.1", "auto"}, {"2.2", "auto-client"},
+	} {
+		raw, err := FillQuestionnaireFromAutoAnswersAtLine(tc.line, []byte(l8000Questionnaire), answers, qc)
+		if err != nil {
+			t.Fatalf("FillQuestionnaireFromAutoAnswersAtLine(%s): %v", tc.line, err)
+		}
+		var qr struct {
+			Item []struct {
+				Item []struct {
+					Answer []struct {
+						Extension []answerExtShape `json:"extension"`
+					} `json:"answer"`
+				} `json:"item"`
+			} `json:"item"`
+		}
+		if err := json.Unmarshal(raw, &qr); err != nil {
+			t.Fatalf("line %s: QR does not unmarshal: %v", tc.line, err)
+		}
+		if len(qr.Item) != 1 || len(qr.Item[0].Item) != 1 || len(qr.Item[0].Item[0].Answer) != 1 {
+			t.Fatalf("line %s: unexpected item shape: %+v", tc.line, qr.Item)
+		}
+		checkAutoOriginExtension(t, "line "+tc.line, qr.Item[0].Item[0].Answer[0].Extension, tc.wantCode)
+	}
+}
+
+// TestFillQuestionnaireFromAutoAnswers_AutoNotManual is
+// TestFillQuestionnaireFromAnswers_ManualNotAuto's mirror: FillQuestionnaireFromAutoAnswers
+// must stamp source="auto" and NEVER source="manual" — the two fillers are the honesty
+// distinction register §15(a) exists to enforce (a system-derived value must never claim
+// human authorship, and a human-entered one must never hide behind "auto").
+func TestFillQuestionnaireFromAutoAnswers_AutoNotManual(t *testing.T) {
+	bTrue := true
+	raw, err := FillQuestionnaireFromAutoAnswers([]byte(l8000Questionnaire), map[string]Answer{
+		"1.2": {Boolean: &bTrue},
+	}, sharedQC())
+	if err != nil {
+		t.Fatalf("AutoNotManual: %v", err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, `"auto"`) {
+		t.Errorf("AutoNotManual: QR does not contain source=auto: %s", s)
+	}
+	if strings.Contains(s, `"manual"`) {
+		t.Errorf("AutoNotManual: QR contains source=manual; must NOT claim human authorship for a system-derived answer: %s", s)
+	}
+}

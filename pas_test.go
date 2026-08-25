@@ -24,8 +24,8 @@ func conformantSubmitInputs(t *testing.T) ConformantClaimInputs {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	q := SandboxLumbarQuestionnaire()
-	qrJSON, err := FillQuestionnaire(q, SandboxUC03Context(), QRContext{
+	q := demoLumbarQuestionnaire()
+	qrJSON, err := FillQuestionnaire(q, DemoLumbarContext(), QRContext{
 		PatientRef:  patientRef,
 		CoverageRef: "Coverage/" + conformantPASCoverageID,
 		OrderRef:    "ServiceRequest/" + conformantPASServiceRequestID,
@@ -269,7 +269,7 @@ func TestConformantClaimBundleInsuranceCoverageIsLogicalRef(t *testing.T) {
 
 // TestConformantClaimBundleInsuranceCoverageSurvivesAbsolutization is the inverted
 // absolutize row: an identifier-only reference has NO literal to absolutize,
-// so absolutizeBundleRefs (AbsoluteRefs, composite lane) must leave it byte-untouched
+// so absolutizeBundleRefs (AbsoluteRefs, reference-payer lane) must leave it byte-untouched
 // — still no "reference" key, still the same identifier.
 func TestConformantClaimBundleInsuranceCoverageSurvivesAbsolutization(t *testing.T) {
 	in := conformantSubmitInputs(t)
@@ -322,8 +322,8 @@ func TestBuildConformantClaimBundle_MatchesGolden(t *testing.T) {
 func TestBuildConformantClaimBundle_OwnsQRContextRefs(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	// Deliberately mis-point the QR's qr-context refs.
-	q := SandboxLumbarQuestionnaire()
-	wrongQR, err := FillQuestionnaire(q, SandboxUC03Context(), QRContext{
+	q := demoLumbarQuestionnaire()
+	wrongQR, err := FillQuestionnaire(q, DemoLumbarContext(), QRContext{
 		PatientRef:  in.PatientRef,
 		CoverageRef: "Coverage/WRONG",
 		OrderRef:    "ServiceRequest/WRONG",
@@ -466,9 +466,12 @@ func TestBuildConformantClaimBundle_NoQR(t *testing.T) {
 }
 
 // TestConformantizePASClaim asserts conformantizePASClaim's intent directly (so a future
-// golden regen can't silently change semantics): item[0].productOrService is the
-// conformant CPT 72148, item[0].category STAYS X12 1365 "Medical Care" (unchanged), and
-// the extension-requestedService is present → the SR ref.
+// golden regen can't silently change semantics): item[0].productOrService is LEFT UNTOUCHED
+// at buildPASClaim's own X12 1365 "Medical Care" (conformantizePASClaim no longer stamps a
+// placeholder service code — see TestBuildConformantClaimBundle_ProductOrServiceFromOrder for
+// where the real order code lands, via the unconditional setClaimItemProductFromSR call in
+// both builders), item[0].category STAYS X12 1365 "Medical Care" too (unchanged), and the
+// extension-requestedService is present → the SR ref.
 func TestConformantizePASClaim(t *testing.T) {
 	created := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	claimJSON, err := buildPASClaim("Patient/MBR-COVERED", "Coverage/MBR-COVERED", "corr-1", created)
@@ -510,11 +513,13 @@ func TestConformantizePASClaim(t *testing.T) {
 		t.Fatalf("item count = %d, want 1", len(claim.Item))
 	}
 	it := claim.Item[0]
-	// productOrService → CPT 72148.
+	// productOrService is UNTOUCHED by conformantizePASClaim — stays buildPASClaim's own
+	// X12 1365 "Medical Care" (same coding as category). The real order code is stamped by
+	// setClaimItemProductFromSR, called unconditionally by both builders after this step.
 	if len(it.ProductOrService.Coding) != 1 ||
-		it.ProductOrService.Coding[0].System != "http://www.ama-assn.org/go/cpt" ||
-		it.ProductOrService.Coding[0].Code != "72148" {
-		t.Errorf("productOrService = %+v, want CPT system http://www.ama-assn.org/go/cpt code 72148", it.ProductOrService.Coding)
+		it.ProductOrService.Coding[0].System != "https://codesystem.x12.org/005010/1365" ||
+		it.ProductOrService.Coding[0].Code != "1" {
+		t.Errorf("productOrService = %+v, want X12 1365 code 1 (unchanged — conformantizePASClaim does not stamp a service code)", it.ProductOrService.Coding)
 	}
 	// category STAYS X12 1365 "Medical Care".
 	if len(it.Category.Coding) != 1 ||
@@ -828,12 +833,15 @@ func TestParseClaimResponse_DeniedWithNumberStaysDenied(t *testing.T) {
 	}
 }
 
-// TestParseClaimResponse_DeniedA2_brpayer proves the X12-conformant denial code A2 "Not
-// Certified" (https://codesystem.x12.org/005010/306) is read as denied. A real Da Vinci PAS
-// payer (br-payer a8bece4) denies a not-covered/excluded service with reviewActionCode A2
-// ("Not Certified"); A3 in that code system is "Not Required" (no PA needed), NOT a denial.
-// SHN's sandbox emits A3 for its denials (legacy, kept as a transitional alias), but the
-// parser MUST recognize the standard A2 or it cannot read any conformant payer's denial.
+// TestParseClaimResponse_DeniedA2_brpayer proves the observed br-payer denial shape —
+// reviewActionCode A2 with display "Not Certified" — is read as denied. This is NOT the
+// X12-conformant denial code: X12 306 (https://codesystem.x12.org/005010/306) defines A3 as
+// "Not Certified" (the denial SHN's own producer emits, conformant and correct) and A2 as
+// "Certified – partial" (see TestParseClaimResponse_A2CertifiedPartial for that branch). The
+// real reference payer (br-payer a8bece4) denies a not-covered/excluded service with
+// reviewActionCode A2 but display "Not Certified" — a code/display self-contradiction, i.e. a
+// bug in that RI. The parser tolerates it (PARSE only, never EMIT) because it must be able to
+// read a real RI's denial as-observed, not because A2 is itself a conformant denial code.
 func TestParseClaimResponse_DeniedA2_brpayer(t *testing.T) {
 	reviewA2 := func(disposition string) []byte {
 		disp := ""
@@ -866,6 +874,131 @@ func TestParseClaimResponse_DeniedA2_brpayer(t *testing.T) {
 	if err != nil || res2.Denial == nil || res2.Denial.Rationale != "Service is excluded from plan coverage" {
 		t.Fatalf("A2 with disposition: got %+v err=%v, want Rationale from disposition", res2.Denial, err)
 	}
+}
+
+// TestParseClaimResponse_A2CertifiedPartial is the guard for the A2-with-a-number defect: X12
+// 306 defines A2 as "Certified – partial", not a denial. Before this guard, ParseClaimResponse
+// returned Outcome "denied" on ANY A2 before it ever collected the "number" sub-extension, so a
+// standards-conformant payer that partially certifies (issuing an auth number alongside A2) was
+// reported to the caller as denied, WITH THE AUTH NUMBER DISCARDED — a wrong determination,
+// silently. HONESTY NOTE: no producer this SDK can drive (SHN's own, or the live br-payer)
+// emits A2-with-a-number — br-payer's only observed A2 shape is the no-number denial in
+// TestParseClaimResponse_DeniedA2_brpayer. This test is parse-side only, hermetically tested
+// against synthetic fixtures, not live-proven.
+func TestParseClaimResponse_A2CertifiedPartial(t *testing.T) {
+	build := func(code, display, number string) []byte {
+		coding := `{"system":"https://codesystem.x12.org/005010/306","code":"` + code + `"`
+		if display != "" {
+			coding += `,"display":"` + display + `"`
+		}
+		coding += `}`
+		subExt := `{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode","valueCodeableConcept":{"coding":[` + coding + `]}}`
+		if number != "" {
+			subExt += `,{"url":"number","valueString":"` + number + `"}`
+		}
+		return []byte(`{"resourceType":"ClaimResponse","outcome":"complete","use":"preauthorization",` +
+			`"item":[{"adjudication":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction","extension":[` +
+			subExt + `]}]}]}]}`)
+	}
+
+	// A3, no number → denied. The conformant path: SHN's own denial code.
+	t.Run("A3_no_number_denied", func(t *testing.T) {
+		res, err := ParseClaimResponse(build("A3", "Not Certified", ""))
+		if err != nil {
+			t.Fatalf("ParseClaimResponse: %v", err)
+		}
+		if res.Outcome != "denied" || res.Denial == nil || res.Denial.ReasonCode != "A3" {
+			t.Fatalf("got %+v, want denied A3", res)
+		}
+	})
+
+	// A2, no number → denied. The observed br-payer denial shape (keep the existing row in
+	// TestParseClaimResponse_DeniedA2_brpayer too — it is a real captured shape).
+	t.Run("A2_no_number_denied_brpayer_shape", func(t *testing.T) {
+		res, err := ParseClaimResponse(build("A2", "Not Certified", ""))
+		if err != nil {
+			t.Fatalf("ParseClaimResponse: %v", err)
+		}
+		if res.Outcome != "denied" || res.Denial == nil || res.Denial.ReasonCode != "A2" {
+			t.Fatalf("got %+v, want denied A2 (br-payer's observed no-number denial shape)", res)
+		}
+	})
+
+	// A2 WITH a number → NOT denied: a partial certification. THE NEW GUARD — it must fail
+	// if the disambiguation is reverted (verified by actually reverting it; see the R1 report).
+	t.Run("A2_with_number_NOT_denied_partial", func(t *testing.T) {
+		res, err := ParseClaimResponse(build("A2", "Certified - partial", "AUTH-PARTIAL-0001"))
+		if err != nil {
+			t.Fatalf("ParseClaimResponse: %v", err)
+		}
+		if res.Outcome != "approved" {
+			t.Fatalf("Outcome = %q, want approved (A2 with a number is a partial certification, never a denial)", res.Outcome)
+		}
+		if res.Denial != nil {
+			t.Fatalf("Denial = %+v, want nil (a partial certification is not a denial)", res.Denial)
+		}
+		if !res.Partial {
+			t.Fatal("Partial = false, want true")
+		}
+		if res.PreAuthRef != "AUTH-PARTIAL-0001" {
+			t.Fatalf("PreAuthRef = %q, want the carried auth number", res.PreAuthRef)
+		}
+		if res.Disposition != "Certified - partial" {
+			t.Fatalf("Disposition = %q, want the payer's own display text carried through", res.Disposition)
+		}
+	})
+
+	// A2 code on item[0], "number" on a DIFFERENT item[1] → still NOT denied: the harder
+	// cross-entry case. build() above places code and number as SIBLINGS under the SAME
+	// reviewAction extension entry; a real Da Vinci RI can split them across separate
+	// item/adjudication/extension entries (see ParseClaimResponse's own doc comment on the
+	// walk), so the accumulation must survive crossing an item boundary, not just a
+	// same-entry sibling. This is the row the R1 review flagged as independently verified
+	// in the implementation but unpinned by any committed test — mutation-verified (see the
+	// R2 report) by narrowing the walk back to a single item and watching only this row fail.
+	t.Run("A2_cross_entry_code_and_number_accumulate", func(t *testing.T) {
+		cr := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","use":"preauthorization","item":[` +
+			`{"adjudication":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction","extension":[` +
+			`{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode","valueCodeableConcept":{"coding":[` +
+			`{"system":"https://codesystem.x12.org/005010/306","code":"A2","display":"Certified - partial"}]}}]}]}]},` +
+			`{"adjudication":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction","extension":[` +
+			`{"url":"number","valueString":"AUTH-PARTIAL-CROSS-0001"}]}]}]}` +
+			`]}`)
+		res, err := ParseClaimResponse(cr)
+		if err != nil {
+			t.Fatalf("ParseClaimResponse: %v", err)
+		}
+		if res.Outcome != "approved" {
+			t.Fatalf("Outcome = %q, want approved (A2 on item[0] + number on item[1] is still a partial certification)", res.Outcome)
+		}
+		if res.Denial != nil {
+			t.Fatalf("Denial = %+v, want nil", res.Denial)
+		}
+		if !res.Partial {
+			t.Fatal("Partial = false, want true — the cross-entry number must still be found")
+		}
+		if res.PreAuthRef != "AUTH-PARTIAL-CROSS-0001" {
+			t.Fatalf("PreAuthRef = %q, want the cross-entry auth number", res.PreAuthRef)
+		}
+	})
+
+	// A1 WITH a number → approved, Partial false. Positive control: partial must not leak
+	// onto a full certification.
+	t.Run("A1_with_number_approved_not_partial", func(t *testing.T) {
+		res, err := ParseClaimResponse(build("A1", "Certified in total", "AUTH-FULL-0001"))
+		if err != nil {
+			t.Fatalf("ParseClaimResponse: %v", err)
+		}
+		if res.Outcome != "approved" {
+			t.Fatalf("Outcome = %q, want approved", res.Outcome)
+		}
+		if res.Partial {
+			t.Fatal("Partial = true, want false — a full A1 certification must never read as partial")
+		}
+		if res.PreAuthRef != "AUTH-FULL-0001" {
+			t.Fatalf("PreAuthRef = %q, want the carried auth number", res.PreAuthRef)
+		}
+	})
 }
 
 // TestParseClaimResponse_NonApproved: an AMBIGUOUS bare ClaimResponse — one that is
@@ -1159,7 +1292,119 @@ func claimFromBundle(t *testing.T, bundleJSON []byte) map[string]json.RawMessage
 	return nil
 }
 
-// TestBuildConformantClaimBundle_ContainedInsurer_True proves the composite lane
+// claimItemProductServiceCode extracts the Claim's item[0].productOrService.coding[0].code
+// from a claim map (as returned by claimFromBundle). Fails the test if item[0] or its
+// productOrService.coding is absent.
+func claimItemProductServiceCode(t *testing.T, claim map[string]json.RawMessage) string {
+	t.Helper()
+	var items []struct {
+		ProductOrService struct {
+			Coding []struct {
+				System string `json:"system"`
+				Code   string `json:"code"`
+			} `json:"coding"`
+		} `json:"productOrService"`
+	}
+	if err := json.Unmarshal(claim["item"], &items); err != nil {
+		t.Fatalf("parse claim.item: %v", err)
+	}
+	if len(items) == 0 || len(items[0].ProductOrService.Coding) == 0 {
+		t.Fatalf("claim item[0].productOrService.coding is empty: %s", claim["item"])
+	}
+	return items[0].ProductOrService.Coding[0].Code
+}
+
+// TestBuildConformantClaimBundle_ProductOrServiceFromOrder_NoPayerOrgEntry is Task R2's
+// load-bearing regression (register §13, "the default output produces a real determination
+// about a different service with no error anywhere"): setClaimItemProductFromSR must run
+// UNCONDITIONALLY, not gated on PayerOrgEntry. Every payer on this network decides on
+// productOrService, so a caller that leaves PayerOrgEntry false (the default — every caller
+// outside the reference-payer lane) must still get the ORDER's real requested-service code,
+// never the CPT 72148 placeholder buildPASClaim's own native item carries. G0151 is a
+// demo-roster HCPCS code that is not 72148, so this row fails loud the moment the derivation
+// is re-gated on PayerOrgEntry (verified live by reverting the gate — see the R2 report for
+// the observed failure).
+func TestBuildConformantClaimBundle_ProductOrServiceFromOrder_NoPayerOrgEntry(t *testing.T) {
+	in := conformantSubmitInputs(t)
+	in.PayerOrgEntry = false // the exact condition that used to leave the CPT 72148 hardcode standing
+	sr, err := BuildServiceRequestCoded(systemHCPCS, "G0151", "Home health services", "M62.81", in.PatientRef)
+	if err != nil {
+		t.Fatalf("BuildServiceRequestCoded: %v", err)
+	}
+	in.SR = sr
+
+	got, err := BuildConformantClaimBundle(in)
+	if err != nil {
+		t.Fatalf("BuildConformantClaimBundle: %v", err)
+	}
+	claim := claimFromBundle(t, got)
+	if code := claimItemProductServiceCode(t, claim); code != "G0151" {
+		t.Fatalf("Claim.item[0].productOrService code = %q, want G0151 (the order's own code) — "+
+			"still hardcoded 72148 or gated on PayerOrgEntry?", code)
+	}
+}
+
+// TestBuildConformantClaimUpdateBundle_ProductOrServiceFromOrder_NoPayerOrgEntry is the
+// update-builder sibling of TestBuildConformantClaimBundle_ProductOrServiceFromOrder_NoPayerOrgEntry
+// — the same defect existed on the amendment leg (buildConformantClaimUpdateBundle gated
+// setClaimItemProductFromSR on PayerOrgEntry identically).
+func TestBuildConformantClaimUpdateBundle_ProductOrServiceFromOrder_NoPayerOrgEntry(t *testing.T) {
+	in := conformantUpdateInputsFromGolden(t)
+	in.PayerOrgEntry = false
+	sr, err := BuildServiceRequestCoded(systemHCPCS, "E0250", "Hospital bed", "M62.81", in.PatientRef)
+	if err != nil {
+		t.Fatalf("BuildServiceRequestCoded: %v", err)
+	}
+	in.SR = sr
+
+	got, err := BuildConformantClaimUpdateBundle(in)
+	if err != nil {
+		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
+	}
+	claim := claimFromBundle(t, got)
+	if code := claimItemProductServiceCode(t, claim); code != "E0250" {
+		t.Fatalf("Claim.item[0].productOrService code = %q, want E0250 (the order's own code) — "+
+			"still hardcoded 72148 or gated on PayerOrgEntry?", code)
+	}
+}
+
+// TestBuildConformantClaimBundle_DeviceRequestOrder_NoPayerOrgEntry proves the
+// codeCodeableConcept (DeviceRequest) derivation path is ALSO unconditional — the demo
+// lane's dispatch orders (home-oxygen, hospital-bed) are DeviceRequests, so the
+// ServiceRequest-only regression row above does not cover this path.
+func TestBuildConformantClaimBundle_DeviceRequestOrder_NoPayerOrgEntry(t *testing.T) {
+	dr := []byte(`{"resourceType":"DeviceRequest","id":"x","status":"active","intent":"order",` +
+		`"subject":{"reference":"Patient/MBR-OX"},"codeCodeableConcept":{"coding":[{"system":` +
+		`"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E1390","display":"Oxygen concentrator"}]}}`)
+	out, err := BuildConformantClaimBundle(ConformantClaimInputs{
+		SR: dr, PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/MBR-OX", MemberID: "MBR-OX",
+		Corr: "c1", Created: time.Unix(0, 0).UTC(),
+		Payer: CMSPayerIdentity,
+		// PayerOrgEntry deliberately left false (zero value) — this path must not depend on
+		// the reference-payer flag.
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := claimFromBundle(t, out)
+	if code := claimItemProductServiceCode(t, claim); code != "E1390" {
+		t.Fatalf("Claim.item[0].productOrService code = %q, want E1390 (from DeviceRequest.codeCodeableConcept)", code)
+	}
+}
+
+// TestBuildConformantClaimBundle_OrderWithNoCode_Errors proves an order carrying no code
+// fails LOUD — never a silent CPT 72148 fallback. This is the other half of "derive the
+// code from the order always": a missing code must surface as an error, not as a wrong
+// determination about a different service.
+func TestBuildConformantClaimBundle_OrderWithNoCode_Errors(t *testing.T) {
+	in := conformantSubmitInputs(t)
+	in.SR = []byte(`{"resourceType":"ServiceRequest","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"}}`)
+	if _, err := BuildConformantClaimBundle(in); err == nil {
+		t.Fatal("BuildConformantClaimBundle with an order carrying no code = nil error, want a loud failure (never a silent 72148 fallback)")
+	}
+}
+
+// TestBuildConformantClaimBundle_ContainedInsurer_True proves the reference-payer lane
 // (ContainedInsurer:true): the Claim contains a #cms-payer Organization with the expected
 // identifier and the insurer references it, making the ref resolvable.
 // Also checks the contained org's identifier matches the Coverage's payer (consistency).
@@ -1227,18 +1472,19 @@ func TestBuildConformantClaimBundle_ContainedInsurer_True(t *testing.T) {
 	}
 }
 
-// TestBuildConformantClaimBundle_PayerOrgEntry proves the composite-lane PAS bundle carries
+// TestBuildConformantClaimBundle_PayerOrgEntry proves the reference-payer-lane PAS bundle carries
 // the cms-payer Organization as a resolvable bundle ENTRY (not contained) with the CMS-OID
 // identifier, and Coverage.payor references it resolvably. br-payer's PAS payor resolution
 // (PayorIdentifierUtil.extractFirstFromCoverageAndBundle -> ResourceResolver.findInBundle)
 // reads bundle ENTRIES only — a contained #cms-payer yields 0 payor identifiers -> empty
-// PlanDefinition search -> A3 "Not Required" for every code. Spec 2A.4.
+// PlanDefinition search -> A3 "Not Certified" (br-payer's no-match fallback) for every code.
+// Spec 2A.4.
 func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.ContainedInsurer = true
 	in.AbsoluteRefs = true
 	in.PayerOrgEntry = true
-	// Composite lane originates an HCPCS code on the SR; the Claim item productOrService must
+	// Reference-payer lane originates an HCPCS code on the SR; the Claim item productOrService must
 	// carry the SAME code (br-payer keys PAS on Claim.item.productOrService, not the SR).
 	in.SR = []byte(`{"resourceType":"ServiceRequest","status":"active","intent":"order",` +
 		`"subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":` +
@@ -1317,12 +1563,12 @@ func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 			"(Organization/%s or its absolute fullUrl) so br-payer's findInBundle resolves it", coveragePayorRef, conformantPayerOrgID)
 	}
 	if claimItemCode != "L8000" {
-		t.Fatalf("Claim.item[0].productOrService code = %q, want L8000 (the SR's composite HCPCS code) — "+
+		t.Fatalf("Claim.item[0].productOrService code = %q, want L8000 (the SR's HCPCS code) — "+
 			"br-payer keys PAS on Claim.item.productOrService, not the SR (still hardcoded 72148?)", claimItemCode)
 	}
 }
 
-// TestBuildConformantClaimBundle_ContainedInsurer_False proves the sandbox path
+// TestBuildConformantClaimBundle_ContainedInsurer_False proves the SHN-native path
 // (ContainedInsurer:false, the default): the Claim insurer stays the generic
 // "Organization/payer" and there is no contained payer organization — byte-identical to
 // the current output.
@@ -1399,7 +1645,7 @@ func TestBuildConformantClaimUpdateBundle_ContainedInsurer_True(t *testing.T) {
 	}
 }
 
-// TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable proves the composite
+// TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable proves the reference-payer lane
 // lane (PayerOrgEntry:true) makes the amended re-POST a CONFORMANT Da Vinci PAS Claim Update that
 // real br-payer ACCEPTS. br-payer's resolvePriorClaim (PasSubmitService.java:379-403) reads
 // Claim.related[0].claim.REFERENCE and requires that prior Claim to be a BUNDLE ENTRY — an
@@ -1408,7 +1654,7 @@ func TestBuildConformantClaimUpdateBundle_ContainedInsurer_True(t *testing.T) {
 // vs br-payer a8bece4). It also re-evaluates the item only when it carries the infoChanged extension
 // (hasInfoChanged, PasSubmitService.java:316/449). The included prior Claim's identifier
 // (urn:shn:correlation|OriginalCorr) matches the stored initial-submit Claim so the server-side
-// identifier search resolves it. Sandbox path (PayerOrgEntry:false) carries NONE of this — locked
+// identifier search resolves it. SHN-native path (PayerOrgEntry:false) carries NONE of this — locked
 // byte-identical by TestBuildConformantClaimUpdateBundle_MatchesGolden.
 func TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable(t *testing.T) {
 	in := conformantUpdateInputsFromGolden(t)
@@ -1457,7 +1703,7 @@ func TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable(t *
 		t.Fatal("no operative update Claim entry (id convergence-claim-update)")
 	}
 	if priorClaim == nil {
-		t.Fatalf("composite update bundle has NO prior Claim entry (id %q) — br-payer 400s without it", conformantPASClaimID)
+		t.Fatalf("reference-payer update bundle has NO prior Claim entry (id %q) — br-payer 400s without it", conformantPASClaimID)
 	}
 
 	// (1) The prior Claim entry's identifier must match the original submit correlation so
@@ -1526,9 +1772,9 @@ func TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable(t *
 }
 
 // TestBuildConformantClaimUpdateBundle_NoPayerOrgEntry_NoPriorClaimEntry is the rejection arm of
-// the prior-Claim-inclusion guard: the sandbox path (PayerOrgEntry:false) must NOT carry the
-// composite-only prior Claim entry / related.reference / infoChanged (those are the real-br-payer
-// shape; the sandbox accepts the lean identifier-only related). Byte-identity is locked by
+// the prior-Claim-inclusion guard: the SHN-native path (PayerOrgEntry:false) must NOT carry the
+// reference-payer-lane-only prior Claim entry / related.reference / infoChanged (those are the real-br-payer
+// shape; the SHN-native lane accepts the lean identifier-only related). Byte-identity is locked by
 // MatchesGolden; this asserts the structural absence directly.
 func TestBuildConformantClaimUpdateBundle_NoPayerOrgEntry_NoPriorClaimEntry(t *testing.T) {
 	got, err := BuildConformantClaimUpdateBundle(conformantUpdateInputsFromGolden(t)) // PayerOrgEntry:false
@@ -1553,11 +1799,11 @@ func TestBuildConformantClaimUpdateBundle_NoPayerOrgEntry_NoPriorClaimEntry(t *t
 		}
 	}
 	if claimCount != 1 {
-		t.Errorf("sandbox update bundle has %d Claim entries, want exactly 1 (no prior Claim entry)", claimCount)
+		t.Errorf("SHN-native update bundle has %d Claim entries, want exactly 1 (no prior Claim entry)", claimCount)
 	}
 }
 
-// TestBuildConformantClaimBundle_AbsoluteRefs_True proves the composite lane
+// TestBuildConformantClaimBundle_AbsoluteRefs_True proves the reference-payer lane
 // (AbsoluteRefs:true): every internal reference pointing to a bundle entry is rewritten
 // to its absolute fullUrl (pasBundleBaseURL + "/" + "<resourceType>/<id>"). Specifically:
 //   - Claim.patient.reference is absolute and equals the Patient entry's fullUrl.
@@ -1634,7 +1880,7 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_True(t *testing.T) {
 	// Claim.insurance[0].coverage is the ONE bundle-internal Coverage pointer that is
 	// NOT a literal: the logical-reference shape makes it a LOGICAL reference, so there is
 	// nothing for absolutizeBundleRefs to rewrite and the element must come out of the
-	// composite lane exactly as the builder stamped it.
+	// reference-payer lane exactly as the builder stamped it.
 	assertInsuranceCoverageLogicalRef(t, got, "MBR-COVERED")
 
 	// Coverage.beneficiary.reference must STAY RELATIVE ("Patient/<id>") even under
@@ -1644,7 +1890,7 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_True(t *testing.T) {
 	// $submit bundle via cqf-fhir. That in-memory patient-compartment retrieve of
 	// [Coverage] matches on Coverage.beneficiary; an ABSOLUTE beneficiary breaks the
 	// compartment match → First([Coverage]) is null → no coverage-info extension →
-	// PasCoverageEvaluator falls through to A3 "Not Required" for EVERY code (live-proven
+	// PasCoverageEvaluator falls through to A3 "Not Certified" for EVERY code (live-proven
 	// against br-payer a8bece4: absolute beneficiary → A3; relative → A1). Claim.patient
 	// stays absolute (the PAS reference resolver needs it; cqf extracts the id part for
 	// the subject, so absolute there is harmless).
@@ -1728,7 +1974,7 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_True(t *testing.T) {
 
 // TestBuildConformantClaimBundle_AbsoluteRefs_False proves the default path
 // (AbsoluteRefs:false): Claim.patient.reference stays relative ("Patient/<id>"),
-// not absolutized — byte-identical to the sandbox-proven output.
+// not absolutized — byte-identical to the SHN-native output.
 func TestBuildConformantClaimBundle_AbsoluteRefs_False(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	// Default zero-value is false.
