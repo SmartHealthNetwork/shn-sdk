@@ -304,6 +304,7 @@ func TestResponder_PASSubmit(t *testing.T) {
 		// owns consistent refs.
 		mismatch := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
 			{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-001"}}},
+			{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-001"}}},
 			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-OTHER"}}},
 			{"resource":{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/MBR-OTHER"}}}
 		]}`)
@@ -362,6 +363,7 @@ func TestResponder_PASSubmit(t *testing.T) {
 		t.Run("mismatch-"+tc.name+"-403", func(t *testing.T) {
 			mismatch := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
 				{"resource":{"resourceType":"Claim","patient":{"reference":"` + tc.claimRef + `"}}},
+				{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-001"}}},
 				{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"` + tc.srRef + `"}}}
 			]}`)
 			envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-mismatch-"+tc.name, mismatch)
@@ -377,6 +379,7 @@ func TestResponder_PASSubmit(t *testing.T) {
 		// the extraction would look equivalent and silently open exactly that hole.
 		mismatch := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
 			{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-001"}}},
+			{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-001"}}},
 			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Group/MBR-001"}}}
 		]}`)
 		envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "pas-mismatch-group", mismatch)
@@ -389,6 +392,7 @@ func TestResponder_PASSubmit(t *testing.T) {
 		// different patient). Mirrors the deleted bindBundleSubject's REQUIRED-QR-subject arm.
 		noSubjQR := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
 			{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-001"}}},
+			{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-001"}}},
 			{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-001"}}},
 			{"resource":{"resourceType":"QuestionnaireResponse","status":"completed"}}
 		]}`)

@@ -71,12 +71,15 @@ func conformantOrderSelectCoverageAndPatient(body []byte) (covJSON []byte, patie
 // conformantPASSubjects also carries srJSON/member; the SDK Responder needs the patient ref and
 // the QR/DR facts).
 type conformantClaimSubmit struct {
-	claimPatient string // Claim.patient.reference — "Patient/<member>" or "<base>/Patient/<member>" (see pasMemberFromRef)
-	srSubject    string // ServiceRequest.subject.reference (REQUIRED — intra-bundle bind)
-	qrJSON       []byte // the QuestionnaireResponse resource, or nil (optional on this leg)
-	qrSubject    string // QuestionnaireResponse.subject.reference, or "" if no QR
-	hasDR        bool   // a DiagnosticReport entry is present (FR-20 pended branch)
-	drSubject    string // DiagnosticReport.subject.reference, or "" if no DR
+	claimPatient   string // operative (FIRST) Claim's patient.reference — "Patient/<member>" or "<base>/Patient/<member>" (see pasMemberFromRef)
+	srSubject      string // the ORDER's subject.reference — ServiceRequest OR DeviceRequest (both bind the same way)
+	haveOrder      bool   // an order entry is present (REQUIRED — a bundle without one authorizes nothing)
+	covBeneficiary string // Coverage.beneficiary.reference (REQUIRED — intra-bundle bind)
+	haveCoverage   bool   // a Coverage entry is present
+	qrJSON         []byte // the QuestionnaireResponse resource, or nil (optional on this leg)
+	qrSubject      string // QuestionnaireResponse.subject.reference, or "" if no QR
+	hasDR          bool   // a DiagnosticReport entry is present (FR-20 pended branch)
+	drSubject      string // DiagnosticReport.subject.reference, or "" if no DR
 }
 
 // parseConformantClaimSubmit does ONE pass over a CONFORMANT PAS Claim Bundle, indexing entries
@@ -107,6 +110,7 @@ func parseConformantClaimSubmit(body []byte) (conformantClaimSubmit, bool) {
 		return v.Reference
 	}
 	var cs conformantClaimSubmit
+	haveClaim := false
 	for _, e := range probe.Entry {
 		var rt struct {
 			ResourceType string `json:"resourceType"`
@@ -116,9 +120,26 @@ func parseConformantClaimSubmit(body []byte) (conformantClaimSubmit, bool) {
 		}
 		switch rt.ResourceType {
 		case "Claim":
-			cs.claimPatient = subjectRef(e.Resource, "patient")
-		case "ServiceRequest":
+			// Bind the member from the OPERATIVE Claim — the FIRST Claim entry,
+			// first-Claim-wins, identical to the substrate gateway's
+			// parseConformantPASSubjects (and to how a real Da Vinci payer selects
+			// it): a reference-payer-lane update bundle also carries the PRIOR
+			// Claim as a later linkage entry, which must not clobber the
+			// operative Claim.patient.
+			if !haveClaim {
+				cs.claimPatient, haveClaim = subjectRef(e.Resource, "patient"), true
+			}
+		case "ServiceRequest", "DeviceRequest":
+			// The ORDER entry — a procedure ServiceRequest OR a DME DeviceRequest.
+			// Both bind the order subject the same way, identical to the substrate
+			// gateway; this fence had read only ServiceRequest and wrongly refused
+			// a conformant DME bundle (twin-fence corpus:
+			// upd-accept-devicerequest-order).
 			cs.srSubject = subjectRef(e.Resource, "subject")
+			cs.haveOrder = true
+		case "Coverage":
+			cs.covBeneficiary = subjectRef(e.Resource, "beneficiary")
+			cs.haveCoverage = true
 		case "QuestionnaireResponse":
 			cs.qrJSON = e.Resource
 			cs.qrSubject = subjectRef(e.Resource, "subject")
@@ -133,21 +154,33 @@ func parseConformantClaimSubmit(body []byte) (conformantClaimSubmit, bool) {
 	return cs, true
 }
 
-// bindConformantClaimSubject enforces intra-bundle patient consistency on a parsed conformant
-// Claim Bundle (the SDK Responder's edge fence, mirroring the deleted minimized bindBundleSubject
-// AND engine.parseConformantPASSubjects' three-way bind for the conformant shape): the
-// ServiceRequest subject, the QuestionnaireResponse subject (when a QR is present — REQUIRED
-// then, a subjectless QR could approve a Claim for a different patient), and the DiagnosticReport
+// bindConformantClaimSubject enforces the structural entry set and intra-bundle patient
+// consistency on a parsed conformant Claim Bundle (the SDK Responder's edge fence, the twin of
+// engine.parseConformantPASSubjects' bind for the conformant shape — the twin-fence corpus under
+// testdata/twinfence holds the two in lockstep): an order entry (ServiceRequest or DeviceRequest)
+// and a Coverage with a beneficiary are REQUIRED, and the order subject, the Coverage
+// beneficiary, the QuestionnaireResponse subject (when a QR is present — REQUIRED then, a
+// subjectless QR could approve a Claim for a different patient), and the DiagnosticReport
 // subject (when present) must all reference the SAME member as Claim.patient. Returns (0, "") on
-// accept, or (HTTP status, message) to write.
+// accept, or (HTTP status, message) to write — the structural absences answer 400, the
+// consistency breaks 403, with the exact statuses and texts the substrate gateway uses.
 //
 // NOTE — divergence from the substrate gateway, by design (same rationale as handleEligibility's
 // NOTE): the gateway additionally resolves Claim.patient against its patient registry and rejects
 // when the derived PCI != token subject. The SDK Responder has no registry; that defense-in-depth
 // layer is structurally unavailable here. ALL bundle-internal consistency checks ARE enforced.
 func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg string) {
+	if !cs.haveOrder {
+		return 400, "PAS bundle missing order (ServiceRequest or DeviceRequest)"
+	}
+	if !cs.haveCoverage || cs.covBeneficiary == "" {
+		return 400, "PAS bundle missing Coverage.beneficiary"
+	}
 	member := pasMemberFromRef(cs.claimPatient)
 	if pasMemberFromRef(cs.srSubject) != member {
+		return 403, "inconsistent patient in PAS bundle"
+	}
+	if pasMemberFromRef(cs.covBeneficiary) != member {
 		return 403, "inconsistent patient in PAS bundle"
 	}
 	if cs.qrJSON != nil {

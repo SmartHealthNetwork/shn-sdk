@@ -147,10 +147,17 @@ IDs — nothing else (no keys, no base URLs). Sorted by `id`.
 ```
 
 `contractVersions` is omitted for a participant that never declared any
-(§2.3's field is optional). `payerIds` is present only on payer rows that
-declared claims at registration (§2.3); omitted otherwise. Additive field.
-A feed error surfaces as `502` rather than a guess — this endpoint never
-invents a directory. FR-G47.
+(§2.3's field is optional). `payerIds` is present only on payer rows whose
+payer identities are **operator-attested**; omitted otherwise. A payer identity
+is never self-asserted at registration: on the self-serve path (§2.3a) the
+applicant *claims* it on the access request (`POST {accounts}/access-requests`),
+the operator *vouches* it at approval, and client registration (`shn register
+--accounts`, wire `POST {accounts}/clients/{id}/pop`) refuses any declared id the
+operator did not vouch (`403`, `"payer-id <system>|<value> not authorized for
+this org"`) before forwarding the registration to the registrar; on the direct
+Trust-admin path the operator attests it in the `POST /register` body itself
+(§2.3). FR-G42. Additive field. A feed error surfaces as `502` rather than a
+guess — this endpoint never invents a directory. FR-G47.
 
 ### Participant directory summary
 
@@ -282,6 +289,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `baseURL` | Where the Hub delivers inbound envelopes. Must be a publicly resolvable https URL — no userinfo, no ASCII control characters (< 0x20) — and must not redirect at /substrate/inbound (the Hub refuses redirects). Originator-only clients are never dialed but the URL must still validate. |
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
 | `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`, FR-G42). Today's network-native set is `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1` (§8.6's bridgedContractVersions is the network's capability surface). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. Version-aware routing and translation consume these in later slices; today they are declaration + surfacing. |
+| `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted** (FR-G42): on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
 
 **Proof-of-possession (`pop`).** In addition to the Trust admin gate, the
@@ -318,7 +326,8 @@ Rejection cases:
 | `pop` absent or malformed (not valid base64 / empty) | 400 (`"missing registration proof-of-possession"`) |
 | `pop` does not verify against the submitted `signPub` | 401 (`"registration proof-of-possession failed"`) |
 | `id` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
-| `id` already dynamically registered | 409 (`"id already registered"`) |
+| `payerIds` present on a non-`payer` role | 400 (`"payerIds are only valid for role=payer"`) |
+| `id` already dynamically registered, or a `payerIds` entry already bound to another holder | 409 (`"id or payer-id already registered"`) |
 
 A 201 response means the holder is registered and will be visible to Hub and
 Authorization Framework on their next poll.
@@ -328,7 +337,8 @@ the same shape as the `POST /register` body. The Hub and Authorization Framework
 poll this endpoint on a ~3-second interval to pick up new admissions. Each row
 republishes the holder's `messageFrames` and `contractVersions` **verbatim** — the
 feed is the same self-declared value the holder registered or last rotated, not
-re-derived or re-validated beyond the admission-time shape check.
+re-derived or re-validated beyond the admission-time shape check — and, for payers,
+the operator-attested `payerIds`.
 
 **Registry merge rule:** `registry = manifest base ∪ dynamic`. Dynamic holders are
 appended; the **manifest base is immutable at runtime** (founding holders are never
@@ -627,6 +637,15 @@ an direct-integration participant minting assertions by hand must do the same. A
 **without** a `jti` is rejected (`"holderauth: missing jti"`). This is the SMART
 `private_key_jwt` `jti` claim.
 
+**`bh` — body-binding hash (OPTIONAL).** An assertion may additionally carry `bh`:
+hex(sha256(request body)), stamped before signing so the signature covers it. A
+body-bound verifier recomputes the hash from the body it received and rejects on
+mismatch — a captured assertion cannot be replayed against a different body. An
+assertion without body binding **omits the field entirely**; an omitted `bh`
+contributes nothing to the signing payload, so the field-set above signs
+byte-identically whether or not an integration ever uses body binding, and a
+verifier that is not body-bound does not inspect it.
+
 Verifier-enforced bounds:
 
 | Bound | Value |
@@ -812,6 +831,7 @@ record is written.
 |---|---|---|
 | `coverage-eligibility` | `eligibility-inquiry` | `eligibility-response` |
 | `crd-order-select` | `crd-order-select` | `crd-cards` |
+| `crd-order-dispatch` | `crd-order-dispatch` | `crd-dispatch-cards` |
 | `dtr-questionnaire-fetch` | `dtr-questionnaire-fetch` | `dtr-questionnaire` |
 | `pas-claim` | `pas-submit` | `pas-response` |
 | `pas-claim-update` | `pas-update-submit` | `pas-update-response` |
@@ -913,6 +933,9 @@ The Hub enforces:
 - `correlationId` must be non-empty (400 otherwise).
 - `timestamp` must parse as RFC 3339 and be within ±5 minutes of Hub clock (400 otherwise).
 - The correlation ID must not have been seen in the last 2 hours (409 replay rejection).
+  It is recorded once the envelope passes verification — before recipient lookup,
+  auditing, or forwarding — and is never released after that; a failed attempt
+  burns its id. See §6.1a for the retry rule.
 
 ### 5.2 Payload encryption
 
@@ -986,7 +1009,85 @@ The originator reads the response from the `POST /route` reply — there is no
 polling or callback.
 
 On error the Hub returns a JSON error body `{"error": "<message>"}` with an
-appropriate 4xx/5xx status.
+appropriate 4xx/5xx status. An error response never releases the envelope's
+`correlationId` — retry under a fresh one (§6.1a).
+
+### 6.1a Retries — a fresh `correlationId` per attempt
+
+The Hub records a `correlationId` once the envelope passes verification (§5.1) —
+before recipient lookup, auditing, or forwarding — and never releases it,
+whether the exchange then succeeds or fails. Within the 2-hour replay window
+(§5.1) any second envelope carrying the same `correlationId` is rejected
+`409 {"error":"replay detected"}` — **including your own legitimate resend after
+an error**. In particular, a `502` from a failed exchange — recipient
+unreachable, a forward or audit-append failure, or a mis-constructed response
+envelope — does not free the id for reuse. (A request refused at verification
+itself — a 400/401/403, or the 502 payload-hash mismatch — is rejected before the id
+is recorded; the fresh-id rule below is correct in either case, so you never
+need to distinguish.)
+
+To retry after any non-2xx from `POST /route`, build the leg again from scratch:
+
+1. Mint a **fresh random** `correlationId` (§5.1).
+2. **Re-seal** the payload (§5.2). Sealed boxes are non-deterministic, so the
+   ciphertext — and with it the payload hash — changes on every seal.
+3. Request a **fresh token** bound to the new `correlationId` and the new
+   payload hash (§4.1). Tokens are per-leg by design; there is nothing to reuse.
+4. `POST /route` the new envelope.
+
+SDK callers get this for free: `RunEligibility`, `RunPriorAuth`, and the other
+originate helpers mint a fresh `correlationId` on every call, so a retry is
+simply calling the helper again.
+
+**Why the guard does not roll back on failure.** The payload-blind Hub cannot
+distinguish a legitimate byte-identical resend from an attacker replaying a
+captured envelope + assertion — they are the same bytes, and rejecting them is
+the point of the guard (§5.1). Nor can the Hub know whether a failed forward
+actually reached the recipient (a timeout can fire after delivery), so releasing
+the id could deliver the same `correlationId` twice. Never releasing it also
+keeps the audit chain unambiguous: one `correlationId` is at most one routed
+attempt — `routed` + `answered`, or `routed` + `failed`, never two `routed`
+records.
+
+**A retry is a new exchange.** It gets its own audit trail and its own
+processing at the recipient. Linkage that must survive a retry rides in the
+payload, not the envelope: the prior-authorization amend leg, for example,
+references its pended claim via `Claim.related` → the original submit leg's
+`correlationId` (§7b.2), which is independent of the amend leg's own envelope
+`correlationId`. If a failed attempt may nonetheless have reached the recipient
+(a timeout, or a `502` returned after forwarding), reconcile through the
+payload's FHIR business identifiers — never by resending the same envelope.
+
+### 6.1b Leg outcomes — what an originator sees
+
+Every origination leg your gateway attempts ends in exactly one of five
+outcomes. They are the vocabulary of the gateway's leg metric
+(`LegOutcome{outcome, role}`, emitted behind the gateway's `METRICS_SERVICE`
+opt-in — the `LegMetric` seam in the gateway's `STABILITY.md`) and of what your
+caller gets back from the console route that started the exchange. A leg is
+`routed` when it is attempted, then one of the four terminal outcomes follows.
+
+| Outcome | Meaning | What the caller sees |
+|---|---|---|
+| `routed` | The leg was attempted: recipient resolved, contract line selected, seal → authorize (§4.1) → `POST {hub}/route` under way. Always followed by exactly one terminal outcome. | — |
+| `answered` | The counterpart answered and the response envelope verified end-to-end (§6.1 steps 6–8, `VerifyBound` §4.4). A frame-carried **non-2xx application answer** (§6.3 — an adjudication denial, a `422` validation reject, a partner payer's real `400`) is `answered`, not a failure. | The application response; a non-2xx answer is relayed **verbatim** with the recipient's own status, `Content-Type` and body. |
+| `denied` | The **Authorization Framework refused the request leg** — `403` from `POST {authz}/authorize` (§4.1: wrong role for the frame, or no consent on `federated-query-submit`). A policy decision, not an error; excluded from the operators' `LegError` alarm. | A `502` whose `error` carries `authorization denied`, from a route with no legitimate denied branch; a flow that has one treats it as a business outcome instead (the UC-05 federated query leaves the prior authorization pended with `consentDenied: true` rather than failing). |
+| `unreachable` | The **Hub leg did not complete**: your gateway could not reach `POST {hub}/route`; the Hub answered non-2xx — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), or the `502` it returns when the recipient is unknown, cannot be reached, or returns a response envelope the Hub cannot verify, on a payload-hash mismatch, or on an audit-append failure (§6.1a); or the Hub answered `200` with a body that is not a decodable envelope. The Hub's status and body are not relayed. | A `502` whose `error` carries `hub routing failed`. Retry under a fresh `correlationId` (§6.1a). |
+| `failed` | Anything else, on **your gateway's** side of the leg: the Authorization Framework unreachable or erroring (non-403), a seal/encode failure, or a response the Hub returned `200` for that fails your gateway's own verification (`VerifyBound`, correlation match, decrypt). Counted in `LegError` with `unreachable`. | A `502` whose `error` names the reason — `authorization failed`, `response leg authorization failed`, `response correlation mismatch`, …. |
+
+Two things are **not** leg outcomes:
+
+- A **refusal before the leg exists** — no registered payer for the member's
+  Coverage payor identifier, or no shared contract line and no bridge (§8.6) —
+  is a legible `422` and never emits `routed`; nothing reached the Hub.
+- The Hub's **audit-record outcome** (§6.1 steps 4 and 7, §6.1a) is the Hub's
+  own view of the same exchange and reuses some of these words with the Hub's
+  meaning: a leg your gateway reports as `unreachable` is, on the canonical
+  chain, either a request record the Hub wrote before failing (`denied` for a
+  payload-hash mismatch, `unreachable` for an unknown recipient, `failed` for a
+  forward that did not complete after `routed`), a `routed` record with no
+  terminal record when the Hub refused the recipient's response, or no record
+  at all when the Hub refused the envelope at verification.
 
 ### 6.2 Holder inbound surface — receive a routed leg
 
@@ -2111,6 +2212,15 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-09-02 — Leg outcomes (§6.1b) and operator-attested `payerIds` (§1a, §2.3).**
+  Documentation only — no `wireProtocolVersion` bump, no wire change. §6.1b defines
+  the five outcomes an origination leg can end in (`routed`, `answered`, `denied`,
+  `unreachable`, `failed`), what the originator's caller sees for each, and which
+  refusals are not leg outcomes at all. §1a and §2.3 now state how a payer row's
+  `payerIds` come to exist — operator-attested, never self-asserted (FR-G42) —
+  with the registration field and its rejections (`400` on a non-payer role,
+  `409` on a duplicate payer-id); the earlier text called them "declared claims
+  at registration" and left who attests them unstated.
 - **2026-08-20 — Extension preservation obligation (§8.7).** Documentation only — no
   `wireProtocolVersion` bump, no wire change. States the peer obligation the carry
   mechanism (§8.6) has always depended on: preserve extensions you do not recognise

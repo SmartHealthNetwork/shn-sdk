@@ -38,12 +38,12 @@ Everything else in this document is an elaboration of these five ideas.
 | Term | Meaning |
 |---|---|
 | **Holder** | An organization that holds clinical/administrative data and participates in the network: a *provider*, a *payer*, a *facility*, or the *PHG* (the SHN-operated patient surface). |
-| **Smart Gateway** | The holder-side service that terminates the substrate. It is the only thing a holder's internal systems touch. It does all sealing, validation, token acquisition, and verification. |
+| **Smart Gateway** | The holder-side service that terminates the wire contract. It is the only thing a holder's internal systems touch. It does all sealing, validation, token acquisition, and verification. |
 | **Hub** | The central, payload-blind message router. |
 | **Authorization Framework** | The central token-issuing service. Policy-evaluates every requested operation (default-deny) and mints signed, scope-bound tokens. Verification of those tokens is decentralized — every party checks them locally. |
 | **Frame** | The legal basis under which an operation occurs. Five frames are defined: `provider-tpo` (provider treatment/payment/operations), `payer-coverage` (payer coverage decisions), `facility-disclosure` (a facility disclosing records in answer to a federated query), `patient-access` (the patient reading their own data), and `patient-authorship` (the patient authoring data). Patient consent for a federated query is modeled as a *gating conjunct* on the provider's `provider-tpo` query — confirmed against the Consent service at token issuance — not as a frame of its own; and the patient-reading and patient-authoring frames are deliberately kept distinct and never collapsed into one "patient access" concept. |
 | **Leg** | One direction of one exchange (request or response). The unit of authorization and of audit: every leg gets its own token and its own audit record. |
-| **PCI** | The substrate-level patient identifier — a derived, opaque `pci:`-prefixed value. Member IDs, MRNs, and other real-world identifiers cross the network **only inside sealed payloads**; all routing metadata and all audit records carry the PCI instead. |
+| **PCI** | The network-level patient identifier — a derived, opaque `pci:`-prefixed value. Member IDs, MRNs, and other real-world identifiers cross the network **only inside sealed payloads**; all routing metadata and all audit records carry the PCI instead. |
 | **Envelope** | The wire unit: cleartext routing metadata (sender, recipient, transaction type, frame, correlation ID, authorization token, timestamp) plus an opaque ciphertext sealed to the recipient's public key. |
 | **Registry** | The directory of admitted holders: ID, role, encryption public key, signing public key, and base URL. Sourced from a provisioning manifest plus dynamic runtime admissions. |
 | **SHN** | The operator of every shared service — the Hub, the Authorization Framework, the Consent service, the Registrar, the Accounts service, the Audit Plane, and the PHG (patient surface). Its routing core, the Hub, is the conduit: it holds no decryption keys and no re-identifiable patient provenance. |
@@ -134,10 +134,10 @@ The holder-side termination point, run once per holder with a configured role:
   exposes the two-phase pending-attestation API the patient surface drives. It additionally
   accepts **native Da Vinci interactions** from the holder's own conformant systems — a CDS
   Hooks `order-select` call (CRD), the DTR `$questionnaire-package` operation, and the PAS
-  `$submit` operation — and maps each onto the corresponding substrate leg, so a
+  `$submit` operation — and maps each onto the corresponding network leg, so a
   standards-conformant provider system can drive the network through its existing Da Vinci
   client without bespoke integration.
-- **Payer** — receives substrate envelopes at its inbound endpoint and dispatches on
+- **Payer** — receives sealed envelopes at its inbound endpoint and dispatches on
   transaction type: eligibility decisions, coverage-requirements cards, questionnaire serving,
   prior-auth adjudication. It answers out of a **content occupant** — there is no built-in
   adjudicator, and a payer gateway with no occupant configured refuses to boot rather than
@@ -167,7 +167,7 @@ PCI named in the token).
 
 ### The holder data boundary
 
-Gateways never talk to clinical systems directly. Between the substrate-facing engine and a
+Gateways never talk to clinical systems directly. Between the network-facing engine and a
 holder's backend sit a few narrow, well-defined **seams**:
 
 - A **read seam** (the holder's system of record): resolve a patient, report whether coverage
@@ -249,7 +249,7 @@ The system's memory, designed so it can be trusted more than any single operator
   reference, the patient's PCI, and the hash of the (still-encrypted) payload. Never content,
   never member IDs.
 - **Authenticated writes.** The append endpoint only accepts records signed by an authorized
-  substrate key (Hub, Authorization Framework, Registrar); the signature covers the record
+  network key (Hub, Authorization Framework, Registrar); the signature covers the record
   content.
 - **Durable and immutable.** Persisted in a store whose schema forbids update, delete, and
   truncate.
@@ -357,7 +357,7 @@ Supporting mechanisms:
 
 ## What flows across the network
 
-The substrate is workload-agnostic — any FHIR exchange can ride the authorized sealed leg —
+The network is workload-agnostic — any FHIR exchange can ride the authorized sealed leg —
 and the implemented domain is **prior authorization**, end to end:
 
 1. **Coverage eligibility.** A provider sends a `CoverageEligibilityRequest`; the payer
@@ -423,7 +423,7 @@ and the implemented domain is **prior authorization**, end to end:
   patient-readable `ExplanationOfBenefit`, never silently rewritten to CPT.
 - **Delegated conformance.** In the optional native-delegation mode — where a holder's own Da
   Vinci system answers a leg — that system is the conformance authority for the resources it
-  authors. The substrate still applies its full security fence to every such leg (sealing,
+  authors. The network still applies its full security fence to every such leg (sealing,
   per-operation authority, patient-binding, and tamper-evident audit), rather than re-validating
   the delegated system's payloads against its own profiles.
 
@@ -439,7 +439,7 @@ In a cloud deployment, the topology is fully infrastructure-as-code: each servic
 container with its own least-privilege identity, per-service secret isolation (each task can
 read only its own key material; the Hub's secrets contain no decryption key), TLS at the
 public edge, and OIDC in front of operator- and patient-facing surfaces. Deployment is
-**holder-operated at the edge**: each participating organization terminates the substrate at
+**holder-operated at the edge**: each participating organization terminates the wire contract at
 its own Smart Gateway, on its own infrastructure, behind its own boundary.
 
 ---
@@ -489,7 +489,7 @@ The architecture's properties are not documentation claims; they are executable:
   — and fail loudly if violated.
 - **An adversarial mutation suite** pairs every guard with a rejection test: take a valid
   exchange, mutate exactly one thing (a token field, a payload byte, a sender, a subject), and
-  assert the substrate rejects it.
+  assert the network rejects it.
 - **Scenario conformance tests** drive each workflow end-to-end — holder ↔ Hub ↔ holder, never
   point-to-point — asserting the exact FHIR resources exchanged, both branches where a
   workflow branches, an audit record per leg, and Provenance where required.

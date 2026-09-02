@@ -220,28 +220,21 @@ the wire.
 > See `docs/PARTICIPANT_PROTOCOL.md` §7a.2 and §7b.
 
 Resume with the SDK's shipped supplemental evidence (a `DiagnosticReport` +
-`Provenance`). What actually makes a payer look at the claim again differs by lane, and
-`ResumePriorAuth` (what `shn priorauth resume` calls) does **not** set the Da Vinci PAS
-`infoChanged` item extension — confirmed by building the exact bundle it builds: it carries
-a `Provenance` entry, no `infoChanged` extension, and `Claim.related[0].claim` by
-`identifier`, not `reference`.
+`Provenance`). The amendment `ResumePriorAuth` (what `shn priorauth resume` calls) builds
+is a conformant Da Vinci Claim Update: the prior Claim rides along in-bundle and
+`Claim.related[0].claim` resolves to it, and every Claim item carries the Da Vinci PAS
+`infoChanged` extension — the one marker a real PAS payer re-evaluates an amendment on.
+Both lanes behave identically here: the hermetic in-process mirror
+(`internal/brpayermirror`, the `make up`/local-dev lane) and the live reference payer
+(native-forward — what this preview environment's `conformance-payer` runs) re-evaluate
+ONLY an `infoChanged`-marked amendment of a prior authorization they actually stored, and
+both refuse an amendment whose prior they never saw submitted.
 
-- **Hermetic in-process mirror** (`internal/brpayermirror`, the `make up`/local-dev lane):
-  resolves the pend on **either** a `Provenance` entry **or** `infoChanged` on the Claim
-  item — `ResumePriorAuth`'s bundle carries `Provenance`, so it resolves via that branch.
-  **This is the lane the resume flow below is proven against.**
-- **Live reference payer** (native-forward — what this preview environment's
-  `conformance-payer` runs): re-evaluates ONLY on `infoChanged`
-  (`gateway/engine/nativepas.go`'s `requestClaimHasInfoChanged` gate checks our own
-  outbound request, before it even reaches the payer's response). `ResumePriorAuth`'s
-  bundle does not carry `infoChanged` — so on this lane, the amendment below does **not**
-  satisfy that gate and does not resolve.
-
-Either way, resolution is **not evidence-driven**: on the branch that does resolve, the
-payer re-pends (still A4) and its own pend-resolution **timer** is what later flips the
-claim to approved, independent of the supplemental report's specific content. `Provenance`
-is required regardless because FR-32 (SHN's own rule) says supplemental data must carry
-attribution — it is not a payer verdict input:
+Resolution is **not evidence-driven**: the payer re-pends the amendment (still A4) and
+its own pend-resolution **timer** is what later flips the claim to approved, independent
+of the supplemental report's specific content — the SDK client re-queries the pend until
+the timer resolves it. `Provenance` is required regardless because FR-32 (SHN's own rule)
+says supplemental data must carry attribution — it is not a payer verdict input:
 
 ```sh
 shn priorauth resume --resume shn-resume.json \
@@ -249,21 +242,14 @@ shn priorauth resume --resume shn-resume.json \
   --report-display "MRI lumbar spine w/o contrast" \
   --provenance-agent "Organization/acme-7f3a" \
   --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
-# → outcome=approved preAuthRef=AUTH-1234 validUntil=… (proven against the hermetic
-#   mirror only — see below for this discovery URL's live network)
+# → outcome=approved preAuthRef=AUTH-1234 validUntil=…
 ```
 
-**Proven scope.** The `outcome=approved` line above is proven against the **hermetic
-in-process mirror** (`internal/brpayermirror`, what a local `make up` stack's
-`conformance-payer` runs) — `ResumePriorAuth`'s bundle satisfies that mirror's
-`Provenance` branch. It is **not** proven against `https://accounts.shn-preview.org`
-itself: that discovery URL's `conformance-payer` native-forwards to the live reference
-payer, whose own gate (`gateway/engine/nativepas.go`'s `requestClaimHasInfoChanged`)
-requires `infoChanged` on the amendment. `ResumePriorAuth` does not set `infoChanged`, so
-against the live network this same command does not resolve the pend — the leg stays
-pended (`422 "amendment still insufficient"`). Know which lane you're integrating
-against: a local/hermetic stack resumes as shown; the live native-forward network does
-not, today.
+**Proven scope.** The `outcome=approved` line above is proven on both lanes: hermetically
+against the in-process mirror, and live against the real Da Vinci reference payer — the
+release gate that pairs the SDK with the real reference implementations drives this same
+client path (`shnsdk.RunPriorAuth` → `PriorAuthResult.Resume` → `shnsdk.ResumePriorAuth`)
+as a registered participant and asserts the pend really resolves to approved.
 
 `--provenance-agent` is **required** on every resume (supplemental data must carry
 provenance attribution; the SDK rejects it before sealing if the agent is absent —

@@ -4,10 +4,10 @@ go 1.26
 
 require (
 	github.com/samply/golang-fhir-models/fhir-models v0.3.2
-	golang.org/x/crypto v0.52.0
+	golang.org/x/crypto v0.55.0
 )
 
-require golang.org/x/sys v0.45.0 // indirect
+require golang.org/x/sys v0.47.0 // indirect
 
 // v0.9.0 shipped a CQL-backed demo questionnaire with an SDC launchContext whose CodeSystem a
 // US-Core-only runtime egress validator rejects (Unknown Code System → 422 on the DTR-fetch leg).

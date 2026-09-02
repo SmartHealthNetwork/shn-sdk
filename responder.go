@@ -93,10 +93,13 @@ type Responder struct {
 
 // responderReqOp pins each TransactionType to the request operation the inbound
 // token must carry. Unknown types → 400 before token work. Mirrors the gateway's PA
-// leg catalog (gateway/engine/workstream_pa.go, paCatalog — the .Op field; only the
-// four payer ops — federated-query and patient-dtr are facility/PHG roles, not payer).
-// The SDK keeps its own copy because it is the published partner-facing surface and
-// does not import the private gateway engine.
+// leg catalog (gateway/engine/workstream_pa.go, paCatalog — the .Op field) for the
+// five types this Responder serves: federated-query and patient-dtr are facility/PHG
+// roles, not payer, and crd-order-dispatch is a payer leg this Responder does not yet
+// serve — both exclusions are pinned deliberately by the network-side lockstep
+// conformance fence over ResponderTransactionOperations, so catalog growth cannot
+// silently widen the gap. The SDK keeps its own copy because it is the published
+// partner-facing surface and does not import the gateway engine.
 var responderReqOp = map[string]string{
 	"coverage-eligibility":    "eligibility-inquiry",
 	"crd-order-select":        "crd-order-select",
