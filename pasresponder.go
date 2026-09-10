@@ -107,7 +107,9 @@ func buildClaimResponse(def PASDef, preAuthRef, validUntil, patientRef, correlat
 	}
 	if preAuthRef != "" {
 		cr.PreAuthRef = preAuthRef
-		cr.PreAuthPeriod = &pasApprovedPreAuthPeriod{End: validUntil}
+		if validUntil != "" {
+			cr.PreAuthPeriod = &pasApprovedPreAuthPeriod{End: validUntil}
+		}
 	}
 	return json.Marshal(cr)
 }

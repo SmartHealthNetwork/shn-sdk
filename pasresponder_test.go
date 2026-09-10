@@ -383,3 +383,27 @@ func TestPendedBuilderDecisionSurvivesTaskRemoval(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildClaimResponseOmitsUnspecifiedAuthorizationPeriod(t *testing.T) {
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		t.Run(line, func(t *testing.T) {
+			for _, until := range []string{"", "2026-09-30"} {
+				raw, err := BuildClaimResponseAtLine(line, "AUTH-REAL", until, "Patient/member", "period-test", testNow)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var cr map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &cr); err != nil {
+					t.Fatal(err)
+				}
+				period, present := cr["preAuthPeriod"]
+				if until == "" && present {
+					t.Fatalf("unspecified period emitted: %s", period)
+				}
+				if until != "" && (!present || string(period) != `{"end":"2026-09-30"}`) {
+					t.Fatalf("supplied period lost: %s", period)
+				}
+			}
+		})
+	}
+}

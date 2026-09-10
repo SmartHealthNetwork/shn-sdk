@@ -108,6 +108,10 @@ func (r *Responder) handlePASSubmit(plaintext []byte, tok Token, corr string, no
 		if err != nil {
 			return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build pended response failed"}
 		}
+		pendedJSON, err = buildPASOperationResponse(plaintext, pendedJSON, now)
+		if err != nil {
+			return handlerResult{appStatus: http.StatusBadRequest, errMsg: "incomplete PAS request graph"}
+		}
 		// Ledger ordering — commit records the pend AFTER seal+authorize succeed:
 		// a response-leg failure leaves no orphan pended entry. No rollback needed (record is
 		// the acquiring step). The provider retries and gets a fresh pended response (record is
@@ -123,6 +127,10 @@ func (r *Responder) handlePASSubmit(plaintext []byte, tok Token, corr string, no
 		if err != nil {
 			return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build claim response failed"}
 		}
+		crJSON, err = buildPASOperationResponse(plaintext, crJSON, now)
+		if err != nil {
+			return handlerResult{appStatus: http.StatusBadRequest, errMsg: "incomplete PAS request graph"}
+		}
 		return handlerResult{payload: crJSON}
 
 	default: // PASDenied
@@ -133,6 +141,10 @@ func (r *Responder) handlePASSubmit(plaintext []byte, tok Token, corr string, no
 		denJSON, err := BuildDeniedResponse(cs.claimPatient, corr, rationale, now)
 		if err != nil {
 			return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build denied response failed"}
+		}
+		denJSON, err = buildPASOperationResponse(plaintext, denJSON, now)
+		if err != nil {
+			return handlerResult{appStatus: http.StatusBadRequest, errMsg: "incomplete PAS request graph"}
 		}
 		return handlerResult{payload: denJSON}
 	}
@@ -242,6 +254,11 @@ func (r *Responder) handlePASUpdate(plaintext []byte, tok Token, corr string, no
 	crJSON, err := BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, cs.claimPatient, corr, now)
 	if err != nil {
 		return fail(http.StatusInternalServerError, "build claim response failed")
+	}
+
+	crJSON, err = buildPASOperationResponse(plaintext, crJSON, now)
+	if err != nil {
+		return fail(http.StatusBadRequest, "incomplete PAS request graph")
 	}
 
 	// Return commit+rollback so the pipeline controls the finalize/release timing:

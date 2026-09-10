@@ -1724,10 +1724,10 @@ throughout (fresh correlation + `payloadHash`-bound token each leg).
 
 ### 7b.1 UC-04: exchange-1 PAS submit returns pended
 
-The initial PAS submit (§7a, leg 3) is identical for UC-04, but the payer's response
-is a **Bundle** instead of a bare `ClaimResponse`. Its ClaimResponse uses
-`outcome=queued` or an A4 review action to identify the pending decision. The Task
-enumerates the supplemental items needed for adjudication.
+The initial PAS submit (§7a, leg 3) returns a PAS response **Bundle** for
+approval, denial or pending adjudication. Select its single `ClaimResponse` and
+inspect the decision: `outcome=queued` or an A4 review-action code means pending.
+A retained Task does not make a completed decision pending.
 
 **Detect pended with `ParsePendedResponse`:**
 
@@ -1756,7 +1756,7 @@ item; that label is not a live payer questionnaire identifier.
 
 Exchange-2 is a second PAS leg using the `pas-claim-update` transaction type. The
 provider sends the supplemental evidence, then the payer adjudicates and returns the
-final `ClaimResponse`.
+final PAS response Bundle containing the `ClaimResponse` and its referenced resources.
 
 Wire contract:
 
@@ -1893,9 +1893,9 @@ silent mis-parse.
 
 | Outcome | Response shape | Key field |
 |---|---|---|
-| `approved` | Bare `ClaimResponse` | `outcome=complete` + non-empty `preAuthRef` |
-| `pended` | `Bundle` (ClaimResponse + Task) | Task.input enumerates needed items |
-| `denied` | Bare `ClaimResponse` | `outcome=complete` + reviewActionCode `A3` (or the observed reference-payer `A2` denial shape); no `preAuthRef` |
+| `approved` | PAS response `Bundle` | Completed ClaimResponse with an explicit authorization number |
+| `pended` | PAS response `Bundle` | ClaimResponse `outcome=queued` or reviewActionCode `A4`; Task inputs describe requested items |
+| `denied` | PAS response `Bundle` | `outcome=complete` + reviewActionCode `A3` (or the observed reference-payer `A2` denial shape); no `preAuthRef` |
 
 Use `ParsePendedResponse` first (decision check), then `ParseClaimResponse` on
 the same bytes when the decision is not pending — this is the dispatch `parsePASOutcome` implements internally

@@ -70,14 +70,15 @@ func buildConformantClaim(t *testing.T, member, corr string, qrJSON []byte, now 
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
 	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{
-		QR:          qrJSON,
-		SR:          srJSON,
-		PatientRef:  patientRef,
-		CoverageRef: coverageRef,
-		MemberID:    member,
-		Corr:        corr,
-		Created:     now,
-		Payer:       CMSPayerIdentity,
+		QR:            qrJSON,
+		SR:            srJSON,
+		PatientRef:    patientRef,
+		CoverageRef:   coverageRef,
+		MemberID:      member,
+		Corr:          corr,
+		Created:       now,
+		Payer:         CMSPayerIdentity,
+		PayerOrgEntry: true,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
@@ -443,7 +444,7 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 		t.Fatalf("BuildDiagnosticReport: %v", err)
 	}
 	// Provenance target is rewritten by the builder to the bundle-local DR id; pass a placeholder.
-	provJSON, err := BuildProvenance("DiagnosticReport/dr-"+member, "Organization/provider", now)
+	provJSON, err := BuildProvenanceWithIdentifier("DiagnosticReport/dr-"+member, ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "provider"}, now)
 	if err != nil {
 		t.Fatalf("BuildProvenance: %v", err)
 	}
@@ -459,6 +460,7 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 		OriginalCorr:     origCorr,
 		Created:          now,
 		Payer:            CMSPayerIdentity,
+		PayerOrgEntry:    true,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
