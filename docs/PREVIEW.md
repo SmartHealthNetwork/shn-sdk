@@ -240,7 +240,8 @@ says supplemental data must carry attribution — it is not a payer verdict inpu
 shn priorauth resume --resume shn-resume.json \
   --report-id dr-uc04-operative --report-cpt 72148 \
   --report-display "MRI lumbar spine w/o contrast" \
-  --provenance-agent "Organization/acme-7f3a" \
+  --provenance-agent-system "http://smarthealth.network/ids/holder" \
+  --provenance-agent-value "acme-7f3a" \
   --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
 # → outcome=approved preAuthRef=AUTH-1234 validUntil=…
 ```
@@ -251,7 +252,7 @@ release gate that pairs the SDK with the real reference implementations drives t
 client path (`shnsdk.RunPriorAuth` → `PriorAuthResult.Resume` → `shnsdk.ResumePriorAuth`)
 as a registered participant and asserts the pend really resolves to approved.
 
-`--provenance-agent` is **required** on every resume (supplemental data must carry
+`--provenance-agent-system` and `--provenance-agent-value` are **required** on every resume (supplemental data must carry
 provenance attribution; the SDK rejects it before sealing if the agent is absent —
 FR-32). `preAuthRef` is the reference payer's own authorization number,
 `AUTH-` followed by four digits — never the retired `PA-<hex>` shape.

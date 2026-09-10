@@ -488,18 +488,21 @@ func (id Identity) runLegWithCorr(ctx context.Context, c *http.Client, ep Endpoi
 
 // SupplementalReport is the NEW clinical evidence a ClaimUpdate amendment attaches,
 // plus its FR-32 provenance facts. ProvenanceAgent is REQUIRED: the payer REJECTS
-// supplemental data without Provenance, so ResumePriorAuth validates it BEFORE
+// supplemental data without Provenance. Use the registered holder namespace
+// http://smarthealth.network/ids/holder or the NPI namespace
+// http://hl7.org/fhir/sid/us-npi with the actual source identifier.
+// ResumePriorAuth validates it BEFORE
 // sealing and fails with a clear error — the dev meets FR-32 as a named
 // precondition, not a cryptic three-legs-deep payer rejection.
 type SupplementalReport struct {
-	ReportID        string // the DiagnosticReport id (e.g. "dr-uc04-operative")
-	CPT             string // procedure code (e.g. "72148")
-	Display         string // procedure display
-	ProvenanceAgent string // FR-32 source attribution, e.g. "Organization/<holderID>" — REQUIRED
+	ReportID        string               // the DiagnosticReport id (e.g. "dr-uc04-operative")
+	CPT             string               // procedure code (e.g. "72148")
+	Display         string               // procedure display
+	ProvenanceAgent ProvenanceIdentifier // FR-32 source identifier — REQUIRED
 }
 
 // ResumePriorAuth drives the exchange-2 ClaimUpdate from a pended PA's resume
-// handle: validate supp (ProvenanceAgent present → else error, no wire) → build the
+// handle: validate supp (complete source identifier → else error, no wire) → build the
 // operative DiagnosticReport + Provenance → BuildConformantClaimUpdateBundle (reusing the
 // submit QR/SR unchanged, related[] → the original submit correlation, FR-21) → ONE sealed
 // round-trip via runLeg under pas-claim-update / pas-update-submit / pas-update-response
@@ -512,7 +515,7 @@ func (id Identity) ResumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 	}
 	// FR-32 precondition: supplemental data MUST carry provenance attribution. Fail loud
 	// BEFORE sealing anything rather than letting the payer reject it three legs deep.
-	if supp.ProvenanceAgent == "" {
+	if err := supp.ProvenanceAgent.validate(); err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: SupplementalReport.ProvenanceAgent is required (FR-32: supplemental data must be attributed)")
 	}
 	if supp.ReportID == "" {
@@ -523,7 +526,7 @@ func (id Identity) ResumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: build diagnostic report: %w", err)
 	}
-	provJSON, err := BuildProvenance("DiagnosticReport/"+supp.ReportID, supp.ProvenanceAgent, id.now())
+	provJSON, err := BuildProvenanceWithIdentifier("DiagnosticReport/"+supp.ReportID, supp.ProvenanceAgent, id.now())
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: build provenance: %w", err)
 	}

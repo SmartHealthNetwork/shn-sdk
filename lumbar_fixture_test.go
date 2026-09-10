@@ -77,6 +77,6 @@ func demoSupplementalReport() SupplementalReport {
 		ReportID:        "dr-uc04-operative",
 		CPT:             "72148",
 		Display:         "MRI lumbar spine w/o contrast",
-		ProvenanceAgent: "Organization/provider",
+		ProvenanceAgent: ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "provider"},
 	}
 }

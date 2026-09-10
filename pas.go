@@ -47,7 +47,9 @@ type PriorAuthResult struct {
 
 // NeededItem is one supplemental item the payer's FR-20 Task asks for on a pended
 // PA. Code is the Task.input value (e.g. "operative-diagnostic-report"); Display is
-// its human-readable label (Task.input.type.text). Typed so a dev/CLI sees exactly
+// its human-readable label (Task.input.type.text or questionnaire coding display).
+// Questionnaire requests use valueIdentifier.value; routing inputs are excluded.
+// Typed so a dev/CLI sees exactly
 // what the payer is asking for.
 type NeededItem struct {
 	Code    string
@@ -784,7 +786,7 @@ func stripMetaProfile(resourceJSON []byte) ([]byte, error) {
 }
 
 // rewriteQRContextRefs rewrites the QuestionnaireResponse's top-level qr-context
-// extension valueReferences so the Coverage-typed qr-context points at coverageRef and
+// and DTR 2.2 qr-coverage valueReferences so Coverage points at coverageRef and
 // the ServiceRequest-typed qr-context points at srRef — matching each qr-context
 // extension by the resourceType PREFIX of its existing valueReference.reference (a ref
 // starting "Coverage/" → coverageRef; one starting "ServiceRequest/" → srRef). This makes
@@ -810,7 +812,7 @@ func rewriteQRContextRefs(qrJSON []byte, coverageRef, srRef string) ([]byte, err
 		if err := json.Unmarshal(ext["url"], &url); err != nil {
 			continue // non-string url — leave it alone
 		}
-		if url != extQRContext {
+		if url != extQRContext && url != qrCoverageExt {
 			continue
 		}
 		vrRaw, ok := ext["valueReference"]
@@ -1310,6 +1312,39 @@ func BuildProvenanceWithPolicy(targetRef, agentWho, policyRef, purposeOfUse stri
 				Code:   strPtr(purposeOfUse),
 			}},
 		}}
+	}
+	raw, err := json.Marshal(prov)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: marshal Provenance: %w", err)
+	}
+	return pasInjectResourceType(raw, "Provenance")
+}
+
+// ProvenanceIdentifier names the source of supplemental evidence using an explicit
+// identifier namespace and value; it is not a reference to a bundled resource.
+type ProvenanceIdentifier struct {
+	System string `json:"system"`
+	Value  string `json:"value"`
+}
+
+func (source ProvenanceIdentifier) validate() error {
+	if (source.System != "http://smarthealth.network/ids/holder" && source.System != "http://hl7.org/fhir/sid/us-npi") || strings.TrimSpace(source.Value) == "" {
+		return fmt.Errorf("ProvenanceAgent requires a holder or NPI identifier system and nonblank value")
+	}
+	return nil
+}
+
+// BuildProvenanceWithIdentifier attributes supplemental evidence to a logical
+// source identifier, such as a registered holder id or an NPI. It does not invent
+// an Organization resource or reinterpret a literal resource reference.
+func BuildProvenanceWithIdentifier(targetRef string, source ProvenanceIdentifier, recorded time.Time) ([]byte, error) {
+	if err := source.validate(); err != nil {
+		return nil, err
+	}
+	prov := fhir.Provenance{
+		Target:   []fhir.Reference{{Reference: strPtr(targetRef)}},
+		Recorded: recorded.UTC().Format(time.RFC3339),
+		Agent:    []fhir.ProvenanceAgent{{Who: fhir.Reference{Identifier: &fhir.Identifier{System: strPtr(source.System), Value: strPtr(source.Value)}}}},
 	}
 	raw, err := json.Marshal(prov)
 	if err != nil {
@@ -1851,46 +1886,114 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	return bundleOut, nil
 }
 
-// ParsePendedResponse inspects a PAS submit/update response shape. A Bundle ⇒ PENDED:
-// returns pended=true and the typed NeededItems parsed from the Task.input[] (Code =
-// the input value, Display = the input type.text). A non-Bundle ⇒ pended=false (the
-// caller then parses the bare ClaimResponse via ParseClaimResponse). Mirrors
-// internal/pas.ParsePendedOrApproved; the typed NeededItem is the SDK surface.
+// ParsePendedResponse classifies the uniquely selected ClaimResponse by decision
+// content, in either a response Bundle or a bare polling resource. Tasks supply
+// needed items only after queued outcome or A4 establishes a pending decision.
 func ParsePendedResponse(data []byte) (pended bool, needed []NeededItem, err error) {
+	response, tasks, err := selectPASClaimResponse(data)
+	if err != nil {
+		return false, nil, err
+	}
+	result, err := parsePASClaimDecision(response)
+	if err != nil {
+		return false, nil, err
+	}
+	if result.Outcome != "pended" {
+		return false, nil, nil
+	}
+	for _, task := range tasks {
+		var probe struct {
+			Input []struct {
+				Type struct {
+					Text   string `json:"text"`
+					Coding []struct {
+						System  string `json:"system"`
+						Code    string `json:"code"`
+						Display string `json:"display"`
+					} `json:"coding"`
+				} `json:"type"`
+				ValueString     string `json:"valueString"`
+				ValueIdentifier *struct {
+					Value string `json:"value"`
+				} `json:"valueIdentifier"`
+			} `json:"input"`
+		}
+		if err := json.Unmarshal(task, &probe); err != nil {
+			return false, nil, fmt.Errorf("shnsdk: parse PAS Task: %w", err)
+		}
+		for _, input := range probe.Input {
+			display := input.Type.Text
+			questionnaire, routing := false, false
+			for _, coding := range input.Type.Coding {
+				if coding.Code == "payer-url" {
+					routing = true
+				}
+				if coding.System == "http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes" && coding.Code == "questionnaires-needed" {
+					questionnaire = true
+					if display == "" {
+						display = coding.Display
+					}
+				}
+			}
+			if routing {
+				continue
+			}
+			value := input.ValueString
+			if questionnaire && input.ValueIdentifier != nil {
+				value = input.ValueIdentifier.Value
+			}
+			if value != "" {
+				needed = append(needed, NeededItem{Code: value, Display: display})
+			}
+		}
+	}
+	return true, needed, nil
+}
+
+// selectPASClaimResponse rejects ambiguous or malformed envelopes before either
+// decision parser can interpret them. Graph/profile validation remains separate.
+func selectPASClaimResponse(data []byte) (json.RawMessage, []json.RawMessage, error) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 		Entry        []struct {
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
-	if err = json.Unmarshal(data, &probe); err != nil {
-		return false, nil, fmt.Errorf("shnsdk: parse PAS response: %w", err)
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return nil, nil, fmt.Errorf("shnsdk: parse PAS response: %w", err)
+	}
+	if probe.ResourceType == "ClaimResponse" {
+		return data, nil, nil
 	}
 	if probe.ResourceType != "Bundle" {
-		return false, nil, nil
+		return nil, nil, fmt.Errorf("shnsdk: expected PAS Bundle or ClaimResponse, got %q", probe.ResourceType)
 	}
-	for _, e := range probe.Entry {
-		var rt struct {
+	var response json.RawMessage
+	var tasks []json.RawMessage
+	for i, entry := range probe.Entry {
+		var resource struct {
 			ResourceType string `json:"resourceType"`
-			Input        []struct {
-				Type struct {
-					Text string `json:"text"`
-				} `json:"type"`
-				ValueString string `json:"valueString"`
-			} `json:"input"`
 		}
-		if err = json.Unmarshal(e.Resource, &rt); err != nil {
-			return false, nil, fmt.Errorf("shnsdk: parse PAS response entry: %w", err)
+		if err := json.Unmarshal(entry.Resource, &resource); err != nil {
+			return nil, nil, fmt.Errorf("shnsdk: parse PAS entry %d: %w", i, err)
 		}
-		if rt.ResourceType == "Task" {
-			for _, in := range rt.Input {
-				if in.ValueString != "" {
-					needed = append(needed, NeededItem{Code: in.ValueString, Display: in.Type.Text})
-				}
+		if resource.ResourceType == "" {
+			return nil, nil, fmt.Errorf("shnsdk: PAS entry %d has no resourceType", i)
+		}
+		switch resource.ResourceType {
+		case "ClaimResponse":
+			if response != nil {
+				return nil, nil, fmt.Errorf("shnsdk: PAS Bundle has multiple ClaimResponses")
 			}
+			response = entry.Resource
+		case "Task":
+			tasks = append(tasks, entry.Resource)
 		}
 	}
-	return true, needed, nil
+	if response == nil {
+		return nil, nil, fmt.Errorf("shnsdk: PAS Bundle has no ClaimResponse")
+	}
+	return response, tasks, nil
 }
 
 const (
@@ -1923,7 +2026,7 @@ const (
 	reviewActionDeniedCodeObservedRI = "A2"
 )
 
-// ParseClaimResponse parses a bare PAS ClaimResponse into a PriorAuthResult by EXPLICIT
+// ParseClaimResponse parses a PAS response Bundle or bare polling ClaimResponse into a PriorAuthResult by EXPLICIT
 // signals — approved, denied, partial, and pended are each keyed on an explicit marker:
 //   - reviewActionCode == "A3" (X12 "Not Certified", SHN's own conformant denial code) ⇒
 //     Outcome "denied" + Denial{ReasonCode, Rationale, AppealNote}, UNCONDITIONALLY — a
@@ -1945,9 +2048,23 @@ const (
 //   - anything else ⇒ error (fail loud on an ambiguous/malformed shape — never infer a
 //     confident outcome from absence).
 //
-// NOTE: a PENDED response is a Bundle, not a bare ClaimResponse — callers detect it with
-// ParsePendedResponse FIRST; this function is for the bare-ClaimResponse case.
+// Pending content is rejected here; use ParsePendedResponse to read pending decisions.
 func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
+	response, _, err := selectPASClaimResponse(data)
+	if err != nil {
+		return PriorAuthResult{}, err
+	}
+	result, err := parsePASClaimDecision(response)
+	if err != nil {
+		return PriorAuthResult{}, err
+	}
+	if result.Outcome == "pended" {
+		return PriorAuthResult{}, fmt.Errorf("shnsdk: ClaimResponse is pending")
+	}
+	return result, nil
+}
+
+func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 	var probe struct {
 		ResourceType  string `json:"resourceType"`
 		Outcome       string `json:"outcome"`
@@ -1960,6 +2077,7 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 			Text string `json:"text"`
 		} `json:"processNote"`
 		Item []struct {
+			ItemSequence int `json:"itemSequence"`
 			Adjudication []struct {
 				Extension []struct {
 					URL       string `json:"url"`
@@ -1968,6 +2086,7 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 						ValueString          string `json:"valueString"`
 						ValueCodeableConcept *struct {
 							Coding []struct {
+								System  string `json:"system"`
 								Code    string `json:"code"`
 								Display string `json:"display"`
 							} `json:"coding"`
@@ -1993,9 +2112,23 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 	// ever read, silently reporting a partial certification as a denial with the auth
 	// number discarded.
 	var reviewActionPreAuthRef string
-	var sawA3, sawA2 bool
+	var sawA3, sawA2, sawA4 bool
+	type itemDecision struct {
+		a1, a2, a3, a4 bool
+		hasNumber      bool
+	}
+	decisions := make(map[int]*itemDecision)
+	numbers := make(map[string]bool)
+	if probe.PreAuthRef != "" {
+		numbers[probe.PreAuthRef] = true
+	}
 	var a3Code, a3Display, a2Code, a2Display string
 	for _, it := range probe.Item {
+		decision := decisions[it.ItemSequence]
+		if decision == nil {
+			decision = &itemDecision{}
+			decisions[it.ItemSequence] = decision
+		}
 		for _, adj := range it.Adjudication {
 			for _, ext := range adj.Extension {
 				if ext.URL != reviewActionExtURL {
@@ -2009,17 +2142,28 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 						}
 						for _, c := range sub.ValueCodeableConcept.Coding {
 							switch c.Code {
+							case "A1":
+								decision.a1 = true
+							case "A4":
+								decision.a4 = decision.a4 || c.System == "https://codesystem.x12.org/005010/306"
+								sawA4 = sawA4 || decision.a4
 							case reviewActionDeniedCode: // "A3"
+								decision.a3 = true
 								if !sawA3 {
 									sawA3, a3Code, a3Display = true, c.Code, c.Display
 								}
 							case reviewActionDeniedCodeObservedRI: // "A2"
+								decision.a2 = true
 								if !sawA2 {
 									sawA2, a2Code, a2Display = true, c.Code, c.Display
 								}
 							}
 						}
 					case "number":
+						if sub.ValueString != "" {
+							decision.hasNumber = true
+							numbers[sub.ValueString] = true
+						}
 						// Real Da Vinci PAS RIs place the auth number in the reviewAction
 						// "number" sub-extension rather than the top-level preAuthRef field
 						// (observed in real RI output). Take the first non-empty value seen.
@@ -2030,6 +2174,35 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 				}
 			}
 		}
+	}
+
+	// Review actions belong to an item sequence. Different items may complete at
+	// different times; only contradictory signals on the same item are invalid.
+	for _, decision := range decisions {
+		if (decision.a4 && (decision.a1 || decision.a2 || decision.a3 || decision.hasNumber)) ||
+			(decision.a1 && (decision.a2 || decision.a3)) || (decision.a2 && decision.a3) {
+			return PriorAuthResult{}, fmt.Errorf("shnsdk: contradictory PAS item decision")
+		}
+	}
+	if probe.Outcome == "queued" || sawA4 {
+		if probe.Outcome != "queued" && probe.Outcome != "complete" {
+			return PriorAuthResult{}, fmt.Errorf("shnsdk: invalid pending ClaimResponse outcome %q", probe.Outcome)
+		}
+		// Without an explicit pending item, terminal markers contradict queued.
+		if !sawA4 {
+			for _, decision := range decisions {
+				if decision.a1 || decision.a2 || decision.a3 || decision.hasNumber {
+					return PriorAuthResult{}, fmt.Errorf("shnsdk: contradictory pending and terminal PAS decision")
+				}
+			}
+		}
+		if probe.PreAuthRef != "" && len(decisions) <= 1 {
+			return PriorAuthResult{}, fmt.Errorf("shnsdk: contradictory pending and terminal PAS decision")
+		}
+		return PriorAuthResult{Outcome: "pended"}, nil
+	}
+	if len(numbers) > 1 {
+		return PriorAuthResult{}, fmt.Errorf("shnsdk: multiple PAS authorization numbers cannot be represented")
 	}
 
 	// dispositionText builds the payer-sourced rationale/disposition: probe.Disposition,
@@ -2119,9 +2292,8 @@ func ParseClaimResponse(data []byte) (PriorAuthResult, error) {
 	return PriorAuthResult{}, fmt.Errorf("shnsdk: ClaimResponse is neither approved (no preAuthRef) nor denied (no reviewActionCode A2/A3); ambiguous outcome=%q", probe.Outcome)
 }
 
-// parsePASOutcome dispatches a PAS submit/update response on shape: a Bundle ⇒ PENDED
-// (Outcome "pended" + NeededItems; the caller fills Resume from its leg context), a
-// bare ClaimResponse ⇒ approved/denied (via ParseClaimResponse). Shared by RunPriorAuth
+// parsePASOutcome classifies PAS decision content in Bundles and polling resources.
+// The caller fills Resume from its leg context. Shared by RunPriorAuth
 // (submit response) and ResumePriorAuth (update response) so both stay consistent.
 func parsePASOutcome(data []byte) (PriorAuthResult, error) {
 	pended, needed, err := ParsePendedResponse(data)

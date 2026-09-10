@@ -516,7 +516,7 @@ func TestRunPriorAuth_LegAttributedError(t *testing.T) {
 
 func TestDemoSupplementalReportFixture(t *testing.T) {
 	r := demoSupplementalReport()
-	if r.ReportID == "" || r.CPT == "" || r.ProvenanceAgent == "" {
+	if r.ReportID == "" || r.CPT == "" || r.ProvenanceAgent.Value == "" {
 		t.Fatalf("demoSupplementalReport incomplete: %+v", r)
 	}
 }
@@ -531,7 +531,7 @@ func TestResumePriorAuth_RequiresProvenance(t *testing.T) {
 		QRJSON:                []byte(`{"resourceType":"QuestionnaireResponse"}`),
 		SRJSON:                []byte(`{"resourceType":"ServiceRequest"}`),
 	}
-	bad := SupplementalReport{ReportID: "dr-x", CPT: "72148", Display: "MRI", ProvenanceAgent: ""}
+	bad := SupplementalReport{ReportID: "dr-x", CPT: "72148", Display: "MRI", ProvenanceAgent: ProvenanceIdentifier{}}
 	_, err := id.ResumePriorAuth(context.Background(), nil, Endpoints{}, Payer{}, resume, bad)
 	if err == nil {
 		t.Fatal("ResumePriorAuth with empty ProvenanceAgent: want a fail-loud error before sealing")

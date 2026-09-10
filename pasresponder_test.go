@@ -357,3 +357,29 @@ func TestBuildPendedResponseAtLine_OutcomeByLine(t *testing.T) {
 		}
 	}
 }
+
+func TestPendedBuilderDecisionSurvivesTaskRemoval(t *testing.T) {
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		t.Run(line, func(t *testing.T) {
+			raw, err := BuildPendedResponseAtLine(line, "Patient/member", "pending-content", []string{"report"}, testNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var bundle struct {
+				Entry []struct {
+					Resource json.RawMessage `json:"resource"`
+				} `json:"entry"`
+			}
+			if err := json.Unmarshal(raw, &bundle); err != nil {
+				t.Fatal(err)
+			}
+			pended, _, err := ParsePendedResponse(bundle.Entry[0].Resource)
+			if err != nil || !pended {
+				t.Fatalf("ClaimResponse must independently declare pending: %v, %v", pended, err)
+			}
+			if _, err := ParseClaimResponse(bundle.Entry[0].Resource); err == nil {
+				t.Fatal("pending parsed as terminal")
+			}
+		})
+	}
+}

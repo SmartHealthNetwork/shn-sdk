@@ -197,7 +197,8 @@ func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 	reportID := fs.String("report-id", "", "supplemental DiagnosticReport id (required)")
 	cpt := fs.String("report-cpt", "", "supplemental procedure CPT")
 	display := fs.String("report-display", "", "supplemental procedure display")
-	agent := fs.String("provenance-agent", "", "FR-32 provenance source, e.g. Organization/<id>")
+	agentSystem := fs.String("provenance-agent-system", "", "source identifier namespace (holder: http://smarthealth.network/ids/holder; NPI: http://hl7.org/fhir/sid/us-npi)")
+	agentValue := fs.String("provenance-agent-value", "", "source holder id or NPI")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -214,7 +215,7 @@ func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "shn priorauth resume: read resume handle %q: %v\n", *resumePath, err)
 		return 1
 	}
-	supp := shnsdk.SupplementalReport{ReportID: *reportID, CPT: *cpt, Display: *display, ProvenanceAgent: *agent}
+	supp := shnsdk.SupplementalReport{ReportID: *reportID, CPT: *cpt, Display: *display, ProvenanceAgent: shnsdk.ProvenanceIdentifier{System: *agentSystem, Value: *agentValue}}
 
 	ctx := context.Background()
 	c := http.DefaultClient

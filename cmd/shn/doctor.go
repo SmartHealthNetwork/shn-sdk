@@ -260,7 +260,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 			ReportID:        "dr-" + p.MemberID + "-operative",
 			CPT:             p.Order.Code,
 			Display:         p.Order.Display,
-			ProvenanceAgent: "Organization/provider",
+			ProvenanceAgent: shnsdk.ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: devID.HolderID},
 		}
 		amended, err := devID.ResumePriorAuth(ctx, c, ep, payer, *res.Resume, supp)
 		if err != nil {

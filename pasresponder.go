@@ -156,7 +156,7 @@ func pasPendedOutcome(def PASDef) (fhir.ClaimProcessingCodes, error) {
 
 func buildPendedResponse(def PASDef, patientRef, correlationID string, needed []string, created time.Time) ([]byte, error) {
 	// PAS 2.2 (def-driven): "queued" leaves the required ClaimResponseOutcome value
-	// set at 2.2.1 — the pend is carried by the Task entry, not the outcome code.
+	// set at 2.2.1 — the A4 review action carries the pending decision.
 	outcome, err := pasPendedOutcome(def)
 	if err != nil {
 		return nil, err
@@ -189,7 +189,22 @@ func buildPendedResponse(def PASDef, patientRef, correlationID string, needed []
 			Value:  strPtr(correlationID),
 		}}
 	}
-	crJSON, err := json.Marshal(cr)
+	// A4 carries the decision independently of outcome and any retained Task.
+	// PAS 2.2 uses outcome=complete even while the item remains pending.
+	type pendedBase fhir.ClaimResponse
+	pendedCR := struct {
+		pendedBase
+		Item []pasDeniedItem `json:"item"`
+	}{pendedBase: pendedBase(cr), Item: []pasDeniedItem{{
+		ItemSequence: 1,
+		Adjudication: []pasDeniedAdj{{
+			Category: pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/adjudication", Code: "submitted"}}},
+			Extension: []pasReviewActionExt{{URL: pasReviewActionExtURL, Extension: []pasReviewActionSubExt{{
+				URL: pasReviewActionCodeExtURL, ValueCodeableConcept: &pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: pasSystemX12ReviewAction, Code: "A4", Display: "Pended"}}},
+			}}}},
+		}},
+	}}}
+	crJSON, err := json.Marshal(pendedCR)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: marshal pended ClaimResponse: %w", err)
 	}

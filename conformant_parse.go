@@ -307,11 +307,17 @@ func parseConformantUpdateFacts(body []byte) (conformantUpdateFacts, bool) {
 				} `json:"target"`
 				Agent []struct {
 					Who struct {
-						Reference string `json:"reference"`
+						Reference  string `json:"reference"`
+						Identifier struct {
+							System string `json:"system"`
+							Value  string `json:"value"`
+						} `json:"identifier"`
 					} `json:"who"`
 				} `json:"agent"`
 			}
-			_ = json.Unmarshal(e.Resource, &prov)
+			if err := json.Unmarshal(e.Resource, &prov); err != nil {
+				return conformantUpdateFacts{}, false
+			}
 			for _, tgt := range prov.Target {
 				if tgt.Reference != "" {
 					f.provenanceTargets = append(f.provenanceTargets, tgt.Reference)
@@ -320,6 +326,8 @@ func parseConformantUpdateFacts(body []byte) (conformantUpdateFacts, bool) {
 			for _, a := range prov.Agent {
 				if a.Who.Reference != "" {
 					f.provenanceAgents = append(f.provenanceAgents, a.Who.Reference)
+				} else if (a.Who.Identifier.System == "http://hl7.org/fhir/sid/us-npi" || a.Who.Identifier.System == "http://smarthealth.network/ids/holder") && strings.TrimSpace(a.Who.Identifier.Value) != "" {
+					f.provenanceAgents = append(f.provenanceAgents, a.Who.Identifier.System+"|"+a.Who.Identifier.Value)
 				}
 			}
 		}

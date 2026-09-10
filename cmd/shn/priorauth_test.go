@@ -187,7 +187,7 @@ func TestPriorAuthResume_HandleCarriesPayerID(t *testing.T) {
 		t.Errorf("resume handle should carry payerId: %s", raw)
 	}
 
-	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-id", "dr-uc04-operative", "--report-cpt", "72148", "--report-display", "MRI lumbar spine w/o contrast", "--provenance-agent", "Organization/provider", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-id", "dr-uc04-operative", "--report-cpt", "72148", "--report-display", "MRI lumbar spine w/o contrast", "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
 	if code2 != exitOK {
 		t.Fatalf("priorauth resume exit=%d (want %d)\nstdout=%s\nstderr=%s", code2, exitOK, stdout2, stderr2)
 	}
@@ -228,7 +228,7 @@ func TestPriorAuthResume_LegacyHandle(t *testing.T) {
 		t.Errorf("a legacy-path pend must not stamp payerId onto the handle: %s", raw)
 	}
 
-	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-id", "dr-uc04-operative", "--report-cpt", "72148", "--report-display", "MRI lumbar spine w/o contrast", "--provenance-agent", "Organization/provider", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-id", "dr-uc04-operative", "--report-cpt", "72148", "--report-display", "MRI lumbar spine w/o contrast", "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
 	if code2 != exitOK {
 		t.Fatalf("priorauth resume exit=%d (want %d)\nstdout=%s\nstderr=%s", code2, exitOK, stdout2, stderr2)
 	}
@@ -277,7 +277,7 @@ func TestPriorAuthResume_HandleWithoutPayerIDIgnoresLiveNetworkPersonas(t *testi
 		t.Fatalf("writeResumeHandle: %v", err)
 	}
 
-	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-id", "dr-uc04-operative", "--report-cpt", "72148", "--report-display", "MRI lumbar spine w/o contrast", "--provenance-agent", "Organization/provider", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-id", "dr-uc04-operative", "--report-cpt", "72148", "--report-display", "MRI lumbar spine w/o contrast", "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
 	if code2 != exitOK {
 		t.Fatalf("priorauth resume exit=%d (want %d)\nstdout=%s\nstderr=%s", code2, exitOK, stdout2, stderr2)
 	}

@@ -1725,38 +1725,32 @@ throughout (fresh correlation + `payloadHash`-bound token each leg).
 ### 7b.1 UC-04: exchange-1 PAS submit returns pended
 
 The initial PAS submit (§7a, leg 3) is identical for UC-04, but the payer's response
-is a **Bundle** instead of a bare `ClaimResponse`. The Bundle shape is the pended
-signal: it contains a `ClaimResponse` with `outcome=queued` and a `Task` enumerating
-the supplemental items needed for adjudication.
+is a **Bundle** instead of a bare `ClaimResponse`. Its ClaimResponse uses
+`outcome=queued` or an A4 review action to identify the pending decision. The Task
+enumerates the supplemental items needed for adjudication.
 
 **Detect pended with `ParsePendedResponse`:**
 
 ```go
 pended, needed, err := shnsdk.ParsePendedResponse(pasRespBytes)
-// pended==true ⇒ Bundle received; needed carries the Task.input items
-// pended==false ⇒ bare ClaimResponse; continue to ParseClaimResponse
+// Check err first: malformed or ambiguous responses are rejected.
+// pended==true ⇒ pending decision; needed carries requested Task.input items
+// pended==false ⇒ continue to ParseClaimResponse with the same response bytes
 ```
 
-`ParsePendedResponse` inspects the response `resourceType`: a `"Bundle"` is pended;
-anything else is passed through to `ParseClaimResponse`. The `needed` slice is typed
-(`[]NeededItem{Code, Display}`) — `Code` reads only `Task.input[].valueString`, and
-`Display` reads only `Task.input[].type.text`; neither looks at `type.coding[].code`.
-What that produces depends on who built the Bundle:
+Both parsers accept a Bundle containing exactly one ClaimResponse, or a bare
+ClaimResponse returned by a payer polling read. Missing or multiple responses and
+malformed entries return errors. `ParseClaimResponse` rejects a pending decision.
 
-- **Relayed verbatim from the real reference payer** (the live network's
-  `conformance-payer`, native-forwarding): the real payer's `G0151` pend Task carries
-  two typed inputs — `payer-url` (a re-query URL) as `valueString`, and
-  `questionnaires-needed` (the still-outstanding questionnaire canonical) as
-  `valueCanonical`, with no `type.text` on either. Only `valueString` items survive this
-  parse, so `needed` comes back as **one item — the payer's own FHIR base URL, with an
-  empty `Display`** — e.g. `Code="http://localhost:8081/fhir" Display=""` against a live
-  captured reference-payer pended Task run through `ParsePendedResponse` directly. The
-  `questionnaires-needed` canonical does not survive this parse.
-- **A hermetic/local mirror** (`internal/brpayermirror`, `cmd/payermirror`) instead emits
-  its own synthetic Task carrying `"pend-resolution-timer"` in *both* `valueString` and
-  `type.text` — so on that lane `needed` is one item, `Code="pend-resolution-timer"
-  Display="pend-resolution-timer"`. That string is a mirror-only label, never something
-  the live reference payer puts on the wire.
+The `needed` slice is typed (`[]NeededItem{Code, Display}`). It includes string-valued
+supplemental requests and the identifier value of PAS `questionnaires-needed`
+inputs. `Display` uses the payer's `type.text`, falling back to the questionnaire
+coding display when present. The Task's `payer-url`
+input is routing information and is excluded. The real reference payer identifies
+its outstanding questionnaire using a `valueIdentifier`; its endpoint uses
+`valueUrl`. No questionnaire content or clinical answer is inferred from either.
+A hermetic/local mirror may instead request its synthetic `pend-resolution-timer`
+item; that label is not a live payer questionnaire identifier.
 
 ### 7b.2 UC-04: exchange-2 ClaimUpdate (amend)
 
@@ -1783,7 +1777,7 @@ The update Bundle payload carries :
   evidence.
 - A **`Provenance`** attributing the DiagnosticReport to its source (the
   payer **rejects** supplemental data without Provenance; `ResumePriorAuth` validates
-  that `supp.ProvenanceAgent` is non-empty before calling any builder, so you meet
+  that `supp.ProvenanceAgent` has a recognized holder/NPI system and nonblank value before calling any builder, so you meet
   that requirement as a named precondition rather than a cryptic three-legs-deep payer rejection).
 
 **One-call path** (`ResumePriorAuth`):
@@ -1800,7 +1794,7 @@ The update Bundle payload carries :
 // is required because FR-32 (SHN's own rule) says supplemental data must carry
 // attribution — not because either payer's verdict reads it.
 supp := shnsdk.SupplementalReport{ReportID: "dr-uc04-operative", CPT: "G0151", Display: "Home health services"}
-supp.ProvenanceAgent = "Organization/acme-7f3a" // required
+supp.ProvenanceAgent = shnsdk.ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "acme-7f3a"} // required
 res, err := id.ResumePriorAuth(ctx, c, ep, payer, resume, supp)
 // res.Outcome == "approved", res.PreAuthRef != "" (shape AUTH-NNNN) — proven against the
 // hermetic in-process mirror; see the proven-scope statement immediately below for the
@@ -1840,7 +1834,7 @@ For a non-Go participant or a Go participant that needs to inspect intermediates
 ```
 # Build the supplemental FHIR resources:
 drJSON   = BuildDiagnosticReport(reportID, patientRef, cptCode, display)
-provJSON = BuildProvenance("DiagnosticReport/"+reportID, provenanceAgent, now)
+provJSON = BuildProvenanceWithIdentifier("DiagnosticReport/"+reportID, provenanceAgent, now)
 
 # Build the update bundle (Claim.related[] → originalCorrelationID):
 updateBundle = BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
@@ -1903,8 +1897,8 @@ silent mis-parse.
 | `pended` | `Bundle` (ClaimResponse + Task) | Task.input enumerates needed items |
 | `denied` | Bare `ClaimResponse` | `outcome=complete` + reviewActionCode `A3` (or the observed reference-payer `A2` denial shape); no `preAuthRef` |
 
-Use `ParsePendedResponse` first (Bundle check), then `ParseClaimResponse` on
-the non-Bundle case — this is the dispatch `parsePASOutcome` implements internally
+Use `ParsePendedResponse` first (decision check), then `ParseClaimResponse` on
+the same bytes when the decision is not pending — this is the dispatch `parsePASOutcome` implements internally
 and `ResumePriorAuth` / `RunPriorAuth` call for you.
 
 ---
