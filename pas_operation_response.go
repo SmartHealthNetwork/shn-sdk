@@ -105,6 +105,7 @@ func buildPASOperationResponse(request, decision []byte, now time.Time) ([]byte,
 			r["patient"] = patient
 			r["insurer"] = insurer
 			r["request"] = map[string]any{"reference": claimURL}
+			echoItemTraceNumbers(claim, r)
 		case "Task":
 			r["for"] = patient
 		}
@@ -136,4 +137,35 @@ func buildPASOperationResponse(request, decision []byte, now time.Time) ([]byte,
 		return nil, pasAssemblyError()
 	}
 	return raw, nil
+}
+
+// echoItemTraceNumbers copies each request item's itemTraceNumber extensions
+// onto the answer item with the same sequence, as PAS payers echo them, so a
+// requester can match the answer to its request lines.
+func echoItemTraceNumbers(claim, response map[string]any) {
+	traces := map[string][]any{}
+	items, _ := claim["item"].([]any)
+	for _, v := range items {
+		it, _ := v.(map[string]any)
+		seq, ok := it["sequence"].(json.Number)
+		if !ok {
+			continue
+		}
+		exts, _ := it["extension"].([]any)
+		for _, e := range exts {
+			if em, _ := e.(map[string]any); em != nil && em["url"] == pasExtItemTraceNumber {
+				traces[seq.String()] = append(traces[seq.String()], em)
+			}
+		}
+	}
+	answered, _ := response["item"].([]any)
+	for _, v := range answered {
+		it, _ := v.(map[string]any)
+		seq, ok := it["itemSequence"].(json.Number)
+		if !ok || len(traces[seq.String()]) == 0 {
+			continue
+		}
+		exts, _ := it["extension"].([]any)
+		it["extension"] = append(append([]any{}, traces[seq.String()]...), exts...)
+	}
 }

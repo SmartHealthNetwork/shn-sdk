@@ -3,6 +3,7 @@ package shnsdk
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2082,4 +2083,352 @@ func TestBuildConformantClaimUpdateBundle_AbsoluteRefs_OutOfBundleRefsUntouched(
 		return
 	}
 	t.Fatal("no Provenance entry found in update bundle")
+}
+
+// The PAS assembler owns order identity, including DeviceRequest context. Other
+// reference members and unrecognized content must survive that identity change.
+func TestQRContextOrderRenamePreservesReferenceMembers(t *testing.T) {
+	for _, kind := range []string{"ServiceRequest", "DeviceRequest"} {
+		t.Run(kind, func(t *testing.T) {
+			raw := []byte(`{"resourceType":"QuestionnaireResponse","extension":[{"url":"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context","valueReference":{"reference":"` + kind + `/source","type":"` + kind + `","display":"Synthetic order","identifier":{"system":"https://example.test/orders","value":"source"},"extension":[{"url":"https://example.test/number","valueDecimal":9007199254740993.2300}]}},{"url":"https://example.test/unknown","valueDecimal":9007199254740993.2300}]}`)
+			out, err := rewriteQRContextRefs(raw, "Coverage/bundle", ""+kind+"/bundle")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var before, after struct{ Extension []map[string]json.RawMessage }
+			_ = json.Unmarshal(raw, &before)
+			_ = json.Unmarshal(out, &after)
+			var oldRef, newRef map[string]json.RawMessage
+			_ = json.Unmarshal(before.Extension[0]["valueReference"], &oldRef)
+			_ = json.Unmarshal(after.Extension[0]["valueReference"], &newRef)
+			if string(newRef["reference"]) != `"`+kind+`/bundle"` {
+				t.Fatalf("reference=%s", newRef["reference"])
+			}
+			for k, v := range oldRef {
+				if k != "reference" && !bytes.Equal(v, newRef[k]) {
+					t.Fatalf("lost reference.%s: %s", k, newRef[k])
+				}
+			}
+			if !bytes.Equal(before.Extension[1]["valueDecimal"], after.Extension[1]["valueDecimal"]) {
+				t.Fatal("unknown numeric content changed")
+			}
+		})
+	}
+}
+
+func TestConformantDeviceRequestContextResolvesToOrder(t *testing.T) {
+	in := conformantSubmitInputs(t)
+	in.SR = []byte(`{"resourceType":"DeviceRequest","id":"actual-order","status":"active","intent":"order","codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E1390"}]},"subject":{"reference":"` + in.PatientRef + `"}}`)
+	var qr map[string]json.RawMessage
+	_ = json.Unmarshal(in.QR, &qr)
+	qr["extension"] = json.RawMessage(`[{"url":"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context","valueReference":{"reference":"DeviceRequest/actual-order"}}]`)
+	in.QR, _ = json.Marshal(qr)
+	out, err := BuildConformantClaimBundle(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b struct {
+		Entry []struct{ Resource json.RawMessage }
+	}
+	_ = json.Unmarshal(out, &b)
+	orderRef, contextRef := "", ""
+	for _, e := range b.Entry {
+		var r struct {
+			ResourceType, ID string
+			Extension        []struct {
+				URL            string
+				ValueReference struct{ Reference string }
+			}
+		}
+		_ = json.Unmarshal(e.Resource, &r)
+		if r.ResourceType == "DeviceRequest" {
+			orderRef = "DeviceRequest/" + r.ID
+		}
+		if r.ResourceType == "QuestionnaireResponse" {
+			for _, ext := range r.Extension {
+				if ext.URL == "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context" {
+					contextRef = ext.ValueReference.Reference
+				}
+			}
+		}
+	}
+	if orderRef == "" || contextRef != orderRef {
+		t.Fatalf("context %q does not resolve to %q", contextRef, orderRef)
+	}
+}
+
+// realPayerPended is the reference payer's pended $submit answer, recorded
+// from the pinned image (a copy of the network's retained fixture).
+func realPayerPended(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile("testdata/brpayer/pas-submit-response-pended.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestParsePendedDetail_NonconformantValueReported: the reference payer's
+// pended Task carries its questionnaire as a valueCanonical (PAS 2.0.1
+// defines a valueIdentifier) and its payer URL as a valueString (the profile
+// defines a valueUrl). Both are reported exactly, never dropped and never
+// converted; the Task's own facts are read as sent.
+func TestParsePendedDetail_NonconformantValueReported(t *testing.T) {
+	raw := realPayerPended(t)
+	before := bytes.Clone(raw)
+	pended, detail, err := ParsePendedResponseDetail(raw)
+	if err != nil || !pended {
+		t.Fatalf("pended=%v err=%v", pended, err)
+	}
+	if !bytes.Equal(raw, before) {
+		t.Fatal("the parser changed its input")
+	}
+	if len(detail.Tasks) != 1 || len(detail.OtherTasks) != 0 {
+		t.Fatalf("tasks=%d other=%d", len(detail.Tasks), len(detail.OtherTasks))
+	}
+	task := detail.Tasks[0]
+	if task.ID != "task-b1fb4ff3" || task.Status != "requested" || task.Code != PASTaskCodeQuestionnaires {
+		t.Errorf("task facts = %q %q %q", task.ID, task.Status, task.Code)
+	}
+	if len(task.Identifiers) != 0 || task.Requester != nil || task.Owner != nil {
+		t.Errorf("identifiers/requester/owner invented: %+v %+v %+v", task.Identifiers, task.Requester, task.Owner)
+	}
+	if task.PayerURL != "" || len(task.Items) != 0 {
+		t.Errorf("a nonconformant value was coerced: payerURL=%q items=%+v", task.PayerURL, task.Items)
+	}
+	want := []NonconformantTaskInput{
+		{Index: 0, Type: "payer-url", ValueType: "valueString", Value: json.RawMessage(`"http://localhost:8081/fhir"`), Text: "http://localhost:8081/fhir"},
+		{Index: 1, Type: "questionnaires-needed", ValueType: "valueCanonical", Value: json.RawMessage(`"http://example.org/fhir/Questionnaire/HomeOxygenDispatch"`), Text: "http://example.org/fhir/Questionnaire/HomeOxygenDispatch"},
+	}
+	if len(task.Nonconformant) != len(want) {
+		t.Fatalf("nonconformant = %+v", task.Nonconformant)
+	}
+	for i, w := range want {
+		g := task.Nonconformant[i]
+		if g.Index != w.Index || g.Type != w.Type || g.ValueType != w.ValueType || !bytes.Equal(g.Value, w.Value) || g.Text != w.Text || g.Sequence != 0 {
+			t.Errorf("nonconformant[%d] = %+v (value %s), want %+v", i, g, g.Value, w)
+		}
+	}
+	if !bytes.Contains(raw, task.Raw) {
+		t.Error("the Task's raw bytes are not the payer's")
+	}
+	// The flattened needed items keep the canonical and skip the payer URL.
+	_, needed, err := ParsePendedResponse(raw)
+	if err != nil || len(needed) != 1 || needed[0].Code != "http://example.org/fhir/Questionnaire/HomeOxygenDispatch" || needed[0].Display != "Questionnaires Needed" {
+		t.Errorf("needed = %+v err=%v", needed, err)
+	}
+}
+
+// TestParsePendedDetail_ReadsEachLine: a built Task is read back at each line
+// with its facts, needs and line numbers, and nothing nonconformant.
+func TestParsePendedDetail_ReadsEachLine(t *testing.T) {
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		in := testPendedInputs(line, "Patient/MBR-1", "corr-detail")
+		in.Task.Items = append(in.Task.Items, questionnaireNeed(line, 2))
+		raw, err := BuildPendedClaimResponseAtLine(line, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pended, detail, err := ParsePendedResponseDetail(raw)
+		if err != nil || !pended || len(detail.Tasks) != 2 {
+			t.Fatalf("%s: pended=%v tasks=%d err=%v", line, pended, len(detail.Tasks), err)
+		}
+		att, q := detail.Tasks[0], detail.Tasks[1]
+		if att.Code != PASTaskCodeAttachments || q.Code != PASTaskCodeQuestionnaires {
+			t.Errorf("%s: codes %q %q", line, att.Code, q.Code)
+		}
+		for _, task := range detail.Tasks {
+			if len(task.Nonconformant) != 0 || task.PayerURL != in.Task.PayerURL || task.Requester == nil || *task.Requester != in.Task.Requester ||
+				len(task.Identifiers) != 1 || task.Identifiers[0] != in.Task.Identifier || task.Status != "requested" {
+				t.Errorf("%s: task read back as %+v", line, task)
+			}
+		}
+		if len(att.Items) != 1 || att.Items[0].Sequence != 1 || len(att.Items[0].AttachmentCodes) != 1 || att.Items[0].AttachmentCodes[0] != testOperativeNote {
+			t.Errorf("%s: attachment items %+v", line, att.Items)
+		}
+		wantQ := questionnaireNeed(line, 2)
+		if len(q.Items) != 1 || q.Items[0].Sequence != 2 || len(q.Items[0].QuestionnaireIDs) != len(wantQ.QuestionnaireIDs) || len(q.Items[0].QuestionnaireContexts) != len(wantQ.QuestionnaireContexts) {
+			t.Errorf("%s: questionnaire items %+v", line, q.Items)
+		}
+	}
+}
+
+// TestForeignTaskPreserved: a Task the payer sent, conformant or not, is read
+// and never rebuilt: each parsed Task's Raw is the payer's exact bytes, the
+// input is unchanged, and the parser adds no fact the Task does not carry.
+func TestForeignTaskPreserved(t *testing.T) {
+	foreign := []byte(`{"resourceType":"Task","id":"t-9","status":"on-hold","intent":"order","code":{"coding":[{"system":"` + PASTempCodesSystem + `","code":"attachment-request-code"}]},` +
+		`"input":[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-paLineNumber","valueInteger":4}],` +
+		`"type":{"coding":[{"system":"` + PASTempCodesSystem + `","code":"attachments-needed"}]},"valueCodeableConcept":{"coding":[{"system":"http://loinc.org","code":"11504-8"}]},"_x":{"y":[1.50,2e3]}},` +
+		`{"type":{"text":"note"},"valueMarkdown":"**send** the op note"}], "unknownMember" : 9007199254740993 }`)
+	bundle := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":` + contentResponse("queued", "", "") + `},{"resource":` + string(foreign) + `}]}`)
+	before := bytes.Clone(bundle)
+	pended, detail, err := ParsePendedResponseDetail(bundle)
+	if err != nil || !pended || len(detail.Tasks) != 1 {
+		t.Fatalf("pended=%v tasks=%d err=%v", pended, len(detail.Tasks), err)
+	}
+	if !bytes.Equal(bundle, before) {
+		t.Fatal("the parser changed its input")
+	}
+	task := detail.Tasks[0]
+	if !bytes.Equal(task.Raw, foreign) {
+		t.Fatalf("Raw is not the payer's Task:\n got %s\nwant %s", task.Raw, foreign)
+	}
+	if task.Status != "on-hold" || len(task.Items) != 1 || task.Items[0].Sequence != 4 || task.PayerURL != "" || len(task.Identifiers) != 0 {
+		t.Errorf("task read as %+v", task)
+	}
+	if len(task.Nonconformant) != 1 || task.Nonconformant[0].Type != "note" || task.Nonconformant[0].ValueType != "valueMarkdown" || task.Nonconformant[0].Text != "**send** the op note" {
+		t.Errorf("nonconformant = %+v", task.Nonconformant)
+	}
+}
+
+// TestCDexHandoffTaskDistinct: the PAS pended Task and the CDex data-request
+// Task are different contracts. The PAS builder never writes the CDex
+// profile or codes; a CDex Task in a pended answer is kept aside
+// (OtherTasks), never read as a PAS need; the CDex parser refuses a PAS Task.
+func TestCDexHandoffTaskDistinct(t *testing.T) {
+	pas, err := BuildPendedTasks("2.0", pastaskInputs("2.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{cdexTaskProfile, cdexTemp, "data-request-query", "data-query"} {
+		if bytes.Contains(pas[0], []byte(s)) {
+			t.Errorf("the PAS Task carries CDex %q: %s", s, pas[0])
+		}
+	}
+	if _, err := ParseCDexTaskDataRequest(pas[0]); err == nil {
+		t.Error("the CDex parser accepted a PAS pended Task")
+	}
+	cdex, err := BuildCDexTaskDataRequest("Patient/MBR-1", "DiagnosticReport", "2026-01-01", "2026-06-30",
+		CDexTaskMeta{AuthoredOn: testNow, Requester: "provider", Owner: "facility"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(cdex, []byte(PASTaskProfile)) || bytes.Contains(cdex, []byte("attachment-request")) {
+		t.Errorf("the CDex Task carries PAS content: %s", cdex)
+	}
+	raw, err := BuildPendedClaimResponseAtLine("2.0", testPendedInputs("2.0", "Patient/MBR-1", "corr-cdex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b map[string]any
+	if err := json.Unmarshal(raw, &b); err != nil {
+		t.Fatal(err)
+	}
+	var cdexRes any
+	if err := json.Unmarshal(cdex, &cdexRes); err != nil {
+		t.Fatal(err)
+	}
+	b["entry"] = append(b["entry"].([]any), map[string]any{"resource": cdexRes})
+	withCDex, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, detail, err := ParsePendedResponseDetail(withCDex)
+	if err != nil || len(detail.Tasks) != 1 || len(detail.OtherTasks) != 1 {
+		t.Fatalf("tasks=%d other=%d err=%v", len(detail.Tasks), len(detail.OtherTasks), err)
+	}
+	if !bytes.Contains(detail.OtherTasks[0], []byte("data-request-query")) {
+		t.Errorf("OtherTasks[0] = %s", detail.OtherTasks[0])
+	}
+	if _, needed, _ := ParsePendedResponse(withCDex); len(needed) != 1 || needed[0].Code != testOperativeNote.Code {
+		t.Errorf("the CDex Task leaked into the needed items: %+v", needed)
+	}
+}
+
+// TestNeededItemsDeprecatedStillPopulated: the deprecated flattened views
+// stay filled for pended answers — ParsePendedResponse's needed items, and
+// PriorAuthResult.NeededItems from the prior-authorization flow — so readers
+// of NeededItems keep working.
+func TestNeededItemsDeprecatedStillPopulated(t *testing.T) {
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		in := testPendedInputs(line, "Patient/MBR-1", "corr-needed")
+		in.Task.Items = append(in.Task.Items, questionnaireNeed(line, 2))
+		raw, err := BuildPendedClaimResponseAtLine(line, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{testOperativeNote.Code, "home-oxygen"}
+		if line != "2.0" {
+			want[1] = "ctx-" + line
+		}
+		for name, get := range map[string]func() ([]NeededItem, error){
+			"ParsePendedResponse": func() ([]NeededItem, error) { _, n, err := ParsePendedResponse(raw); return n, err },
+			"parsePASOutcome": func() ([]NeededItem, error) {
+				r, err := parsePASOutcome(raw)
+				if r.Outcome != "pended" {
+					t.Errorf("%s: outcome %q", line, r.Outcome)
+				}
+				return r.NeededItems, err
+			},
+		} {
+			got, err := get()
+			if err != nil || len(got) != 2 || got[0].Code != want[0] || got[1].Code != want[1] {
+				t.Errorf("%s %s: needed = %+v err=%v, want codes %v", line, name, got, err, want)
+			}
+		}
+	}
+}
+
+// TestSubmitBuilderMintsItemTraceNumbers: the PAS submit and update builders
+// write one item trace number per Claim item at every line — system
+// PASItemTraceSystem, value "<correlation>.<sequence>".
+func TestSubmitBuilderMintsItemTraceNumbers(t *testing.T) {
+	for _, line := range []string{"2.0", "2.1", "2.2"} {
+		sub := conformantSubmitInputs(t)
+		submit, err := BuildConformantClaimBundleAtLine(line, sub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		upd := conformantUpdateInputsFromGolden(t)
+		update, err := BuildConformantClaimUpdateBundleAtLine(line, upd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, c := range map[string]struct {
+			bundle []byte
+			corr   string
+		}{"submit": {submit, sub.Corr}, "update": {update, upd.Corr}} {
+			claim, err := firstBundleResource(c.bundle, "Claim")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cl struct {
+				Item []struct {
+					Sequence  int `json:"sequence"`
+					Extension []struct {
+						URL             string         `json:"url"`
+						ValueIdentifier *PASIdentifier `json:"valueIdentifier"`
+					} `json:"extension"`
+				} `json:"item"`
+			}
+			if err := json.Unmarshal(claim, &cl); err != nil || len(cl.Item) == 0 {
+				t.Fatalf("%s %s: items %v", line, name, err)
+			}
+			for _, it := range cl.Item {
+				var traces []PASIdentifier
+				for _, e := range it.Extension {
+					if e.URL == "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber" {
+						if e.ValueIdentifier == nil {
+							t.Fatalf("%s %s: trace number without valueIdentifier", line, name)
+						}
+						traces = append(traces, *e.ValueIdentifier)
+					}
+				}
+				want := PASIdentifier{System: PASItemTraceSystem, Value: fmt.Sprintf("%s.%d", c.corr, it.Sequence)}
+				if len(traces) != 1 || traces[0] != want {
+					t.Errorf("%s %s item %d: trace numbers %+v, want [%+v]", line, name, it.Sequence, traces, want)
+				}
+			}
+		}
+	}
+	if _, err := stampItemTraceNumbers([]byte(`{"item":[{"sequence":0}]}`), "c"); err == nil {
+		t.Error("an item without a positive sequence was stamped")
+	}
+	if _, err := stampItemTraceNumbers([]byte(`{"item":[]}`), "c"); err == nil {
+		t.Error("a Claim without items was stamped")
+	}
+	if _, err := stampItemTraceNumbers([]byte(`{"item":[{"sequence":1}]}`), ""); err == nil {
+		t.Error("a trace number without a correlation was stamped")
+	}
 }

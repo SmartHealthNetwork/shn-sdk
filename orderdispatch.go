@@ -92,6 +92,11 @@ const conformantOrderDispatchHookInstance = "convergence-order-dispatch-hi-1"
 //   - NO fhirServer field is emitted; br-payer resolves all resources from prefetch alone.
 //   - context.performer exactly matches in.PerformerRef (caller is responsible for
 //     consistency; br-payer silently absorbs a mismatch).
+//
+// Deprecated: use BuildCRDRequest with the order-dispatch hook, which takes the
+// participant's real Patient and its prefetch values exactly as held. This builder
+// still sends an id-only Patient and re-wraps the Coverage; its output is unchanged
+// until it is removed.
 func BuildConformantOrderDispatchRequest(in OrderDispatchInputs) ([]byte, error) {
 	// Build a minimal id-only Patient for the patient prefetch entry. br-payer accepts
 	// an id-only Patient. The id is the BARE member id (no "Patient/" prefix).

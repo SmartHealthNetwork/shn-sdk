@@ -76,6 +76,21 @@ type paFakeSubstrate struct {
 	// ServiceRequest RunPriorAuth built carries the code SYSTEM PriorAuthRequest.
 	// ProcedureSystem was set to (or the CPT backward-compat default).
 	capturedCRDRequest []byte
+
+	// crdAssertionID, when set, makes the CRD leg answer the way a CRD payer
+	// does: the requested order returned in an update system action carrying
+	// coverage information with this assertion id and crdQuestionnaire
+	// (SupportedQuestionnaireCanonical when empty).
+	crdAssertionID   string
+	crdQuestionnaire string
+	// crdAnsweredOrder records the order bytes that answer carried.
+	crdAnsweredOrder []byte
+
+	// capturedRequestOperation records, per request TransactionType, the
+	// frame's operation header ("" when absent or unframed).
+	capturedRequestOperation map[string]string
+	// authorizeCalls counts authorization requests.
+	authorizeCalls int
 }
 
 // responseOpFor mirrors hubsvc.responseOp: the op the response-leg token is pinned
@@ -94,6 +109,7 @@ func (f *paFakeSubstrate) mint(tok Token) Token {
 }
 
 func (f *paFakeSubstrate) authorizeHandler(w http.ResponseWriter, r *http.Request) {
+	f.authorizeCalls++
 	var req AuthorizeRequest
 	body, _ := io.ReadAll(io.LimitReader(r.Body, MaxRequestBytes))
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -124,6 +140,9 @@ func (f *paFakeSubstrate) payloadFor(txType string, reqPlain []byte) []byte {
 	case "crd-order-select":
 		if f.malformCards {
 			return []byte("this is not json cards {{{")
+		}
+		if f.crdAssertionID != "" {
+			return f.crdSystemActionAnswer(reqPlain)
 		}
 		ext := `"covered":"covered","paNeeded":"no-auth"`
 		if f.paRequired {
@@ -156,6 +175,45 @@ func (f *paFakeSubstrate) payloadFor(txType string, reqPlain []byte) []byte {
 	return []byte(`{}`)
 }
 
+// crdSystemActionAnswer answers a CRD request with its first draft order in
+// an update system action (BuildCRDResponse).
+func (f *paFakeSubstrate) crdSystemActionAnswer(reqPlain []byte) []byte {
+	var req struct {
+		Context struct {
+			DraftOrders struct {
+				Entry []struct {
+					Resource json.RawMessage `json:"resource"`
+				} `json:"entry"`
+			} `json:"draftOrders"`
+		} `json:"context"`
+	}
+	if err := json.Unmarshal(reqPlain, &req); err != nil || len(req.Context.DraftOrders.Entry) == 0 {
+		panic("priorauth fake: CRD request has no draft order")
+	}
+	q := f.crdQuestionnaire
+	if q == "" {
+		q = SupportedQuestionnaireCanonical
+	}
+	answer, err := BuildCRDResponse("2.0", CRDResponseInputs{Orders: []CRDOrderCoverage{{
+		Order:       req.Context.DraftOrders.Entry[0].Resource,
+		Description: "coverage information",
+		Coverage: []CoverageInformationInput{{
+			Coverage: "Coverage/cov-1", Covered: "covered", PANeeded: "auth-needed",
+			DocNeeded: []string{"clinical"}, Questionnaires: []string{q},
+			Date: f.now.UTC().Format("2006-01-02"), CoverageAssertionID: f.crdAssertionID,
+		}},
+	}}})
+	if err != nil {
+		panic("priorauth fake: build CRD answer: " + err.Error())
+	}
+	obs, err := ParseCRDResponse(answer)
+	if err != nil || len(obs.Orders) != 1 {
+		panic("priorauth fake: parse own CRD answer")
+	}
+	f.crdAnsweredOrder = append([]byte(nil), obs.Orders[0].Order...)
+	return answer
+}
+
 // routeHandler mimics the Hub+payer for the PA legs: open the request, look up the
 // per-leg response op, build the response payload, seal it back to the requester,
 // and mint a response token bound to the response ciphertext (AI-2).
@@ -186,10 +244,15 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 		if f.capturedRequestClaim == nil {
 			f.capturedRequestClaim = map[string]string{}
 		}
+		if f.capturedRequestOperation == nil {
+			f.capturedRequestOperation = map[string]string{}
+		}
+		f.capturedRequestOperation[txType] = ""
 		if IsFramed(reqPlain) {
 			f.capturedRequestFramed[txType] = true
 			if hdr, unwrapped, ferr := DecodeHTTPFrame(reqPlain); ferr == nil {
 				f.capturedRequestClaim[txType] = hdr.Headers[FrameHeaderContractVersion]
+				f.capturedRequestOperation[txType] = hdr.Headers[FrameHeaderOperation]
 				reqPlain = unwrapped
 			}
 		} else {
@@ -492,7 +555,7 @@ func TestRunPriorAuth_NoPARequired(t *testing.T) {
 }
 
 // TestRunPriorAuth_LegAttributedError proves a leg failure surfaces a leg-attributed
-// error naming the leg + step (e.g. "crd-order-select" / "parse cards"), so a caller
+// error naming the leg + step (e.g. "crd-order-select" / "parse CRD response"), so a caller
 // can tell WHICH leg broke.
 func TestRunPriorAuth_LegAttributedError(t *testing.T) {
 	_, signPriv, _ := ed25519.GenerateKey(rand.Reader)

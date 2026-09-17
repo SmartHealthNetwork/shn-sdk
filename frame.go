@@ -54,6 +54,54 @@ func SupportsRequestFrameV1(frames []string) bool {
 	return false
 }
 
+// RequestFrameV1Op is the capability token a holder advertises in its
+// registry entry (requestFrames) when it accepts a DTR request frame that
+// names its operation in the FrameHeaderOperation header, with the
+// operation's own input as the body. A receiver that does not know that
+// header drops it without error, so a requester sends a framed DTR operation
+// only to a holder that declares this token, and otherwise refuses before
+// sending (ErrFramedDTRUnsupported).
+//
+// Declaring v1op also declares that the holder accepts request frames for
+// dtr-questionnaire-fetch: a requester frames the operation to a v1op peer
+// whether or not the peer also declares RequestFrameV1. Other transaction
+// types are framed only to a peer that declares RequestFrameV1.
+//
+// SupportedRequestFrames does not list it yet: this library can build and
+// serve framed DTR operations, and declares the capability once payer
+// gateways accept them.
+const RequestFrameV1Op = "v1op"
+
+// SupportsRequestFrameV1Op reports whether a holder's advertised request
+// frames include v1op. Absent means the holder does not accept framed DTR
+// operations.
+func SupportsRequestFrameV1Op(frames []string) bool {
+	for _, f := range frames {
+		if f == RequestFrameV1Op {
+			return true
+		}
+	}
+	return false
+}
+
+// FrameHeaderOperation is the request-frame header naming the DTR operation
+// whose input is the frame body: FrameOperationQuestionnairePackage (the
+// body is the $questionnaire-package input Parameters) or
+// FrameOperationNextQuestion (the body is the SDC $next-question input, a
+// Parameters or a bare QuestionnaireResponse). It sits inside the sealed
+// payload, so the Hub never sees it.
+const FrameHeaderOperation = "operation"
+
+// DTR operations named by FrameHeaderOperation.
+const (
+	FrameOperationQuestionnairePackage = "questionnaire-package"
+	FrameOperationNextQuestion         = "next-question"
+)
+
+// ErrFramedDTRUnsupported: the payer has not declared RequestFrameV1Op, so a
+// framed DTR operation is not sent to it.
+var ErrFramedDTRUnsupported = errors.New("payer gateway does not support framed DTR operations (upgrade required)")
+
 const (
 	frameMagic    byte = 0x00 // illegal first byte of every text format we carry (JSON/X12/XML/HL7v2)
 	frameVersion1 byte = 0x01
@@ -80,8 +128,9 @@ const FrameHeaderContractVersion = "contractVersion"
 // allowedFrameHeaders is the produce+consume header allowlist: relaying
 // arbitrary headers through the seal would be a smuggling vector (cookies,
 // hop-by-hop, internal headers). Widening it is a spec change — contractVersion
-// was added with the multi-version contracts design.
-var allowedFrameHeaders = map[string]bool{"Content-Type": true, FrameHeaderContractVersion: true}
+// was added with the multi-version contracts design, and operation with framed
+// DTR operations.
+var allowedFrameHeaders = map[string]bool{"Content-Type": true, FrameHeaderContractVersion: true, FrameHeaderOperation: true}
 
 // IsFramed reports whether payload begins with the v1 frame magic. Bare legacy
 // payloads are all text formats, which cannot begin 0x00 — see the spec's

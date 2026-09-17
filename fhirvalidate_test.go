@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -43,6 +44,143 @@ func TestFakeValidator_RejectsConfiguredResource(t *testing.T) {
 // ---------------------------------------------------------------------------
 // HTTPValidator tests (ported from internal/fhirvalidate/httpvalidator_test.go)
 // ---------------------------------------------------------------------------
+
+func httpValidatorStub(t *testing.T, body string) *shnsdk.HTTPValidator {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return shnsdk.NewHTTPValidator(srv.URL)
+}
+
+func TestHTTPValidatorDecodesWrapperLevelMessage(t *testing.T) {
+	v := httpValidatorStub(t, `{"outcomes":[{"issues":[{"level":"ERROR","message":"Profile X not found","type":"STRUCTURE","line":1}]}]}`)
+	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Valid || len(res.Issues) != 1 || res.Issues[0] != "Profile X not found" {
+		t.Fatalf("want Valid=false with the wrapper message, got %+v", res)
+	}
+	v = httpValidatorStub(t, `{"outcomes":[{"issues":[{"level":"WARNING","message":"unresolved value set"}]}]}`)
+	res, err = v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+	if err != nil || !res.Valid {
+		t.Fatalf("a WARNING-only outcome is valid, got %+v err=%v", res, err)
+	}
+}
+
+func TestHTTPValidatorRejectsUnknownIssueShape(t *testing.T) {
+	for _, body := range []string{
+		`{"outcomes":[{"issues":[{"text":"something","kind":"bad"}]}]}`,
+		`{"outcomes":[{"issues":[{"level":"BOGUS","message":"something"}]}]}`,
+		`{"outcomes":[{"issues":[{"severity":"BOGUS","details":"something"}]}]}`,
+	} {
+		v := httpValidatorStub(t, body)
+		_, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+		if err == nil || !strings.Contains(err.Error(), "unrecognised issue level") {
+			t.Fatalf("body %s: want fail-closed error naming the issue level, got %v", body, err)
+		}
+	}
+}
+
+func TestHTTPValidatorRejectsEmptyOutcomes(t *testing.T) {
+	for _, body := range []string{`{"outcomes":[]}`, `{"outcomes":null}`, `{"sessionId":"x"}`} {
+		v := httpValidatorStub(t, body)
+		_, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+		if err == nil || !strings.Contains(err.Error(), "no outcomes") {
+			t.Fatalf("body %s: want fail-closed error naming empty outcomes, got %v", body, err)
+		}
+	}
+}
+
+func TestHTTPValidatorRejectsFatal(t *testing.T) {
+	v := httpValidatorStub(t, `{"outcomes":[{"issues":[{"level":"FATAL","message":"cannot parse"}]}]}`)
+	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+	if err != nil || res.Valid || len(res.Issues) != 1 {
+		t.Fatalf("FATAL must be a failure verdict: %+v err=%v", res, err)
+	}
+}
+
+func TestHTTPValidatorRejectsMalformedBody(t *testing.T) {
+	for _, body := range []string{`not json`, `[]`, `"a string"`, `{"outcomes":"nope"}`} {
+		v := httpValidatorStub(t, body)
+		_, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+		if err == nil {
+			t.Fatalf("body %s: want a decode error, got nil", body)
+		}
+	}
+}
+
+func TestHTTPValidatorRejectsMalformedOutcomeEntries(t *testing.T) {
+	for _, body := range []string{
+		`{"outcomes":[null]}`,
+		`{"outcomes":[{}]}`,
+		`{"outcomes":[{"issues":null}]}`,
+		`{"outcomes":[{"issues":"nope"}]}`,
+		`{"outcomes":[{"issues":{}}]}`,
+		`{"outcomes":[{"issues":[{"level":"WARNING","message":"ok"}]},null]}`,
+	} {
+		v := httpValidatorStub(t, body)
+		_, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+		if err == nil {
+			t.Fatalf("body %s: want malformed outcome error, got nil", body)
+		}
+	}
+}
+
+func TestHTTPValidatorAcceptsExplicitEmptyIssueArrays(t *testing.T) {
+	for _, body := range []string{
+		`{"outcomes":[{"issues":[],"wire":"wrapper"}]}`,
+		`{"outcomes":[{"issues":[],"wire":"legacy"}]}`,
+	} {
+		v := httpValidatorStub(t, body)
+		res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+		if err != nil || !res.Valid {
+			t.Fatalf("body %s: want explicit empty issues to be valid, got %+v err=%v", body, res, err)
+		}
+	}
+}
+
+func TestHTTPValidatorAcceptsUnknownAdditionalFields(t *testing.T) {
+	for _, body := range []string{
+		`{"outcomes":[{"issues":[{"level":"WARNING","message":"ok","extra":true}],"extra":true}]}`,
+		`{"outcomes":[{"issues":[{"severity":"information","details":"ok","extra":true}],"extra":true}]}`,
+	} {
+		v := httpValidatorStub(t, body)
+		res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+		if err != nil || !res.Valid {
+			t.Fatalf("body %s: want unknown fields accepted, got %+v err=%v", body, res, err)
+		}
+	}
+}
+
+func TestHTTPValidatorAcceptsValidResponseUnderLimit(t *testing.T) {
+	padding := strings.Repeat("x", shnsdk.MaxResponseBytes-128)
+	body := `{"outcomes":[{"issues":[]}],"padding":"` + padding + `"}`
+	if len(body) >= shnsdk.MaxResponseBytes {
+		t.Fatalf("test body must be under response limit: %d >= %d", len(body), shnsdk.MaxResponseBytes)
+	}
+	v := httpValidatorStub(t, body)
+	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+	if err != nil || !res.Valid {
+		t.Fatalf("valid response under limit rejected: %+v err=%v", res, err)
+	}
+}
+
+func TestHTTPValidatorRejectsResponseOverflowIncludingTrailingJSON(t *testing.T) {
+	prefix := `{"outcomes":[{"issues":[]}]}`
+	body := prefix + strings.Repeat(" ", shnsdk.MaxResponseBytes-len(prefix)) + `{}`
+	if len(body) <= shnsdk.MaxResponseBytes {
+		t.Fatalf("test body must exceed response limit: %d <= %d", len(body), shnsdk.MaxResponseBytes)
+	}
+	v := httpValidatorStub(t, body)
+	_, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+	if err == nil {
+		t.Fatal("response exceeding the limit must be rejected, including trailing JSON beyond the limit")
+	}
+}
 
 func TestHTTPValidator_ValidWhenNoErrors(t *testing.T) {
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

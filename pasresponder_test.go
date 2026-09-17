@@ -3,6 +3,7 @@ package shnsdk
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
@@ -39,13 +40,32 @@ func TestBuildClaimResponse_ApprovedRoundTrip(t *testing.T) {
 	}
 }
 
-// TestBuildPendedResponse_RoundTrip: BuildPendedResponse → ParsePendedResponse
-// reads pended=true + the NeededItems.
+// testPendedInputs is a complete pended response at line: one attachment
+// need on request line 1 (a questionnaire need is added at the line's own
+// type by callers that need it).
+func testPendedInputs(line, patientRef, corrID string) PendedResponseInputs {
+	return PendedResponseInputs{
+		Correlation: corrID,
+		Created:     testNow,
+		Task: PendedTaskInputs{
+			Identifier: PASIdentifier{System: "urn:test:payer:pa-request", Value: "req-" + corrID},
+			Status:     "requested",
+			Patient:    patientRef,
+			Claim:      "https://provider.test/fhir/Claim/claim-1",
+			Requester:  testPayerIdentifier,
+			Owner:      testPayerIdentifier,
+			PayerURL:   "https://payer.test/fhir",
+			Items:      []PendedItem{{Sequence: 1, AttachmentCodes: []PASCoding{testOperativeNote}}},
+		},
+	}
+}
+
+// TestBuildPendedResponse_RoundTrip: BuildPendedClaimResponseAtLine →
+// ParsePendedResponse reads pended=true and the needed attachment.
 func TestBuildPendedResponse_RoundTrip(t *testing.T) {
-	needed := []string{"operative-diagnostic-report"}
-	resp, err := BuildPendedResponse("Patient/MBR-UC04", "corr-pend-1", needed, testNow)
+	resp, err := BuildPendedClaimResponseAtLine("2.0", testPendedInputs("2.0", "Patient/MBR-UC04", "corr-pend-1"))
 	if err != nil {
-		t.Fatalf("BuildPendedResponse: %v", err)
+		t.Fatalf("BuildPendedClaimResponseAtLine: %v", err)
 	}
 	pended, items, err := ParsePendedResponse(resp)
 	if err != nil {
@@ -54,8 +74,8 @@ func TestBuildPendedResponse_RoundTrip(t *testing.T) {
 	if !pended {
 		t.Fatal("pended = false, want true")
 	}
-	if len(items) != 1 || items[0].Code != "operative-diagnostic-report" {
-		t.Errorf("NeededItems = %v, want [{Code:operative-diagnostic-report}]", items)
+	if len(items) != 1 || items[0].Code != testOperativeNote.Code || items[0].Display != testOperativeNote.Display {
+		t.Errorf("NeededItems = %v, want [{Code:%s}]", items, testOperativeNote.Code)
 	}
 	if got := pendedBundleTimestamp(t, resp); got != testNow.UTC().Format(time.RFC3339) {
 		t.Errorf("Bundle.timestamp = %q, want %q (PAS SD min=1 since PAS 2.0.1)", got, testNow.UTC().Format(time.RFC3339))
@@ -136,30 +156,26 @@ func TestBuildDeniedResponseAtLine_RegressionFenceAndRejection(t *testing.T) {
 	}
 }
 
-// TestBuildPendedResponseAtLine_RegressionFenceAndRejection mirrors the
-// ClaimResponse case for BuildPendedResponse.
+// TestBuildPendedResponseAtLine_RegressionFenceAndRejection: the deprecated
+// pended builders refuse (their signature cannot carry the Task facts), an
+// unknown line errors, and Bundle.timestamp is set at every line.
 func TestBuildPendedResponseAtLine_RegressionFenceAndRejection(t *testing.T) {
 	needed := []string{"operative-diagnostic-report"}
-	legacy, err := BuildPendedResponse("Patient/MBR-UC04", "corr-pend-atline", needed, testNow)
-	if err != nil {
-		t.Fatalf("BuildPendedResponse: %v", err)
+	if _, err := BuildPendedResponse("Patient/MBR-UC04", "corr-pend-atline", needed, testNow); !errors.Is(err, ErrPendedResponseNeedsTaskFacts) {
+		t.Fatalf("BuildPendedResponse error = %v, want ErrPendedResponseNeedsTaskFacts", err)
 	}
-	atLine, err := BuildPendedResponseAtLine("2.0", "Patient/MBR-UC04", "corr-pend-atline", needed, testNow)
-	if err != nil {
-		t.Fatalf("BuildPendedResponseAtLine(2.0): %v", err)
+	if _, err := BuildPendedResponseAtLine("2.0", "Patient/MBR-UC04", "corr-pend-atline", needed, testNow); !errors.Is(err, ErrPendedResponseNeedsTaskFacts) {
+		t.Fatalf("BuildPendedResponseAtLine error = %v, want ErrPendedResponseNeedsTaskFacts", err)
 	}
-	if !bytes.Equal(legacy, atLine) {
-		t.Fatalf("BuildPendedResponse != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
-	}
-	if _, err := BuildPendedResponseAtLine("9.9", "Patient/MBR-UC04", "corr-pend-atline", needed, testNow); err == nil {
-		t.Fatal("BuildPendedResponseAtLine(\"9.9\") = nil error, want an error")
+	if _, err := BuildPendedClaimResponseAtLine("9.9", testPendedInputs("2.0", "Patient/MBR-UC04", "corr-pend-atline")); err == nil {
+		t.Fatal("BuildPendedClaimResponseAtLine(\"9.9\") = nil error, want an error")
 	}
 	// Bundle.timestamp: the PAS StructureDefinition sets min=1 on
 	// Bundle.timestamp at every line (2.0.1/2.1.0/2.2.1) — assert it at each.
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
-		got, err := BuildPendedResponseAtLine(line, "Patient/MBR-UC04", "corr-pend-atline-ts", needed, testNow)
+		got, err := BuildPendedClaimResponseAtLine(line, testPendedInputs(line, "Patient/MBR-UC04", "corr-pend-atline-ts"))
 		if err != nil {
-			t.Fatalf("BuildPendedResponseAtLine(%s): %v", line, err)
+			t.Fatalf("BuildPendedClaimResponseAtLine(%s): %v", line, err)
 		}
 		if ts := pendedBundleTimestamp(t, got); ts != testNow.UTC().Format(time.RFC3339) {
 			t.Errorf("line %s: Bundle.timestamp = %q, want %q", line, ts, testNow.UTC().Format(time.RFC3339))
@@ -205,13 +221,12 @@ func pendedBundleIdentifier(t *testing.T, pendedJSON []byte) *struct {
 // PAS package differential). 2.0/2.1 carry NO Bundle.identifier (regression fence);
 // 2.2 carries it, set to the PAS bundle identifier system + the correlation id.
 func TestBuildPendedResponseAtLine_BundleIdentifierByLine(t *testing.T) {
-	needed := []string{"operative-diagnostic-report"}
 	const corrID = "corr-pend-ident"
 	for _, tc := range []struct {
 		line     string
 		wantsIdn bool
 	}{{"2.0", false}, {"2.1", false}, {"2.2", true}} {
-		got, err := BuildPendedResponseAtLine(tc.line, "Patient/MBR-UC04", corrID, needed, testNow)
+		got, err := BuildPendedClaimResponseAtLine(tc.line, testPendedInputs(tc.line, "Patient/MBR-UC04", corrID))
 		if err != nil {
 			t.Fatalf("BuildPendedResponseAtLine(%s): %v", tc.line, err)
 		}
@@ -276,7 +291,7 @@ func TestClaimResponseRequestByLine(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildDeniedResponseAtLine(%s): %v", tc.line, err)
 		}
-		pended, err := BuildPendedResponseAtLine(tc.line, "Patient/MBR-UC04", corrID, []string{"operative-diagnostic-report"}, testNow)
+		pended, err := BuildPendedClaimResponseAtLine(tc.line, testPendedInputs(tc.line, "Patient/MBR-UC04", corrID))
 		if err != nil {
 			t.Fatalf("BuildPendedResponseAtLine(%s): %v", tc.line, err)
 		}
@@ -327,7 +342,7 @@ func TestBuildPendedResponseAtLine_OutcomeByLine(t *testing.T) {
 	for _, tc := range []struct {
 		line, want string
 	}{{"2.0", "queued"}, {"2.1", "queued"}, {"2.2", "complete"}} {
-		got, err := BuildPendedResponseAtLine(tc.line, "Patient/MBR-UC04", "corr-pend-outcome", []string{"operative-diagnostic-report"}, testNow)
+		got, err := BuildPendedClaimResponseAtLine(tc.line, testPendedInputs(tc.line, "Patient/MBR-UC04", "corr-pend-outcome"))
 		if err != nil {
 			t.Fatalf("BuildPendedResponseAtLine(%s): %v", tc.line, err)
 		}
@@ -361,7 +376,7 @@ func TestBuildPendedResponseAtLine_OutcomeByLine(t *testing.T) {
 func TestPendedBuilderDecisionSurvivesTaskRemoval(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
-			raw, err := BuildPendedResponseAtLine(line, "Patient/member", "pending-content", []string{"report"}, testNow)
+			raw, err := BuildPendedClaimResponseAtLine(line, testPendedInputs(line, "Patient/member", "pending-content"))
 			if err != nil {
 				t.Fatal(err)
 			}

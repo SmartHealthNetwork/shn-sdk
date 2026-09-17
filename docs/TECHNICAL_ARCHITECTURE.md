@@ -382,8 +382,8 @@ and the implemented domain is **prior authorization**, end to end:
      claim-update on the same rails for re-adjudication. The payer's pended-claim ledger uses
      an atomic test-and-set so concurrent or replayed updates can't double-process.
    - **Denied** — a `ClaimResponse` carrying the machine-readable review action and denial
-     code, appeal rights in process notes, and a corresponding `ExplanationOfBenefit` recorded
-     payer-side for the patient to read.
+     code, the payer's own rationale and any appeal rights it supplies (in process notes), and
+     a corresponding `ExplanationOfBenefit` recorded payer-side for the patient to read.
 5. **Federated query.** When required evidence lives at a *third* organization, the provider
    issues a narrow, consent-gated query routed through the Hub to the facility. It rides as a
    Da Vinci CDex data-request `Task` (named patient, named resource type, bounded scope — no

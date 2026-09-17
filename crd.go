@@ -143,6 +143,11 @@ const (
 // the gateway's conformantCRDBind accepts this shape and a real br-payer adjudicates it. Deterministic
 // (no time/random). The SR keeps its US Core meta.profile (US Core resolves clean
 // against the US-Core-only validator).
+//
+// Deprecated: use BuildCRDRequest, which takes the participant's real Patient,
+// the hook the workflow fires, and the Coverage prefetch as the caller holds it,
+// and sends no fhirServer. This builder still sends an id-only Patient and a
+// placeholder fhirServer; its output is unchanged until it is removed.
 func BuildConformantOrderSelectRequest(serviceRequestJSON, coverageJSON []byte, patientID string) ([]byte, error) {
 	// Inject the local order id into the order (the minimized BuildServiceRequest emits no
 	// id; the conformant Bundle entry needs a stable id to wrap+select).
@@ -313,6 +318,11 @@ func ParseOrderSelectRequest(data []byte) (OrderSelectRequest, error) {
 //
 // Thin delegate to BuildCardsAtLine("2.0", …), matching the AtLine convention Tasks 3/4
 // established for the PAS/DTR builders.
+//
+// Deprecated: use BuildCRDResponse. CRD carries coverage information as an update
+// system action on the order, not in a card; this builder's card-extension output
+// is not a conformant CRD response at any line. Its output is unchanged in this
+// release and becomes the BuildCRDResponse shape in a later one.
 func BuildCards(cov CardCoverage) ([]byte, error) {
 	return BuildCardsAtLine("2.0", cov)
 }
@@ -339,6 +349,8 @@ func BuildCards(cov CardCoverage) ([]byte, error) {
 // today — the line parameter exists for fail-closed validation and API symmetry with
 // the other AtLine builders, and is the growth point a future CRD line's genuine delta
 // would extend (see CRDDef in linedef.go).
+//
+// Deprecated: use BuildCRDResponse (see BuildCards).
 func BuildCardsAtLine(line string, cov CardCoverage) ([]byte, error) {
 	if _, ok := CRDLineDef(line); !ok {
 		return nil, fmt.Errorf("shnsdk: BuildCardsAtLine: unknown CRD line %q", line)
@@ -355,18 +367,38 @@ func BuildCardsAtLine(line string, cov CardCoverage) ([]byte, error) {
 	return json.Marshal(cardsResponse{Cards: []card{c}})
 }
 
-// ParseCards parses the CRD cards response, returning the first card's coverage
-// projection (the substrate emits exactly one card). It errors if the response carries
-// zero cards. Reimplements internal/crd.ParseCards standalone.
+// ParseCards returns the coverage projection of a CRD response. When the first
+// card carries the card extension object BuildCards writes, that object is
+// returned exactly as before. Otherwise the first coverage information the
+// response carries (ParseCRDResponse, then CRDObservation.Primary) is returned.
+// A response with no card and no coverage information is an error; a card
+// without either still yields the empty projection, as it always did.
+//
+// Deprecated: use ParseCRDResponse, which returns every order and every
+// coverage-information value, exactly as sent.
 func ParseCards(data []byte) (CardCoverage, error) {
 	var resp cardsResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return CardCoverage{}, err
 	}
+	var present struct {
+		Cards []struct {
+			Extension json.RawMessage `json:"extension"`
+		} `json:"cards"`
+	}
+	_ = json.Unmarshal(data, &present) // the decode above already succeeded
+	if len(resp.Cards) > 0 && present.Cards[0].Extension != nil {
+		return resp.Cards[0].Extension, nil
+	}
+	if obs, err := ParseCRDResponse(data); err == nil {
+		if cov, ok := obs.Primary(); ok {
+			return cov, nil
+		}
+	}
 	if len(resp.Cards) == 0 {
 		return CardCoverage{}, fmt.Errorf("shnsdk: CardsResponse must contain at least one card")
 	}
-	return resp.Cards[0].Extension, nil
+	return CardCoverage{}, nil
 }
 
 // StripCanonicalVersion drops a trailing |version from a FHIR canonical URL, leaving the

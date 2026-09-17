@@ -7,6 +7,7 @@ package shnsdk
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -264,59 +265,96 @@ func parseNarrowQuery(raw, forRef string) (CDexQuery, error) {
 	return CDexQuery{ResourceType: rtype, PatientRef: forRef, Start: start, End: end}, nil
 }
 
-// BuildCDexQueryResult builds the CDex completed-Task response by TRANSITIONING the request Task:
-// it echoes the request (code/for/authoredOn/requester/owner/input — all required by
-// cdex-task-data-request), flips status to "completed", and adds Task.output referencing a CONTAINED
-// US-Core searchset Bundle (CDex Task-Based synchronous fulfillment; cf. CDex example
-// Task-cdex-task-example3 = completed + input + output + contained). The inner bundle is
-// BuildRecordsBundle's output (KEPT — shared US-Core assembler). Echoing the request (vs building a
-// fresh Task) keeps the response a valid cdex-task-data-request (input min=1 retained) and inherits
-// the honest requester/owner/authoredOn from the request. SHN's request/response leg model sends a
-// distinct completed Task (substrate-id-correlated) rather than PUTting one Task back in place — a
-// documented single-Task-lifecycle simplification (the synchronous output wrapper is conformant; an
-// async poll/subscribe Task-status lifecycle is an additive follow-on).
-// NOTE: the inner bundle is parsed as map[string]any to set its id, so the contained resources'
-// JSON key order is NOT preserved — callers must not rely on byte identity of the disclosed records.
-func BuildCDexQueryResult(requestTaskJSON, searchsetBundle []byte) ([]byte, error) {
-	var task map[string]any
-	if err := json.Unmarshal(requestTaskJSON, &task); err != nil {
-		return nil, fmt.Errorf("cdex: parse request task: %w", err)
-	}
-	if rt, _ := task["resourceType"].(string); rt != "Task" {
-		return nil, fmt.Errorf("cdex: request is not a Task (got %q)", rt)
-	}
-	var inner map[string]any
-	if err := json.Unmarshal(searchsetBundle, &inner); err != nil {
-		return nil, fmt.Errorf("cdex: parse inner bundle: %w", err)
-	}
-	inner["id"] = "results"
-	task["status"] = "completed"
-	task["contained"] = []any{inner}
-	task["output"] = []any{map[string]any{
-		"type":           map[string]any{"coding": []any{map[string]any{"system": hrexTemp, "code": "data-query"}}},
-		"valueReference": map[string]any{"reference": "#results"},
-	}}
-	return json.Marshal(task)
+// ErrCDexSignedContent reports a fulfillment refused because it would extend
+// signed content: the request Task carries a Signature element, a signed
+// Provenance among the supplied documents targets the Task, or a signed
+// records Bundle would need its id written.
+var ErrCDexSignedContent = errors.New("cdex: signed content cannot be extended")
+
+// ErrCDexTaskStatus reports a request Task whose status does not allow
+// fulfillment. Only requested, received, accepted and in-progress Tasks can
+// be fulfilled.
+var ErrCDexTaskStatus = errors.New("cdex: the request Task's status does not allow fulfillment")
+
+// CDexFulfillment is a completed CDex data request built by
+// BuildCDexFulfillment.
+type CDexFulfillment struct {
+	// Task is the fulfilled Task: the request Task's own bytes with status
+	// "completed", the records Bundle appended to contained, and one
+	// data-query output referencing it.
+	Task []byte
+	// ResultsID is the contained id of the records Bundle; the added output
+	// references "#" + ResultsID.
+	ResultsID string
+	// Copied lists the parts of Task copied unchanged from the inputs, each
+	// one whole JSON value in its source and in Task.
+	Copied []CDexCopiedSpan
 }
 
-// ExtractCDexEvidence pulls the DiagnosticReport + Provenance out of a CDex completed-Task
-// response (Task.contained[] searchset). Supersedes the removed ExtractOperativeEvidence.
-// Returns the first contained Bundle — BuildCDexQueryResult's
-// synchronous fulfillment produces exactly one.
+// CDexCopiedSpan says that Task[At:At+(End-Start)] is a copy of the source
+// bytes [Start, End): the records Bundle when FromRecords is set, otherwise
+// the request Task.
+type CDexCopiedSpan struct {
+	FromRecords bool
+	Start, End  int
+	At          int
+}
+
+// BuildCDexQueryResult fulfills a CDex data request synchronously: it
+// returns the payer's request Task, byte for byte, with exactly three
+// changes, and the facility's records Bundle embedded as the facility wrote
+// it. See BuildCDexFulfillment for the rules; this returns only the Task.
+func BuildCDexQueryResult(requestTaskJSON, searchsetBundle []byte) ([]byte, error) {
+	f, err := BuildCDexFulfillment(requestTaskJSON, searchsetBundle)
+	if err != nil {
+		return nil, err
+	}
+	return f.Task, nil
+}
+
+// BuildCDexFulfillment fulfills a CDex data request synchronously (CDex
+// Task-based fulfillment with a contained result, as in the CDex example
+// Task with status completed, input, output and contained). It extends the
+// payer's request Task instead of rebuilding it, so everything the payer
+// sent (its layout, member order, number lexemes, escapes, unknown elements,
+// existing contained resources and outputs) is kept. The changes are:
+//
+//   - status becomes "completed";
+//   - the records Bundle is appended to contained (created when absent);
+//   - one output is appended to output (created when absent): a data-query
+//     output whose valueReference is "#" + the Bundle's contained id.
+//
+// The records Bundle is embedded as the facility's exact bytes. Its contained
+// id is its own id when that id is present and free; otherwise "results", or
+// "results-<n>" for the smallest free n, is written into it (appended as its
+// last member, or in place of a colliding id). An id is free when no
+// contained resource of the Task has it and no local reference in the Task
+// ("#id") names it. Appended elements and members follow the layout of the
+// array or object they join.
+//
+// Refusals (an error, never a modified Task):
+//   - the request is not one well-formed Task, or the records are not one
+//     well-formed Bundle (both are scanned strictly: a repeated member name at
+//     any depth, compared after unescaping and ignoring case, is refused);
+//   - the Task's status is not requested, received, accepted or in-progress
+//     (ErrCDexTaskStatus);
+//   - the Task carries a Signature element anywhere, or a signed Provenance
+//     in the Task or in the records targets the Task (ErrCDexSignedContent);
+//   - the records Bundle carries an empty or non-string id;
+//   - the records Bundle would need its id written although a signature
+//     covers it (ErrCDexSignedContent).
+func BuildCDexFulfillment(requestTaskJSON, recordsBundle []byte) (CDexFulfillment, error) {
+	return buildCDexFulfillment(requestTaskJSON, recordsBundle)
+}
+
+// ExtractCDexEvidence pulls the DiagnosticReport and Provenance out of a
+// fulfilled CDex Task. It follows the Task's last data-query output (the
+// one a fulfillment appends) through its valueReference to the contained
+// Bundle with that id, and returns those resources' bytes as they appear in
+// the Task. A Task whose last data-query output does not reference exactly
+// one contained resource, a Bundle, has no evidence, whatever else it
+// contains. The Task is
+// scanned strictly first (see BuildCDexFulfillment).
 func ExtractCDexEvidence(taskJSON []byte) (drJSON, provJSON []byte, err error) {
-	var task struct {
-		Contained []json.RawMessage `json:"contained"`
-	}
-	if e := json.Unmarshal(taskJSON, &task); e != nil {
-		return nil, nil, fmt.Errorf("cdex: parse task: %w", e)
-	}
-	for _, c := range task.Contained {
-		var rt struct {
-			ResourceType string `json:"resourceType"`
-		}
-		if json.Unmarshal(c, &rt) == nil && rt.ResourceType == "Bundle" {
-			return extractEvidenceFromBundle(c) // shared helper in fedquery.go
-		}
-	}
-	return nil, nil, fmt.Errorf("cdex: completed Task has no contained searchset Bundle")
+	return extractCDexEvidence(taskJSON)
 }

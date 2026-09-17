@@ -1287,8 +1287,10 @@ rest          body        raw bytes — no additional encoding
 - `status` — the application's real HTTP status, `100`–`599`. Both 2xx and
   non-2xx answers are framed identically; there is no separate error shape.
 - `headers` — an **allowlist**, widened 2026-08-11 (multi-version-contracts
-  design §4, routing) to `Content-Type` and `contractVersion`. No other header
-  (hop-by-hop, cookie, or otherwise) is ever carried inside a frame.
+  design §4, routing) to `Content-Type` and `contractVersion`, and widened
+  again for framed DTR operations to `operation` (request frames only, below).
+  No other header (hop-by-hop, cookie, or otherwise) is ever carried inside a
+  frame.
 - `contractVersion` — the full `<contract>@<line>` token (e.g. `pa.pas@2.0`) of
   the exchange-contract line the response body was **built at** — content-
   descriptive, like `Content-Type`, not a negotiation echo. Present only on
@@ -1313,9 +1315,13 @@ unknown version byte, a header length that overruns the payload or the 64 KiB
 cap, a non-JSON or malformed header, or an out-of-range `status`. Each of these
 is a distinct, typed decode failure. A header field outside the allowlist is
 **not** a reject: the reference decoder silently drops it and returns success
-(SHN gateways only ever emit the two allowlisted headers, `Content-Type` and,
-on contract-mapped legs, `contractVersion` (§8.6), so this rarely fires in
-practice).
+(SHN gateways only ever emit the allowlisted headers, `Content-Type`, on
+contract-mapped legs `contractVersion` (§8.6), and on a framed DTR operation
+`operation`, so this rarely fires in practice). Because an unknown header is
+dropped rather than refused, a receiver built before a header was allowlisted
+never sees it: a new header that changes how the body is read is therefore
+sent only to a receiver that declares the matching capability (see
+`v1op` below).
 
 **Mechanical vs. application status — the rule that replaced
 `RESPONDER_RELAY_ERRORS`.** A responder returns a non-2xx status **to the Hub**
@@ -1372,6 +1378,49 @@ directions negotiate, and can be rolled out, independently:
 - `coverage-eligibility` is version-neutral (no contract-version token exists
   for it, §8.6) and is therefore never framed, regardless of what either side
   declares.
+
+**Framed DTR operations (`operation`, capability `v1op`).** A
+`dtr-questionnaire-fetch` request frame may name the Da Vinci DTR operation
+whose own input is the frame body:
+
+| `operation` | Body |
+|---|---|
+| `questionnaire-package` | the `$questionnaire-package` input `Parameters` (profile `dtr-qpackage-input-parameters`), exactly as the requester built or received it: every `coverage`, `order`, `questionnaire` canonical (a `\|version` kept), `context` and other parameter |
+| `next-question` | the SDC `$next-question` input: a `Parameters` with one `questionnaire-response` parameter, or a bare `QuestionnaireResponse` |
+
+- **Capability.** A holder that accepts framed DTR operations declares the
+  token `"v1op"` in its `requestFrames` list (it satisfies the registrar's
+  `^[a-z0-9]{1,16}$` token rule). `"v1op"` is separate from `"v1"`: a holder
+  that declares only `"v1"` accepts request frames but not the `operation`
+  header. Declaring `"v1op"` also declares that the holder accepts request
+  frames for `dtr-questionnaire-fetch`: a requester frames the operation to a
+  `"v1op"` peer whether or not that peer also lists `"v1"`. The other
+  transaction types are framed only to a peer that lists `"v1"`.
+- **Refuse unless declared.** A receiver that does not know the `operation`
+  header drops it silently (above) and would read the body as the older
+  questionnaire request. A requester therefore sends a framed DTR operation
+  **only** to a recipient whose registry entry declares `"v1op"`, and
+  otherwise refuses before sending:
+  `payer gateway does not support framed DTR operations (upgrade required)`
+  (this SDK: `ErrFramedDTRUnsupported`). The frame also carries
+  `contractVersion` as usual.
+- **Receiver obligation.** A holder that declares `"v1op"` dispatches a
+  `dtr-questionnaire-fetch` request on its `operation` header and still
+  accepts the older questionnaire request (a JSON object with `canonical`
+  and optional `coverage`), framed without `operation` or bare, from
+  requesters that do not send the framed operation. The `operation` header
+  on any other transaction type is refused with `400`.
+- **This SDK.** `BuildQuestionnairePackageParameters(line, …)` builds the
+  `questionnaire-package` input with every resource embedded as your own
+  bytes; `RunPriorAuth` sends it as a framed operation when the payer
+  declares `"v1op"` (carrying the payer's updated order and its
+  `coverage-assertion-id` as `context`) and the older request otherwise. The
+  SDK `Responder` serves both operations and the older request; `next-question`
+  is served when your `Adjudicator` implements `NextQuestionAdjudicator`, and
+  refused with `422` otherwise. `SupportedRequestFrames()` does not list
+  `"v1op"` yet: registrations declare it once payer gateways accept framed
+  DTR operations (Smart Gateway v0.44.0). An older payer gateway does not
+  serve them, so never declare `"v1op"` by hand for a payer that cannot.
 
 The Smart Gateway additionally *honors* a well-formed claim it can both
 natively build and validate for (native ∩ laned);
@@ -1608,16 +1657,16 @@ request leg and `payer-coverage` on the response leg.
 
 | Leg | `transactionType` | Request `operation` | Response `operation` | What it does |
 |---|---|---|---|---|
-| **CRD** | `crd-order-select` | `crd-order-select` | `crd-cards` | Provider proposes the order (ServiceRequest + Coverage); payer returns CDS cards. If **no PA is required** the round-trip is **terminal here** — DTR/PAS never run. |
-| **DTR** | `dtr-questionnaire-fetch` | `dtr-questionnaire-fetch` | `dtr-questionnaire` | Provider fetches the questionnaire the CRD card advertised (by canonical URL); the response is a Da Vinci `$questionnaire-package` collection Bundle (the questionnaire plus its dependent Libraries/ValueSets) — extract the Questionnaire, then fill it **locally** from its own clinical data. |
+| **CRD** | `crd-order-select` | `crd-order-select` | `crd-cards` | Provider proposes the order (ServiceRequest + Coverage); payer returns a CDS Hooks response. Da Vinci CRD carries the coverage information as an `update` system action on the order (cards are for text a person reads). If **no PA is required** the round-trip is **terminal here** — DTR/PAS never run. |
+| **DTR** | `dtr-questionnaire-fetch` | `dtr-questionnaire-fetch` | `dtr-questionnaire` | Provider fetches the questionnaire the CRD coverage information advertised (by canonical URL); the response is a Da Vinci `$questionnaire-package` collection Bundle (the questionnaire plus its dependent Libraries/ValueSets) — extract the Questionnaire, then fill it **locally** from its own clinical data. |
 | **PAS** | `pas-claim` | `pas-submit` | `pas-response` | Provider submits the Claim bundle (the filled QuestionnaireResponse + ServiceRequest); payer adjudicates and returns a ClaimResponse. |
 
 Two guards a conformant client MUST honour:
 
-- **No-PA short-circuit.** If the CRD cards say PA is not required, return
+- **No-PA short-circuit.** If the CRD coverage information says PA is not required, return
   `no-pa-required` and stop. Do not run DTR/PAS.
 - **Canonical-substitution guard.** The questionnaire fetched in the DTR leg MUST be
-  the exact canonical the CRD card advertised; reject the exchange if the payer
+  the exact canonical the CRD coverage information advertised; reject the exchange if the payer
   returns a different questionnaire.
 
 Profiles per leg are in §8.2; the operation/frame rows are the CRD/DTR/PAS entries in
@@ -1689,14 +1738,19 @@ covJSON = BuildCoverage("Patient/MBR-D-UC04", "MBR-D-UC04")   # 2nd arg = the BA
                                                                 #  refused
 
 # LEG 1 — CRD
-crdReq            = BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-D-UC04")
+crdReq            = BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-D-UC04")   # deprecated: see BuildCRDRequest below
 crdResp           ← route(crd-order-select / crd-order-select → crd-cards, crdReq)
-cov               = ParseCards(crdResp)          # cov: CardCoverage. !cov.PARequired() ⇒ no-pa STOP; cov.Covered=="not-covered" ⇒ STOP
+obs               = ParseCRDResponse(crdResp)    # every order the payer returned, every coverage-information value, exactly as sent
+cov, ok           = obs.Primary()                # cov: CardCoverage. !ok ⇒ no coverage information; !cov.PARequired() ⇒ no-pa STOP; cov.Covered=="not-covered" ⇒ STOP
 canon             = cov.Questionnaires[0]        # DTR canonical (present when cov.NeedsDTR())
 
 # LEG 2 — DTR
-dtrReq   = BuildQuestionnaireFetch(canon)
-dtrResp  ← route(dtr-questionnaire-fetch / dtr-questionnaire-fetch → dtr-questionnaire, dtrReq)
+dtrReq   = BuildQuestionnairePackageParameters("2.0", {Coverages: [covJSON], Orders: [obs.Orders[0].Order],
+                                                      Questionnaires: [cov.Questionnaires[0]],   # |version kept
+                                                      Context: <the payer's coverage-assertion-id>})
+dtrResp  ← route(dtr-questionnaire-fetch / dtr-questionnaire-fetch → dtr-questionnaire,
+                 frame(operation=questionnaire-package, dtrReq.Body))   # ONLY if the payer declares requestFrames "v1op" (§6.3)
+         # a payer without "v1op": dtrReq = BuildQuestionnaireFetch(canon) (the deprecated older request), sent with no operation header
 qJSON    = ExtractQuestionnaireFromPackage(dtrResp)  # DTR-fetch returns a $questionnaire-package Bundle
 url      = ParseQuestionnaireURL(qJSON)          # MUST equal canon (canonical-substitution guard)
 qrJSON   = FillQuestionnaire(qJSON, clinical, qrContext)     # ONLY valid when url == SupportedQuestionnaireCanonical;
@@ -1713,6 +1767,28 @@ Each `route(...)` is the §7 originate sequence with that leg's `transactionType
 request `operation` / response `operation`; the `payloadHash`-bound token is minted per
 leg. `PreAuthRef` on an approved outcome is the reference payer's own authorization
 number, shape `AUTH-NNNN`.
+
+**CRD request and response builders.** `BuildCRDRequest(CRDRequestInputs{…})` builds
+the CRD request from your own records: the hook your workflow fires (`order-select`,
+`order-sign` or `order-dispatch`) and that hook's context, your `Patient` (required),
+and your Coverage search result for the patient (a `searchset` Bundle, or `null` when
+you hold none). Every resource travels as your exact bytes, and the request names no
+`fhirServer` and no `fhirAuthorization`. CRD 2.2.1's request model marks both `1..1`;
+the network omits them by design: the payer answers from the context and prefetch, and
+the network never hands a payer a route into the provider's system. For an order type
+whose patient element is `patient` (`NutritionOrder`, `VisionPrescription`) that element
+names your `Patient`. It replaces the deprecated
+`BuildConformantOrderSelectRequest` / `BuildConformantOrderDispatchRequest`, which still
+send an id-only Patient. A payer participant answers with `BuildCRDResponse(line, …)`:
+the order returned in an `update` system action carrying the coverage-information
+extension (with the payer's own `coverage-assertion-id`), and `cards: []` unless it
+supplies cards for a person to read, each with a `source.label` and `source.topic`.
+`CheckCDSHooksResponse(body, line)` certifies any CDS Hooks response against the CDS
+Hooks 2.0 response rules and the CRD card rules for the line, and lists every
+violation; `CDSHooksRules()` is its rule table with the specification text each rule
+enforces. Payer gateways relay the requested hook and a Coverage search result as sent
+from gateway v0.44.0; until your payer's gateway runs it, keep the deprecated request
+builder.
 
 ---
 
@@ -1742,15 +1818,85 @@ Both parsers accept a Bundle containing exactly one ClaimResponse, or a bare
 ClaimResponse returned by a payer polling read. Missing or multiple responses and
 malformed entries return errors. `ParseClaimResponse` rejects a pending decision.
 
-The `needed` slice is typed (`[]NeededItem{Code, Display}`). It includes string-valued
-supplemental requests and the identifier value of PAS `questionnaires-needed`
-inputs. `Display` uses the payer's `type.text`, falling back to the questionnaire
-coding display when present. The Task's `payer-url`
-input is routing information and is excluded. The real reference payer identifies
-its outstanding questionnaire using a `valueIdentifier`; its endpoint uses
-`valueUrl`. No questionnaire content or clinical answer is inferred from either.
-A hermetic/local mirror may instead request its synthetic `pend-resolution-timer`
-item; that label is not a live payer questionnaire identifier.
+**Read what the payer asks for with `ParsePendedResponseDetail`.** It returns each
+PAS pended-response Task exactly as the payer sent it (`PendedTask.Raw`) with the
+facts it carries (identifiers, status, code, requester, owner, payer URL) and its
+needs grouped by request line (`PendedItem`): `AttachmentCodes` (an
+`attachments-needed` CodeableConcept), `QuestionnaireIDs` (a `questionnaires-needed`
+Identifier, PAS 2.0.1) and `QuestionnaireContexts` (a `questionnaire-context` string,
+PAS 2.1.0 and 2.2.1), with the line number from `extension-paLineNumber` (2.0.1,
+2.1.0) or `extension-serviceLineNumber` (2.2.1). An input in any other form is
+reported in `PendedTask.Nonconformant` with its exact value, never dropped and
+never converted. The reference payer sends its questionnaire as a
+`valueCanonical` and its payer URL as a `valueString`; both are reported there. A
+Task coded from another code system (for example a CDex data request) is kept
+aside in `OtherTasks`.
+
+The `needed` slice `ParsePendedResponse` returns flattens the same needs
+(`[]NeededItem{Code, Display}`): each attachment code, questionnaire identifier
+value and questionnaire context, then each nonconformant value that has text
+(the payer URL excluded). `Display` is the coding's display, else the input
+type's display or text. No questionnaire content or clinical answer is inferred.
+A hermetic/local mirror names a synthetic `pend-resolution-timer` item; that label
+is not a live payer questionnaire identifier.
+
+**Item trace numbers.** The SDK's PAS submit and update builders write one
+`Claim.item.extension:itemTraceNumber` per item (system `urn:shn:pas:item-trace`,
+value `<correlation>.<item sequence>`), which PAS allows at 2.0.1, 2.1.0 and 2.2.1.
+A payer echoes it on the matching `ClaimResponse.item`, so a later answer or an
+inquiry is matched by request line. `shnsdk.Responder` echoes it too.
+
+### 7b.1a Pended responses a payer builds (the PAS Task)
+
+A pended PAS response carries a Task for each kind of information the payer asks
+for. `shnsdk.BuildPendedTasks(line, …)` builds it and
+`shnsdk.BuildPendedClaimResponseAtLine(line, …)` builds the whole pended response
+(the `ClaimResponse` with one A4 item per request line asked about, then the
+Tasks). The facts below are read from the published PAS packages
+(`StructureDefinition-profile-task`, `CodeSystem-PASTempCodes`,
+`ValueSet-PASTaskCodes`) and the IG's example Task
+(`AdditionalInformationTaskExample`).
+
+| Element | 2.0.1 | 2.1.0 | 2.2.1 | Who supplies it |
+|---|---|---|---|---|
+| `meta.profile` | `…/profile-task\|2.0.1` | `\|2.1.0` | `\|2.2.1` | the builder |
+| `identifier` 1..* | required | required | required | the payer (`PendedTaskInputs.Identifier`, system and value) |
+| `status` 1..1 (HRex task status: requested, accepted, rejected, in-progress, failed, completed, on-hold) | required | required | required | the payer |
+| `intent` | `order` | `order` | `order` | the builder |
+| `code` 1..1 (PASTaskCodes) | `attachment-request-code` or `attachment-request-questionnaire` | same | same | the builder, from the kind of need; both kinds give two Tasks |
+| `for` 1..1 | required | required | required | the request's `Claim.patient` |
+| `requester`, `owner` (identifier only) | **1..1** each ("Payer ID") | 0..1 ("Provider ID") | 0..1 ("Provider ID") | the payer |
+| `reasonCode` 1..1 | PASTempCodes `priorAuthorization` | same | same | the builder |
+| `reasonReference` 1..1 | Reference(PAS Claim) | same | same | the request Claim (its `fullUrl`) |
+| `input:PayerURL` 1..1 | `payer-url`, `valueUrl` | same | same | the payer (absolute http(s) URL) |
+| attachments | `attachments-needed`, `valueCodeableConcept` (LOINC class ATTACH or X12 755) | LOINC | LOINC (`valid-hl7-attachment-requests`) | the payer |
+| questionnaires | `questionnaires-needed`, `valueIdentifier` | `questionnaire-context`, `valueString` | `questionnaire-context`, `valueString` | the payer |
+| line number (1..1 on each need) | `extension-paLineNumber`, `valueInteger` | `extension-paLineNumber`, `valueInteger` | `extension-serviceLineNumber`, `valuePositiveInt` | the item sequence |
+
+Profile invariants, enforced by the builder: a Task coded
+`attachment-request-code` has an `attachments-needed` input; a Task coded
+`attachment-request-questionnaire` has a `questionnaires-needed` input at 2.0.1
+and a `questionnaire-context` input at 2.1.0 and 2.2.1.
+
+`requester` and `owner`: PAS 2.0.1 describes both as "Payer ID"; 2.1.0 and 2.2.1
+describe both as "Provider ID - only send the identifier"; the IG's example Task
+sends the same NPI identifier as both, at all three lines. The builder therefore
+never derives them: the payer supplies both.
+
+A missing or malformed fact is a builder error; nothing is invented. The Task a
+payer sent is never rebuilt by the network or the SDK. The CDex data-request Task
+(`BuildCDexTaskDataRequest`) is a separate contract with its own profile and codes.
+
+**`shnsdk.Responder`.** A pended `PASDecision` carries `PendedItems`,
+`TaskIdentifier`, `TaskStatus`, `TaskRequester`, `TaskOwner` and `PayerURL` (the
+Responder answers at PAS 2.0, where requester and owner are required).
+`PayerURL` may be empty when the Responder was built with
+`ResponderConfig.PublicBaseURL`, which is then used. A pended decision missing a
+fact is refused with `500`, naming it. `PASDecision.NeededItems` is deprecated: a
+bare string does not say whether an item is an attachment or a questionnaire, so
+a pended decision that sets only `NeededItems` is refused with `500`.
+`BuildPendedResponse` / `BuildPendedResponseAtLine` are deprecated and return
+`ErrPendedResponseNeedsTaskFacts`.
 
 ### 7b.2 UC-04: exchange-2 ClaimUpdate (amend)
 
@@ -1853,6 +1999,65 @@ result = ParseClaimResponse(updResp)   # → {Outcome:"approved", PreAuthRef, Va
 envelope carried when the submit leg was routed (the payer's ledger key for the
 pended claim). The `PriorAuthResume` struct persists it as `OriginalCorrelationID`.
 
+The payer answers an amendment with its own decision: approved, denied, or pended
+again (with the Task of what it still needs). `ResumePriorAuth` returns that
+decision; a pended result carries a usable `Resume`. `shnsdk.Responder` answers an
+amendment with its `Adjudicator`'s decision likewise: an approval or a denial
+decides the claim (a later amendment of it is refused with `409`), and a re-pend
+keeps it pended for a later amendment.
+
+### 7b.2a Following up a pended decision: `$inquire`
+
+A pended decision is followed up with a Da Vinci PAS inquiry (`Claim/$inquire`),
+transaction type `pas-claim-inquire`, request operation `pas-inquire`, response
+operation `pas-inquire-response` (frames `provider-tpo` → `payer-coverage`, contract
+`pa.pas`). **The inquiry leg is served by Smart Gateway v0.45.0 and later**; an older
+payer gateway refuses it. (Framed DTR operations, §6.3, need Smart Gateway v0.44.0
+and later.)
+
+- **The request.** `shnsdk.BuildPASInquiryBundle(line, …)` builds the inquiry: a
+  collection `Bundle` (identifier and timestamp; no `entry.request`, `response` or
+  `search`) whose first entry is the inquiry `Claim` (status, type,
+  `use=preauthorization`, patient, created, insurer, provider — an Organization or
+  PractitionerRole — priority, insurance, and the items asked about with their trace
+  numbers), followed by your Patient, Coverage, provider and insurer records, each
+  embedded as your exact bytes. The payer matches on the member identifier plus the
+  provider identifier, so the Patient must carry the member id as an identifier with
+  a system (typed `MB` at PAS 2.1.0, the one line that slices it). The inquiry `Claim.identifier` is the inquiry's own trace number (required
+  from 2.1.0). Authorization and administration reference numbers are item
+  extensions at every line: PAS 2.2.1 also declares `Claim`-level slices for them,
+  but both extension definitions allow only item contexts, which validators
+  enforce.
+- **The answer.** A `Bundle` of `ClaimResponse`s at 2.0.1 and 2.1.0; a `Parameters`
+  with `return` Bundles at 2.2.1.
+- **The continuation handle.** A pended `PriorAuthResult.Resume` carries
+  `Continuation` (`PriorAuthContinuation`): the PAS line, the payer holder, the
+  submitted Claim's identifiers, type and priority, the member id, the provider NPI,
+  the items (sequence, product code, service date, trace number, and the numbers the
+  payer gave), and the payer's `ClaimResponse` identifiers and authorization
+  reference. It holds no clinical content. `NewPriorAuthContinuation` records it
+  from a request and its answer.
+- **`Identity.Inquire(ctx, client, endpoints, payer, resume, records)`** builds the
+  inquiry from the handle and your `PASInquiryRecords`, sends it to the payer the
+  handle names, matches the answer to your request by item trace number (or the
+  payer's identifiers), and returns the payer's decision. No match or more than one is
+  an error (`ErrInquiryNoMatch`, `ErrInquiryAmbiguous`); a handle without
+  continuation facts is refused (`ErrNoContinuation`).
+- **Waiting.** `RunPriorAuthWith` / `ResumePriorAuthWith` accept `WithWait(d)` and
+  `WithInquiryRecords(records)`. The default is no wait (`RunPriorAuth` and
+  `ResumePriorAuth` never wait). With a wait, the first inquiry runs 2 s after the
+  pend and later ones back off (4 s, then 5 s steps); at most 6 inquiries are sent and
+  the wait is capped at 120 s. Reaching the bound returns the pended decision, not an
+  error; cancellation follows the context.
+- **Payers.** `shnsdk.Responder` answers an inquiry when its `Adjudicator` also
+  implements `InquiryAdjudicator` (`Inquire(PASInquiry) (PASDecision, error)`),
+  with that decision as a PAS response; otherwise it refuses with `501`. An inquiry
+  does not change the Responder's pended-claim state.
+- **Standards note.** PAS 2.2.1 asks clients not to inquire while a decision is
+  pending and makes Subscription the notification mechanism; this network does not
+  offer Subscription. PAS 2.0.1 says the client can use the inquire operation to
+  query for the final result.
+
 ### 7b.3 UC-08: denied PAS response
 
 `MBR-D-UC08`'s order (`J3490`, an excluded-service family) already comes back
@@ -1869,8 +2074,10 @@ network's `conformance-payer`) instead returns `"A2"` on this leg with display "
 Certified" — a code/display self-contradiction in that reference implementation, not a
 different conformant code; this network only ever PARSES it, never emits it. The parser
 accepts both `A3` and this observed `A2` shape as a denial signal. There is **no**
-`preAuthRef`; the rationale is in `ClaimResponse.disposition`; the appeal window is in
-`ClaimResponse.processNote[].text`.
+`preAuthRef`. The rationale is in `ClaimResponse.disposition` when the payer gave one,
+and any notes the payer supplies (an appeal window, a review instruction) are in
+`ClaimResponse.processNote[].text`. A payer that gives neither sends neither: the network
+adds no rationale or note of its own.
 
 **Parse with `ParseClaimResponse`:**
 
@@ -1878,8 +2085,8 @@ accepts both `A3` and this observed `A2` shape as a denial signal. There is **no
 result, err := shnsdk.ParseClaimResponse(claimRespBytes)
 // result.Outcome == "denied"
 // result.Denial.ReasonCode == "A2"
-// result.Denial.Rationale == "…" (ClaimResponse.disposition)
-// result.Denial.AppealNote == []string{"…"} (ClaimResponse.processNote[].text)
+// result.Denial.Rationale == "…" (ClaimResponse.disposition, else the review-action display)
+// result.Denial.AppealNote == the payer's own notes, if any (ClaimResponse.processNote[].text)
 ```
 
 `ParseClaimResponse` navigates
@@ -2030,8 +2237,10 @@ which lives inside the seal (§6.3).
 
 - **A silent recipient** (no `contractVersions` declared at all — the default
   for a holder that has never registered the field, §2.3) is not treated as
-  incompatible: the leg routes at the originating build's own highest native
-  line for that contract. Silence is not disagreement.
+  incompatible: the leg routes at the originating gateway's own highest
+  **declared** line for that contract (its `contractVersions` declaration — the
+  build's default declaration when none is set — never the highest line the
+  build could natively produce). Silence is not disagreement.
 - **A non-empty declaration is exhaustive.** Once a recipient declares *any*
   contract-version tokens, that declaration is read as its complete
   capability across every contract, including ones it never mentions. A
@@ -2206,6 +2415,98 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-09-16 — PAS: profiled pended Task, inquiry and continuation (§7b).** New:
+  `BuildPendedTasks` and `BuildPendedClaimResponseAtLine` (the PAS `profile-task` at
+  each line, from the payer's facts only), `ParsePendedResponseDetail` (needs per
+  request line; values in a form the line does not define are reported, never
+  converted), `BuildPASInquiryBundle`, `PriorAuthContinuation` /
+  `NewPriorAuthContinuation`, `PriorAuthResume.Continuation`, `Identity.Inquire`,
+  `RunPriorAuthWith` / `ResumePriorAuthWith` with `WithWait` and
+  `WithInquiryRecords`, `InquiryAdjudicator`, and `ResponderConfig.PublicBaseURL`.
+  The submit and update builders write one item trace number per item, and
+  `shnsdk.Responder` echoes it on its answers. Behavior changes:
+  `shnsdk.Responder` answers an amendment its `Adjudicator` pends again or denies
+  with that decision (it used to answer `422 amendment still insufficient`); a
+  pended decision must carry `PendedItems` and the Task facts (`500` otherwise);
+  `PASDecision.NeededItems` alone is refused; `BuildPendedResponse` /
+  `BuildPendedResponseAtLine` return `ErrPendedResponseNeedsTaskFacts`. The
+  Responder frames each answer with its own media type (`application/json` for a
+  CDS Hooks answer, `application/fhir+json` for FHIR); an `Adjudicator` error that is
+  an `*AppAnswerError` is relayed with its status, exact body and media type (no
+  `Content-Type` when it names none). `PASDecision.PendedItems`, `TaskIdentifier`,
+  `TaskStatus`, `TaskRequester`, `TaskOwner` and `PayerURL` are new; `NeededItems` is
+  deprecated. The inquiry leg needs Smart Gateway v0.45.0 or later; framed DTR
+  operations need Smart Gateway v0.44.0 or later.
+
+- **2026-09-16 — CRD: coverage information as a system action; request and response
+  builders; response certifier (§7a).** `shnsdk.Responder` now answers a CRD request
+  the way Da Vinci CRD defines it: `cards: []` and one `update` system action returning
+  the requested order (its own bytes plus the coverage-information extension: covered,
+  `pa-needed`, and for a prior authorization with a questionnaire, `doc-needed`
+  `clinical` and the questionnaire), with a fresh `coverage-assertion-id`. An
+  `Adjudicator` that also implements `CoverageAssertionRecorder` receives each
+  assertion after its answer is sent. New: `BuildCRDResponse`, `ParseCRDResponse`
+  (coverage information from system actions, from card suggestions, and from the card
+  extension object earlier SDK versions wrote; every value exactly as sent, unknown
+  sub-extensions included), `BuildCRDRequest`, `CheckCDSHooksResponse` /
+  `CDSHooksRules`, and `ParseCoveragePayer`. `ParsePayerIdentifier` and
+  `ParseCoverageBeneficiary` also accept a Bundle of Coverages when every Coverage names
+  the same payer (respectively beneficiary). `RunPriorAuth` reads the CRD answer with
+  `ParseCRDResponse`, so it understands both answer shapes. Deprecated:
+  `BuildCards` / `BuildCardsAtLine` (output unchanged in this release; a later release
+  emits the `BuildCRDResponse` shape), `ParseCards` (now a wrapper that keeps its
+  earlier result for the card extension object and otherwise returns the first
+  coverage information), `BuildConformantOrderSelectRequest` and
+  `BuildConformantOrderDispatchRequest` (output unchanged; replaced by
+  `BuildCRDRequest`). A requester on an earlier SDK that reads only the card extension
+  object cannot read a current `shnsdk.Responder`'s CRD answer. `BuildCRDRequest` omits
+  `fhirServer` and `fhirAuthorization`, which CRD 2.2.1's request model marks `1..1`,
+  by design: the payer answers from context and prefetch, and the network never hands
+  a payer a route into the provider's system. `BuildCRDResponse` enforces `crd-ci-q3`
+  in both directions and the `withpa` rule of `crd-ci-q4` as CRD 2.2.1 states it at
+  every line, writes `contact` as a `ContactPoint` at 2.0/2.1 and a `ContactDetail` at
+  2.2 (refusing the other shape), and requires a card `uuid` at 2.2.
+- **2026-09-16 — DTR: framed operations (`operation` header, `v1op`) and the package
+  request builder (§6.3).** The frame header allowlist gains `operation`
+  (`questionnaire-package`, `next-question`) for `dtr-questionnaire-fetch` request
+  frames, declared by the `requestFrames` token `"v1op"`; a requester sends a framed
+  DTR operation only to a recipient that declares it (`ErrFramedDTRUnsupported`
+  otherwise). New: `BuildQuestionnairePackageParameters`, `SupportsRequestFrameV1Op`,
+  `NextQuestionAdjudicator`. `RunPriorAuth` sends the framed operation to a payer that
+  declares `"v1op"` and the older request otherwise; `shnsdk.Responder` serves both.
+  Behavior change: a `nextQuestion` round sent in the older questionnaire request is
+  now answered by your `NextQuestionAdjudicator`, or refused with `422` when the
+  `Adjudicator` does not implement it; it is no longer answered with a questionnaire
+  package. Declaring `"v1op"` implies accepting `dtr-questionnaire-fetch` request
+  frames (a requester frames the operation to a `"v1op"` peer without `"v1"`).
+  `SupportedRequestFrames()` is unchanged (`["v1"]`). Deprecated:
+  `BuildQuestionnaireFetch` / `BuildQuestionnaireFetchWithCoverage` (output unchanged).
+- **2026-09-16 — Denials carry only the payer's own reason and notes (§7b.3).** A
+  `shnsdk.Responder` denial now carries `ClaimResponse.disposition` only when the
+  adjudicator's `PASDecision.DenyReason` is set (exactly as given), and
+  `ClaimResponse.processNote` only for the adjudicator's own
+  `PASDecision.ProcessNotes`. The SDK no longer supplies a default rationale or a fixed
+  appeal note. `shnsdk.BuildDeniedResponse` no longer emits the fixed appeal note;
+  `shnsdk.BuildDeniedResponseWithNotesAtLine` carries supplied notes. A decision that
+  sets `ProcessNotes` with an outcome other than denied is refused (`500`).
+- **2026-09-16 — CDex fulfillment keeps the request Task and the records exactly.**
+  `shnsdk.BuildCDexQueryResult` now extends the payer's request `Task` instead of
+  rebuilding it. The Task keeps its own bytes apart from three changes: `status` becomes
+  `completed`, the records searchset `Bundle` is appended to `contained`, and one
+  `data-query` `output` referencing it is appended to `output` (each array is created when
+  absent). The facility's records `Bundle` is embedded as its own bytes, so decimal and
+  large-integer lexemes, unknown elements and member order survive. A contained id is
+  written into it only when it has none, or when its id is already used in the Task
+  (`results`, else `results-<n>`); a records `Bundle` with an empty `id` is refused. A
+  request Task that carries a `Signature`, or that a
+  signed `Provenance` targets, is refused with `ErrCDexSignedContent`; so is a signed
+  records `Bundle` that would need an id. A Task whose status is not `requested`,
+  `received`, `accepted` or `in-progress` is refused with `ErrCDexTaskStatus`.
+  `shnsdk.BuildCDexFulfillment` (new) returns the same Task plus the spans it copied
+  unchanged. `shnsdk.ExtractCDexEvidence` now follows the Task's last `data-query`
+  output to the contained `Bundle` it references, instead of taking the first contained
+  `Bundle`, and refuses a reference that more than one contained resource answers. Both
+  functions refuse a document that repeats a member name at any depth.
 - **2026-09-02 — Leg outcomes (§6.1b) and operator-attested `payerIds` (§1a, §2.3).**
   Documentation only — no `wireProtocolVersion` bump, no wire change. §6.1b defines
   the five outcomes an origination leg can end in (`routed`, `answered`, `denied`,
@@ -2229,6 +2530,7 @@ property. Until then, build to the rule: preserve what you do not recognise.
   the registrar `/holders` feed (§3), instead of the legacy `demoResponders[]` hint.
   `demoResponders[]` is still populated for older consumers that have not migrated; see
   its field-table entry above for the deprecation note.
+- **2026-09-13 — Silent-recipient rule stated exactly (§8.6).** A silent recipient is answered at the originator's highest declared line, not its highest native line; the code has always done this (`selectContractToken` over the declared set) — the prose is corrected to match.
 - **2026-08-12 — Tri-line native builders + request frames (`requestFrames`, §6.3, §8.6).**
   Two additive changes, no `wireProtocolVersion` bump, no new frame version.
   (1) **Tri-line native.** The Smart Gateway and this SDK now build every PA

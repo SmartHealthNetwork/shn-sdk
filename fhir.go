@@ -44,12 +44,13 @@ const (
 	// Mirrors internal/fhirmap.systemAdjudication (eob.go).
 	systemAdjudication = "http://terminology.hl7.org/CodeSystem/adjudication"
 
-	// EOBAppealNote is the appeal-rights text carried on the EOB.processNote so the
-	// patient surface (PHG) renders the appeal window FROM the FHIR resource (FR-28),
-	// not from a bespoke UI string. The 30-day window matches the provider-facing
-	// PAS ClaimResponse processNote. Exported so a test can assert the patient view
-	// is data-driven (it equals THIS text, not a generic constant).
+	// EOBAppealNote is the fixed appeal-rights text BuildPADecisionEOB writes on a
+	// denied EOB when PADecisionEOBParams.ProcessNotes is nil.
 	// Mirrors internal/fhirmap.EOBAppealNote (eob.go).
+	//
+	// Deprecated: the payer's own appeal terms belong in
+	// PADecisionEOBParams.ProcessNotes. The nil-notes default that emits this text
+	// will be removed in a later release.
 	EOBAppealNote = "Appeal window: 30 days from the date of this determination. " +
 		"A peer-to-peer review with the medical director may be requested before filing a formal appeal."
 )
@@ -308,7 +309,7 @@ type eobJSON struct {
 
 type eobProcessNote struct {
 	Number int    `json:"number"`
-	Type   string `json:"type"`
+	Type   string `json:"type,omitempty"`
 	Text   string `json:"text"`
 }
 
@@ -351,8 +352,10 @@ type eobReference struct {
 // ExplanationOfBenefit for a PA decision (FR-28): use=preauthorization,
 // outcome=complete. The item adjudication shape branches on decision:
 //   - PADecisionDenied: the denialreason adjudication slice carrying CARC 50 (not
-//     medically necessary) + the appeal-window/peer-to-peer processNote (authNumber
-//     ignored — a denial has no authorization).
+//     medically necessary) (authNumber ignored — a denial has no authorization).
+//
+// processNote carries PADecisionEOBParams.ProcessNotes when they are non-nil; when
+// they are nil a denied EOB keeps the deprecated fixed EOBAppealNote.
 //   - PADecisionApproved: a "submitted" adjudication (standard adjudication
 //     CodeSystem, in the PDexAdjudication binding) with no Reason/no denialreason,
 //     and the authorization number on EOB.preAuthRef so the patient surface (PHG)
@@ -389,6 +392,16 @@ type PADecisionEOBParams struct {
 	Decision        PADecision
 	AuthNumber      string
 	Created         time.Time
+	// ProcessNotes are the payer's own notes (for example its appeal window),
+	// written as EOB.processNote in order and numbered from 1, on either
+	// decision. A note without text, or with a type other than "display",
+	// "print" or "printoper", is refused. A non-nil empty slice writes no
+	// processNote.
+	//
+	// Nil keeps the deprecated default: a denied EOB carries the fixed
+	// EOBAppealNote and an approved EOB carries none. That default will be
+	// removed in a later release; pass the payer's notes (or an empty slice).
+	ProcessNotes []PASProcessNote
 }
 
 // davinciIGCanonical builds a versioned Da Vinci implementationGuide canonical
@@ -611,6 +624,10 @@ func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
 	if procedureSystem == "" {
 		procedureSystem = systemPAProcedureCPT // backward-compatible default
 	}
+	supplied, err := pasDeniedNotes(p.ProcessNotes)
+	if err != nil {
+		return nil, err
+	}
 	eob := eobJSON{
 		ResourceType: "ExplanationOfBenefit",
 		Id:           id,
@@ -653,9 +670,18 @@ func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
 			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemPDexAdjudication, Code: "denialreason"}}},
 			Reason:   &eobCodeableConcept{Coding: []eobCoding{{System: systemCARC, Code: "50", Display: "These are non-covered services because this is not deemed a 'medical necessity' by the payer"}}},
 		}}
-		// FR-28: the appeal window + peer-to-peer instruction travel ON the FHIR
-		// resource so the patient surface renders them from the EOB, not a UI string.
-		eob.ProcessNote = []eobProcessNote{{Number: 1, Type: "print", Text: EOBAppealNote}}
+		if p.ProcessNotes == nil {
+			// Deprecated default (see PADecisionEOBParams.ProcessNotes).
+			eob.ProcessNote = []eobProcessNote{{Number: 1, Type: "print", Text: EOBAppealNote}}
+		}
+	}
+	// FR-28: the payer's own notes travel ON the FHIR resource so the patient
+	// surface renders them from the EOB, not a UI string.
+	if p.ProcessNotes != nil {
+		eob.ProcessNote = nil
+		for _, n := range supplied {
+			eob.ProcessNote = append(eob.ProcessNote, eobProcessNote(n))
+		}
 	}
 	return json.Marshal(eob)
 }

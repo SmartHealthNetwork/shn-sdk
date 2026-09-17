@@ -1,12 +1,10 @@
 package shnsdk
 
-// The PAS response builders in this file (BuildClaimResponse, BuildPendedResponse,
-// BuildDeniedResponse and their AtLine variants) are PORTED-standalone from
-// internal/pas/pas.go — byte-identical in logic to their internal twins, which
-// the substrate's golden-corpus generator still uses; the difference is the
-// package-level prefix and the use of pasFullURLFor / pasInjectResourceType
-// (sdk/pas.go) instead of the internal-private copies.
-// Parity tests live in test/sdkparity/pas_parity_test.go.
+// The approved and denied PAS response builders in this file
+// (BuildClaimResponse, BuildDeniedResponse and their AtLine variants) are
+// ported from the network's own PAS package and kept byte-identical to it; the
+// pended response builder (BuildPendedClaimResponseAtLine) is the one
+// implementation both use.
 //
 // This package ships NO prior-auth policy. Deciding a PA is the deployer's job: a
 // Responder gets its verdicts from the ResponderConfig.Adjudicator the occupant
@@ -16,7 +14,9 @@ package shnsdk
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
@@ -33,12 +33,83 @@ const (
 
 // PASDecision is the partner's prior-auth verdict (returned by
 // Adjudicator.PriorAuth — added to the interface in the dispatch change).
+//
+// A denial carries only what the partner decided: DenyReason becomes
+// ClaimResponse.disposition exactly as given (no disposition when it is
+// empty), and ProcessNotes become ClaimResponse.processNote in order (none
+// when it is empty). The Responder adds no rationale or note of its own.
+//
+// A pended decision carries the facts of the Task(s) the pended response
+// holds (see BuildPendedTasks): PendedItems, TaskIdentifier, TaskStatus,
+// TaskRequester, TaskOwner and PayerURL. PayerURL may be left empty when the
+// Responder was built with ResponderConfig.PublicBaseURL, which is then used.
+// The Responder answers at PAS 2.0, where TaskRequester and TaskOwner are
+// required. A pended decision without these facts is refused with 500 rather
+// than answered with invented ones.
 type PASDecision struct {
-	Outcome     PASOutcome
-	NeededItems []string // pended: what exchange-2 must supply
-	PreAuthRef  string   // approved: the authorization number
-	ValidUntil  string   // approved: expiry
-	DenyReason  string   // denied: rationale carried in the ClaimResponse
+	Outcome PASOutcome
+	// NeededItems names what the payer needs as bare strings.
+	//
+	// Deprecated: a bare string does not say whether an item is an
+	// attachment or a questionnaire, so the Responder does not answer from it:
+	// a pended decision that sets NeededItems without PendedItems is refused
+	// with 500 naming PendedItems. Use PendedItems.
+	NeededItems []string
+	PreAuthRef  string // approved: the authorization number
+	ValidUntil  string // approved: expiry
+	DenyReason  string // denied: the partner's own rationale; empty emits no disposition
+	// ProcessNotes (denied only) are the partner's own notes, for example an
+	// appeal window or a review instruction. The Responder refuses a decision
+	// that sets them with an approved or pended outcome.
+	ProcessNotes []PASProcessNote
+
+	// PendedItems (pended) are the needs, one per request line.
+	PendedItems []PendedItem
+	// TaskIdentifier (pended) is the payer's tracking identifier for the
+	// request for information.
+	TaskIdentifier PASIdentifier
+	// TaskStatus (pended) is the Task status, an HRex task status code
+	// (usually "requested").
+	TaskStatus string
+	// TaskRequester and TaskOwner (pended) are the Task requester and owner
+	// identifiers.
+	TaskRequester PASIdentifier
+	TaskOwner     PASIdentifier
+	// PayerURL (pended) is the payer's follow-up endpoint.
+	PayerURL string
+}
+
+// PASProcessNote is one ClaimResponse.processNote the partner supplies.
+type PASProcessNote struct {
+	// Type is the FHIR note-type code: "display", "print" or "printoper".
+	// Empty omits processNote.type.
+	Type string
+	// Text is the note text, carried exactly. Required.
+	Text string
+}
+
+// pasNoteTypes is the FHIR R4 NoteType value set (required binding on
+// ClaimResponse.processNote.type).
+var pasNoteTypes = map[string]bool{"display": true, "print": true, "printoper": true}
+
+// pasDeniedNotes renders notes as processNote elements numbered from 1 (the
+// number is required at PAS 2.1 and later), refusing a note without text or
+// with a type outside the NoteType codes.
+func pasDeniedNotes(notes []PASProcessNote) ([]pasDeniedProcessNote, error) {
+	if len(notes) == 0 {
+		return nil, nil
+	}
+	out := make([]pasDeniedProcessNote, 0, len(notes))
+	for i, n := range notes {
+		if n.Text == "" {
+			return nil, fmt.Errorf("shnsdk: process note %d has no text", i+1)
+		}
+		if n.Type != "" && !pasNoteTypes[n.Type] {
+			return nil, fmt.Errorf("shnsdk: process note %d type %q is not display, print or printoper", i+1, n.Type)
+		}
+		out = append(out, pasDeniedProcessNote{Number: i + 1, Type: n.Type, Text: n.Text})
+	}
+	return out, nil
 }
 
 // BuildClaimResponse builds a Da Vinci PAS APPROVED ClaimResponse (FR-22).
@@ -114,49 +185,69 @@ func buildClaimResponse(def PASDef, preAuthRef, validUntil, patientRef, correlat
 	return json.Marshal(cr)
 }
 
-// BuildPendedResponse builds the exchange-1 PENDED response (FR-20): a
-// collection Bundle holding a ClaimResponse (outcome=queued,
-// use=preauthorization) and a Task (status=requested) whose inputs enumerate
-// the supplemental items the payer needs. The provider distinguishes this from
-// an approved bare ClaimResponse by resourceType (Bundle ⇒ pended). The
-// pended/approved business outcome stays in the payload — the payload-blind Hub
-// never sees it (AI-2).
+// ErrPendedResponseNeedsTaskFacts is returned by the deprecated
+// BuildPendedResponse and BuildPendedResponseAtLine: a pended PAS response
+// carries a profiled Task whose identifier, status, requester, owner, payer
+// URL and needed items only the payer can supply, and those two functions do
+// not take them. Use BuildPendedClaimResponseAtLine.
+var ErrPendedResponseNeedsTaskFacts = errors.New("shnsdk: a pended PAS response needs the payer's Task facts; use BuildPendedClaimResponseAtLine")
+
+// BuildPendedResponse returns ErrPendedResponseNeedsTaskFacts.
 //
-// PORTED-standalone: internal/pas.BuildPendedResponse.
-//
-// BuildPendedResponse speaks PAS line 2.0 — it is BuildPendedResponseAtLine("2.0", …),
-// byte-identical (regression-fenced by test/sdkparity). Use BuildPendedResponseAtLine
-// to target 2.1/2.2 (PAS package differential: PAS 2.2 makes response Bundle.identifier
-// mandatory — profile-pas-response-bundle.json, absent at 2.0.1/2.1.0).
+// Deprecated: a pended response's Task needs facts this signature does not
+// carry. Use BuildPendedClaimResponseAtLine.
 func BuildPendedResponse(patientRef, correlationID string, needed []string, created time.Time) ([]byte, error) {
-	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
-	return buildPendedResponse(def, patientRef, correlationID, needed, created)
+	return nil, ErrPendedResponseNeedsTaskFacts
 }
 
-// BuildPendedResponseAtLine is BuildPendedResponse parameterized by PAS line
-// ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
+// BuildPendedResponseAtLine returns ErrPendedResponseNeedsTaskFacts.
+//
+// Deprecated: a pended response's Task needs facts this signature does not
+// carry. Use BuildPendedClaimResponseAtLine.
 func BuildPendedResponseAtLine(line, patientRef, correlationID string, needed []string, created time.Time) ([]byte, error) {
+	return nil, ErrPendedResponseNeedsTaskFacts
+}
+
+// PendedResponseInputs are a payer's facts for a pended PAS response.
+type PendedResponseInputs struct {
+	// Correlation is the ClaimResponse business identifier value
+	// (urn:shn:correlation) and the ClaimResponse id suffix.
+	Correlation string
+	// Created is ClaimResponse.created and the Bundle timestamp.
+	Created time.Time
+	// Task are the facts of the Task(s) the response carries (see
+	// BuildPendedTasks). Task.ID defaults to "task-" + Correlation. Task.Patient
+	// is also the ClaimResponse.patient.
+	Task PendedTaskInputs
+}
+
+// BuildPendedClaimResponseAtLine builds a pended Da Vinci PAS response at a
+// PAS line ("2.0", "2.1", "2.2"): a collection Bundle holding the
+// ClaimResponse, whose items each carry the X12 306 review action A4 (Pended)
+// for a request line the payer needs information about, followed by the
+// Task(s) BuildPendedTasks builds from in.Task. The ClaimResponse outcome is
+// the line's pended outcome ("queued" at 2.0 and 2.1, "complete" at 2.2, where
+// the review action carries the pend).
+func BuildPendedClaimResponseAtLine(line string, in PendedResponseInputs) ([]byte, error) {
 	def, ok := PASLineDef(line)
 	if !ok {
-		return nil, fmt.Errorf("shnsdk: BuildPendedResponseAtLine: unknown PAS line %q", line)
+		return nil, fmt.Errorf("shnsdk: BuildPendedClaimResponseAtLine: unknown PAS line %q", line)
 	}
-	return buildPendedResponse(def, patientRef, correlationID, needed, created)
+	if in.Correlation == "" {
+		return nil, errors.New("shnsdk: BuildPendedClaimResponseAtLine: Correlation is required")
+	}
+	if in.Task.ID == "" {
+		in.Task.ID = "task-" + in.Correlation
+	}
+	tasks, err := BuildPendedTasks(line, in.Task)
+	if err != nil {
+		return nil, err
+	}
+	return buildPendedResponse(def, in, tasks)
 }
 
-// pasPendedOutcome maps def.PendedResponseOutcome onto the samply enum,
-// fail-closed (an unmapped code is a manifest/def bug, never a silent default).
-func pasPendedOutcome(def PASDef) (fhir.ClaimProcessingCodes, error) {
-	switch def.PendedResponseOutcome {
-	case "queued":
-		return fhir.ClaimProcessingCodesQueued, nil
-	case "complete":
-		return fhir.ClaimProcessingCodesComplete, nil
-	default:
-		return 0, fmt.Errorf("shnsdk: PAS line %q: unsupported pended ClaimResponse.outcome %q", def.Line, def.PendedResponseOutcome)
-	}
-}
-
-func buildPendedResponse(def PASDef, patientRef, correlationID string, needed []string, created time.Time) ([]byte, error) {
+func buildPendedResponse(def PASDef, in PendedResponseInputs, tasks [][]byte) ([]byte, error) {
+	patientRef, correlationID, created := in.Task.Patient, in.Correlation, in.Created
 	// PAS 2.2 (def-driven): "queued" leaves the required ClaimResponseOutcome value
 	// set at 2.2.1 — the A4 review action carries the pending decision.
 	outcome, err := pasPendedOutcome(def)
@@ -191,21 +282,32 @@ func buildPendedResponse(def PASDef, patientRef, correlationID string, needed []
 			Value:  strPtr(correlationID),
 		}}
 	}
-	// A4 carries the decision independently of outcome and any retained Task.
-	// PAS 2.2 uses outcome=complete even while the item remains pending.
+	// One A4 item per request line the payer needs information about, in line
+	// order. A4 carries the decision independently of outcome and the Task.
+	var sequences []int
+	for _, it := range in.Task.Items {
+		if !slices.Contains(sequences, it.Sequence) {
+			sequences = append(sequences, it.Sequence)
+		}
+	}
+	slices.Sort(sequences)
+	items := make([]pasDeniedItem, 0, len(sequences))
+	for _, seq := range sequences {
+		items = append(items, pasDeniedItem{
+			ItemSequence: seq,
+			Adjudication: []pasDeniedAdj{{
+				Category: pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/adjudication", Code: "submitted"}}},
+				Extension: []pasReviewActionExt{{URL: pasReviewActionExtURL, Extension: []pasReviewActionSubExt{{
+					URL: pasReviewActionCodeExtURL, ValueCodeableConcept: &pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: pasSystemX12ReviewAction, Code: "A4", Display: "Pended"}}},
+				}}}},
+			}},
+		})
+	}
 	type pendedBase fhir.ClaimResponse
 	pendedCR := struct {
 		pendedBase
 		Item []pasDeniedItem `json:"item"`
-	}{pendedBase: pendedBase(cr), Item: []pasDeniedItem{{
-		ItemSequence: 1,
-		Adjudication: []pasDeniedAdj{{
-			Category: pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/adjudication", Code: "submitted"}}},
-			Extension: []pasReviewActionExt{{URL: pasReviewActionExtURL, Extension: []pasReviewActionSubExt{{
-				URL: pasReviewActionCodeExtURL, ValueCodeableConcept: &pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: pasSystemX12ReviewAction, Code: "A4", Display: "Pended"}}},
-			}}}},
-		}},
-	}}}
+	}{pendedBase: pendedBase(cr), Item: items}
 	crJSON, err := json.Marshal(pendedCR)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: marshal pended ClaimResponse: %w", err)
@@ -214,29 +316,25 @@ func buildPendedResponse(def PASDef, patientRef, correlationID string, needed []
 	if err != nil {
 		return nil, err
 	}
-	taskJSON, err := buildPASTask(patientRef, correlationID, needed, created)
-	if err != nil {
-		return nil, err
-	}
 	crURL, err := pasFullURLFor(crJSON)
 	if err != nil {
 		return nil, err
 	}
-	taskURL, err := pasFullURLFor(taskJSON)
-	if err != nil {
-		return nil, err
+	entries := []fhir.BundleEntry{{FullUrl: strPtr(crURL), Resource: json.RawMessage(crJSON)}}
+	for _, taskJSON := range tasks {
+		taskURL, err := pasFullURLFor(taskJSON)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, fhir.BundleEntry{FullUrl: strPtr(taskURL), Resource: json.RawMessage(taskJSON)})
 	}
 	bundle := fhir.Bundle{
 		Type:      fhir.BundleTypeCollection,
 		Timestamp: strPtr(created.UTC().Format(time.RFC3339)),
-		Entry: []fhir.BundleEntry{
-			{FullUrl: strPtr(crURL), Resource: json.RawMessage(crJSON)},
-			{FullUrl: strPtr(taskURL), Resource: json.RawMessage(taskJSON)},
-		},
+		Entry:     entries,
 	}
 	// PAS 2.2 (def-driven, PAS package differential): response Bundle.identifier is
-	// mandatory. No-op at 2.0/2.1 (def.ResponseBundleIdentifierRequired false) —
-	// byte-identical to the existing legacy shape.
+	// mandatory. No-op at 2.0/2.1 (def.ResponseBundleIdentifierRequired false).
 	if def.ResponseBundleIdentifierRequired {
 		bundle.Identifier = &fhir.Identifier{System: strPtr(pasBundleIdentifierSystem), Value: strPtr(correlationID)}
 	}
@@ -247,67 +345,17 @@ func buildPendedResponse(def PASDef, patientRef, correlationID string, needed []
 	return pasInjectResourceType(raw, "Bundle")
 }
 
-// pasTaskInputJSON is a minimal FHIR R4 Task.input that emits ONLY the
-// value[x] discriminant actually set (valueString here). The samply
-// golang-fhir-models TaskInput marshals every value[x] variant to its zero
-// value, which the FHIR validator correctly rejects as unrecognised properties
-// on a choice type. We bypass the generated struct for this field only.
-//
-// PORTED-standalone: internal/pas.taskInputJSON.
-type pasTaskInputJSON struct {
-	Type        pasTaskCodeableConceptJSON `json:"type"`
-	ValueString string                     `json:"valueString"`
-}
-
-type pasTaskCodeableConceptJSON struct {
-	Text string `json:"text"`
-}
-
-// pasTaskJSON is a minimal FHIR R4 Task that emits exactly the required fields
-// and avoids the samply TaskInput marshalling problem (see pasTaskInputJSON).
-//
-// PORTED-standalone: internal/pas.taskJSON.
-type pasTaskJSON struct {
-	ResourceType string               `json:"resourceType"`
-	Id           string               `json:"id,omitempty"`
-	Status       string               `json:"status"`
-	Intent       string               `json:"intent"`
-	For          pasTaskReferenceJSON `json:"for"`
-	AuthoredOn   string               `json:"authoredOn"`
-	Input        []pasTaskInputJSON   `json:"input,omitempty"`
-}
-
-type pasTaskReferenceJSON struct {
-	Reference string `json:"reference"`
-}
-
-// buildPASTask builds the FHIR Task enumerating needed supplemental items
-// (FR-20). Uses a custom minimal struct rather than the samply fhir.Task to
-// avoid the generated TaskInput marshalling all value[x] zero values.
-//
-// PORTED-standalone: internal/pas.buildTask.
-func buildPASTask(patientRef, correlationID string, needed []string, created time.Time) ([]byte, error) {
-	inputs := make([]pasTaskInputJSON, 0, len(needed))
-	for _, item := range needed {
-		inputs = append(inputs, pasTaskInputJSON{
-			Type:        pasTaskCodeableConceptJSON{Text: item},
-			ValueString: item,
-		})
+// pasPendedOutcome maps def.PendedResponseOutcome onto the samply enum,
+// fail-closed (an unmapped code is a manifest/def bug, never a silent default).
+func pasPendedOutcome(def PASDef) (fhir.ClaimProcessingCodes, error) {
+	switch def.PendedResponseOutcome {
+	case "queued":
+		return fhir.ClaimProcessingCodesQueued, nil
+	case "complete":
+		return fhir.ClaimProcessingCodesComplete, nil
+	default:
+		return 0, fmt.Errorf("shnsdk: PAS line %q: unsupported pended ClaimResponse.outcome %q", def.Line, def.PendedResponseOutcome)
 	}
-	task := pasTaskJSON{
-		ResourceType: "Task",
-		Id:           "task-" + correlationID,
-		Status:       "requested",
-		Intent:       "order",
-		For:          pasTaskReferenceJSON{Reference: patientRef},
-		AuthoredOn:   created.UTC().Format(time.RFC3339),
-		Input:        inputs,
-	}
-	raw, err := json.Marshal(task)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: marshal Task: %w", err)
-	}
-	return raw, nil
 }
 
 // Denied ClaimResponse types — ported standalone from internal/pas.
@@ -315,8 +363,8 @@ func buildPASTask(patientRef, correlationID string, needed []string, created tim
 // pasDeniedCR is a minimal FHIR R4 ClaimResponse expressing a Da Vinci PAS
 // DENIAL: outcome=complete (the request was processed; denial is a decision,
 // not an error), the reviewAction extension on the item carrying reviewActionCode
-// A3 (Not Certified), a plain-language disposition (rationale), and a processNote
-// carrying the appeal window + peer-to-peer instruction. NO preAuthRef — a denial
+// A3 (Not Certified), the partner's own disposition (absent when it gave none), and
+// the partner's own processNotes (absent when it gave none). NO preAuthRef — a denial
 // issues no authorization number, so ParseClaimResponse reads it as not-approved.
 //
 // PORTED-standalone: internal/pas.claimResponseDeniedJSON.
@@ -330,13 +378,13 @@ type pasDeniedCR struct {
 	Created      string                   `json:"created"`
 	Insurer      pasDeniedReference       `json:"insurer"`
 	Outcome      string                   `json:"outcome"`
-	Disposition  string                   `json:"disposition"`
+	Disposition  string                   `json:"disposition,omitempty"`
 	Identifier   []pasDeniedIdentifier    `json:"identifier"`
 	// Request is the PAS 2.1+ mandatory ClaimResponse.request (omitted at 2.0 —
 	// PASDef.ClaimResponseRequestRequired).
 	Request     *pasClaimRequestRef    `json:"request,omitempty"`
 	Item        []pasDeniedItem        `json:"item"`
-	ProcessNote []pasDeniedProcessNote `json:"processNote"`
+	ProcessNote []pasDeniedProcessNote `json:"processNote,omitempty"`
 }
 
 type pasDeniedItem struct {
@@ -361,7 +409,7 @@ type pasDeniedAdj struct {
 
 type pasDeniedProcessNote struct {
 	Number int    `json:"number"`
-	Type   string `json:"type"`
+	Type   string `json:"type,omitempty"`
 	Text   string `json:"text"`
 }
 
@@ -453,9 +501,11 @@ const (
 )
 
 // BuildDeniedResponse builds the Da Vinci PAS denied ClaimResponse (FR-22).
-// The rationale is the human-readable disposition; the appeal window (30 days)
-// + peer-to-peer instruction ride in a processNote. No preAuthRef is issued.
-// Outcome is "complete" — denial is a decision, not an error.
+// The rationale is the human-readable disposition, carried exactly; an empty
+// rationale emits no disposition. It carries no processNote — use
+// BuildDeniedResponseWithNotesAtLine to add the partner's own notes. No
+// preAuthRef is issued. Outcome is "complete" — denial is a decision, not an
+// error.
 //
 // PORTED-standalone: internal/pas.BuildDeniedResponse.
 //
@@ -465,20 +515,32 @@ const (
 // AtLine variant exists for interface symmetry + meta.profile-from-def discipline.
 func BuildDeniedResponse(patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
 	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
-	return buildDeniedResponse(def, patientRef, correlationID, rationale, created)
+	return buildDeniedResponse(def, patientRef, correlationID, rationale, nil, created)
 }
 
 // BuildDeniedResponseAtLine is BuildDeniedResponse parameterized by PAS line
 // ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
 func BuildDeniedResponseAtLine(line, patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
-	def, ok := PASLineDef(line)
-	if !ok {
-		return nil, fmt.Errorf("shnsdk: BuildDeniedResponseAtLine: unknown PAS line %q", line)
-	}
-	return buildDeniedResponse(def, patientRef, correlationID, rationale, created)
+	return BuildDeniedResponseWithNotesAtLine(line, patientRef, correlationID, rationale, nil, created)
 }
 
-func buildDeniedResponse(def PASDef, patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
+// BuildDeniedResponseWithNotesAtLine is BuildDeniedResponseAtLine carrying the
+// partner's own notes as ClaimResponse.processNote, in order and numbered from
+// 1. A note without text, or with a type other than "display", "print" or
+// "printoper", is refused. Nil notes emit no processNote.
+func BuildDeniedResponseWithNotesAtLine(line, patientRef, correlationID, rationale string, notes []PASProcessNote, created time.Time) ([]byte, error) {
+	def, ok := PASLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: BuildDeniedResponseWithNotesAtLine: unknown PAS line %q", line)
+	}
+	return buildDeniedResponse(def, patientRef, correlationID, rationale, notes, created)
+}
+
+func buildDeniedResponse(def PASDef, patientRef, correlationID, rationale string, notes []PASProcessNote, created time.Time) ([]byte, error) {
+	processNotes, err := pasDeniedNotes(notes)
+	if err != nil {
+		return nil, err
+	}
 	cr := pasDeniedCR{
 		ResourceType: "ClaimResponse",
 		Meta:         &pasClaimResponseMeta{Profile: []string{def.ClaimResponseProfile}},
@@ -508,11 +570,7 @@ func buildDeniedResponse(def PASDef, patientRef, correlationID, rationale string
 				}},
 			}},
 		}},
-		ProcessNote: []pasDeniedProcessNote{{
-			Number: 1,
-			Type:   "print",
-			Text:   "Appeal window: 30 days from the date of this determination. A peer-to-peer review with the medical director may be requested before filing a formal appeal.",
-		}},
+		ProcessNote: processNotes,
 	}
 	return json.Marshal(cr)
 }

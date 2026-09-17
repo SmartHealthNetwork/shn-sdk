@@ -140,6 +140,35 @@ func TestVectorFillQuestionnaireAtLineReproduce(t *testing.T) {
 	}
 }
 
+// TestVectorCRDResponseConsume: the PA-required CRD answer carries its coverage
+// information as an update system action on the order; ParseCRDResponse must CONSUME it
+// (and the deprecated ParseCards reads the same projection), and the answer must certify
+// as a CDS Hooks response at the 2.0 line.
+func TestVectorCRDResponseConsume(t *testing.T) {
+	dir := vectorsDir(t)
+	raw := readVector(t, dir, "crd-cards-pa.json")
+	if v := CheckCDSHooksResponse(raw, "2.0"); len(v) != 0 {
+		t.Fatalf("CheckCDSHooksResponse: %+v", v)
+	}
+	obs, err := ParseCRDResponse(raw)
+	if err != nil {
+		t.Fatalf("ParseCRDResponse: %v", err)
+	}
+	if len(obs.Orders) != 1 || obs.Orders[0].Source != CRDSourceSystemAction || obs.Orders[0].ID != "sr-MBR-COVERED" {
+		t.Fatalf("orders = %+v", obs.Orders)
+	}
+	ci := obs.Orders[0].Coverage[0]
+	const canonical = "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"
+	if ci.Covered != "covered" || ci.PANeeded != "auth-needed" || len(ci.Questionnaires) != 1 ||
+		ci.Questionnaires[0] != canonical || ci.CoverageAssertionID != "crd-assertion-order-sign" {
+		t.Fatalf("coverage information = %+v", ci)
+	}
+	cov, err := ParseCards(raw)
+	if err != nil || !cov.PARequired() || !cov.NeedsDTR() || cov.Questionnaires[0] != canonical {
+		t.Fatalf("ParseCards = %+v, %v", cov, err)
+	}
+}
+
 // TestVectorClaimResponseConsume: the SDK's ParseClaimResponse must CONSUME the approved
 // vector → PriorAuthResult{Outcome:"approved", PreAuthRef, ValidUntil}.
 func TestVectorClaimResponseConsume(t *testing.T) {
@@ -373,6 +402,7 @@ func TestVectorPendedConsume(t *testing.T) {
 	if !pended {
 		t.Fatal("ParsePendedResponse: pended=false, want true")
 	}
+	// The payer asks for one questionnaire, identified at 2.0.
 	if len(needed) != 1 || needed[0].Code != "operative-diagnostic-report" {
 		t.Fatalf("needed = %+v, want [operative-diagnostic-report]", needed)
 	}
@@ -393,6 +423,7 @@ func TestVectorPendedAtLineConsume(t *testing.T) {
 		if !pended {
 			t.Fatalf("line %s: ParsePendedResponse: pended=false, want true", line)
 		}
+		// The questionnaire context at 2.1 and 2.2.
 		if len(needed) != 1 || needed[0].Code != "operative-diagnostic-report" {
 			t.Fatalf("line %s: needed = %+v, want [operative-diagnostic-report]", line, needed)
 		}

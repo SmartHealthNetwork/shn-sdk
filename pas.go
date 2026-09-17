@@ -98,6 +98,12 @@ type PriorAuthResume struct {
 	// native-lane roles need). ADDITIVE serialized field, same grow-only local-file
 	// rules as PayerID above.
 	MemberID string `json:"memberId,omitempty"`
+
+	// Continuation holds the facts an inquiry needs (Identity.Inquire):
+	// metadata of the request and the payer's answer, no clinical content.
+	// ADDITIVE serialized field: a handle written before inquiry support lacks
+	// it, and Inquire refuses such a handle (ErrNoContinuation).
+	Continuation *PriorAuthContinuation `json:"continuation,omitempty"`
 }
 
 // pasBundleBaseURL is the deterministic base for entry fullUrls. A non-urn:uuid
@@ -556,6 +562,13 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 			return nil, fmt.Errorf("shnsdk: conformant submit: append infoChanged: %w", err)
 		}
 	}
+	// One item trace number per item (PAS Claim.item.extension:itemTraceNumber,
+	// allowed at 2.0.1, 2.1.0 and 2.2.1): the payer echoes it on the matching
+	// ClaimResponse item, so a later answer or inquiry can be matched by line.
+	claimJSON, err = stampItemTraceNumbers(claimJSON, in.Corr)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
+	}
 
 	// --- Coverage: reuse BuildCoverageWithPayer (contained cms-payer Org), restamp the id
 	// to the bundle-local conformant id, and STRIP meta.profile (PAS context). The
@@ -787,7 +800,7 @@ func stripMetaProfile(resourceJSON []byte) ([]byte, error) {
 
 // rewriteQRContextRefs rewrites the QuestionnaireResponse's top-level qr-context
 // and DTR 2.2 qr-coverage valueReferences so Coverage points at coverageRef and
-// the ServiceRequest-typed qr-context points at srRef — matching each qr-context
+// the ServiceRequest- or DeviceRequest-typed qr-context points at srRef — matching each qr-context
 // extension by the resourceType PREFIX of its existing valueReference.reference (a ref
 // starting "Coverage/" → coverageRef; one starting "ServiceRequest/" → srRef). This makes
 // BuildConformantClaimBundle SELF-CONSISTENT: the QR's qr-context refs resolve to the
@@ -819,22 +832,25 @@ func rewriteQRContextRefs(qrJSON []byte, coverageRef, srRef string) ([]byte, err
 		if !ok {
 			continue
 		}
-		var vr struct {
-			Reference string `json:"reference"`
+		var vr map[string]json.RawMessage
+		if err := json.Unmarshal(vrRaw, &vr); err != nil || vr == nil {
+			continue
 		}
-		if err := json.Unmarshal(vrRaw, &vr); err != nil {
+		var reference string
+		if err := json.Unmarshal(vr["reference"], &reference); err != nil {
 			continue
 		}
 		var want string
 		switch {
-		case strings.HasPrefix(vr.Reference, "Coverage/"):
+		case strings.HasPrefix(reference, "Coverage/"):
 			want = coverageRef
-		case strings.HasPrefix(vr.Reference, "ServiceRequest/"):
+		case strings.HasPrefix(reference, "ServiceRequest/"), strings.HasPrefix(reference, "DeviceRequest/"):
 			want = srRef
 		default:
 			continue // a qr-context ref we don't own — leave it verbatim
 		}
-		vrJSON, err := json.Marshal(map[string]string{"reference": want})
+		vr["reference"], _ = json.Marshal(want)
+		vrJSON, err := json.Marshal(vr)
 		if err != nil {
 			return nil, err
 		}
@@ -1489,6 +1505,53 @@ func appendInfoChangedToClaimItems(claimJSON []byte) ([]byte, error) {
 	return out, nil
 }
 
+// PASItemTraceSystem is the identifier system of the item trace numbers the
+// PAS submit and update builders write: "<correlation>.<item sequence>".
+const PASItemTraceSystem = "urn:shn:pas:item-trace"
+
+// pasExtItemTraceNumber is the PAS item trace number extension.
+const pasExtItemTraceNumber = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-itemTraceNumber"
+
+// stampItemTraceNumbers appends one itemTraceNumber extension to every Claim
+// item: system PASItemTraceSystem, value "<corr>.<sequence>". An item without
+// a positive sequence, or a Claim without items, is an error.
+func stampItemTraceNumbers(claimJSON []byte, corr string) ([]byte, error) {
+	if corr == "" {
+		return nil, fmt.Errorf("item trace numbers need the correlation id")
+	}
+	var claim map[string]interface{}
+	if err := json.Unmarshal(claimJSON, &claim); err != nil {
+		return nil, fmt.Errorf("item trace numbers: unmarshal claim: %w", err)
+	}
+	items, _ := claim["item"].([]interface{})
+	if len(items) == 0 {
+		return nil, fmt.Errorf("item trace numbers: claim has no item[]")
+	}
+	for i, it := range items {
+		im, ok := it.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("item trace numbers: item %d is not an object", i)
+		}
+		seq, ok := im["sequence"].(float64)
+		if !ok || seq < 1 || seq != float64(int(seq)) {
+			return nil, fmt.Errorf("item trace numbers: item %d has no positive sequence", i)
+		}
+		ext, _ := im["extension"].([]interface{})
+		im["extension"] = append(ext, map[string]interface{}{
+			"url": pasExtItemTraceNumber,
+			"valueIdentifier": map[string]interface{}{
+				"system": PASItemTraceSystem,
+				"value":  fmt.Sprintf("%s.%d", corr, int(seq)),
+			},
+		})
+	}
+	out, err := json.Marshal(claim)
+	if err != nil {
+		return nil, fmt.Errorf("item trace numbers: marshal claim: %w", err)
+	}
+	return out, nil
+}
+
 // appendInfoChangedToClaimItemsMap mutates a decoded Claim map in place, appending the infoChanged
 // item extension to every item. Factored out of appendInfoChangedToClaimItems (its only caller) so
 // the extension shape has one definition even if a future generic-map caller needs it without a
@@ -1697,6 +1760,10 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: append infoChanged: %w", err)
 	}
+	claimJSON, err = stampItemTraceNumbers(claimJSON, in.Corr)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
 	// Reference-payer lane ONLY: repoint Claim.related[0].claim.reference at the prior Claim
 	// ENTRY (added to the bundle below, also PayerOrgEntry-gated). br-payer's resolvePriorClaim
 	// (PasSubmitService.java:379-403) reads .reference (NOT .identifier) and requires the prior
@@ -1887,67 +1954,302 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 }
 
 // ParsePendedResponse classifies the uniquely selected ClaimResponse by decision
-// content, in either a response Bundle or a bare polling resource. Tasks supply
-// needed items only after queued outcome or A4 establishes a pending decision.
+// content, in either a response Bundle or a bare polling resource. It is
+// ParsePendedResponseDetail with the needs flattened to NeededItems
+// (PendedResponseDetail.NeededItems).
 func ParsePendedResponse(data []byte) (pended bool, needed []NeededItem, err error) {
+	pended, detail, err := ParsePendedResponseDetail(data)
+	if err != nil || !pended {
+		return false, nil, err
+	}
+	return true, detail.NeededItems(), nil
+}
+
+// PendedResponseDetail is what a pended PAS response asks for.
+type PendedResponseDetail struct {
+	// Tasks are the response's PAS pended-response Tasks, in Bundle order: a
+	// Task coded from PASTaskCodes, or a Task with no code at all.
+	Tasks []PendedTask
+	// OtherTasks are the response's other Tasks (for example a CDex data
+	// request), exactly as received.
+	OtherTasks []json.RawMessage
+}
+
+// PendedTask is one PAS pended-response Task as the payer sent it.
+type PendedTask struct {
+	// Raw is the Task exactly as received.
+	Raw         json.RawMessage
+	ID          string
+	Status      string
+	Code        string // the PASTempCodes code, "" when the Task has none
+	Profiles    []string
+	Identifiers []PASIdentifier
+	// Requester and Owner are the identifiers the Task names (nil when it
+	// names none, or only by reference).
+	Requester *PASIdentifier
+	Owner     *PASIdentifier
+	// PayerURL is the payer-url input's valueUrl ("" when the input is
+	// absent or not a valueUrl, in which case Nonconformant reports it).
+	PayerURL string
+	// Items are the conformant needs, grouped by request line (Sequence 0
+	// when an input carries no line number).
+	Items []PendedItem
+	// Nonconformant are the inputs this parser could not read as their line
+	// defines them. They are reported, never dropped and never converted.
+	Nonconformant []NonconformantTaskInput
+
+	needed []NeededItem
+}
+
+// NonconformantTaskInput is a Task input whose value is not in the form the
+// PAS profile defines for its input type (for example a questionnaires-needed
+// input with a valueCanonical, where PAS 2.0.1 defines a valueIdentifier), or
+// an input whose type is not a PAS input type.
+type NonconformantTaskInput struct {
+	// Index is the input's position in Task.input.
+	Index int
+	// Type is the input's type code (a PASTempCodes code, or a code given
+	// without a system), or its type text when it has neither.
+	Type string
+	// ValueType is the value's element name (for example "valueCanonical"),
+	// "" when the input has no value.
+	ValueType string
+	// Value is the value exactly as received.
+	Value json.RawMessage
+	// Text is the value's text when the value is a JSON string (for a
+	// canonical, the canonical itself).
+	Text string
+	// Sequence is the input's line number, 0 when it has none.
+	Sequence int
+}
+
+// NeededItems flattens the needs into NeededItem values, in Task and input
+// order: each attachment code, questionnaire identifier value and
+// questionnaire context, and each nonconformant value with text other than
+// the payer URL. Display is the coding's display, else the input type's
+// display or text.
+func (d PendedResponseDetail) NeededItems() []NeededItem {
+	var out []NeededItem
+	for _, t := range d.Tasks {
+		out = append(out, t.needed...)
+	}
+	return out
+}
+
+// ParsePendedResponseDetail reads a PAS response. pended is true when the
+// uniquely selected ClaimResponse's decision is pending (queued outcome or the
+// A4 review action); detail then lists the response's Tasks. Each PAS Task
+// input is read by the type its line defines: attachments-needed as a
+// CodeableConcept, questionnaires-needed as an Identifier (PAS 2.0.1),
+// questionnaire-context as a string (PAS 2.1.0 and 2.2.1), payer-url as a
+// url, and the line number from extension-paLineNumber (2.0.1, 2.1.0) or
+// extension-serviceLineNumber (2.2.1). Any other form is reported in
+// Nonconformant. The input bytes are never changed.
+func ParsePendedResponseDetail(data []byte) (pended bool, detail PendedResponseDetail, err error) {
 	response, tasks, err := selectPASClaimResponse(data)
 	if err != nil {
-		return false, nil, err
+		return false, PendedResponseDetail{}, err
 	}
 	result, err := parsePASClaimDecision(response)
 	if err != nil {
-		return false, nil, err
+		return false, PendedResponseDetail{}, err
 	}
 	if result.Outcome != "pended" {
-		return false, nil, nil
+		return false, PendedResponseDetail{}, nil
 	}
-	for _, task := range tasks {
-		var probe struct {
-			Input []struct {
-				Type struct {
-					Text   string `json:"text"`
-					Coding []struct {
-						System  string `json:"system"`
-						Code    string `json:"code"`
-						Display string `json:"display"`
-					} `json:"coding"`
-				} `json:"type"`
-				ValueString     string `json:"valueString"`
-				ValueIdentifier *struct {
-					Value string `json:"value"`
-				} `json:"valueIdentifier"`
-			} `json:"input"`
+	for _, raw := range tasks {
+		t, pas, err := parsePendedTask(raw)
+		if err != nil {
+			return false, PendedResponseDetail{}, err
 		}
-		if err := json.Unmarshal(task, &probe); err != nil {
-			return false, nil, fmt.Errorf("shnsdk: parse PAS Task: %w", err)
+		if !pas {
+			detail.OtherTasks = append(detail.OtherTasks, raw)
+			continue
 		}
-		for _, input := range probe.Input {
-			display := input.Type.Text
-			questionnaire, routing := false, false
-			for _, coding := range input.Type.Coding {
-				if coding.Code == "payer-url" {
-					routing = true
+		detail.Tasks = append(detail.Tasks, t)
+	}
+	return true, detail, nil
+}
+
+type pendedTaskCoding struct {
+	System  string `json:"system"`
+	Code    string `json:"code"`
+	Display string `json:"display"`
+}
+
+type pendedTaskProbe struct {
+	ID   string `json:"id"`
+	Meta struct {
+		Profile []string `json:"profile"`
+	} `json:"meta"`
+	Identifier []PASIdentifier `json:"identifier"`
+	Status     string          `json:"status"`
+	Code       *struct {
+		Coding []pendedTaskCoding `json:"coding"`
+	} `json:"code"`
+	Requester *struct {
+		Identifier *PASIdentifier `json:"identifier"`
+	} `json:"requester"`
+	Owner *struct {
+		Identifier *PASIdentifier `json:"identifier"`
+	} `json:"owner"`
+	Input []map[string]json.RawMessage `json:"input"`
+}
+
+// pasInputType returns an input type's code, whether it is a PASTempCodes
+// code (a coding without a system yields its code with pas false), the type's
+// text and the coding's display.
+func pasInputType(raw json.RawMessage) (code string, pas bool, text, display string) {
+	var t struct {
+		Text   string             `json:"text"`
+		Coding []pendedTaskCoding `json:"coding"`
+	}
+	_ = json.Unmarshal(raw, &t)
+	for _, c := range t.Coding {
+		if c.System == PASTempCodesSystem {
+			return c.Code, true, t.Text, c.Display
+		}
+	}
+	for _, c := range t.Coding {
+		if c.System == "" && c.Code != "" {
+			return c.Code, false, t.Text, c.Display
+		}
+	}
+	return "", false, t.Text, ""
+}
+
+// pasInputLine returns the input's line number (0 when it carries none).
+func pasInputLine(raw json.RawMessage) int {
+	var exts []struct {
+		URL              string `json:"url"`
+		ValueInteger     *int   `json:"valueInteger"`
+		ValuePositiveInt *int   `json:"valuePositiveInt"`
+	}
+	_ = json.Unmarshal(raw, &exts)
+	for _, e := range exts {
+		switch {
+		case e.URL == pasExtPALineNumber && e.ValueInteger != nil:
+			return *e.ValueInteger
+		case e.URL == pasExtServiceLineNumber && e.ValuePositiveInt != nil:
+			return *e.ValuePositiveInt
+		}
+	}
+	return 0
+}
+
+// parsePendedTask reads one Task; pas is false for a Task coded from another
+// code system.
+func parsePendedTask(raw json.RawMessage) (t PendedTask, pas bool, err error) {
+	var p pendedTaskProbe
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return PendedTask{}, false, fmt.Errorf("shnsdk: parse PAS Task: %w", err)
+	}
+	if p.Code != nil {
+		for _, c := range p.Code.Coding {
+			if c.System == PASTempCodesSystem {
+				t.Code = c.Code
+			}
+		}
+		if t.Code == "" {
+			return PendedTask{}, false, nil
+		}
+	}
+	t.Raw, t.ID, t.Status, t.Profiles, t.Identifiers = raw, p.ID, p.Status, p.Meta.Profile, p.Identifier
+	if p.Requester != nil {
+		t.Requester = p.Requester.Identifier
+	}
+	if p.Owner != nil {
+		t.Owner = p.Owner.Identifier
+	}
+	bySeq := map[int]*PendedItem{}
+	var order []int
+	item := func(seq int) *PendedItem {
+		if it, ok := bySeq[seq]; ok {
+			return it
+		}
+		bySeq[seq] = &PendedItem{Sequence: seq}
+		order = append(order, seq)
+		return bySeq[seq]
+	}
+	for i, in := range p.Input {
+		typeCode, pasType, text, display := pasInputType(in["type"])
+		if display == "" {
+			display = text
+		}
+		code := ""
+		if pasType {
+			code = typeCode
+		}
+		seq := pasInputLine(in["extension"])
+		valueType := ""
+		for k := range in {
+			if strings.HasPrefix(k, "value") {
+				if valueType != "" {
+					valueType = "" // two values: not one readable value
+					break
 				}
-				if coding.System == "http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes" && coding.Code == "questionnaires-needed" {
-					questionnaire = true
-					if display == "" {
-						display = coding.Display
+				valueType = k
+			}
+		}
+		value := in[valueType]
+		ok := false
+		switch {
+		case code == pasTaskInputPayerURL && valueType == "valueUrl":
+			ok = json.Unmarshal(value, &t.PayerURL) == nil
+		case code == pasTaskInputAttachments && valueType == "valueCodeableConcept":
+			var cc struct {
+				Coding []pendedTaskCoding `json:"coding"`
+			}
+			if json.Unmarshal(value, &cc) == nil && len(cc.Coding) > 0 {
+				ok = true
+				it := item(seq)
+				for _, c := range cc.Coding {
+					it.AttachmentCodes = append(it.AttachmentCodes, PASCoding(c))
+					d := c.Display
+					if d == "" {
+						d = display
 					}
+					t.needed = append(t.needed, NeededItem{Code: c.Code, Display: d})
 				}
 			}
-			if routing {
-				continue
+		case code == pasTaskInputQuestionnaires && valueType == "valueIdentifier":
+			var id PASIdentifier
+			if json.Unmarshal(value, &id) == nil && id.Value != "" {
+				ok = true
+				it := item(seq)
+				it.QuestionnaireIDs = append(it.QuestionnaireIDs, id)
+				t.needed = append(t.needed, NeededItem{Code: id.Value, Display: display})
 			}
-			value := input.ValueString
-			if questionnaire && input.ValueIdentifier != nil {
-				value = input.ValueIdentifier.Value
-			}
-			if value != "" {
-				needed = append(needed, NeededItem{Code: value, Display: display})
+		case code == pasTaskInputQuestionnaireCtx && valueType == "valueString":
+			var v string
+			if json.Unmarshal(value, &v) == nil && v != "" {
+				ok = true
+				it := item(seq)
+				it.QuestionnaireContexts = append(it.QuestionnaireContexts, v)
+				t.needed = append(t.needed, NeededItem{Code: v, Display: display})
 			}
 		}
+		if ok {
+			continue
+		}
+		name := typeCode
+		if name == "" {
+			name = text
+		}
+		nc := NonconformantTaskInput{Index: i, Type: name, ValueType: valueType, Value: value, Sequence: seq}
+		var str string
+		if len(value) > 0 && json.Unmarshal(value, &str) == nil {
+			nc.Text = str
+		}
+		t.Nonconformant = append(t.Nonconformant, nc)
+		if nc.Text != "" && typeCode != pasTaskInputPayerURL {
+			t.needed = append(t.needed, NeededItem{Code: nc.Text, Display: display})
+		}
 	}
-	return true, needed, nil
+	for _, seq := range order {
+		t.Items = append(t.Items, *bySeq[seq])
+	}
+	return t, true, nil
 }
 
 // selectPASClaimResponse rejects ambiguous or malformed envelopes before either

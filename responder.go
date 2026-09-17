@@ -2,6 +2,7 @@ package shnsdk
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -24,6 +25,12 @@ type Adjudicator interface {
 	// The code is opaque here (CPT or HCPCS — whatever allowlisted system the
 	// draft order's ServiceRequest carried); the parameter name is historical,
 	// kept unchanged to hold Adjudicator's additive-only growth rule.
+	//
+	// The Responder answers with the order's coverage information: covered,
+	// pa-needed auth-needed or no-auth, and, when a questionnaire canonical is
+	// returned with paRequired, doc-needed clinical plus that questionnaire. An
+	// Adjudicator that also implements CoverageAssertionRecorder receives the
+	// assertion id each answer carries.
 	OrderSelect(cpt string) (paRequired bool, questionnaireCanonical string)
 
 	// Questionnaire returns the FHIR Questionnaire JSON for a canonical this
@@ -34,9 +41,60 @@ type Adjudicator interface {
 
 	// PriorAuth adjudicates a PAS submission from the QuestionnaireResponse and
 	// whether the bundle carried supplemental evidence. Used for BOTH the
-	// initial submit and the ClaimUpdate re-adjudication. An error → 422 with
-	// the error text (mirrors the substrate gateway).
+	// initial submit and the ClaimUpdate re-adjudication; the Responder answers
+	// either with this decision (approved, pended or denied). An error is
+	// answered with 422 and the error text, or, when it is an
+	// *AppAnswerError, with that answer's status, body and media type.
 	PriorAuth(qrJSON []byte, hasDiagnosticReport bool) (PASDecision, error)
+}
+
+// InquiryAdjudicator is an optional Adjudicator extension for payers that
+// answer Da Vinci PAS inquiries (Claim/$inquire, transaction type
+// pas-claim-inquire). Inquire returns the payer's current decision on the
+// prior authorization the inquiry asks about; the Responder answers with that
+// decision as a PAS response. An error is answered like a PriorAuth error. A
+// Responder whose Adjudicator does not implement it refuses inquiries with
+// 501. An inquiry does not change the Responder's pended-claim state.
+type InquiryAdjudicator interface {
+	Inquire(inquiry PASInquiry) (PASDecision, error)
+}
+
+// PASInquiry is a prior-authorization inquiry the Responder received.
+type PASInquiry struct {
+	// Bundle is the inquiry request Bundle exactly as received.
+	Bundle []byte
+	// Patient is the inquiry Claim's patient reference.
+	Patient string
+	// ClaimIdentifiers are the inquiry Claim's identifiers.
+	ClaimIdentifiers []PASIdentifier
+	// MemberIdentifiers are the identifiers of the inquiry's Patient entry.
+	MemberIdentifiers []PASIdentifier
+	// Items are the inquiry Claim's items.
+	Items []PASInquiryItem
+	// AuthorizationNumber and AdministrationReferenceNumber are the
+	// claim-level numbers (PAS 2.2); item-level numbers are on Items.
+	AuthorizationNumber           string
+	AdministrationReferenceNumber string
+}
+
+// CoverageAssertion is one coverage assertion the Responder sent: its id (the
+// coverage-assertion-id a later DTR request can carry back as context), the
+// order and Coverage it was made for, the procedure code the Adjudicator
+// decided on, and the decision.
+type CoverageAssertion struct {
+	ID            string
+	Order         string // "ServiceRequest/<id>"
+	Coverage      string // "Coverage/<id>"
+	ProcedureCode string
+	PARequired    bool
+	Questionnaire string
+}
+
+// CoverageAssertionRecorder is an optional Adjudicator extension. The
+// Responder calls RecordCoverageAssertion once for each coverage assertion,
+// after the answer carrying it has been sealed and authorized.
+type CoverageAssertionRecorder interface {
+	RecordCoverageAssertion(CoverageAssertion)
 }
 
 // ResponderConfig wires a payer responder. Every field is REQUIRED except Clock
@@ -76,6 +134,12 @@ type ResponderConfig struct {
 	// Stamp rule: an app-error frame (respondLegError's sibling here) is NEVER stamped,
 	// since it may relay bytes this build did not produce.
 	StampContractVersion bool
+
+	// PublicBaseURL is this payer's public FHIR base URL. OPTIONAL: when set,
+	// a pended decision without a PayerURL uses it as the Task's payer URL.
+	// When neither is set, a pended decision is refused (500) rather than
+	// answered with an invented URL.
+	PublicBaseURL string
 }
 
 // Responder serves a payer holder's /substrate/inbound with the SAME pipeline
@@ -89,12 +153,15 @@ type Responder struct {
 	cfg    ResponderConfig
 	jti    *ReplayGuard
 	ledger *pendedLedger
+	// newAssertionID mints coverage assertion ids (random; replaceable in tests).
+	newAssertionID func() string
 }
 
 // responderReqOp pins each TransactionType to the request operation the inbound
 // token must carry. Unknown types → 400 before token work. Mirrors the gateway's PA
 // leg catalog (gateway/engine/workstream_pa.go, paCatalog — the .Op field) for the
-// five types this Responder serves: federated-query and patient-dtr are facility/PHG
+// six types this Responder serves (pas-claim-inquire is served here ahead of the
+// network: gateways route it from Smart Gateway v0.45.0): federated-query and patient-dtr are facility/PHG
 // roles, not payer, and crd-order-dispatch is a payer leg this Responder does not yet
 // serve — both exclusions are pinned deliberately by the network-side lockstep
 // conformance fence over ResponderTransactionOperations, so catalog growth cannot
@@ -106,6 +173,7 @@ var responderReqOp = map[string]string{
 	"dtr-questionnaire-fetch": "dtr-questionnaire-fetch",
 	"pas-claim":               "pas-submit",
 	"pas-claim-update":        "pas-update-submit",
+	"pas-claim-inquire":       "pas-inquire",
 }
 
 // NewResponder validates cfg, defaults Clock and Client, and returns a ready
@@ -145,7 +213,12 @@ func NewResponder(cfg ResponderConfig) (*Responder, error) {
 	if cfg.Client == nil {
 		cfg.Client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Responder{cfg: cfg, jti: NewReplayGuard(MaxAssertionTTL, 1<<16), ledger: newPendedLedger()}, nil
+	if cfg.PublicBaseURL != "" {
+		if err := checkPayerURL(cfg.PublicBaseURL); err != nil {
+			return nil, fmt.Errorf("shnsdk: ResponderConfig.PublicBaseURL: %w", err)
+		}
+	}
+	return &Responder{cfg: cfg, jti: NewReplayGuard(MaxAssertionTTL, 1<<16), ledger: newPendedLedger(), newAssertionID: randomAssertionID}, nil
 }
 
 // Handler returns a ServeMux with exactly POST /substrate/inbound wired to
@@ -161,10 +234,12 @@ func (r *Responder) Handler() http.Handler {
 // and let handleInbound decide how to relay it (bare legacy vs sealed v1 frame).
 //
 // Contract:
-//   - success ⇒ payload non-nil, appStatus 0 (relayed as frame(200,
-//     application/fhir+json,…) to a capable requester, bare otherwise);
-//   - app error ⇒ appStatus non-2xx + errMsg, and OPTIONALLY payload+contentType
-//     for a FHIR error body (else handleInbound builds {"error":errMsg}).
+//   - success ⇒ payload non-nil, appStatus 0, contentType the payload's media
+//     type (relayed as frame(200, contentType, …) to a capable requester, bare
+//     otherwise);
+//   - app error ⇒ appStatus non-2xx + errMsg, and OPTIONALLY the adjudicator's
+//     own answer (participantBody: payload, possibly empty, and contentType,
+//     possibly empty) — else handleInbound builds {"error":errMsg}.
 //
 // commit runs AFTER the response leg seals + authorizes successfully (the ledger
 // state mutation — pend record / update finalize — must not happen until the
@@ -178,8 +253,27 @@ type handlerResult struct {
 	appStatus   int
 	errMsg      string
 	contentType string
-	commit      func()
-	rollback    func()
+	// participantBody marks payload and contentType as the adjudicator's own
+	// error answer, relayed exactly (an empty body and an absent media type
+	// included).
+	participantBody bool
+	commit          func()
+	rollback        func()
+}
+
+// adjudicatorError answers an Adjudicator error: an *AppAnswerError with a
+// 4xx or 5xx status is the adjudicator's own answer, relayed with its status,
+// exact body and media type (none when it gave none); any other error is 422
+// with the error text.
+func adjudicatorError(err error) handlerResult {
+	var ae *AppAnswerError
+	if errors.As(err, &ae) {
+		if ae.Status < 400 || ae.Status > 599 {
+			return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "adjudicator answered an error with a non-error status"}
+		}
+		return handlerResult{appStatus: ae.Status, errMsg: fmt.Sprintf("adjudicator answered %d", ae.Status), payload: ae.Body, contentType: ae.ContentType, participantBody: true}
+	}
+	return handlerResult{appStatus: http.StatusUnprocessableEntity, errMsg: err.Error()}
 }
 
 // respondErr writes a JSON {"error": msg} body with the given HTTP status code.
@@ -305,7 +399,10 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	// for its own per-leg Content-Type field) rather than acted on. A corrupt
 	// frame is the one rejection: a magic byte with a body that fails
 	// DecodeHTTPFrame is 400, exactly like a corrupt envelope at step 2.
-	var claimedContract string
+	//
+	// A frame may also name a DTR operation (FrameHeaderOperation); that
+	// header is defined for the DTR leg only.
+	var claimedContract, claimedOperation string
 	if IsFramed(plaintext) {
 		hdr, body, ferr := DecodeHTTPFrame(plaintext)
 		if ferr != nil {
@@ -313,6 +410,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		claimedContract = hdr.Headers[FrameHeaderContractVersion]
+		claimedOperation = hdr.Headers[FrameHeaderOperation]
 		plaintext = body
 	}
 
@@ -327,36 +425,42 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	//    not happen until the response leg succeeds.
 	var res handlerResult
 
-	switch env.Metadata.TransactionType {
-	case "coverage-eligibility":
-		res = r.handleEligibility(plaintext, corr, now)
-	case "crd-order-select":
-		res = r.handleCRD(plaintext, claimedContract)
-	case "dtr-questionnaire-fetch":
-		res = r.handleDTR(plaintext, claimedContract)
-	case "pas-claim":
-		// R8 re-home (FR-16/FR-27): fence BEFORE dispatch, parity with the
-		// substrate gateway's inbound/ingress fence — an unattested clinician/
-		// patient QR item is nonconformant regardless of which handler would
-		// otherwise run.
-		if reason, ok := fenceAttestedItems(plaintext); !ok {
-			respondErr(w, http.StatusForbidden, reason)
+	if claimedOperation != "" && env.Metadata.TransactionType != "dtr-questionnaire-fetch" {
+		res = handlerResult{appStatus: http.StatusBadRequest, errMsg: "operation header is not defined for this transaction type"}
+	} else {
+		switch env.Metadata.TransactionType {
+		case "coverage-eligibility":
+			res = r.handleEligibility(plaintext, corr, now)
+		case "crd-order-select":
+			res = r.handleCRD(plaintext, now, claimedContract)
+		case "dtr-questionnaire-fetch":
+			res = r.handleDTR(plaintext, claimedContract, claimedOperation)
+		case "pas-claim":
+			// R8 re-home (FR-16/FR-27): fence BEFORE dispatch, parity with the
+			// substrate gateway's inbound/ingress fence — an unattested clinician/
+			// patient QR item is nonconformant regardless of which handler would
+			// otherwise run.
+			if reason, ok := fenceAttestedItems(plaintext); !ok {
+				respondErr(w, http.StatusForbidden, reason)
+				return
+			}
+			res = r.handlePASSubmit(plaintext, tok, corr, now, claimedContract)
+		case "pas-claim-update":
+			// R8 re-home (FR-16/FR-27): same fence as pas-claim above — the
+			// property belongs to any QR item, not only to amends.
+			if reason, ok := fenceAttestedItems(plaintext); !ok {
+				respondErr(w, http.StatusForbidden, reason)
+				return
+			}
+			res = r.handlePASUpdate(plaintext, tok, corr, now, claimedContract)
+		case "pas-claim-inquire":
+			res = r.handlePASInquire(plaintext, corr, now)
+		default:
+			// Defensive: step 5 already rejects unknowns via responderReqOp, but
+			// this hardens against a future responderReqOp edit.
+			respondErr(w, http.StatusBadRequest, "unknown transaction type")
 			return
 		}
-		res = r.handlePASSubmit(plaintext, tok, corr, now, claimedContract)
-	case "pas-claim-update":
-		// R8 re-home (FR-16/FR-27): same fence as pas-claim above — the
-		// property belongs to any QR item, not only to amends.
-		if reason, ok := fenceAttestedItems(plaintext); !ok {
-			respondErr(w, http.StatusForbidden, reason)
-			return
-		}
-		res = r.handlePASUpdate(plaintext, tok, corr, now, claimedContract)
-	default:
-		// Defensive: step 5 already rejects unknowns via responderReqOp, but
-		// this hardens against a future responderReqOp edit.
-		respondErr(w, http.StatusBadRequest, "unknown transaction type")
-		return
 	}
 
 	// Relay decision. An application non-2xx is a real answer: a legacy requester
@@ -370,7 +474,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 			respondErr(w, res.appStatus, res.errMsg) // pre-frame contract, byte-identical
 			return
 		}
-		if res.payload == nil {
+		if !res.participantBody {
 			res.payload, _ = json.Marshal(map[string]string{"error": res.errMsg})
 			res.contentType = "application/json"
 		}
@@ -384,10 +488,9 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		if st == 0 {
 			st = http.StatusOK
 		}
+		// The media type is the answer's own; an answer without one (an
+		// adjudicator's error that named none) is framed with no Content-Type.
 		ct := res.contentType
-		if ct == "" {
-			ct = "application/fhir+json"
-		}
 		var ferr error
 		// contractVersion stamp (v0.38.0 parity): ONLY a success (2xx) frame is stamped, and
 		// only when the deployment opted in (StampContractVersion) — false takes
@@ -399,10 +502,11 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		// bytes this build did not produce).
 		stampToken := contractTokenForTxType(env.Metadata.TransactionType)
 		if r.cfg.StampContractVersion && stampToken != "" && st/100 == 2 {
-			sealPayload, ferr = EncodeHTTPFrameHeaders(st, map[string]string{
-				"Content-Type":             ct,
-				FrameHeaderContractVersion: stampToken,
-			}, res.payload)
+			headers := map[string]string{FrameHeaderContractVersion: stampToken}
+			if ct != "" {
+				headers["Content-Type"] = ct
+			}
+			sealPayload, ferr = EncodeHTTPFrameHeaders(st, headers, res.payload)
 		} else {
 			sealPayload, ferr = EncodeHTTPFrame(st, ct, res.payload)
 		}
@@ -503,6 +607,8 @@ func responseOp(txType string) string {
 		return "pas-response"
 	case "pas-claim-update":
 		return "pas-update-response"
+	case "pas-claim-inquire":
+		return "pas-inquire-response"
 	default:
 		return ""
 	}
@@ -546,7 +652,7 @@ func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Ti
 	if err != nil {
 		return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build response failed"}
 	}
-	return handlerResult{payload: crrJSON}
+	return handlerResult{payload: crrJSON, contentType: fhirJSON}
 }
 
 // handleDTR implements the dtr-questionnaire-fetch handler. Mirrors payer.go
@@ -555,13 +661,36 @@ func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Ti
 // claimedContract is the inbound request-frame claim (handleInbound step 7,
 // "" when the request arrived bare or unclaimed) — currently unread; see
 // handleInbound's RECEIVER OBLIGATION comment for why.
-func (r *Responder) handleDTR(plaintext []byte, claimedContract string) handlerResult {
-	var fetch QuestionnaireFetchRequest
+//
+// operation is the request frame's operation header ("" for the older
+// questionnaire envelope, which is still accepted). A framed operation carries
+// that operation's own input: handleDTROperation.
+func (r *Responder) handleDTR(plaintext []byte, claimedContract, operation string) handlerResult {
+	if operation != "" {
+		return r.handleDTROperation(plaintext, operation)
+	}
+	var fetch struct {
+		QuestionnaireFetchRequest
+		NextQuestion json.RawMessage `json:"nextQuestion,omitempty"`
+	}
 	if err := json.Unmarshal(plaintext, &fetch); err != nil {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse questionnaire fetch failed"}
 	}
+	if len(fetch.NextQuestion) > 0 && string(fetch.NextQuestion) != "null" {
+		// The envelope's adaptive round: answered by the adaptive Adjudicator,
+		// never with a package.
+		qr, ok := nextQuestionInput(fetch.NextQuestion)
+		if !ok {
+			return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse next-question input failed"}
+		}
+		return r.nextQuestion(qr)
+	}
+	return r.questionnairePackage(fetch.Canonical)
+}
 
-	questionnaireJSON, ok := r.cfg.Adjudicator.Questionnaire(fetch.Canonical)
+// questionnairePackage answers a package request for one canonical.
+func (r *Responder) questionnairePackage(canonical string) handlerResult {
+	questionnaireJSON, ok := r.cfg.Adjudicator.Questionnaire(canonical)
 	if !ok {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "unknown questionnaire canonical"}
 	}
@@ -573,7 +702,7 @@ func (r *Responder) handleDTR(plaintext []byte, claimedContract string) handlerR
 	if err != nil {
 		return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build questionnaire package failed"}
 	}
-	return handlerResult{payload: pkg}
+	return handlerResult{payload: pkg, contentType: fhirJSON}
 }
 
 // ---- FR-16/FR-27 attestation conformance fence (R8 re-home; parity with the
@@ -912,4 +1041,14 @@ func fenceStringField(node map[string]any, key string) string {
 func fenceItemLinkID(item map[string]any) string {
 	id, _ := item["linkId"].(string)
 	return id
+}
+
+// randomAssertionID returns a random version-4 UUID.
+func randomAssertionID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never fails
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }

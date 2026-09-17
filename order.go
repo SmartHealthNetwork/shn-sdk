@@ -321,7 +321,39 @@ func ParseServiceRequestSubject(data []byte) (string, error) {
 // order-select patient (H2). PORTED standalone from
 // internal/fhirmap.ParseCoverageBeneficiary; behavior parity proven by
 // test/sdkparity/crd_parity_test.go.
+//
+// data may also be a Bundle (a search result or a collection) of Coverages: every Coverage
+// entry must name the same beneficiary, which is returned; a Bundle with no Coverage or with
+// Coverages for different beneficiaries is an error.
 func ParseCoverageBeneficiary(data []byte) (string, error) {
+	entries, isBundle, err := coverageBundleEntries(data)
+	if err != nil {
+		return "", fmt.Errorf("shnsdk: coverage Bundle: %w", err)
+	}
+	if !isBundle {
+		return parseOneCoverageBeneficiary(data)
+	}
+	found := ""
+	for _, e := range entries {
+		if e.head.ResourceType != "Coverage" {
+			continue
+		}
+		ref, err := parseOneCoverageBeneficiary(e.Resource)
+		if err != nil {
+			return "", err
+		}
+		if found != "" && found != ref {
+			return "", fmt.Errorf("shnsdk: coverage Bundle names more than one beneficiary")
+		}
+		found = ref
+	}
+	if found == "" {
+		return "", fmt.Errorf("shnsdk: coverage Bundle holds no Coverage")
+	}
+	return found, nil
+}
+
+func parseOneCoverageBeneficiary(data []byte) (string, error) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 		Beneficiary  struct {

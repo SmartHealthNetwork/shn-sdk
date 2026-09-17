@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // Result reports whether a resource conforms to a profile and lists any issues.
@@ -98,18 +99,42 @@ type fileToValidate struct {
 
 // validatorResponse is the JSON body returned by the validator server.
 type validatorResponse struct {
-	Outcomes []outcome `json:"outcomes"`
+	Outcomes []json.RawMessage `json:"outcomes"`
 }
 
-type outcome struct {
-	Issues []issue `json:"issues"`
-}
-
+// issue decodes both wire shapes: the HL7 validator-wrapper's
+// ValidationMessage (level/message) and the legacy severity/details shape. A
+// level outside the recognised set is a decode failure, never a silent valid.
 type issue struct {
+	Level    string `json:"level"`
+	Message  string `json:"message"`
 	Severity string `json:"severity"`
 	Details  string `json:"details"`
 	Type     string `json:"type"`
 	Line     int    `json:"line"`
+}
+
+var recognisedLevels = map[string]bool{"FATAL": true, "ERROR": true, "WARNING": true, "INFORMATION": true}
+
+func (i issue) level() string {
+	if i.Level != "" {
+		return strings.ToUpper(i.Level)
+	}
+	return strings.ToUpper(i.Severity)
+}
+
+func (i issue) text() string {
+	if i.Message != "" {
+		return i.Message
+	}
+	return i.Details
+}
+
+func truncateBytes(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "…"
 }
 
 // Validate posts resourceJSON to the HL7 validator server and returns a Result.
@@ -163,16 +188,49 @@ func (h *HTTPValidator) Validate(ctx context.Context, resourceJSON []byte, profi
 		return Result{}, fmt.Errorf("shnsdk: httpvalidator server returned %d", resp.StatusCode)
 	}
 
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
+	if err != nil {
+		return Result{}, fmt.Errorf("shnsdk: httpvalidator read response: %w", err)
+	}
+	if len(raw) > MaxResponseBytes {
+		return Result{}, fmt.Errorf("shnsdk: httpvalidator response exceeds %d bytes", MaxResponseBytes)
+	}
 	var vresp validatorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&vresp); err != nil {
+	if err := json.Unmarshal(raw, &vresp); err != nil {
 		return Result{}, fmt.Errorf("shnsdk: httpvalidator decode response: %w", err)
 	}
-
+	// Fail closed: a body without outcomes is not a verdict (a wrong URL, a
+	// proxy page or a changed schema must never read as valid).
+	if len(vresp.Outcomes) == 0 {
+		return Result{}, fmt.Errorf("shnsdk: httpvalidator response carries no outcomes (body %q)", truncateBytes(raw, 200))
+	}
 	var issues []string
-	for _, oc := range vresp.Outcomes {
-		for _, iss := range oc.Issues {
-			if iss.Severity == "error" || iss.Severity == "fatal" {
-				issues = append(issues, iss.Details)
+	for _, rawOutcome := range vresp.Outcomes {
+		trimmed := bytes.TrimSpace(rawOutcome)
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			return Result{}, fmt.Errorf("shnsdk: httpvalidator invalid outcome object")
+		}
+		var oc struct {
+			Issues json.RawMessage `json:"issues"`
+		}
+		if err := json.Unmarshal(rawOutcome, &oc); err != nil {
+			return Result{}, fmt.Errorf("shnsdk: httpvalidator decode outcome: %w", err)
+		}
+		rawIssues := bytes.TrimSpace(oc.Issues)
+		if len(rawIssues) == 0 || rawIssues[0] != '[' {
+			return Result{}, fmt.Errorf("shnsdk: httpvalidator missing or malformed issues")
+		}
+		var decoded []issue
+		if err := json.Unmarshal(rawIssues, &decoded); err != nil {
+			return Result{}, fmt.Errorf("shnsdk: httpvalidator decode issues: %w", err)
+		}
+		for _, iss := range decoded {
+			lvl := iss.level()
+			if !recognisedLevels[lvl] {
+				return Result{}, fmt.Errorf("shnsdk: httpvalidator unrecognised issue level %q (message %q)", lvl, iss.text())
+			}
+			if lvl == "ERROR" || lvl == "FATAL" {
+				issues = append(issues, iss.text())
 			}
 		}
 	}

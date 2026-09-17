@@ -205,7 +205,7 @@ func testPriorAuthDecision(qrJSON []byte, hasDiagnosticReport bool, now time.Tim
 	}
 	switch {
 	case priorSurgery && !hasDiagnosticReport:
-		return PASDecision{Outcome: PASPended, NeededItems: []string{"operative-diagnostic-report"}}, nil
+		return testPendedDecision(), nil
 	case weeks < 6:
 		return PASDecision{Outcome: PASDenied}, nil
 	default:
@@ -214,6 +214,28 @@ func testPriorAuthDecision(qrJSON []byte, hasDiagnosticReport bool, now time.Tim
 			PreAuthRef: fmt.Sprintf("PA-%012x", now.Unix()),
 			ValidUntil: now.AddDate(0, 0, 90).Format("2006-01-02"),
 		}, nil
+	}
+}
+
+// testPayerIdentifier is the synthetic payer identifier the test pends name
+// as Task requester and owner.
+var testPayerIdentifier = PASIdentifier{System: "http://hl7.org/fhir/sid/us-npi", Value: "1234567893"}
+
+// testOperativeNote is the attachment the test pends ask for (LOINC Surgical
+// operation note).
+var testOperativeNote = PASCoding{System: "http://loinc.org", Code: "11504-8", Display: "Surgical operation note"}
+
+// testPendedDecision is a pended decision carrying every Task fact a PAS 2.0
+// pended response needs.
+func testPendedDecision() PASDecision {
+	return PASDecision{
+		Outcome:        PASPended,
+		PendedItems:    []PendedItem{{Sequence: 1, AttachmentCodes: []PASCoding{testOperativeNote}}},
+		TaskIdentifier: PASIdentifier{System: "urn:test:payer:pa-request", Value: "req-1"},
+		TaskStatus:     "requested",
+		TaskRequester:  testPayerIdentifier,
+		TaskOwner:      testPayerIdentifier,
+		PayerURL:       "https://payer.test/fhir",
 	}
 }
 
@@ -1682,4 +1704,104 @@ func TestFenceWhoUsable(t *testing.T) {
 			t.Fatalf("who carrying only an identifier (no reference): want ok=true, got reject reason=%q", reason)
 		}
 	})
+}
+
+// appAnswerAdjudicator answers PriorAuth with the participant's own error
+// answer.
+type appAnswerAdjudicator struct {
+	errPriorAuthAdjudicator
+	answer *AppAnswerError
+}
+
+func (a appAnswerAdjudicator) PriorAuth(_ []byte, _ bool) (PASDecision, error) {
+	return PASDecision{}, fmt.Errorf("adjudication refused: %w", a.answer)
+}
+
+// framedAnswer submits a claim to a frame-capable Responder backed by adj and
+// returns the decoded frame.
+func framedAnswer(t *testing.T, adj Adjudicator, corr string) (HTTPFrameHeader, []byte) {
+	t.Helper()
+	h, responderIdent, _ := newPAHarness(t)
+	srv := h.makeFramedResponderSrv(t, responderIdent, adj, framesV1)
+	qr := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 8}, h.now)
+	envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", corr, buildConformantClaim(t, "MBR-001", corr, qr, h.now))
+	resp := postInbound(t, srv, envBytes, hubHdr)
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HTTP %d: %s", resp.StatusCode, body)
+	}
+	hdr, fbody, err := DecodeHTTPFrame(h.openResponse(t, body))
+	if err != nil {
+		t.Fatalf("DecodeHTTPFrame: %v", err)
+	}
+	return hdr, fbody
+}
+
+// TestSDKResponder_ErrorContentTypePassedThrough: an adjudicator's own error
+// answer reaches a frame-capable requester with its status, its exact body
+// and its media type; the Responder's own refusals stay application/json and
+// its answers carry their real media type (a CDS Hooks answer is JSON, a PAS
+// answer FHIR JSON).
+func TestSDKResponder_ErrorContentTypePassedThrough(t *testing.T) {
+	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"business-rule","diagnostics":"member not found — ñ"}]}` + "\n")
+	for _, ct := range []string{"application/fhir+json", "application/json", "text/plain; charset=utf-8"} {
+		hdr, body := framedAnswer(t, appAnswerAdjudicator{answer: &AppAnswerError{Status: http.StatusUnprocessableEntity, ContentType: ct, Body: oo}}, "ct-pass")
+		if hdr.Status != http.StatusUnprocessableEntity || hdr.Headers["Content-Type"] != ct || !bytes.Equal(body, oo) {
+			t.Errorf("%s: frame status=%d type=%q body=%q", ct, hdr.Status, hdr.Headers["Content-Type"], body)
+		}
+	}
+	hdr, _ := framedAnswer(t, appAnswerAdjudicator{answer: &AppAnswerError{Status: http.StatusServiceUnavailable, ContentType: "application/json", Body: []byte(`{}`)}}, "ct-503")
+	if hdr.Status != http.StatusServiceUnavailable {
+		t.Errorf("5xx status = %d", hdr.Status)
+	}
+	// A participant error with a non-error status is refused, not relayed.
+	hdr, body := framedAnswer(t, appAnswerAdjudicator{answer: &AppAnswerError{Status: http.StatusOK, ContentType: "application/json", Body: []byte(`{}`)}}, "ct-200")
+	if hdr.Status != http.StatusInternalServerError || hdr.Headers["Content-Type"] != "application/json" || !bytes.Contains(body, []byte("non-error status")) {
+		t.Errorf("2xx error answer: status=%d type=%q body=%s", hdr.Status, hdr.Headers["Content-Type"], body)
+	}
+	// The Responder's own refusal is JSON.
+	hdr, body = framedAnswer(t, &errPriorAuthAdjudicator{}, "ct-own")
+	if hdr.Status != http.StatusUnprocessableEntity || hdr.Headers["Content-Type"] != "application/json" || !bytes.Contains(body, []byte(`"error"`)) {
+		t.Errorf("own refusal: status=%d type=%q body=%s", hdr.Status, hdr.Headers["Content-Type"], body)
+	}
+	// A PAS answer is FHIR JSON.
+	hdr, _ = framedAnswer(t, decisionAdjudicator{dec: PASDecision{Outcome: PASApproved, PreAuthRef: "AUTH-1"}}, "ct-fhir")
+	if hdr.Status != http.StatusOK || hdr.Headers["Content-Type"] != "application/fhir+json" {
+		t.Errorf("PAS answer: status=%d type=%q", hdr.Status, hdr.Headers["Content-Type"])
+	}
+	// A CDS Hooks answer is JSON.
+	h, responderIdent, _ := newPAHarness(t)
+	srv := h.makeFramedResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now}, framesV1)
+	envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "ct-crd", buildConformantCRD(t, "MBR-001", "72148"))
+	resp := postInbound(t, srv, envBytes, hubHdr)
+	raw := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CRD HTTP %d: %s", resp.StatusCode, raw)
+	}
+	crd, cbody, err := DecodeHTTPFrame(h.openResponse(t, raw))
+	if err != nil || crd.Status != http.StatusOK || crd.Headers["Content-Type"] != "application/json" || !bytes.Contains(cbody, []byte(`"cards"`)) {
+		t.Errorf("CDS answer: status=%d type=%q err=%v", crd.Status, crd.Headers["Content-Type"], err)
+	}
+}
+
+// TestSDKResponder_NoTypeWhenAbsent: an adjudicator's error answer
+// without a media type is framed with no Content-Type (never a guessed one),
+// and an empty body stays empty.
+func TestSDKResponder_NoTypeWhenAbsent(t *testing.T) {
+	for name, body := range map[string][]byte{"empty": nil, "text": []byte("try later")} {
+		hdr, got := framedAnswer(t, appAnswerAdjudicator{answer: &AppAnswerError{Status: http.StatusConflict, Body: body}}, "ct-none-"+name)
+		if hdr.Status != http.StatusConflict || !bytes.Equal(got, body) {
+			t.Errorf("%s: status=%d body=%q", name, hdr.Status, got)
+		}
+		if ct, ok := hdr.Headers["Content-Type"]; ok {
+			t.Errorf("%s: Content-Type %q set, want none", name, ct)
+		}
+	}
+	// A legacy (unframed) requester still gets the bare error contract.
+	h, responderIdent, _ := newPAHarness(t)
+	srv := h.makeFramedResponderSrv(t, responderIdent, appAnswerAdjudicator{answer: &AppAnswerError{Status: http.StatusConflict}}, nil)
+	qr := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 8}, h.now)
+	envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", "ct-legacy", buildConformantClaim(t, "MBR-001", "ct-legacy", qr, h.now))
+	resp := postInbound(t, srv, envBytes, hubHdr)
+	assertError(t, resp, readBody(t, resp), http.StatusConflict, "adjudicator answered 409")
 }

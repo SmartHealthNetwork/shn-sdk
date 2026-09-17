@@ -233,7 +233,10 @@ both refuse an amendment whose prior they never saw submitted.
 Resolution is **not evidence-driven**: the payer re-pends the amendment (still A4) and
 its own pend-resolution **timer** is what later flips the claim to approved, independent
 of the supplemental report's specific content — the SDK client re-queries the pend until
-the timer resolves it. `Provenance` is required regardless because FR-32 (SHN's own rule)
+the timer resolves it. If the amendment reaches the payer at the instant its timer is
+writing that same claim, the payer's store refuses the amendment's write with a version
+conflict (HTTP 409) instead of persisting it; the payer gateway re-issues the identical
+amendment once and relays whatever that answers. `Provenance` is required regardless because FR-32 (SHN's own rule)
 says supplemental data must carry attribution — it is not a payer verdict input:
 
 ```sh
@@ -319,8 +322,8 @@ denies with reviewActionCode `A2` (display "Not Certified" — a code/display
 self-contradiction in that RI, not a different conformant code), this preview
 environment returns `A2` on this leg. The SDK's parser accepts both `A3` and this
 observed `A2` shape as a denial — it never emits `A2` itself. The rationale is the
-payer's own `ClaimResponse.disposition`; the appeal line, if present, is the first
-`processNote`. There is no `preAuthRef` on a denied response.
+payer's own `ClaimResponse.disposition`; the appeal lines, if present, are the payer's
+own `processNote` entries. There is no `preAuthRef` on a denied response.
 
 ---
 
@@ -396,6 +399,11 @@ func (myAdjudicator) Questionnaire(canonical string) ([]byte, bool) {
 
 // PriorAuth adjudicates a PAS submission (and ClaimUpdate re-adjudication).
 // This is a placeholder — replace it with your own utilization-review policy.
+// A denial carries only what you return: DenyReason (your rationale) and
+// ProcessNotes (for example your appeal window); the SDK adds neither.
+// A pended decision returns PendedItems plus your Task facts (TaskIdentifier,
+// TaskStatus, TaskRequester, TaskOwner, PayerURL) — see PARTICIPANT_PROTOCOL
+// §7b.1a; the Responder refuses a pend that lacks them.
 func (myAdjudicator) PriorAuth(qrJSON []byte, hasDiagnosticReport bool) (shnsdk.PASDecision, error) {
 	return shnsdk.PASDecision{Outcome: shnsdk.PASApproved, PreAuthRef: "AUTH-0001", ValidUntil: "2027-01-01"}, nil
 }

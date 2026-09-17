@@ -132,6 +132,12 @@ type QuestionnaireFetchRequest struct {
 // BuildQuestionnaireFetch builds the DTR questionnaire-fetch request bytes for a
 // canonical. Reimplements the substrate's json.Marshal(dtr.QuestionnaireFetchRequest{...})
 // standalone (byte-identical; test/sdkparity asserts it).
+//
+// Deprecated: this is the older questionnaire envelope, which carries neither
+// the order nor the payer's assertion id. Use BuildQuestionnairePackageParameters
+// and send it as a framed questionnaire-package operation to a payer that declares
+// RequestFrameV1Op. The envelope is still accepted by payers for now; its
+// output is unchanged.
 func BuildQuestionnaireFetch(canonical string) ([]byte, error) {
 	return json.Marshal(QuestionnaireFetchRequest{Canonical: canonical})
 }
@@ -142,6 +148,9 @@ func BuildQuestionnaireFetch(canonical string) ([]byte, error) {
 // 2.2 (`qr-required`) responder derives the QR shell's coverage reference from it and
 // fails closed without it (the qr-required id obligation). BuildQuestionnaireFetch (the
 // canonical-only builder) REMAINS for 2.0-only callers that carry no coverage.
+//
+// Deprecated: use BuildQuestionnairePackageParameters (see
+// BuildQuestionnaireFetch). The output is unchanged.
 func BuildQuestionnaireFetchWithCoverage(canonical string, coverageJSON []byte) ([]byte, error) {
 	if canonical == "" {
 		return nil, fmt.Errorf("shnsdk: BuildQuestionnaireFetchWithCoverage: canonical is required")
