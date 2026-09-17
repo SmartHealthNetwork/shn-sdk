@@ -134,6 +134,12 @@ shn register --accounts https://accounts.shn-preview.org \
 # → Registered acme-7f3a. Keys in ./keys.
 ```
 
+> If a Smart Gateway older than v0.44.0 serves your `--base-url`, add
+> `--request-frames v1`: by default the CLI declares every request-frame
+> capability it supports, including framed DTR operations (`v1op`), which older
+> gateways do not accept. Run `shn rotate` after you upgrade the gateway;
+> rotating issues new keys, so restart the gateway with the new key directory.
+
 > `--base-url` must be an **https URL that publicly resolves** (the registrar
 > rejects private, loopback, link-local, and unresolvable addresses with
 > `400 "invalid baseURL: …"`). If you only *originate* requests (CRD/DTR/PAS via

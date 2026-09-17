@@ -384,7 +384,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// RECEIVER OBLIGATION (request-frame contract, published-SDK parity —
-	// v0.38.0): this build self-declares requestFrames v1 at registration
+	// v0.38.0): this build self-declares requestFrames v1 and v1op at registration
 	// (RegistrationWithDeclared/Registration — SupportedRequestFrames defaults ON),
 	// so it MUST accept BOTH framed and bare inbound requests. Decode-on-magic —
 	// same argument as unframeAnswer: 0x00 cannot begin any bare payload this SDK

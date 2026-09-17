@@ -76,6 +76,8 @@ func cmdRegisterAccounts(args []string, stdout, stderr io.Writer) int {
 	out := fs.String("out", ".", "key directory (loaded if present, else generated)")
 	var payerIDs payerIDList
 	fs.Var(&payerIDs, "payer-id", "declared payer identity as system=value (repeatable; role=payer only)")
+	var requestFrames requestFramesFlag
+	fs.Var(&requestFrames, "request-frames", requestFramesUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -113,7 +115,9 @@ func cmdRegisterAccounts(args []string, stdout, stderr io.Writer) int {
 
 	// Set the server-assigned id BEFORE building the PoP so the proof signs it.
 	id.HolderID = assignedID
+	requestFrames.warn(stderr, "shn register")
 	reg := id.Registration(*role, *baseURL)
+	reg.RequestFrames = requestFrames.resolve()
 	if err := c.SubmitPoP(context.Background(), assignedID, reg); err != nil {
 		fmt.Fprintf(stderr, "shn register: %v\n", err)
 		return 1
@@ -205,6 +209,8 @@ func cmdRotate(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	registrar := fs.String("registrar", "", "registrar base URL (required)")
 	out := fs.String("out", ".", "key directory holding the CURRENT keys (overwritten with the new keys)")
+	var requestFrames requestFramesFlag
+	fs.Var(&requestFrames, "request-frames", requestFramesUsage)
 	id, rest := splitPositional(args)
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -250,7 +256,9 @@ func cmdRotate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "shn rotate: generate new keys: %v\n", err)
 		return 1
 	}
+	requestFrames.warn(stderr, "shn rotate")
 	reg := next.Registration(role, baseURL)
+	reg.RequestFrames = requestFrames.resolve()
 	body, err := json.Marshal(reg)
 	if err != nil {
 		fmt.Fprintf(stderr, "shn rotate: marshal rotation body: %v\n", err)

@@ -143,6 +143,11 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 		ProcedureDisplay: persona.Order.Display, DiagnosisICD10: persona.Order.Diagnosis,
 		ProceedOnNotCovered: true,
 	}
+	req, err = withTestPersonaRecords(req, persona)
+	if err != nil {
+		fmt.Fprintf(stderr, "shn priorauth: persona %q: %v\n", *member, err)
+		return 1
+	}
 	res, err := devID.RunPriorAuth(ctx, c, ep, payer, req)
 	if err != nil {
 		fmt.Fprintf(stderr, "shn priorauth: %v\n", err)

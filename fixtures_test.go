@@ -128,7 +128,7 @@ func TestProviderDataBundle(t *testing.T) {
 				t.Fatalf("%q: bundle has no entries", persona)
 			}
 
-			var activeOrders int
+			var activeOrders, draftOrders int
 			var patientID string
 			var sawMemberIdentifier bool
 			for i, e := range b.Entry {
@@ -147,15 +147,20 @@ func TestProviderDataBundle(t *testing.T) {
 					t.Fatalf("%q entry[%d]: resource does not unmarshal: %v", persona, i, err)
 				}
 
-				// One-active-order invariant: exactly one status=active order (DeviceRequest or
-				// ServiceRequest). OpenOrder returns Entry[0] of DeviceRequest-then-ServiceRequest;
-				// a second active order would make the routed order non-deterministic.
+				// One-order invariant: exactly one order (DeviceRequest or ServiceRequest),
+				// status=active for a signed or dispatched order (OpenOrder returns Entry[0] of
+				// DeviceRequest-then-ServiceRequest; a second active order would make the routed
+				// order non-deterministic) and status=draft for the order-select personas
+				// (an order still being chosen), which carry no active order.
 				// Eligibility-only personas (uc01/uc01-nc) carry no order by design — they
 				// exercise CoverageInforce only, not the order-dispatch path (coverage-completion,
 				// not new fidelity).
 				if r.ResourceType == "DeviceRequest" || r.ResourceType == "ServiceRequest" {
-					if r.Status == "active" {
+					switch r.Status {
+					case "active":
 						activeOrders++
+					case "draft":
+						draftOrders++
 					}
 				}
 
@@ -173,15 +178,22 @@ func TestProviderDataBundle(t *testing.T) {
 
 			// eligibilityPersonas carry no ServiceRequest/DeviceRequest (CoverageInforce only).
 			eligibilityPersonas := map[string]bool{"uc01": true, "uc01-nc": true}
-			if eligibilityPersonas[persona] {
-				if activeOrders != 0 {
-					t.Errorf("%q: found %d active orders, want 0 (eligibility persona — no order path)", persona, activeOrders)
+			selectPersonas := map[string]bool{"uc02": true, "uc02-payerb": true}
+			switch {
+			case eligibilityPersonas[persona]:
+				if activeOrders+draftOrders != 0 {
+					t.Errorf("%q: found %d orders, want 0 (eligibility persona — no order path)", persona, activeOrders+draftOrders)
 				}
-			} else {
-				if activeOrders != 1 {
-					t.Errorf("%q: found %d active orders, want exactly 1 (one-active-order invariant)", persona, activeOrders)
+			case selectPersonas[persona]:
+				if draftOrders != 1 || activeOrders != 0 {
+					t.Errorf("%q: found %d draft and %d active orders, want exactly 1 draft (order-select persona)", persona, draftOrders, activeOrders)
+				}
+			default:
+				if activeOrders != 1 || draftOrders != 0 {
+					t.Errorf("%q: found %d active and %d draft orders, want exactly 1 active (one-active-order invariant)", persona, activeOrders, draftOrders)
 				}
 			}
+
 			if patientID == "" {
 				t.Fatalf("%q: bundle has no Patient", persona)
 			}

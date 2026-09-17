@@ -208,11 +208,9 @@ func TestParseCRDResponse_LegacyCardShape(t *testing.T) {
 		}
 	})
 	t.Run("card extension object", func(t *testing.T) {
-		body, err := BuildCards(CardCoverage{Covered: CoveredCovered, PANeeded: PANeededAuthNeeded,
-			Questionnaires: []string{"http://payer.example/Q/a"}})
-		if err != nil {
-			t.Fatal(err)
-		}
+		// The card extension object earlier releases of this SDK wrote.
+		body := []byte(`{"cards":[{"summary":"Prior authorization required","indicator":"warning",` +
+			`"extension":{"covered":"covered","paNeeded":"auth-needed","questionnaires":["http://payer.example/Q/a"]}}]}`)
 		obs, err := ParseCRDResponse(body)
 		if err != nil {
 			t.Fatal(err)
@@ -536,35 +534,6 @@ func TestBuildCRDResponse_EmitsOnlySuppliedValues(t *testing.T) {
 	}
 	if got := valueURLs(obs.Orders[0].Coverage[0]); !slices.Equal(got, []string{"coverage", "covered", "pa-needed", "date", "coverage-assertion-id"}) {
 		t.Fatalf("minimal sub-extensions %v", got)
-	}
-}
-
-// TestDeprecatedBuildCards_OutputUnchanged pins the deprecated card builder's
-// output byte for byte: callers that still read the card extension object keep
-// working until they move to BuildCRDResponse.
-func TestDeprecatedBuildCards_OutputUnchanged(t *testing.T) {
-	rows := []struct {
-		cov  CardCoverage
-		want string
-	}{
-		{CardCoverage{Covered: "covered", PANeeded: "auth-needed", Questionnaires: []string{"http://x/Q"}},
-			`{"cards":[{"summary":"Prior authorization required","indicator":"warning","extension":{"covered":"covered","paNeeded":"auth-needed","questionnaires":["http://x/Q"]}}]}`},
-		{CardCoverage{Covered: "not-covered"},
-			`{"cards":[{"summary":"Service not covered","indicator":"warning","extension":{"covered":"not-covered"}}]}`},
-		{CardCoverage{Covered: "covered", PANeeded: "no-auth"},
-			`{"cards":[{"summary":"No prior authorization required","indicator":"info","extension":{"covered":"covered","paNeeded":"no-auth"}}]}`},
-	}
-	for _, r := range rows {
-		for _, line := range []string{"2.0", "2.1", "2.2"} {
-			got, err := BuildCardsAtLine(line, r.cov)
-			if err != nil || string(got) != r.want {
-				t.Errorf("%s: %s %v", line, got, err)
-			}
-		}
-		got, err := BuildCards(r.cov)
-		if err != nil || string(got) != r.want {
-			t.Errorf("BuildCards: %s %v", got, err)
-		}
 	}
 }
 

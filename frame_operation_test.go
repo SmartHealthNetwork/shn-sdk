@@ -87,14 +87,35 @@ func TestSupportsRequestFrameV1Op(t *testing.T) {
 	}
 }
 
-// TestSupportedRequestFrames_Unchanged: this release implements the
-// operation header but does not declare the capability yet, so registrations
-// keep declaring exactly ["v1"] until payer gateways accept framed operations.
-func TestSupportedRequestFrames_Unchanged(t *testing.T) {
-	if got := SupportedRequestFrames(); !slices.Equal(got, []string{"v1"}) {
-		t.Fatalf("SupportedRequestFrames() = %q, want [v1]", got)
+// TestSupportedRequestFrames_DeclaresFramedOperation: this library builds and
+// serves framed DTR operations, so it declares both request-frame
+// capabilities, v1 first, and a registration built with it declares them too.
+func TestSupportedRequestFrames_DeclaresFramedOperation(t *testing.T) {
+	want := []string{RequestFrameV1, RequestFrameV1Op}
+	if got := SupportedRequestFrames(); !slices.Equal(got, want) {
+		t.Fatalf("SupportedRequestFrames() = %q, want %q", got, want)
 	}
-	if SupportsRequestFrameV1Op(SupportedRequestFrames()) {
-		t.Fatal("this build must not declare v1op yet")
+	if !SupportsRequestFrameV1(SupportedRequestFrames()) || !SupportsRequestFrameV1Op(SupportedRequestFrames()) {
+		t.Fatalf("SupportedRequestFrames() = %q must satisfy both capability checks", SupportedRequestFrames())
+	}
+	// Each call returns a fresh slice: a caller that edits its copy cannot
+	// change what the next registration declares.
+	got := SupportedRequestFrames()
+	got[0] = "x"
+	if again := SupportedRequestFrames(); !slices.Equal(again, want) {
+		t.Fatalf("SupportedRequestFrames() after a caller edit = %q, want %q", again, want)
+	}
+
+	id, err := GenerateIdentity("h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, req := range map[string]RegistrationRequest{
+		"Registration":             id.Registration("payer", "https://example.test"),
+		"RegistrationWithDeclared": id.RegistrationWithDeclared("payer", "https://example.test", []string{ContractPADTR20}),
+	} {
+		if !slices.Equal(req.RequestFrames, want) {
+			t.Errorf("%s declares requestFrames %q, want %q", name, req.RequestFrames, want)
+		}
 	}
 }

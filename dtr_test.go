@@ -668,6 +668,22 @@ func TestExtractQuestionnaireFromPackage_ParametersWrapper(t *testing.T) {
 	}
 }
 
+// TestExtractQuestionnaireFromPackage_EveryPublishedBundleName: the package
+// Bundle parameter is read under each name a published DTR line gives it:
+// return (2.0.1 operation), PackageBundle (2.0.1/2.1.0 output profile) and
+// packagebundle (2.2.0); any other name is not the package.
+func TestExtractQuestionnaireFromPackage_EveryPublishedBundleName(t *testing.T) {
+	inner := `{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","id":"q1","url":"http://example.org/q"}}]}`
+	for _, name := range []string{"return", "PackageBundle", "packagebundle", "Packagebundle", "bundle"} {
+		wrapped := []byte(`{"resourceType":"Parameters","parameter":[{"name":"` + name + `","resource":` + inner + `}]}`)
+		_, err := ExtractQuestionnaireFromPackage(wrapped)
+		published := name == "return" || name == "PackageBundle" || name == "packagebundle"
+		if published != (err == nil) {
+			t.Errorf("%s: err %v", name, err)
+		}
+	}
+}
+
 // TestExtractQuestionnaireFromPackage_WrapperWithoutQuestionnaire_Rejected: a
 // Parameters{packagebundle} wrapper whose inner Bundle carries no Questionnaire
 // entry is rejected exactly like the bare-Bundle case — the unwrap does not weaken

@@ -2,6 +2,7 @@ package shnsdk
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -58,19 +59,6 @@ func (c CardCoverage) PARequired() bool {
 
 // NeedsDTR reports whether the card advertises at least one DTR questionnaire to gather.
 func (c CardCoverage) NeedsDTR() bool { return len(c.Questionnaires) > 0 }
-
-// card is a single CDS Hooks suggestion card. Ported from internal/crd.Card.
-type card struct {
-	Summary   string       `json:"summary"`
-	Indicator string       `json:"indicator"`
-	Detail    string       `json:"detail,omitempty"`
-	Extension CardCoverage `json:"extension"`
-}
-
-// cardsResponse is the CDS Hooks response envelope. Ported from internal/crd.CardsResponse.
-type cardsResponse struct {
-	Cards []card `json:"cards"`
-}
 
 // conformantCDSBundle is a FHIR collection Bundle carrying the draft orders inline
 // (one entry per draft order). The conformant CRD order-select request models
@@ -309,86 +297,90 @@ func ParseOrderSelectRequest(data []byte) (OrderSelectRequest, error) {
 	return req, nil
 }
 
-// BuildCards constructs a CDS Hooks CardsResponse JSON carrying the given coverage
-// projection. The PA-required-per-CPT policy belongs to the partner's Adjudicator; only
-// the card SHAPE is protocol. The summary/indicator are derived from the coverage:
-// not-covered → "warning"; PA-required → "warning"; otherwise → "info". Byte parity with
-// internal/crd.BuildCards for equivalent coverage is proven by
-// test/sdkparity/crd_parity_test.go.
+// ErrBuildCardsReplaced is returned by the deprecated BuildCards and
+// BuildCardsAtLine. A CRD answer returns the requested order with its
+// coverage information (an update system action); a CardCoverage names no
+// order, no Coverage, no assertion date and no coverage-assertion-id, so no
+// conformant answer can be built from it. Build the answer with
+// BuildCRDResponse from the order the request carried.
+var ErrBuildCardsReplaced = errors.New("shnsdk: BuildCards no longer builds a CRD answer: " +
+	"coverage information returns on the requested order; use BuildCRDResponse")
+
+// BuildCards used to write the coverage projection into a card extension
+// object, a shape no Da Vinci CRD line defines. It now builds nothing and
+// returns ErrBuildCardsReplaced: it is BuildCardsAtLine("2.0", cov).
 //
-// Thin delegate to BuildCardsAtLine("2.0", …), matching the AtLine convention Tasks 3/4
-// established for the PAS/DTR builders.
-//
-// Deprecated: use BuildCRDResponse. CRD carries coverage information as an update
-// system action on the order, not in a card; this builder's card-extension output
-// is not a conformant CRD response at any line. Its output is unchanged in this
-// release and becomes the BuildCRDResponse shape in a later one.
+// Deprecated: use BuildCRDResponse with the order the request carried and
+// the participant's own coverage assertion.
 func BuildCards(cov CardCoverage) ([]byte, error) {
 	return BuildCardsAtLine("2.0", cov)
 }
 
-// BuildCardsAtLine is BuildCards parameterized by CRD line ("2.0", "2.1", "2.2").
-// Unknown line -> error (fail-closed, never a silent 2.0 fallback).
-//
-// Derived live from packages.simplifier.net/hl7.fhir.us.davinci-crd/
-// {2.0.1,2.1.0,2.2.1}, diffing StructureDefinition-ext-coverage-information.json's
-// differential.element against 2.0.1): the split coverage-information sub-extension
-// shape this projection carries — covered (min=1/max=1), pa-needed (min=0/max=1),
-// questionnaire (min=0/max=*), satisfied-pa-id (min=0/max=1) — is min/max-IDENTICAL
-// across all three published CRD STUs (confirms the pre-existing normalizer comment
-// at gateway/engine/davincimap.go:21-26, which reads this same split shape on the
-// INBOUND/foreign-partner side). In-band CRD version extensions: the 2.2.1
-// package introduces two NEW extensions — CDSHookServiceRequestExtensionRequestCRDVersion
-// (a client-set "requested CRD version" on the hook request) and
-// CDSHookServicesExtensionCRDVersion (a server-declared supported-version list on the
-// /cds-services discovery doc) — but BOTH are verified OPTIONAL (no min override in
-// their differential; the extension pattern default is min=0) at 2.2.1. Per the
-// produce-iff ruling (produce iff the package REQUIRES it), neither is built: the
-// package does not require them, so there is nothing to stamp regardless of data
-// availability. Net effect: BuildCardsAtLine has no per-line behavioral delta to gate
-// today — the line parameter exists for fail-closed validation and API symmetry with
-// the other AtLine builders, and is the growth point a future CRD line's genuine delta
-// would extend (see CRDDef in linedef.go).
+// BuildCardsAtLine is BuildCards at a CRD line ("2.0", "2.1", "2.2"). An
+// unknown line is refused as such; a known line returns
+// ErrBuildCardsReplaced.
 //
 // Deprecated: use BuildCRDResponse (see BuildCards).
 func BuildCardsAtLine(line string, cov CardCoverage) ([]byte, error) {
 	if _, ok := CRDLineDef(line); !ok {
 		return nil, fmt.Errorf("shnsdk: BuildCardsAtLine: unknown CRD line %q", line)
 	}
-	c := card{Extension: cov}
-	switch {
-	case cov.Covered == CoveredNotCovered:
-		c.Summary, c.Indicator = "Service not covered", "warning"
-	case cov.PARequired():
-		c.Summary, c.Indicator = "Prior authorization required", "warning"
-	default:
-		c.Summary, c.Indicator = "No prior authorization required", "info"
-	}
-	return json.Marshal(cardsResponse{Cards: []card{c}})
+	return nil, ErrBuildCardsReplaced
 }
 
-// ParseCards returns the coverage projection of a CRD response. When the first
-// card carries the card extension object BuildCards writes, that object is
-// returned exactly as before. Otherwise the first coverage information the
-// response carries (ParseCRDResponse, then CRDObservation.Primary) is returned.
-// A response with no card and no coverage information is an error; a card
-// without either still yields the empty projection, as it always did.
+// legacyCardKeys are the members of the card extension object earlier
+// releases of this SDK wrote (CardCoverage's JSON form).
+var legacyCardKeys = map[string]bool{"covered": true, "paNeeded": true, "questionnaires": true, "satisfiedPaId": true}
+
+// legacyCardCoverage reads a card's CDS Hooks extension object as the
+// coverage object earlier releases of this SDK wrote. ok is false unless the
+// object has that shape: a non-empty covered string, only that object's
+// members, each of its type. Any other extension object belongs to the card's
+// author and states no coverage.
+func legacyCardCoverage(raw []byte) (CardCoverage, bool) {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(raw, &members) != nil || members == nil {
+		return CardCoverage{}, false
+	}
+	for k := range members {
+		if !legacyCardKeys[k] {
+			return CardCoverage{}, false
+		}
+	}
+	var c CardCoverage
+	if json.Unmarshal(raw, &c) != nil || c.Covered == "" {
+		return CardCoverage{}, false
+	}
+	return c, true
+}
+
+// ParseCards returns the coverage projection of a CRD response. When the
+// first card carries the coverage object earlier releases of this SDK wrote
+// in the card's extension, that object is returned. Otherwise the first
+// coverage information the response carries (ParseCRDResponse, then
+// CRDObservation.Primary) is returned; a card extension object of any other
+// shape is the card author's own and is not coverage. A response with no card
+// and no coverage information is an error; a card without either still
+// yields the empty projection, as it always did.
 //
 // Deprecated: use ParseCRDResponse, which returns every order and every
 // coverage-information value, exactly as sent.
 func ParseCards(data []byte) (CardCoverage, error) {
-	var resp cardsResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return CardCoverage{}, err
-	}
-	var present struct {
+	var resp struct {
 		Cards []struct {
+			Summary   string          `json:"summary"`
+			Indicator string          `json:"indicator"`
+			Detail    string          `json:"detail"`
 			Extension json.RawMessage `json:"extension"`
 		} `json:"cards"`
 	}
-	_ = json.Unmarshal(data, &present) // the decode above already succeeded
-	if len(resp.Cards) > 0 && present.Cards[0].Extension != nil {
-		return resp.Cards[0].Extension, nil
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return CardCoverage{}, err
+	}
+	if len(resp.Cards) > 0 {
+		if cov, ok := legacyCardCoverage(resp.Cards[0].Extension); ok {
+			return cov, nil
+		}
 	}
 	if obs, err := ParseCRDResponse(data); err == nil {
 		if cov, ok := obs.Primary(); ok {

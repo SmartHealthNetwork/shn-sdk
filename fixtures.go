@@ -27,7 +27,9 @@ var providerDataFS embed.FS
 // a seeded E0250 hospital-bed DeviceRequest carrying a LOAD-BEARING reasonCode (M62.81) — br-payer
 // keys Documentation Required on exists(DeviceRequest.reasonCode), and HospitalBeds attaches its
 // DTR questionnaire only when Documentation Required=true, so the reasonCode is what makes UC-02's
-// order-select determination no-DTR (covered / no-PA). The reason is persona SELECTION (a real
+// order-select determination no-DTR (covered / no-PA). Its order is a DRAFT (an order still being
+// chosen, as the order-select hook describes); every other persona's order is active (signed or
+// dispatched). The reason is persona SELECTION (a real
 // hospital-bed order carries an indication), not field-tuning. uc03 is the HomeOxygenDispatch
 // analog of the homeoxygen persona on a DIFFERENT oxygen code (E1390 oxygen concentrator vs E0431):
 // a seeded oxygen-concentrator DeviceRequest + the O2 clinical observations br-payer's prepop CQL

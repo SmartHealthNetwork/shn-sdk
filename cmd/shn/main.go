@@ -95,13 +95,14 @@ usage: shn <command> [flags]
 
 commands:
   keygen        generate signing+encryption keys and a public manifest snippet
-  register      register a holder: --accounts (Accounts service) or --registrar (operator); -payer-id system=value (repeatable, role=payer) declares payer identities
+  register      register a holder: --accounts (Accounts service) or --registrar (operator); -payer-id system=value (repeatable, role=payer) declares payer identities;
+                --request-frames v1 declares only v1 (use it when the Smart Gateway serving --base-url is older than v0.44.0)
   eligibility   run a coverage-eligibility round-trip through the Hub
   priorauth     run a prior-authorization (CRD→DTR→PAS) through the Hub
   login         authenticate the CLI to the Accounts service (browser PKCE; --no-browser for headless copy-paste)
   clients       list your registered clients (Accounts service)
   revoke        revoke a client by id (Accounts service)
-  rotate        rotate a holder's keys against the registrar (holder-self)
+  rotate        rotate a holder's keys against the registrar (holder-self); re-declares request frames (--request-frames, as for register)
   doctor        self-validate against the network: discovery + eligibility (wire-correctness)
   send-test     drive a provider gateway's 8 /scenario UCs and tabulate pass/fail
 `)
@@ -234,6 +235,8 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	portal := fs.String("portal", "", "deprecated alias — use --accounts (the Accounts service)")
 	adminAssertion := fs.String("admin-assertion", "", "base64 Trust-admin assertion (operator path); forwarded as X-Holder-Assertion. Without it the registrar returns 401 — self-serve registration is via --accounts (the Accounts service).")
 	out := fs.String("out", ".", "key directory (loaded if present, else generated)")
+	var requestFrames requestFramesFlag
+	fs.Var(&requestFrames, "request-frames", requestFramesUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -261,7 +264,9 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	requestFrames.warn(stderr, "shn register")
 	reg := id.Registration(*role, bu)
+	reg.RequestFrames = requestFrames.resolve()
 	body, err := json.Marshal(reg)
 	if err != nil {
 		fmt.Fprintf(stderr, "shn register: marshal registration: %v\n", err)

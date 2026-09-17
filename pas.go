@@ -43,6 +43,23 @@ type PriorAuthResult struct {
 
 	// Denial is set when Outcome=="denied": the FR-22 denial content.
 	Denial *Denial
+
+	// ProcessNotes are the payer's processNote entries on an approved or
+	// denied decision, in order, each with its type as sent ("" when the
+	// payer gave none); notes without text are skipped. Nil when there are
+	// none.
+	ProcessNotes []PASProcessNote
+	// ReviewAction is the payer's review action that decided the outcome
+	// (the A3 or A2 action of a denial, the A2 action of a partial approval,
+	// the A1 action of an approval), with its X12 886 reasons, exactly as
+	// sent. When several items carry review actions, it is the first action
+	// carrying that code, in item and adjudication order, across all items.
+	// Nil when the payer stated none.
+	ReviewAction *PASReviewAction
+	// DenialReasons are the claim adjustment reason (CARCSystem) and
+	// remittance advice remark (RARCSystem) codes on the payer's item
+	// adjudications, in order, exactly as sent. Nil when there are none.
+	DenialReasons []PASCoding
 }
 
 // NeededItem is one supplemental item the payer's FR-20 Task asks for on a pended
@@ -2376,11 +2393,15 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 			End string `json:"end"`
 		} `json:"preAuthPeriod"`
 		ProcessNote []struct {
+			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"processNote"`
 		Item []struct {
 			ItemSequence int `json:"itemSequence"`
 			Adjudication []struct {
+				Reason *struct {
+					Coding []PASCoding `json:"coding"`
+				} `json:"reason"`
 				Extension []struct {
 					URL       string `json:"url"`
 					Extension []struct {
@@ -2425,6 +2446,10 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 		numbers[probe.PreAuthRef] = true
 	}
 	var a3Code, a3Display, a2Code, a2Display string
+	// actions keeps, per decision code, the first review action that carried
+	// it, with that action's reasons.
+	actions := map[string]*PASReviewAction{}
+	var denialReasons []PASCoding
 	for _, it := range probe.Item {
 		decision := decisions[it.ItemSequence]
 		if decision == nil {
@@ -2432,9 +2457,35 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 			decisions[it.ItemSequence] = decision
 		}
 		for _, adj := range it.Adjudication {
+			if adj.Reason != nil {
+				for _, c := range adj.Reason.Coding {
+					if c.System == CARCSystem || c.System == RARCSystem {
+						denialReasons = append(denialReasons, c)
+					}
+				}
+			}
 			for _, ext := range adj.Extension {
 				if ext.URL != reviewActionExtURL {
 					continue
+				}
+				var action PASReviewAction
+				for _, sub := range ext.Extension {
+					if sub.URL == reviewActionCodeExtURL && sub.ValueCodeableConcept != nil && action.Code.Code == "" {
+						for _, c := range sub.ValueCodeableConcept.Coding {
+							if c.System == X12ReviewDecisionSystem && c.Code != "" {
+								action.Code = PASCoding{System: c.System, Code: c.Code, Display: c.Display}
+								break
+							}
+						}
+					}
+					if sub.URL == "reasonCode" && sub.ValueCodeableConcept != nil {
+						for _, c := range sub.ValueCodeableConcept.Coding {
+							action.Reasons = append(action.Reasons, PASCoding{System: c.System, Code: c.Code, Display: c.Display})
+						}
+					}
+				}
+				if action.Code.Code != "" && actions[action.Code.Code] == nil {
+					actions[action.Code.Code] = &action
 				}
 				for _, sub := range ext.Extension {
 					switch sub.URL {
@@ -2526,20 +2577,31 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 		}
 		return notes
 	}
+	var typedNotes []PASProcessNote
+	for _, n := range probe.ProcessNote {
+		if n.Text != "" {
+			typedNotes = append(typedNotes, PASProcessNote{Type: n.Type, Text: n.Text})
+		}
+	}
+	// detail adds the payer's decision detail to a terminal result.
+	detail := func(r PriorAuthResult, code string) PriorAuthResult {
+		r.ProcessNotes, r.ReviewAction, r.DenialReasons = typedNotes, actions[code], denialReasons
+		return r
+	}
 
 	// A3 is SHN's own X12-conformant denial code — unconditional. A "number" sub-extension
 	// present alongside it does NOT flip this to approved (see
 	// TestParseClaimResponse_DeniedWithNumberStaysDenied): A3 has no "partial" reading in
 	// X12 306, so a number riding along with it is not this function's to interpret.
 	if sawA3 {
-		return PriorAuthResult{
+		return detail(PriorAuthResult{
 			Outcome: "denied",
 			Denial: &Denial{
 				ReasonCode: a3Code,
 				Rationale:  dispositionText(a3Display),
 				AppealNote: processNotes(),
 			},
-		}, nil
+		}, a3Code), nil
 	}
 
 	if sawA2 {
@@ -2554,26 +2616,26 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 			if probe.PreAuthPeriod != nil {
 				validUntil = probe.PreAuthPeriod.End
 			}
-			return PriorAuthResult{
+			return detail(PriorAuthResult{
 				Outcome:     "approved",
 				PreAuthRef:  reviewActionPreAuthRef,
 				ValidUntil:  validUntil,
 				Partial:     true,
 				Disposition: dispositionText(a2Display),
-			}, nil
+			}, a2Code), nil
 		}
 		// A2 WITHOUT an auth number: the observed br-payer denial shape — a code/display
 		// self-contradiction in that RI (code A2, "Certified – partial", but display "Not
 		// Certified"). We parse it as a denial so we can read a real RI's output; SHN
 		// itself never emits this.
-		return PriorAuthResult{
+		return detail(PriorAuthResult{
 			Outcome: "denied",
 			Denial: &Denial{
 				ReasonCode: a2Code,
 				Rationale:  dispositionText(a2Display),
 				AppealNote: processNotes(),
 			},
-		}, nil
+		}, a2Code), nil
 	}
 
 	// Approved: explicit preAuthRef (top-level SHN convention) OR reviewAction "number"
@@ -2587,7 +2649,7 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 		if probe.PreAuthPeriod != nil {
 			validUntil = probe.PreAuthPeriod.End
 		}
-		return PriorAuthResult{Outcome: "approved", PreAuthRef: preAuthRef, ValidUntil: validUntil}, nil
+		return detail(PriorAuthResult{Outcome: "approved", PreAuthRef: preAuthRef, ValidUntil: validUntil}, "A1"), nil
 	}
 
 	// Anything else is ambiguous — fail loud rather than guess.

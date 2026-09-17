@@ -12,8 +12,8 @@ import (
 
 func TestSupportedRequestFramesDeclaresV1(t *testing.T) {
 	got := SupportedRequestFrames()
-	if !reflect.DeepEqual(got, []string{RequestFrameV1}) {
-		t.Fatalf("SupportedRequestFrames() = %v, want [%s]", got, RequestFrameV1)
+	if len(got) == 0 || got[0] != RequestFrameV1 || !SupportsRequestFrameV1(got) {
+		t.Fatalf("SupportedRequestFrames() = %v, want %s first", got, RequestFrameV1)
 	}
 }
 

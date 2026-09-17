@@ -30,7 +30,10 @@ type PriorAuthRequest struct {
 	Member string
 	DOB    string
 	Family string
-	NPI    string
+	// NPI is the ordering practitioner's NPI. A coverage check built from your
+	// own records (Patient and Coverage below) names the ordering practitioner
+	// as Practitioner/<NPI> and requires it; the claim names it too.
+	NPI string
 	// Clinical drives the DTR FillQuestionnaire answers.
 	Clinical ClinicalContext
 	// The order being prior-authed. ProcedureSystem is the code SYSTEM: "" defaults to
@@ -42,6 +45,25 @@ type PriorAuthRequest struct {
 	ProcedureCPT     string
 	ProcedureDisplay string
 	DiagnosisICD10   string
+	// Patient is your own Patient resource for the member; its id is the member id,
+	// the id the payer resolves the patient by. Coverage is your own Coverage
+	// search result for that patient: a searchset Bundle holding the member's
+	// Coverage and the payor Organization it names. With both set, the coverage
+	// check is a CDS Hooks order-sign request (the order is signed and goes on to
+	// prior authorization) built from these records with BuildCRDRequest, and it
+	// names no FHIR server. With neither set, the check keeps the older request
+	// (BuildConformantOrderSelectRequest: the order-select hook, an id-only Patient
+	// and a Coverage this package builds), which a payer that answers order-select
+	// only for some orders, or not at all, cannot adjudicate; that request is
+	// removed in a later release. Setting only one of them is an error.
+	Patient  []byte
+	Coverage []byte
+	// Hook is the CDS Hooks hook of a coverage check built from your own
+	// records: "order-sign" (the default: the order is signed and goes on to
+	// prior authorization) or "order-select" (the order is still being chosen;
+	// the request selects it). Any other hook, or a hook without Patient and
+	// Coverage, is an error.
+	Hook string
 	// ProceedOnNotCovered keeps the flow running past a CRD card that says the service
 	// is NOT covered, so the requester gets the payer's FORMAL determination (a PAS
 	// denial with its rationale) rather than stopping at the advisory card. Default
@@ -165,11 +187,12 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: build coverage: %w", err)
 	}
 
-	// LEG 1 — CRD order-select (the conformant crd-order-select leg; the
-	// minimized crd-order-select leg/op have been removed — this is the only CRD contract).
-	crdReq, err := BuildConformantOrderSelectRequest(srJSON, covJSON, patientRef)
+	// LEG 1 — CRD on the crd-order-select leg (which carries order-sign and
+	// order-select): order-sign from the caller's own records, or the older
+	// order-select request when the caller supplied none.
+	crdReq, err := priorAuthCRDRequest(req, srJSON, covJSON, patientRef)
 	if err != nil {
-		return PriorAuthResult{}, fmt.Errorf("crd-order-select: build order-select request: %w", err)
+		return PriorAuthResult{}, fmt.Errorf("crd-order-select: %w", err)
 	}
 	crdResp, err := id.runLeg(ctx, c, ep, payer, pci,
 		"crd-order-select", "crd-order-select", "crd-cards", crdReq)
@@ -298,6 +321,65 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 
 	// LEG 3 — PAS submit.
 	return id.submitPriorAuthClaim(ctx, c, ep, payer, pci, req, srJSON, patientRef, coverageRef, qrJSON)
+}
+
+// priorAuthOrderID is the id the coverage check gives the order it builds.
+func priorAuthOrderID(member string) string { return "sr-" + member }
+
+// priorAuthCRDRequest is RunPriorAuth's coverage check request: an order-sign
+// (or, when req.Hook says so, order-select) request from req's own Patient and
+// Coverage, or, when req carries neither, the older order-select request.
+func priorAuthCRDRequest(req PriorAuthRequest, srJSON, covJSON []byte, patientRef string) ([]byte, error) {
+	switch {
+	case len(req.Patient) == 0 && len(req.Coverage) == 0 && req.Hook != "":
+		return nil, errors.New("PriorAuthRequest.Hook applies to a request built from PriorAuthRequest.Patient and PriorAuthRequest.Coverage")
+	case len(req.Patient) == 0 && len(req.Coverage) == 0:
+		out, err := BuildConformantOrderSelectRequest(srJSON, covJSON, patientRef)
+		if err != nil {
+			return nil, fmt.Errorf("build order-select request: %w", err)
+		}
+		return out, nil
+	case len(req.Patient) == 0 || len(req.Coverage) == 0:
+		return nil, errors.New("PriorAuthRequest.Patient and PriorAuthRequest.Coverage are set together")
+	case req.NPI == "":
+		return nil, errors.New("PriorAuthRequest.NPI names the ordering practitioner and is required")
+	case req.Hook != "" && req.Hook != "order-sign" && req.Hook != "order-select":
+		return nil, fmt.Errorf("PriorAuthRequest.Hook %q is not order-sign or order-select", req.Hook)
+	}
+	hook := req.Hook
+	if hook == "" {
+		hook = "order-sign"
+	}
+	order, err := withResourceID(srJSON, priorAuthOrderID(req.Member))
+	if err != nil {
+		return nil, fmt.Errorf("build order: %w", err)
+	}
+	draft := append(append([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":`),
+		cdexJSONString("ServiceRequest/"+priorAuthOrderID(req.Member))...), `,"resource":`...)
+	draft = append(append(draft, order...), "}]}"...)
+	var instance [16]byte
+	if _, err := rand.Read(instance[:]); err != nil {
+		return nil, fmt.Errorf("generate hook instance: %w", err)
+	}
+	instance[6] = instance[6]&0x0f | 0x40
+	instance[8] = instance[8]&0x3f | 0x80
+	h := hex.EncodeToString(instance[:])
+	in := CRDRequestInputs{
+		Hook:         hook,
+		HookInstance: h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:],
+		UserID:       "Practitioner/" + req.NPI,
+		DraftOrders:  draft,
+		Patient:      req.Patient,
+		Coverage:     req.Coverage,
+	}
+	if hook == "order-select" {
+		in.Selections = []string{"ServiceRequest/" + priorAuthOrderID(req.Member)}
+	}
+	out, err := BuildCRDRequest(in)
+	if err != nil {
+		return nil, fmt.Errorf("build %s request: %w", hook, err)
+	}
+	return out, nil
 }
 
 // primaryCoverageOrder returns the order and coverage information that

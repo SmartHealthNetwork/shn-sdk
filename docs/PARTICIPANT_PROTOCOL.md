@@ -501,6 +501,19 @@ This is additive: no `wireProtocolVersion` bump was needed to add it. Version-aw
 routing and translation consume these in later slices; today they are declaration +
 surfacing.
 
+**Rotation refreshes `requestFrames` the same way** — it is the current build's
+self-declared request-frame set (§6.3), re-read from every rotate. A library-driven
+rotate (`shn rotate`, `Identity.Registration`) carries the build's set, which is how a
+holder registered with an earlier SDK comes to declare `"v1op"` (pass
+`shn rotate --request-frames v1` while the Smart Gateway serving your base URL is older
+than v0.44.0); a hand-built rotate body that omits `requestFrames` clears it, and
+requests to you are then sent bare.
+
+**Re-declaring without new keys.** A `PUT /register/{id}` whose `encPub` and
+`signPub` equal the registered keys is accepted the same way (the `pop` is signed
+with the current key): it refreshes only the self-declared lists above. It is
+audited as `redeclared` rather than `rotated` (§2.5).
+
 Rejection cases (checks are ordered):
 
 | Condition | Status |
@@ -542,7 +555,8 @@ separately (§4 tokens are per-leg, per-operation — see the concept mapping in
 
 ### 2.5 Auditing
 
-Every lifecycle transition — `registered`, `revoked`, `deregistered`, `rotated` — is signed
+Every lifecycle transition — `registered`, `revoked`, `deregistered`, `rotated` (new keys),
+`redeclared` (a `PUT /register/{id}` that kept both keys, §2.4) — is signed
 by the registrar with its own signing key (public key = the manifest `registrarPub`,
 which the Audit Plane trusts as a signer; distinct from the Audit Plane's own
 `auditSignPub`) and appended to the canonical audit chain. A transition
@@ -1409,7 +1423,13 @@ whose own input is the frame body:
   accepts the older questionnaire request (a JSON object with `canonical`
   and optional `coverage`), framed without `operation` or bare, from
   requesters that do not send the framed operation. The `operation` header
-  on any other transaction type is refused with `400`.
+  on any other transaction type is refused with `400`. The Smart Gateway, as a
+  payer, binds every patient a DTR request names (each coverage beneficiary,
+  order subject or patient, Patient resource and other patient reference) to
+  the authorized patient before its payer's system sees the request: a
+  second patient or another member is refused with `403`, and an unreadable
+  or unbindable patient (a non-Patient reference, a Patient with no id, an
+  unknown member) or a package request with no coverage with `400`.
 - **This SDK.** `BuildQuestionnairePackageParameters(line, …)` builds the
   `questionnaire-package` input with every resource embedded as your own
   bytes; `RunPriorAuth` sends it as a framed operation when the payer
@@ -1417,10 +1437,37 @@ whose own input is the frame body:
   `coverage-assertion-id` as `context`) and the older request otherwise. The
   SDK `Responder` serves both operations and the older request; `next-question`
   is served when your `Adjudicator` implements `NextQuestionAdjudicator`, and
-  refused with `422` otherwise. `SupportedRequestFrames()` does not list
-  `"v1op"` yet: registrations declare it once payer gateways accept framed
-  DTR operations (Smart Gateway v0.44.0). An older payer gateway does not
-  serve them, so never declare `"v1op"` by hand for a payer that cannot.
+  refused with `422` otherwise. `SupportedRequestFrames()` lists `"v1"` and
+  `"v1op"`, so every registration this SDK builds declares both. An older
+  payer gateway does not serve framed DTR operations, so never declare
+  `"v1op"` by hand for a payer that cannot.
+- **Who declares it.** A holder's `requestFrames` states what the Smart
+  Gateway (or receiver) serving its base URL accepts, so who declares `"v1op"`
+  depends on how the holder was registered:
+  - **Reference participants provisioned with the network** declare `"v1"`
+    and `"v1op"`; their Smart Gateways accept framed DTR operations.
+  - **Hosted gateways** declare what their pinned Smart Gateway release
+    serves: `"v1"` and `"v1op"` from v0.44.0, `"v1"` only from v0.34.0, and
+    no request frames on an earlier release or an image whose release cannot
+    be told from its tag. Changing the release re-declares the frames: a
+    withdrawal is published before the older release is rolled out, and the
+    rollout waits until the network has confirmed it; an addition is
+    published once the newer release is running.
+  - **Self-registered participants** declare exactly what their registration
+    (or last rotation) declared; the network never adds a capability for
+    them. A registration built with an SDK earlier than v0.50.1 declares only
+    `"v1"`, so requesters do not send it framed DTR operations; to receive
+    them, re-declare with `shn rotate` (`PUT /register/{id}`, §2.4) from SDK
+    v0.50.1 or later, once the Smart Gateway serving your base URL accepts
+    them.
+  - **The `shn` CLI** (`shn register`, `shn rotate`) declares every capability
+    its build supports unless you pass `--request-frames`. Declare `"v1op"`
+    only when the Smart Gateway serving your base URL is v0.44.0 or newer;
+    otherwise pass `--request-frames v1`, and rotate after you upgrade the
+    gateway. `shn rotate` issues new keys, so the gateway must then load the
+    new key directory. The option accepts only tokens the build supports;
+    `v1op` without `v1` is accepted with a warning, since requesters then
+    frame only DTR operations to you and send your other requests bare.
 
 The Smart Gateway additionally *honors* a well-formed claim it can both
 natively build and validate for (native ∩ laned);
@@ -1712,6 +1759,15 @@ res, err := id.RunPriorAuth(ctx, httpClient, endpoints, payer, shnsdk.PriorAuthR
 // res.Outcome == "pended", res.Resume != nil (resume via ResumePriorAuth, §7b, to reach "approved")
 ```
 
+To have the coverage check carry your own records, set `Patient` (your Patient resource for the
+member, whose id is the member id) and `Coverage` (your Coverage search result: a searchset
+Bundle with the member's Coverage and the payor Organization it names) together, and `NPI` (the
+ordering practitioner, sent as `userId` `Practitioner/<NPI>`; required with records). The check is
+then built with `BuildCRDRequest` and names no FHIR server. `Hook` chooses its hook:
+`order-sign` (the default: the order is signed and goes on to prior authorization) or
+`order-select` (the order is still being chosen; the request selects it). Without `Patient` and
+`Coverage` the older order-select request is sent, and `Hook` must be empty.
+
 Note there is no `Clinical` field set. The reference payer's verdict for this family is
 a function of the order's HCPCS code, not of the DTR answers, and `RunPriorAuth` only
 auto-fills the one worked-example questionnaire it ships fixture logic for
@@ -1789,6 +1845,52 @@ violation; `CDSHooksRules()` is its rule table with the specification text each 
 enforces. Payer gateways relay the requested hook and a Coverage search result as sent
 from gateway v0.44.0; until your payer's gateway runs it, keep the deprecated request
 builder.
+
+### 7a.4 What the network changes in a CRD or DTR message
+
+From Smart Gateway v0.44.0, a CDS Hooks or `$questionnaire-package` message reaches the other
+participant as its author sent it. The payer's answer comes back byte for byte, and the
+hook is never changed. The only changes are the four edits below. Each is made on the
+message's own bytes; everything else in the message is unchanged.
+
+| Edit | Made by | What changes |
+|---|---|---|
+| Callback removed | the provider's gateway, on a CDS Hooks request from the EHR | `fhirServer` and `fhirAuthorization` are removed. The payer never gets a route or a credential into the provider's systems. |
+| Prefetch obtained | the provider's gateway, on a CDS Hooks request from the EHR | An advertised prefetch key the EHR left out is added from the provider's own system of record: the Patient as read, a search as a `searchset` of the records exactly as returned (`urn:uuid:` entry addresses, no server links), `null` for no match. Nothing is made up. |
+| Coverage obtained | the provider's gateway, on a `$questionnaire-package` request from the EHR | One `coverage` parameter is appended from the provider's system of record, only when the request carries none. |
+| Payer identity mapping | the payer's gateway, on the request to its payer (only when configured) | Only the payer identifier strings of each Coverage, and of a PAS Claim's insurer when it names the payer. |
+
+- **Signatures.** A signature inside the message (`Bundle.signature`, `Provenance.signature`, a
+  `Signature` element) travels untouched. An edit that would change signed content is refused
+  with `422 signed content cannot be edited`.
+- **No transport signatures.** HTTP-level signatures (signed header fields, a detached JWS)
+  are not carried. Each Smart Gateway terminates HTTP, and a message frame (§6.3) carries only
+  `Content-Type`, `contractVersion` and `operation`. A participant that needs an end-to-end
+  signature signs inside the payload.
+- **Hooks and services.** The payer's gateway sends each request to the CDS service the
+  payer's own `/cds-services` listing offers for the request's hook. A hook the payer does not
+  offer is refused before anything is sent, with `422` and the hooks it does offer:
+  `{"error":"payer offers no CDS service for hook order-select","offered":[…]}`.
+- **Answers.** The payer's gateway checks a CDS Hooks answer against the CDS Hooks response
+  rules and refuses (`502`) one that breaks them; it never repairs one. The provider's gateway
+  returns the answer body exactly. The success media type is still the gateway's own:
+  `application/json` for CDS Hooks, `application/fhir+json` for a questionnaire package.
+- **Member id limitation.** `context.patientId`, and the patient references a request binds
+  (each order's subject, each Coverage's beneficiary), must use the patient's network member
+  id. A provider's gateway obtains prefetch only when its system of record names the patient
+  by that id. When the system names the patient differently, a request that leaves out
+  `patient` or `coverage` is refused (`422`), and history keys are left out.
+- **Gateway-originated requests.** A request that a provider's gateway builds for its own
+  workflow names the patient by the member id. It changes the system of record's `Patient.id`
+  and the patient reference on each carried record's patient path, and nothing else; the
+  change is checked byte for byte.
+- **Framed questionnaire requests.** A provider's gateway sends a `$questionnaire-package`
+  request only as a framed operation (§6.3). A payer whose registration does not declare
+  `"v1op"` therefore receives no questionnaire requests from a v0.44.0 provider gateway, which
+  answers its EHR `502 payer gateway does not support framed DTR operations (upgrade
+  required)`. A self-registered payer that answers with this SDK's `Responder` must rebuild on
+  SDK v0.50.1 or later, and re-declare its frames with `shn rotate` from that build
+  (`--request-frames` to choose them) to receive framed questionnaire requests.
 
 ---
 
@@ -2133,7 +2235,7 @@ applicable IG profiles. The network enforces a **two-gate** posture:
 | `crd-order-select` | Da Vinci CRD `CDSHooksRequest` / `CDSHooksResponse` |
 | `dtr-questionnaire-fetch` | Da Vinci DTR `Questionnaire` |
 | `pas-claim` / `pas-claim-update` | Da Vinci PAS `Claim` bundle / `ClaimResponse` bundle |
-| `federated-query` | Da Vinci CDex `cdex-task-data-request` `Task` (request) / completed CDex `Task` whose `output` contains a US-Core searchset `Bundle` (`DiagnosticReport`/`DocumentReference`, `Provenance`) (response) — CDex + HRex + US Core |
+| `federated-query` | Da Vinci CDex `cdex-task-data-request` `Task` (request) / completed CDex `Task` whose `output` contains a US-Core searchset `Bundle` (`DiagnosticReport`/`DocumentReference` records, the facility's identity-binding `Patient`, one `Provenance` per record) (response) — CDex + HRex + US Core |
 | `patient-dtr` | Da Vinci DTR `QuestionnaireResponse` |
 
 ### 8.3 Terminology
@@ -2415,6 +2517,57 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-09-17 — SDK: CRD card builders retired, card and evidence readers corrected,
+  decision EOBs state the payer's own reason.** `BuildCards` / `BuildCardsAtLine` now
+  build nothing and return `ErrBuildCardsReplaced`: a CRD answer returns the requested
+  order with its coverage information, and a `CardCoverage` names no order, Coverage,
+  assertion date or `coverage-assertion-id`; build answers with `BuildCRDResponse`.
+  `ParseCards` and `ParseCRDResponse` read a card's `extension` object as coverage only
+  when it has the shape earlier SDK card builders wrote (a `covered` value and only
+  `covered`, `paNeeded`, `questionnaires`, `satisfiedPaId`); any other card extension
+  object is the card author's own, so the coverage the answer states elsewhere is read
+  (earlier, a payer's own card extension object hid it). `ExtractCDexEvidence` returns
+  the records' last `DiagnosticReport` with the `Provenance` whose target names that
+  report (`DiagnosticReport/<id>` or the report entry's `fullUrl`), and refuses records
+  with no such `Provenance`; earlier it returned the last `Provenance` whatever it
+  attributed. `PADecisionEOBParams` gains `ReviewAction` (`PASReviewAction`: the payer's
+  X12 306 decision code and X12 886 reasons) and `DenialReasons` (the payer's CARC or
+  RARC codes). With either set (an empty `DenialReasons` included), a denied EOB carries
+  a `denialreason` adjudication only for each code the payer supplied, and carries the
+  decision as the PDex `reviewAction` extension on the amount adjudication (`submitted`,
+  0 USD, as approvals use): the payer's review action, or `A3` Not Certified when none
+  is given. A review action that contradicts the decision (`A1` or `A6` on a denial, `A3`
+  on an approval) is refused; `A2` is carried on either. With neither set, a denied EOB keeps the fixed CARC 50 `denialreason`
+  (deprecated, removed in a later release). `PriorAuthResult` gains `ProcessNotes` (the
+  payer's notes with their types, on approvals and denials), `ReviewAction` and
+  `DenialReasons`; new constants `X12ReviewDecisionSystem`,
+  `X12ReviewDecisionReasonSystem`, `CARCSystem`, `RARCSystem`.
+
+- **2026-09-17 — What the network changes in a CRD or DTR message (§7a.4).** New
+  section listing the four edits a Smart Gateway (v0.44.0) makes to a CDS Hooks or
+  `$questionnaire-package` message, and nothing else: callback removed, prefetch obtained,
+  coverage obtained, payer identity mapping. Also: signatures inside the payload travel
+  untouched and transport signatures are not carried; the payer's service is chosen by
+  hook and a hook it does not offer is refused with the offered hooks; answer bodies are
+  relayed exactly; the member id limitation and the patient naming of gateway-originated
+  requests; and the framed questionnaire requirement for self-registered payers.
+
+- **2026-09-17 — Framed DTR operations are declared (§6.3).**
+  `SupportedRequestFrames()` now returns `["v1","v1op"]`, so every registration
+  built with this SDK declares that it accepts framed DTR operations; the
+  network declares it for its reference participants, and for hosted gateways
+  whose pinned release serves them (v0.44.0 or later). `RunPriorAuth` therefore
+  sends a framed `questionnaire-package` operation to a payer whose registry
+  entry lists `"v1op"` (pass the entry's `requestFrames` in
+  `Payer.RequestFrames`); a `Payer` without it still receives the older
+  questionnaire request. A self-registered payer keeps the frames it declared:
+  one built on an earlier SDK must rebuild on this version (v0.50.1) and run
+  `shn rotate` to receive framed DTR operations. `shn register` and `shn rotate`
+  take `--request-frames` (for example `--request-frames v1` for a Smart Gateway
+  older than v0.44.0); unsupported tokens are refused. A `PUT /register/{id}`
+  that keeps both keys (a re-declaration) is audited as `redeclared` instead of
+  `rotated` (§2.4, §2.5).
+
 - **2026-09-16 — PAS: profiled pended Task, inquiry and continuation (§7b).** New:
   `BuildPendedTasks` and `BuildPendedClaimResponseAtLine` (the PAS `profile-task` at
   each line, from the payer's facts only), `ParsePendedResponseDetail` (needs per
@@ -2489,6 +2642,36 @@ property. Until then, build to the rule: preserve what you do not recognise.
   appeal note. `shnsdk.BuildDeniedResponse` no longer emits the fixed appeal note;
   `shnsdk.BuildDeniedResponseWithNotesAtLine` carries supplied notes. A decision that
   sets `ProcessNotes` with an outcome other than denied is refused (`500`).
+- **2026-09-17 — A facility's records reach the requester exactly as its system holds them.**
+  A facility gateway answers a CDex data request with **every** record of each requested
+  type whose date falls in the requested range, in the order its FHIR server returned
+  them (earlier releases sent the first record of each type). Each record is carried as
+  the server's own bytes: its `subject` is no longer rewritten to the network member id,
+  and nothing is re-encoded. The facility's own `Patient` record is **not** sent (minimum
+  necessary): the records `Bundle` (id `results`) carries only an identity binding the
+  facility gateway writes, a `Patient` with the facility's Patient `id` and the
+  `urn:shn:member` identifier, plus one gateway `Provenance` (with an id) per record
+  (`search.mode` `match` for records, `include` for the others). Entries are identified as
+  `urn:shn:fedquery:<n>`, never by the facility's server URLs. The facility's search is
+  narrowed to the requested dates (`date=ge…&date=le…`, widened by one day on each side), and the facility still selects
+  records by their own dates (`DiagnosticReport` by `effectiveDateTime`, else
+  `effectivePeriod` end, else start; `DocumentReference` by `date`). More records than one
+  search's bounds (10 pages, 200 entries, 4 MiB) is a `422`
+  (`records exceed the per-answer bound for <type>`), never a partial answer. Before
+  anything is sent, the member must have a `Patient` in the facility's system (`404` when
+  there is none), and every record must be about that member (a record about anyone else,
+  or the same record twice, is a `502`). The requester checks the same on receipt: a
+  record binds to the member through its patient reference, directly or through the
+  identity binding, and an answer naming anyone else is refused before use
+  (`federated response refused: …`). **Requester-side
+  change:** a provider that forwards a facility report as prior-authorization evidence
+  (the `pas-claim-update` `ClaimUpdate`, its own message) sends a copy of the report
+  whose `subject` names the Claim's patient, re-encoded; the facility's bytes are only
+  those in the facility's answer. The evidence is the `DiagnosticReport` with the latest
+  date (as above), compared as instants: a year, month or date alone is the start of that
+  period in UTC, and a date-time keeps its own offset. A report without a readable date
+  comes before dated ones, and of equal instants the later entry wins. The evidence also
+  includes the `Provenance` that targets it.
 - **2026-09-16 — CDex fulfillment keeps the request Task and the records exactly.**
   `shnsdk.BuildCDexQueryResult` now extends the payer's request `Task` instead of
   rebuilding it. The Task keeps its own bytes apart from three changes: `status` becomes

@@ -9,6 +9,7 @@ package shnsdk
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
@@ -43,39 +44,64 @@ func BuildRecordsBundle(resources [][]byte) ([]byte, error) {
 }
 
 // extractEvidenceFromBundle is the shared searchset-Bundle extractor: it pulls the
-// DiagnosticReport and Provenance out of a US-Core searchset Bundle. ExtractCDexEvidence
-// (CDex completed-Task wire) delegates here so the DR+Provenance extraction logic lives
-// in exactly one place.
+// DiagnosticReport and the Provenance that attributes it out of a records Bundle.
+// ExtractCDexEvidence (CDex completed-Task wire) delegates here so the DR+Provenance
+// extraction logic lives in exactly one place.
+//
+// The report is the Bundle's last DiagnosticReport entry (by entry order; no date is
+// compared); the Provenance is the last Provenance entry with a target naming that
+// report, as "DiagnosticReport/<id>" or as the report entry's fullUrl. A Provenance that attributes anything else is never
+// returned. Both are the Bundle's own bytes.
 // Errors keep the fedquery: prefix (bundle-layer attribution); ExtractCDexEvidence callers
 // therefore see mixed cdex:/fedquery: prefixes — intentional, do not "normalize".
 func extractEvidenceFromBundle(bundleJSON []byte) (drJSON, provJSON []byte, err error) {
 	var b struct {
 		Entry []struct {
+			FullURL  string          `json:"fullUrl"`
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
 	if e := json.Unmarshal(bundleJSON, &b); e != nil {
 		return nil, nil, fmt.Errorf("fedquery: parse response: %w", e)
 	}
-	for _, e := range b.Entry {
-		var rt struct {
-			ResourceType string `json:"resourceType"`
-		}
-		if err := json.Unmarshal(e.Resource, &rt); err != nil {
+	type head struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+		Target       []struct {
+			Reference string `json:"reference"`
+		} `json:"target"`
+	}
+	heads := make([]head, len(b.Entry))
+	var names []string // the names a target may use for the selected report
+	for i, e := range b.Entry {
+		if err := json.Unmarshal(e.Resource, &heads[i]); err != nil {
 			return nil, nil, fmt.Errorf("fedquery: parse entry: %w", err)
 		}
-		switch rt.ResourceType {
-		case "DiagnosticReport":
-			drJSON = []byte(e.Resource)
-		case "Provenance":
-			provJSON = []byte(e.Resource)
+		if heads[i].ResourceType == "DiagnosticReport" {
+			drJSON, names = []byte(e.Resource), nil
+			if heads[i].ID != "" {
+				names = append(names, "DiagnosticReport/"+heads[i].ID)
+			}
+			if e.FullURL != "" {
+				names = append(names, e.FullURL)
+			}
 		}
 	}
 	if drJSON == nil {
 		return nil, nil, fmt.Errorf("fedquery: response missing DiagnosticReport")
 	}
+	for i, e := range b.Entry {
+		if heads[i].ResourceType != "Provenance" {
+			continue
+		}
+		for _, t := range heads[i].Target {
+			if t.Reference != "" && slices.Contains(names, t.Reference) {
+				provJSON = []byte(e.Resource)
+			}
+		}
+	}
 	if provJSON == nil {
-		return nil, nil, fmt.Errorf("fedquery: response missing Provenance")
+		return nil, nil, fmt.Errorf("fedquery: response has no Provenance for its DiagnosticReport")
 	}
 	return drJSON, provJSON, nil
 }

@@ -26,6 +26,24 @@ const (
 	// byte-deterministic (FR-35/FR-39). Mirrors internal/fhirmap.docRefDateUC05.
 	docRefDateUC05 = "2026-05-15T00:00:00Z"
 
+	// X12ReviewDecisionSystem is the X12 306 review decision code system (for
+	// example A1 Certified in total, A3 Not Certified) a payer's review action
+	// is coded in, in PAS and in the PDex prior authorization EOB.
+	X12ReviewDecisionSystem = "https://codesystem.x12.org/005010/306"
+	// X12ReviewDecisionReasonSystem is the X12 886 review decision reason code
+	// system a review action's reasons are coded in.
+	X12ReviewDecisionReasonSystem = "https://codesystem.x12.org/external/886"
+	// CARCSystem is the X12 Claim Adjustment Reason Code system and
+	// RARCSystem the CMS Remittance Advice Remark Code system: the codes a PDex
+	// prior authorization EOB's denial reason adjudication may carry.
+	CARCSystem = "https://x12.org/codes/claim-adjustment-reason-codes"
+	RARCSystem = "https://x12.org/codes/remittance-advice-remark-codes"
+
+	// pdexReviewActionURL and pdexReviewActionCodeURL are the PDex review
+	// action extension and its code sub-extension.
+	pdexReviewActionURL     = "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewAction"
+	pdexReviewActionCodeURL = "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewActionCode"
+
 	// systemCARC is the X12 Claim Adjustment Reason Codes system (PDex PPA denial
 	// reason binding). CARC 50 = "non-covered… not deemed a 'medical necessity'."
 	// Mirrors internal/fhirmap.systemCARC (eob.go).
@@ -325,9 +343,16 @@ type eobItem struct {
 }
 
 type eobAdjudication struct {
-	Category eobCodeableConcept  `json:"category"`
-	Reason   *eobCodeableConcept `json:"reason,omitempty"`
-	Amount   *eobMoney           `json:"amount,omitempty"`
+	Extension []eobExtension      `json:"extension,omitempty"`
+	Category  eobCodeableConcept  `json:"category"`
+	Reason    *eobCodeableConcept `json:"reason,omitempty"`
+	Amount    *eobMoney           `json:"amount,omitempty"`
+}
+
+type eobExtension struct {
+	Extension            []eobExtension      `json:"extension,omitempty"`
+	URL                  string              `json:"url"`
+	ValueCodeableConcept *eobCodeableConcept `json:"valueCodeableConcept,omitempty"`
 }
 
 type eobMoney struct {
@@ -351,8 +376,10 @@ type eobReference struct {
 // BuildPADecisionEOB builds the Da Vinci PDex Prior Authorization (PPA)
 // ExplanationOfBenefit for a PA decision (FR-28): use=preauthorization,
 // outcome=complete. The item adjudication shape branches on decision:
-//   - PADecisionDenied: the denialreason adjudication slice carrying CARC 50 (not
-//     medically necessary) (authNumber ignored — a denial has no authorization).
+//   - PADecisionDenied: with the payer's decision detail stated (ReviewAction or
+//     DenialReasons), the amount adjudication carrying the review action plus one
+//     denialreason per supplied code; otherwise the deprecated denialreason slice
+//     carrying CARC 50 (authNumber ignored — a denial has no authorization).
 //
 // processNote carries PADecisionEOBParams.ProcessNotes when they are non-nil; when
 // they are nil a denied EOB keeps the deprecated fixed EOBAppealNote.
@@ -402,6 +429,84 @@ type PADecisionEOBParams struct {
 	// EOBAppealNote and an approved EOB carries none. That default will be
 	// removed in a later release; pass the payer's notes (or an empty slice).
 	ProcessNotes []PASProcessNote
+
+	// ReviewAction is the payer's own review decision (PriorAuthResult
+	// .ReviewAction): its X12 306 code (X12ReviewDecisionSystem; never A4,
+	// never A1 or A6 on a denial, never A3 on an approval)
+	// and any X12 886 reasons (X12ReviewDecisionReasonSystem). It is written
+	// as the reviewAction extension of the item's amount adjudication.
+	ReviewAction *PASReviewAction
+	// DenialReasons are the payer's own claim adjustment reason (CARCSystem)
+	// or remittance advice remark (RARCSystem) codes for a denial
+	// (PriorAuthResult.DenialReasons). Each is written as one denialreason
+	// adjudication, exactly as given; they are refused on an approval.
+	//
+	// Setting ReviewAction or DenialReasons (a non-nil empty slice included)
+	// states the payer's decision detail. A denied EOB then carries a
+	// denialreason only for the codes given, and always carries the decision
+	// as a review action on the amount adjudication (0 USD, the placeholder an
+	// approval uses): the payer's ReviewAction, or, when none is given, A3
+	// Not Certified, the X12 code of the denial itself. Setting neither keeps
+	// the deprecated default: a denied EOB carries the fixed denialreason CARC
+	// 50, which the payer never stated. That default will be removed in a
+	// later release.
+	DenialReasons []PASCoding
+}
+
+// PASReviewAction is a payer's review decision on a prior-authorization
+// item: the X12 306 decision code and the X12 886 reasons for it, as the
+// payer coded them.
+type PASReviewAction struct {
+	Code    PASCoding
+	Reasons []PASCoding
+}
+
+// eobReviewAction renders a review action as the PDex reviewAction
+// extension, refusing a value the profile's bindings exclude.
+func eobReviewAction(ra PASReviewAction) (eobExtension, error) {
+	c := ra.Code
+	switch {
+	case c.Code == "" || c.System != X12ReviewDecisionSystem:
+		return eobExtension{}, fmt.Errorf("shnsdk: review action code must be an X12 306 code (%s)", X12ReviewDecisionSystem)
+	case c.Code == "A4":
+		return eobExtension{}, fmt.Errorf("shnsdk: review action A4 (pended) is not a decision")
+	}
+	ext := eobExtension{URL: pdexReviewActionURL, Extension: []eobExtension{{
+		URL:                  pdexReviewActionCodeURL,
+		ValueCodeableConcept: &eobCodeableConcept{Coding: []eobCoding{{System: c.System, Code: c.Code, Display: c.Display}}},
+	}}}
+	for i, r := range ra.Reasons {
+		if r.Code == "" || r.System != X12ReviewDecisionReasonSystem {
+			return eobExtension{}, fmt.Errorf("shnsdk: review action reason %d must be an X12 886 code (%s)", i+1, X12ReviewDecisionReasonSystem)
+		}
+		ext.Extension = append(ext.Extension, eobExtension{
+			URL:                  "reasonCode",
+			ValueCodeableConcept: &eobCodeableConcept{Coding: []eobCoding{{System: r.System, Code: r.Code, Display: r.Display}}},
+		})
+	}
+	return ext, nil
+}
+
+// eobReviewActionContradicts reports whether an X12 306 code states the
+// opposite of the decision: a certification (A1 in total, A6 with changes)
+// on a denial, or A3 (not certified) on an approval. A2 (certified, partial)
+// is carried on either: a partial certification is an approval, and the Da
+// Vinci reference payer denies with A2.
+func eobReviewActionContradicts(decision PADecision, code string) bool {
+	if decision == PADecisionDenied {
+		return code == "A1" || code == "A6"
+	}
+	return code == "A3"
+}
+
+// eobAmountAdjudication is the amount-type adjudication slice with the 0 USD
+// placeholder: a prior authorization carries no adjudicated dollar figure,
+// and the slice requires the amount.
+func eobAmountAdjudication() eobAdjudication {
+	return eobAdjudication{
+		Category: eobCodeableConcept{Coding: []eobCoding{{System: systemAdjudication, Code: "submitted", Display: "Submitted Amount"}}},
+		Amount:   &eobMoney{Value: "0", Currency: "USD"},
+	}
 }
 
 // davinciIGCanonical builds a versioned Da Vinci implementationGuide canonical
@@ -628,6 +733,31 @@ func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	detailed := p.ReviewAction != nil || p.DenialReasons != nil
+	var review *eobExtension
+	if p.ReviewAction != nil {
+		ext, err := eobReviewAction(*p.ReviewAction)
+		if err != nil {
+			return nil, err
+		}
+		if eobReviewActionContradicts(decision, p.ReviewAction.Code.Code) {
+			return nil, fmt.Errorf("shnsdk: review action %s contradicts the decision", p.ReviewAction.Code.Code)
+		}
+		review = &ext
+	}
+	if len(p.DenialReasons) > 0 && decision != PADecisionDenied {
+		return nil, fmt.Errorf("shnsdk: denial reasons on a decision that is not a denial")
+	}
+	var denialReasons []eobAdjudication
+	for i, r := range p.DenialReasons {
+		if r.Code == "" || (r.System != CARCSystem && r.System != RARCSystem) {
+			return nil, fmt.Errorf("shnsdk: denial reason %d must be a CARC (%s) or RARC (%s) code", i+1, CARCSystem, RARCSystem)
+		}
+		denialReasons = append(denialReasons, eobAdjudication{
+			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemPDexAdjudication, Code: "denialreason"}}},
+			Reason:   &eobCodeableConcept{Coding: []eobCoding{{System: r.System, Code: r.Code, Display: r.Display}}},
+		})
+	}
 	eob := eobJSON{
 		ResourceType: "ExplanationOfBenefit",
 		Id:           id,
@@ -654,10 +784,11 @@ func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
 		// The amount is 0 USD — a pre-authorization carries no adjudicated dollar
 		// figure; the slice mandates the element's presence, so 0 is the deliberate
 		// "not applicable to a pre-auth" placeholder, not a real payment amount.
-		eob.Item[0].Adjudication = []eobAdjudication{{
-			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemAdjudication, Code: "submitted", Display: "Submitted Amount"}}},
-			Amount:   &eobMoney{Value: "0", Currency: "USD"},
-		}}
+		amount := eobAmountAdjudication()
+		if review != nil {
+			amount.Extension = []eobExtension{*review}
+		}
+		eob.Item[0].Adjudication = []eobAdjudication{amount}
 		// Carry the authorization number ON the resource as EOB.preAuthRef (the FHIR
 		// field for a pre-authorization reference number — a plain string, no
 		// terminology), so the patient surface renders the approved auth from the EOB
@@ -666,6 +797,22 @@ func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
 			eob.PreAuthRef = []string{authNumber}
 		}
 	default: // PADecisionDenied
+		if detailed {
+			// The payer's decision: its review action, or the denial's own X12
+			// code; a denialreason only for each code the payer supplied.
+			if review == nil {
+				ext, err := eobReviewAction(PASReviewAction{Code: PASCoding{System: X12ReviewDecisionSystem, Code: "A3", Display: "Not Certified"}})
+				if err != nil {
+					return nil, err
+				}
+				review = &ext
+			}
+			amount := eobAmountAdjudication()
+			amount.Extension = []eobExtension{*review}
+			eob.Item[0].Adjudication = append([]eobAdjudication{amount}, denialReasons...)
+			break
+		}
+		// Deprecated default (see PADecisionEOBParams.DenialReasons).
 		eob.Item[0].Adjudication = []eobAdjudication{{
 			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemPDexAdjudication, Code: "denialreason"}}},
 			Reason:   &eobCodeableConcept{Coding: []eobCoding{{System: systemCARC, Code: "50", Display: "These are non-covered services because this is not deemed a 'medical necessity' by the payer"}}},

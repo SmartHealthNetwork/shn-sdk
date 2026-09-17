@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -261,6 +262,11 @@ func TestRotate_AgainstStubRegistrar(t *testing.T) {
 	// the NEW signPub.
 	if gotBody.ID != "acme-7f3a" || gotBody.Role != "provider" || gotBody.BaseURL != "https://acme.example" {
 		t.Errorf("rotate body fields: %+v", gotBody)
+	}
+	// Rotation re-declares this build's request frames, so a holder registered
+	// with an earlier build publishes the framed DTR operation capability.
+	if !slices.Equal(gotBody.RequestFrames, shnsdk.SupportedRequestFrames()) || !shnsdk.SupportsRequestFrameV1Op(gotBody.RequestFrames) {
+		t.Errorf("rotate body requestFrames = %q, want this build's %q", gotBody.RequestFrames, shnsdk.SupportedRequestFrames())
 	}
 	curSignPubB64 := base64.StdEncoding.EncodeToString(curSignPub)
 	if gotBody.SignPub == curSignPubB64 {

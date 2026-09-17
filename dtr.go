@@ -267,8 +267,8 @@ func ExtractQuestionnaireFromPackage(data []byte) ([]byte, error) {
 // unwrapPackageParameters normalises the two $questionnaire-package response shapes a
 // conformant Da Vinci payer may return: a bare collection Bundle (resourceType=="Bundle"),
 // returned byte-identical, or a Parameters resource profiled on
-// dtr-qpackage-output-parameters, whose inner collection Bundle lives at
-// parameter[name=="packagebundle"].resource and is returned in its place. A Parameters
+// dtr-qpackage-output-parameters, whose inner collection Bundle lives at the
+// package Bundle parameter (isPackageBundleParameter) and is returned in its place. A Parameters
 // wrapper with no packagebundle parameter errors legibly rather than falling through to
 // the bundle-walk's generic "no Questionnaire" message. Malformed JSON is left for the
 // caller's own json.Unmarshal to surface. Mirrors
@@ -289,11 +289,24 @@ func unwrapPackageParameters(raw []byte) ([]byte, error) {
 		return raw, nil // bare Bundle (or anything else) — byte-identical pass-through
 	}
 	for _, p := range top.Parameter {
-		if p.Name == "packagebundle" && len(p.Resource) > 0 {
+		if isPackageBundleParameter(p.Name) && len(p.Resource) > 0 {
 			return p.Resource, nil
 		}
 	}
 	return nil, fmt.Errorf("shnsdk: Parameters carries no packagebundle Bundle")
+}
+
+// isPackageBundleParameter reports whether name is the
+// $questionnaire-package output parameter that carries the package Bundle at
+// one of the published DTR lines: "return" (the 2.0.1 operation
+// definition), "PackageBundle" (the 2.0.1 and 2.1.0 output Parameters
+// profile) or "packagebundle" (2.2.0).
+func isPackageBundleParameter(name string) bool {
+	switch name {
+	case "return", "PackageBundle", "packagebundle":
+		return true
+	}
+	return false
 }
 
 // ParseQuestionnaireURL returns the url field from a marshalled FHIR Questionnaire.

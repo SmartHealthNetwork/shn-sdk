@@ -347,11 +347,15 @@ func BuildCDexFulfillment(requestTaskJSON, recordsBundle []byte) (CDexFulfillmen
 	return buildCDexFulfillment(requestTaskJSON, recordsBundle)
 }
 
-// ExtractCDexEvidence pulls the DiagnosticReport and Provenance out of a
-// fulfilled CDex Task. It follows the Task's last data-query output (the
-// one a fulfillment appends) through its valueReference to the contained
-// Bundle with that id, and returns those resources' bytes as they appear in
-// the Task. A Task whose last data-query output does not reference exactly
+// ExtractCDexEvidence pulls the DiagnosticReport and the Provenance that
+// attributes it out of a fulfilled CDex Task. It follows the Task's last
+// data-query output (the one a fulfillment appends) through its
+// valueReference to the contained Bundle with that id. The report is that
+// Bundle's last DiagnosticReport entry (by entry order; no date is compared);
+// the Provenance is the last Provenance whose
+// target names that report ("DiagnosticReport/<id>", or the report entry's
+// fullUrl). Both are returned as their bytes appear in the Task; records with
+// no Provenance for the report are an error. A Task whose last data-query output does not reference exactly
 // one contained resource, a Bundle, has no evidence, whatever else it
 // contains. The Task is
 // scanned strictly first (see BuildCDexFulfillment).

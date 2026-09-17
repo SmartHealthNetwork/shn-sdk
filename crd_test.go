@@ -1,7 +1,6 @@
 package shnsdk
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -82,117 +81,50 @@ func TestParseOrderSelectRequest_Rejects(t *testing.T) {
 	}
 }
 
-// TestBuildCards covers the PA-required and no-PA branches, and verifies that
-// ParseCards round-trips each branch correctly.
-func TestBuildCards(t *testing.T) {
-	const canon = SupportedQuestionnaireCanonical
-
-	// PA-required branch.
-	b, err := BuildCards(CardCoverage{Covered: "covered", PANeeded: "auth-needed", Questionnaires: []string{canon}})
+// crdAnswerFromCoverage is the conformant answer carrying cov on a
+// ServiceRequest, built by BuildCRDResponse.
+func crdAnswerFromCoverage(t *testing.T, cov CardCoverage) []byte {
+	t.Helper()
+	ci := CoverageInformationInput{Coverage: "Coverage/c1", Covered: cov.Covered, PANeeded: cov.PANeeded,
+		Questionnaires: cov.Questionnaires, SatisfiedPAID: cov.SatisfiedPaID, Date: "2026-09-17", CoverageAssertionID: "ca-1"}
+	if len(cov.Questionnaires) > 0 {
+		ci.DocNeeded = []string{"clinical"}
+	}
+	out, err := BuildCRDResponse("2.0", CRDResponseInputs{Orders: []CRDOrderCoverage{{
+		Order:       []byte(`{"resourceType":"ServiceRequest","id":"sr1"}`),
+		Description: "Add coverage information",
+		Coverage:    []CoverageInformationInput{ci},
+	}}})
 	if err != nil {
-		t.Fatalf("BuildCards(pa-required): %v", err)
+		t.Fatal(err)
 	}
-	cov, err := ParseCards(b)
-	if err != nil {
-		t.Fatalf("ParseCards(pa-required): %v", err)
-	}
-	if !cov.PARequired() || !cov.NeedsDTR() || cov.Questionnaires[0] != canon {
-		t.Errorf("pa-required round-trip = %+v, want PA-required carrying %q", cov, canon)
-	}
-
-	// No-PA branch.
-	b, err = BuildCards(CardCoverage{Covered: "covered", PANeeded: "no-auth"})
-	if err != nil {
-		t.Fatalf("BuildCards(no-pa): %v", err)
-	}
-	cov, err = ParseCards(b)
-	if err != nil {
-		t.Fatalf("ParseCards(no-pa): %v", err)
-	}
-	if cov.PARequired() || cov.NeedsDTR() {
-		t.Errorf("no-pa round-trip = %+v, want not PA-required, no questionnaire", cov)
-	}
+	return out
 }
 
-// TestBuildCardsAtLine_RegressionFenceAndRejection: the legacy BuildCards is
-// byte-identical to AtLine("2.0"); an unrecognised line errors (fail-closed).
-// Derived live from packages.simplifier.net/hl7.fhir.us.davinci-crd/{2.0.1,2.1.0,2.2.1}
-// (StructureDefinition-ext-coverage-information.json differential): confirmed the
-// covered/pa-needed/questionnaire/satisfied-pa-id split sub-extension shape this
-// projection carries is min/max-IDENTICAL across all three published CRD STUs — so
-// BuildCardsAtLine has no per-line behavioral delta to gate; the parameter exists to
-// fail closed on an unrecognized line, matching the AtLine convention already
-// established for PAS/DTR.
-func TestBuildCardsAtLine_RegressionFenceAndRejection(t *testing.T) {
-	cov := CardCoverage{Covered: "covered", PANeeded: "auth-needed", Questionnaires: []string{SupportedQuestionnaireCanonical}}
-	legacy, err := BuildCards(cov)
-	if err != nil {
-		t.Fatalf("BuildCards: %v", err)
-	}
-	atLine, err := BuildCardsAtLine("2.0", cov)
-	if err != nil {
-		t.Fatalf("BuildCardsAtLine(2.0): %v", err)
-	}
-	if !bytes.Equal(legacy, atLine) {
-		t.Fatalf("BuildCards != BuildCardsAtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
-	}
-	if _, err := BuildCardsAtLine("9.9", cov); err == nil {
-		t.Fatal("BuildCardsAtLine(\"9.9\") = nil error, want an error")
-	}
-}
-
-// TestBuildCardsAtLine_LineInvariantShape asserts BuildCardsAtLine emits
-// byte-identical output at every known CRD line (2.0/2.1/2.2) — the Step-1
-// package diff found no behavioral delta for the split coverage-information
-// projection SHN builds, so the three lines must stay byte-equal until a future
-// diff finds a real one (regression fence against silent drift).
-func TestBuildCardsAtLine_LineInvariantShape(t *testing.T) {
-	cov := CardCoverage{Covered: "not-covered", PANeeded: "no-auth"}
-	b20, err := BuildCardsAtLine("2.0", cov)
-	if err != nil {
-		t.Fatalf("BuildCardsAtLine(2.0): %v", err)
-	}
-	for _, line := range []string{"2.1", "2.2"} {
-		b, err := BuildCardsAtLine(line, cov)
-		if err != nil {
-			t.Fatalf("BuildCardsAtLine(%s): %v", line, err)
-		}
-		if !bytes.Equal(b20, b) {
-			t.Fatalf("BuildCardsAtLine(%s) != BuildCardsAtLine(\"2.0\"):\n 2.0: %s\n %s: %s", line, b20, line, b)
-		}
-	}
-}
-
-// TestCardCoverageRoundTrip verifies BuildCards→ParseCards preserves the widened
-// CardCoverage fields and that the PA-required/NeedsDTR predicates read them.
+// TestCardCoverageRoundTrip verifies a conformant answer read by the
+// deprecated ParseCards keeps the CardCoverage fields and that the
+// PA-required/NeedsDTR predicates read them.
 func TestCardCoverageRoundTrip(t *testing.T) {
 	in := CardCoverage{Covered: "covered", PANeeded: "auth-needed",
 		Questionnaires: []string{"http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"}}
-	cardsJSON, err := BuildCards(in)
+	got, err := ParseCards(crdAnswerFromCoverage(t, in))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := ParseCards(cardsJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Covered != "covered" || !got.PARequired() || !got.NeedsDTR() {
+	if !reflect.DeepEqual(got, in) || !got.PARequired() || !got.NeedsDTR() {
 		t.Fatalf("round-trip lost fields: %+v", got)
 	}
 }
 
-// TestCardCoverageNotCovered verifies the not-covered/no-auth projection round-trips
-// and is not PA-required.
+// TestCardCoverageNotCovered verifies the not-covered projection round-trips
+// and is not PA-required (CRD states no pa-needed for a service it does not
+// cover).
 func TestCardCoverageNotCovered(t *testing.T) {
-	cardsJSON, err := BuildCards(CardCoverage{Covered: "not-covered", PANeeded: "no-auth"})
+	got, err := ParseCards(crdAnswerFromCoverage(t, CardCoverage{Covered: "not-covered"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := ParseCards(cardsJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Covered != "not-covered" || got.PARequired() {
+	if got.Covered != "not-covered" || got.PANeeded != "" || got.PARequired() || got.NeedsDTR() {
 		t.Fatalf("got %+v", got)
 	}
 }

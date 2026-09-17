@@ -47,7 +47,9 @@ type Payer struct {
 	// see contractTokenForTxType) is framed toward this payer IFF it declares "v1"
 	// here; empty ⇒ the payer receives a BYTE-IDENTICAL bare request (same rule as
 	// the gateway's roundTripInner). coverage-eligibility never frames (no
-	// contract-version token exists for it), regardless of this field.
+	// contract-version token exists for it), regardless of this field. A DTR
+	// questionnaire request is sent as a framed operation IFF it declares
+	// RequestFrameV1Op ("v1op"), and as the older questionnaire request otherwise.
 	RequestFrames []string
 }
 

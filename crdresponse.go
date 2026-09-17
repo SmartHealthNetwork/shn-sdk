@@ -26,8 +26,8 @@ const (
 	// CRDSourceCardSuggestion: an update or create action inside a card
 	// suggestion (the shape CRD used before system actions).
 	CRDSourceCardSuggestion CRDObservationSource = "cardSuggestion"
-	// CRDSourceLegacyCard: the card "extension" object earlier versions of
-	// this SDK wrote (see BuildCards).
+	// CRDSourceLegacyCard: the coverage object earlier releases of this SDK
+	// wrote in a card's "extension".
 	CRDSourceLegacyCard CRDObservationSource = "legacyCard"
 )
 
@@ -125,8 +125,10 @@ func (o CRDObservation) Primary() (CardCoverage, bool) {
 
 // ParseCRDResponse reads the coverage information a CDS Hooks response
 // carries: in update and create system actions, in update and create actions
-// of card suggestions, and in the card extension object earlier versions of
-// this SDK wrote. The body must be one JSON object with unique member names.
+// of card suggestions, and in the coverage object earlier releases of this
+// SDK wrote in a card's extension (a card extension object of any other shape
+// is the card author's own and is not read as coverage). The body must be
+// one JSON object with unique member names.
 // It never changes or re-encodes the response; every value it returns is a
 // view over, or an exact copy of, the response's own bytes.
 func ParseCRDResponse(body []byte) (CRDObservation, error) {
@@ -154,7 +156,9 @@ func ParseCRDResponse(body []byte) (CRDObservation, error) {
 			}
 			cp := fmt.Sprintf("cards[%d]", i)
 			if ext, ok := d.Member(card, "extension"); ok && d.Kind(ext) == splice.KindObject {
-				obs.Orders = append(obs.Orders, p.legacyCard(ext, cp+".extension"))
+				if o, ok := p.legacyCard(ext, cp+".extension"); ok {
+					obs.Orders = append(obs.Orders, o)
+				}
 			}
 			sugs, ok := d.Member(card, "suggestions")
 			if !ok || d.Kind(sugs) != splice.KindArray {
@@ -367,10 +371,14 @@ func (p crdReader) coverageInformation(e splice.NodeID) CoverageInformation {
 	return ci
 }
 
-// legacyCard reads the card extension object written by BuildCards.
-func (p crdReader) legacyCard(ext splice.NodeID, path string) CRDObservedOrder {
-	var c CardCoverage
-	_ = json.Unmarshal(p.span(ext), &c) // lenient, as ParseCards always read it
+// legacyCard reads a card extension object that has the shape earlier
+// releases of this SDK wrote (legacyCardCoverage); ok is false for any other
+// extension object, which is the card author's own.
+func (p crdReader) legacyCard(ext splice.NodeID, path string) (CRDObservedOrder, bool) {
+	c, ok := legacyCardCoverage(p.span(ext))
+	if !ok {
+		return CRDObservedOrder{}, false
+	}
 	ci := CoverageInformation{
 		Raw:            p.span(ext),
 		Covered:        c.Covered,
@@ -378,7 +386,7 @@ func (p crdReader) legacyCard(ext splice.NodeID, path string) CRDObservedOrder {
 		Questionnaires: c.Questionnaires,
 		SatisfiedPAID:  c.SatisfiedPaID,
 	}
-	return CRDObservedOrder{Source: CRDSourceLegacyCard, Path: path, Coverage: []CoverageInformation{ci}}
+	return CRDObservedOrder{Source: CRDSourceLegacyCard, Path: path, Coverage: []CoverageInformation{ci}}, true
 }
 
 // CRDResponseInputs are a payer participant's CRD answer: the orders it

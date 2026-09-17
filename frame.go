@@ -37,10 +37,13 @@ func SupportsMessageFrameV1(frames []string) bool {
 // pre-request-frame sender or a version-neutral leg — always tolerated).
 const RequestFrameV1 = "v1"
 
-// SupportedRequestFrames returns the request-frame versions THIS library
-// implements. Registration self-declares it (SupportedMessageFrames precedent) —
-// the capability defaults ON for SHN builds.
-func SupportedRequestFrames() []string { return []string{RequestFrameV1} }
+// SupportedRequestFrames returns the request-frame capabilities THIS library
+// implements: RequestFrameV1 and RequestFrameV1Op. Registration self-declares
+// it (SupportedMessageFrames precedent) — the capability defaults ON for SHN
+// builds. A registration keeps what its build declared until it registers or
+// rotates again, so a holder registered with an earlier build declares v1op
+// only after it re-declares from this one.
+func SupportedRequestFrames() []string { return []string{RequestFrameV1, RequestFrameV1Op} }
 
 // SupportsRequestFrameV1 reports whether a holder's advertised request frames
 // include v1. Absent ⇒ NOT capable (the request-frame fence: no framed request is ever sent
@@ -67,9 +70,8 @@ func SupportsRequestFrameV1(frames []string) bool {
 // whether or not the peer also declares RequestFrameV1. Other transaction
 // types are framed only to a peer that declares RequestFrameV1.
 //
-// SupportedRequestFrames does not list it yet: this library can build and
-// serve framed DTR operations, and declares the capability once payer
-// gateways accept them.
+// SupportedRequestFrames lists it: this library builds and serves framed DTR
+// operations, so every registration it builds declares the capability.
 const RequestFrameV1Op = "v1op"
 
 // SupportsRequestFrameV1Op reports whether a holder's advertised request

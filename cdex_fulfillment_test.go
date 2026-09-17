@@ -464,7 +464,8 @@ func TestExtractCDexEvidence_ReferenceDrivenRefusals(t *testing.T) {
 		return `{"type":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-hrex/CodeSystem/hrex-temp","code":"data-query"}]},"valueReference":{"reference":"` + ref + `"}}`
 	}
 	evidence := func(dr string) string {
-		return `{"resourceType":"Bundle","id":"` + dr + `-b","type":"searchset","entry":[{"resource":{"resourceType":"DiagnosticReport","id":"` + dr + `"}},{"resource":{"resourceType":"Provenance","id":"p-` + dr + `"}}]}`
+		return `{"resourceType":"Bundle","id":"` + dr + `-b","type":"searchset","entry":[{"resource":{"resourceType":"DiagnosticReport","id":"` + dr + `"}},` +
+			`{"resource":{"resourceType":"Provenance","id":"p-` + dr + `","target":[{"reference":"DiagnosticReport/` + dr + `"}]}}]}`
 	}
 	for _, row := range []struct{ name, task string }{
 		{"no output", `{"resourceType":"Task","status":"completed","contained":[` + evidence("a") + `]}`},
@@ -493,4 +494,80 @@ func TestExtractCDexEvidence_ReferenceDrivenRefusals(t *testing.T) {
 			t.Fatalf("want the last data-query output's Bundle, got %s", dr)
 		}
 	})
+}
+
+// evidenceTask is a fulfilled Task whose contained records Bundle has the
+// given entries.
+func evidenceTask(entries ...string) []byte {
+	return []byte(`{"resourceType":"Task","status":"completed","contained":[{"resourceType":"Bundle","id":"results","type":"searchset","entry":[` +
+		strings.Join(entries, ",") + `]}],"output":[{"type":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-hrex/CodeSystem/hrex-temp","code":"data-query"}]},"valueReference":{"reference":"#results"}}]}`)
+}
+
+func reportEntry(fullURL, id string) string {
+	e := `{"resource":{"resourceType":"DiagnosticReport","id":"` + id + `","status":"final"}}`
+	if fullURL != "" {
+		e = `{"fullUrl":"` + fullURL + `",` + e[1:]
+	}
+	return e
+}
+
+func provenanceEntry(id string, targets ...string) string {
+	var refs []string
+	for _, t := range targets {
+		refs = append(refs, `{"reference":"`+t+`"}`)
+	}
+	return `{"resource":{"resourceType":"Provenance","id":"` + id + `","target":[` + strings.Join(refs, ",") + `],"recorded":"2026-06-04T00:00:00Z"}}`
+}
+
+// TestExtractCDexEvidence_ProvenanceTargetsTheReport: the evidence is the
+// records' last DiagnosticReport and a Provenance that names that report as
+// its target (by DiagnosticReport/<id>, or by the report entry's fullUrl),
+// never the last Provenance of the Bundle regardless of what it attributes.
+func TestExtractCDexEvidence_ProvenanceTargetsTheReport(t *testing.T) {
+	t.Run("provenance of the last report, listed first", func(t *testing.T) {
+		task := evidenceTask(reportEntry("", "dr-old"), reportEntry("", "dr-new"),
+			provenanceEntry("p-new", "DiagnosticReport/dr-new"), provenanceEntry("p-old", "DiagnosticReport/dr-old"))
+		dr, prov, err := shnsdk.ExtractCDexEvidence(task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(dr), `"id":"dr-new"`) || !strings.Contains(string(prov), `"id":"p-new"`) {
+			t.Fatalf("got report %s with provenance %s", dr, prov)
+		}
+		if !bytes.Contains(task, prov) || !bytes.Contains(task, dr) {
+			t.Fatal("evidence is not the records' own bytes")
+		}
+	})
+	t.Run("provenance names the report by its fullUrl among other targets", func(t *testing.T) {
+		task := evidenceTask(reportEntry("urn:uuid:5d3c", "dr-1"), provenanceEntry("p-1", "Patient/pt", "urn:uuid:5d3c"))
+		if _, prov, err := shnsdk.ExtractCDexEvidence(task); err != nil || !strings.Contains(string(prov), `"id":"p-1"`) {
+			t.Fatalf("got %s %v", prov, err)
+		}
+	})
+	t.Run("of several provenances of the report the last is returned", func(t *testing.T) {
+		task := evidenceTask(reportEntry("", "dr-1"), provenanceEntry("p-a", "DiagnosticReport/dr-1"),
+			provenanceEntry("p-other", "DiagnosticReport/dr-0"), provenanceEntry("p-b", "DiagnosticReport/dr-1"))
+		if _, prov, err := shnsdk.ExtractCDexEvidence(task); err != nil || !strings.Contains(string(prov), `"id":"p-b"`) {
+			t.Fatalf("got %s %v", prov, err)
+		}
+	})
+	for _, row := range []struct {
+		name    string
+		entries []string
+	}{
+		{"only provenance attributes another report", []string{reportEntry("", "dr-old"), reportEntry("", "dr-new"),
+			provenanceEntry("p-old", "DiagnosticReport/dr-old")}},
+		{"provenance without a target", []string{reportEntry("", "dr-1"), provenanceEntry("p-1")}},
+		{"target names the id under another type", []string{reportEntry("", "dr-1"), provenanceEntry("p-1", "Patient/dr-1")}},
+		{"target names a fullUrl the report does not have", []string{reportEntry("urn:uuid:aaaa", "dr-1"), provenanceEntry("p-1", "urn:uuid:bbbb")}},
+		{"report without id or fullUrl", []string{`{"resource":{"resourceType":"DiagnosticReport","status":"final"}}`, provenanceEntry("p-1", "DiagnosticReport/")}},
+		{"no report", []string{provenanceEntry("p-1", "DiagnosticReport/dr-1")}},
+		{"no provenance", []string{reportEntry("", "dr-1")}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if dr, prov, err := shnsdk.ExtractCDexEvidence(evidenceTask(row.entries...)); err == nil {
+				t.Fatalf("want an error, got %s / %s", dr, prov)
+			}
+		})
+	}
 }

@@ -225,7 +225,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		h := payerFor[p.MemberID]
 		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub}
-		res, err := devID.RunPriorAuth(ctx, c, ep, payer, shnsdk.PriorAuthRequest{
+		paReq, err := withTestPersonaRecords(shnsdk.PriorAuthRequest{
 			Member:           p.MemberID,
 			DOB:              p.DOB,
 			Family:           p.Family,
@@ -236,7 +236,11 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 			DiagnosisICD10:   p.Order.Diagnosis,
 
 			ProceedOnNotCovered: true,
-		})
+		}, p)
+		if err != nil {
+			return fail(exitOutcome, "priorauth %s: %v", p.MemberID, err)
+		}
+		res, err := devID.RunPriorAuth(ctx, c, ep, payer, paReq)
 		if err != nil {
 			return fail(exitNetworkHealth, "priorauth %s: round-trip failed: %v", p.MemberID, err)
 		}
