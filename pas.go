@@ -815,6 +815,12 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if err := checkPASCoverageResolves(bundleOut); err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
+	// dom-3 over the coverage and the claim: each re-point above moves the one
+	// reference that named a contained record, and a record left inside asserting
+	// nothing is refused here. See checkPASContainedReferenced for its scope.
+	if err := checkPASContainedReferenced(bundleOut); err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
+	}
 	if in.PayerOrgEntry || in.ContainedInsurer {
 		if err := checkPASInsurerResolves(bundleOut); err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
@@ -1140,8 +1146,9 @@ func setClaimItemProductFromSR(claimJSON, orderJSON []byte) ([]byte, error) {
 
 // repointPayorToEntry rewrites a reference-payer-lane Coverage so Coverage.payor[0] references the
 // payer Organization ENTRY the request carries — the participant's own record — instead of the
-// contained #cms-payer, and drops the now-redundant contained org. absolutizeBundleRefs then makes
-// the ref the entry's absolute fullUrl so a real payer's PAS findInBundle resolves it.
+// payer organization the record contained, and drops that now-redundant contained copy (see
+// dropContainedPayerOrg). absolutizeBundleRefs then makes the ref the entry's absolute fullUrl
+// so a real payer's PAS findInBundle resolves it.
 func repointPayorToEntry(coverageJSON []byte, payerOrgID string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(coverageJSON, &m); err != nil {
@@ -1152,15 +1159,15 @@ func repointPayorToEntry(coverageJSON []byte, payerOrgID string) ([]byte, error)
 		return nil, fmt.Errorf("repointPayorToEntry: marshal payor: %w", err)
 	}
 	m["payor"] = payorJSON
-	if err := dropContainedPayerOrg(m); err != nil {
+	if err := dropContainedPayerOrg(m, payerOrgID); err != nil {
 		return nil, fmt.Errorf("repointPayorToEntry: %w", err)
 	}
 	return json.Marshal(m)
 }
 
 // repointInsurerToEntry rewrites a reference-payer-lane Claim so Claim.insurer references the payer
-// Organization ENTRY the request carries — the participant's own record — and drops any contained
-// #cms-payer.
+// Organization ENTRY the request carries — the participant's own record — and drops the contained
+// payer organization it no longer names (see dropContainedPayerOrg).
 func repointInsurerToEntry(claimJSON []byte, payerOrgID string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(claimJSON, &m); err != nil {
@@ -1171,16 +1178,34 @@ func repointInsurerToEntry(claimJSON []byte, payerOrgID string) ([]byte, error) 
 		return nil, fmt.Errorf("repointInsurerToEntry: marshal insurer: %w", err)
 	}
 	m["insurer"] = insurerJSON
-	if err := dropContainedPayerOrg(m); err != nil {
+	if err := dropContainedPayerOrg(m, payerOrgID); err != nil {
 		return nil, fmt.Errorf("repointInsurerToEntry: %w", err)
 	}
 	return json.Marshal(m)
 }
 
-// dropContainedPayerOrg removes any contained Organization with id == conformantPayerOrgID from
-// the resource map's "contained" array (the org lives as a bundle entry instead), deleting the
-// array if it becomes empty. No-op when there is no such contained resource.
-func dropContainedPayerOrg(m map[string]json.RawMessage) error {
+// dropContainedPayerOrg removes the contained payer Organization the repointed
+// payor/insurer reference no longer names, deleting the "contained" array if it
+// becomes empty. No-op when there is no such contained resource.
+//
+// entryOrgID is the id of the payer Organization ENTRY the request now carries.
+// It is the id to drop, not just the minted conformantPayerOrgID, because the
+// record this request carries is the PARTICIPANT'S OWN Coverage, and a
+// participant's Coverage may carry its payer organization INSIDE itself — the
+// shape the demo roster, the bridging personas and the Cambia member are all
+// seeded in, and the shape the gateway's one payer-organization reader lifts the
+// entry out of (memberPayerOrganization). So the entry and the contained copy are
+// the SAME record under the SAME id: once payor/insurer names the entry, the
+// contained copy is referenced by nothing, which is FHIR dom-3 — a contained
+// resource SHALL be referred to from elsewhere in the resource that contains it.
+// A pinned IG-profile $validate rejects that at egress, which is how it surfaced:
+// only the members whose contained org id was NOT conformantPayerOrgID were hit,
+// so every cms-payer persona passed and the bridging one did not.
+//
+// Nothing is lost by the drop: the very same Organization rides the request as
+// the entry both references now name. conformantPayerOrgID stays in the set for
+// the minted org the non-entry lanes splice in under that fixed id.
+func dropContainedPayerOrg(m map[string]json.RawMessage, entryOrgID string) error {
 	raw, ok := m["contained"]
 	if !ok || len(raw) == 0 {
 		return nil
@@ -1189,14 +1214,31 @@ func dropContainedPayerOrg(m map[string]json.RawMessage) error {
 	if err := json.Unmarshal(raw, &contained); err != nil {
 		return fmt.Errorf("parse contained: %w", err)
 	}
+	// What the resource still points at locally AFTER the re-point, read without
+	// descending into the records it contains. A candidate that is still named
+	// here is not the displaced copy and stays: dropping it would leave the
+	// reference that names it pointing at nothing.
+	stillNamed := map[string]bool{}
+	outer := map[string]json.RawMessage{}
+	for k, v := range m {
+		if k != "contained" {
+			outer[k] = v
+		}
+	}
+	if outerJSON, err := json.Marshal(outer); err == nil {
+		for _, ref := range localReferences(outerJSON, true) {
+			stillNamed[ref] = true
+		}
+	}
 	kept := make([]json.RawMessage, 0, len(contained))
 	for _, c := range contained {
 		var probe struct {
 			ResourceType string `json:"resourceType"`
 			ID           string `json:"id"`
 		}
-		if err := json.Unmarshal(c, &probe); err == nil &&
-			probe.ResourceType == "Organization" && probe.ID == conformantPayerOrgID {
+		if err := json.Unmarshal(c, &probe); err == nil && probe.ResourceType == "Organization" &&
+			!stillNamed[probe.ID] &&
+			(probe.ID == conformantPayerOrgID || (entryOrgID != "" && probe.ID == entryOrgID)) {
 			continue // drop the payer org — it lives as a bundle entry now
 		}
 		kept = append(kept, c)
@@ -1998,6 +2040,10 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
 	if err := checkPASCoverageResolves(bundleOut); err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
+	// dom-3 over the coverage and the claim — the same guard the submit builder runs.
+	if err := checkPASContainedReferenced(bundleOut); err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
 	if in.PayerOrgEntry || in.ContainedInsurer {

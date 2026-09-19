@@ -24,8 +24,9 @@ without deploying anything of your own.
 - **Test lane only.** Every payer reachable from this endpoint is a test environment.
   Nothing here ever reaches a production payer.
 - **Synthetic data only.** Send only synthetic test data — no real patient information,
-  ever. Use only the published test members below; the endpoint refuses a member it does
-  not hold (§8).
+  ever. The published test members below are the ones the endpoint holds records for; a
+  member it does not hold is carried under the id you send (§8), so any patient you use
+  must be synthetic too.
 - **Availability.** This endpoint remains available for integration testing, with no
   scheduled teardown date. It is a test service, not a production endpoint.
 - **No verification, no SLA.** Registration is self-service and unauthenticated beyond
@@ -662,9 +663,11 @@ decision uses review-action code `A4` — see §5.3 for the route that produces 
 | `MBR-COVERED` | Linda Johansson | `00301` (2.2 line) | `urn:oid:2.16.840.1.113883.6.300\|00301` | CRD coverage answer, questionnaire package, and a PAS pend with a `102089-0` `CommunicationRequest` you can relaunch DTR from (§5) |
 | `MBR-COVERED` | Linda Johansson | `00001` (2.0 line) | `urn:oid:2.16.840.1.113883.6.300\|00001` | CRD coverage answer, questionnaire package and a PAS approval; the DTR package names an unresolved member, and `doc-needed` is off-value-set (§6) |
 
-These are the published test members. A member id the endpoint does not hold is refused
-before any payer is called (§8); on route `00001` the DTR limitation in §6.2 applies even to
-the published member.
+These are the published test members, and the only ones the endpoint holds records for. A
+member id the endpoint does not hold — a patient from your own test environment, for example — is still
+carried, bound by the id you send (§8.1), but you must then supply `patient` and `coverage`
+yourself, and what the payer answers for a member it does not hold is the payer's own
+answer. On route `00001` the DTR limitation in §6.2 applies even to the published member.
 
 ---
 
@@ -678,13 +681,17 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
   payer registered on the network, the request is rejected with `422 Unprocessable Entity`
   (`no registered payer for identifier …`) rather than silently going nowhere. The routes
   in §1.5 are the ones documented here with test members.
-- **Unknown member → refused before any payer is called.** The endpoint first resolves the
-  member against its own synthetic roster. A CRD request whose `context.patientId`, or a
-  PAS bundle whose `Claim.patient`, names a member it does not hold is rejected with
-  `400 Bad Request`; a request that mixes members is rejected with `403 Forbidden`. A DTR
-  request whose Coverage beneficiary (or, if the Coverage names none, the order's subject)
-  names such a member is rejected with `403 Forbidden`. For CRD and PAS, the payer side
-  then resolves the member again, independently.
+- **Unknown member → carried, bound by the id you send.** The endpoint first resolves the
+  member against its own synthetic roster. A CRD request whose `context.patientId`, a PAS
+  bundle whose `Claim.patient`, or a DTR request whose Coverage beneficiary (or, if the
+  Coverage names none, the order's subject) names a member it does not hold is bound by
+  that member id alone and carried, so you can drive the hook from a patient in your own test
+  environment. Two consequences: the endpoint holds no records for such a member, so leave
+  out `patient` or `coverage` prefetch and the request is refused (`422`, next bullet),
+  and a history key you leave out is left out of what the payer receives rather than
+  supplied; and the payer resolves the member on its own, so its answer for a member it
+  does not hold is the payer's own — the DTR prepopulation warning in §5.2 is the visible
+  case. A request that mixes members is still rejected with `403 Forbidden`.
 - **A prefetch key the endpoint cannot supply → `422`.** If you leave out an advertised
   prefetch key and the endpoint's own records hold no matching patient or coverage, the
   request is refused rather than sent with a blank or invented value.

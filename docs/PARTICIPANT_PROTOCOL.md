@@ -2290,8 +2290,20 @@ applicable IG profiles. The network enforces a **two-gate** posture:
 
 1. **Runtime US Core validation** — every resource is validated against base R4 +
    US Core profiles at the gateway on egress (before sealing) and on ingress
-   (after decrypting). Egress validation is load-bearing: an invalid resource
-   must never enter the network.
+   (after decrypting). Both checks always run, at every enforcement level.
+
+   What an invalid result *does* is the receiving gateway's own configured
+   choice (`CONFORMANCE_ENFORCEMENT`), not something the network imposes. At
+   `none` — the default when the value is unset — the verdict is recorded as a
+   conformance finding and the message is relayed as sent; at `strict` the
+   message is refused and the refusal names the rule and the issues behind it.
+   Your obligation above is unchanged either way: a gateway that relays your
+   non-conformant resource has recorded it, not accepted it, and the peer you
+   sent it to may be configured to refuse it.
+
+   Two results refuse at every level, because neither is a statement about a
+   peer's conformance: an answer the gateway cannot read at all, and a payload
+   that gateway itself translated between IG lines.
 
 2. **Da Vinci gap-report contract** — Da Vinci CRD/DTR/PAS-specific profile gaps
    are tracked in the network's conformance gap report (maintained upstream).

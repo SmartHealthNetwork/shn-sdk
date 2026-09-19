@@ -61,7 +61,8 @@ same unit. Understanding this unit means understanding the system.
  sender gateway                      Hub (payload-blind)                 recipient gateway
  ──────────────                      ───────────────────                 ─────────────────
  1. validate the FHIR payload
-    (egress, fail-closed)
+    (egress, always observed;
+    refused at strict)
  2. SEAL the payload to the
     recipient's public key
  3. obtain a TOKEN from the
@@ -350,7 +351,7 @@ Supporting mechanisms:
 | Is the payload about the right patient? | The recipient resolves the decrypted payload's patient to a PCI and requires it to equal the token's subject. |
 | Can anyone read it in transit? | Payloads are sealed to the recipient's X25519 key; only the recipient can open them. The Hub has no key. |
 | Did it really happen / was history edited? | Hub-signed, hash-chained, append-only audit with externally anchored signed checkpoints; the whole chain is independently re-verifiable. |
-| Is the data well-formed? | Real FHIR `$validate` at every gateway crossing, egress and ingress, fail-closed; terminology validated against curated value sets. |
+| Is the data well-formed? | Real FHIR `$validate` at every gateway crossing, egress and ingress, always observed, refused at `strict`; terminology validated against curated value sets. |
 | Is patient identity protected? | Member IDs and demographics cross only inside sealed payloads; routing and audit use the derived PCI. |
 
 ---
