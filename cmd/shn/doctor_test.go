@@ -55,6 +55,10 @@ type fakeNetwork struct {
 	// fallback available. Combined with personas carrying no payerId, this drives
 	// resolvePersonaPayer's "no test counterparty" refusal (R3/R4 boundary).
 	emptyResponders bool
+	// operations is what the descriptor advertises under "operations". Nil is a
+	// network that advertises none — which is what a network built before an
+	// operation existed looks like to a newer CLI.
+	operations []shnsdk.DiscoveryOp
 
 	routeHits int32 // atomically counted /route calls (proves version-check short-circuit)
 }
@@ -285,6 +289,7 @@ func (f *fakeNetwork) start(t *testing.T) *httptest.Server {
 			AuthzPublicKeyURL: srv.URL + "/pubkey",
 			DemoResponders:    responders,
 			DemoPersonas:      f.personas,
+			Operations:        f.operations,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(disc)
@@ -702,5 +707,74 @@ func TestDoctor_PriorAuthDenied(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "priorauth MBR-UC08: denied") {
 		t.Errorf("stdout should report the denied line: %s", stdout)
+	}
+}
+
+// TestDoctor_PendWithContinuationIsAPass: a persona whose payer PENDS, and that
+// advertises no post-amend outcome, is a COMPLETE, correct result — the payer has
+// the request and the answer carries the continuation the decision can be asked
+// for later with. doctor passes, and says which of the two networks it is on.
+//
+// The offer is keyed on the DESCRIPTOR'S OWN advertised operations, not on the
+// CLI's assumption that the leg exists: a network built before the inquiry
+// advertises none of them, and a CLI that offered the operation there would turn a
+// correct pend into a failure. (The substrate's own descriptor advertises the
+// inquiry under this transaction type — pinned network-side in test/conformance's
+// discovery rows.)
+func TestDoctor_PendWithContinuationIsAPass(t *testing.T) {
+	// The transaction type the network advertises the inquiry under, as a
+	// literal. The CLI's constant is bound to it HERE and nowhere else.
+	const advertisedInquiryTransaction = "pas-claim-inquire"
+	if priorAuthInquiryTransaction != advertisedInquiryTransaction {
+		t.Fatalf("priorAuthInquiryTransaction = %q, want the advertised %q", priorAuthInquiryTransaction, advertisedInquiryTransaction)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		operations []shnsdk.DiscoveryOp
+		want       string
+	}{
+		{
+			name:       "a network that carries the inquiry",
+			operations: []shnsdk.DiscoveryOp{{Frame: "provider-tpo", Operation: "pas-inquire", TransactionType: advertisedInquiryTransaction}},
+			want:       "pended, and the answer carries a continuation the network advertises a prior-authorization inquiry for",
+		},
+		{
+			name:       "a network that does not",
+			operations: []shnsdk.DiscoveryOp{{Frame: "provider-tpo", Operation: "pas-submit", TransactionType: "pas-claim"}},
+			want:       "pended, and the answer carries a continuation (this network advertises no prior-authorization inquiry to continue it with)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, devID, dir := newFakeNetwork(t)
+			f.paPended = true
+			f.operations = tc.operations
+			cms := shnsdk.CMSPayerIdentity
+			// No expectedAfterAmend: the pend itself is the advertised outcome,
+			// and there is no amendment stage to rescue it.
+			f.personas = []shnsdk.DiscoveryPersona{{
+				MemberID: "MBR-UC04", DOB: "1982-11-03", Family: "Chen",
+				ExpectedEligibility: "covered", ExpectedPriorAuth: "pended", PayerID: &cms,
+				Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "G0151", Display: "Services of a qualified physical therapist in the home health setting, each 15 minutes", Diagnosis: "I63.9"},
+			}}
+			srv := f.start(t)
+			id, err := loadIdentity(dir, devID)
+			if err != nil {
+				t.Fatalf("loadIdentity: %v", err)
+			}
+			f.requesterEnc = id.EncPub
+
+			stdout, stderr, code := runCLI("doctor", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+			if code != exitOK {
+				t.Fatalf("a pend carrying a continuation is a complete outcome: exit=%d (want %d)\nstdout=%s\nstderr=%s", code, exitOK, stdout, stderr)
+			}
+			if !strings.Contains(stdout, tc.want) {
+				t.Errorf("stdout must report what the pend carries and whether this network can continue it (%q): %s", tc.want, stdout)
+			}
+			// The pend is not quietly turned into something else on the way.
+			if !strings.Contains(stdout, "priorauth MBR-UC04: pended") {
+				t.Errorf("stdout must report the payer's own outcome: %s", stdout)
+			}
+		})
 	}
 }

@@ -93,7 +93,8 @@ type PASInquiryInputs struct {
 	// MemberID is the member identifier value the Patient carries. Required.
 	MemberID string
 	// Patient is the patient's record. It must carry an identifier with a
-	// system and the value MemberID, typed MB at PAS 2.1.
+	// system and the value MemberID, typed MB (v2-0203) — what a payer matches
+	// an inquiry on, and what the submit path already puts on the request.
 	Patient []byte
 	// Coverage is the patient's Coverage (its beneficiary is Patient).
 	Coverage []byte
@@ -134,7 +135,7 @@ var fhirDatePattern = regexp.MustCompile(`^\d{4}(-\d{2}(-\d{2})?)?$`)
 //
 // Refusals (an error, never a partial inquiry): an unknown line; a missing
 // required input (see PASInquiryInputs); a Patient without the member
-// identifier (with a system; typed MB at 2.1); a resource that is not one JSON object
+// identifier (with a system, typed MB); a resource that is not one JSON object
 // of the expected type with an id; a Coverage for another patient; a Provider
 // that is not an Organization or PractitionerRole; an item without a positive
 // sequence, a product code, or a trace number, or with a malformed service
@@ -235,13 +236,21 @@ func buildPASInquiryBundle(line string, in PASInquiryInputs) (PASInquiryRequest,
 	if err != nil {
 		return PASInquiryRequest{}, err
 	}
-	// Only PAS 2.1.0 slices the member identifier (memberIdentifier, typed MB).
-	typed := line == "2.1"
-	if !memberIdentifierPresent(pm, in.MemberID, typed) {
-		if typed {
-			return PASInquiryRequest{}, fmt.Errorf("the Patient carries no member identifier typed MB with a system and the member id (PAS 2.1.0 memberIdentifier)")
-		}
-		return PASInquiryRequest{}, errors.New("the Patient carries no identifier with a system and the member id")
+	// The member identifier must be typed MB at EVERY line, not only where 2.1.0
+	// slices it. That is the payer's rule, measured: it refuses an inquiry whose
+	// Patient carries an untyped member identifier at 2.0 as well
+	// ("Patient member identifier (type=MB) is required for inquiry").
+	//
+	// It is also the rule the SUBMIT path already follows — the request it builds
+	// identifies the member with the MB type (pasMemberPatient), and its guard
+	// checkPASMemberIdentified refuses anything less. A submission and the inquiry
+	// about it treating one record differently is how an authorization gets stored
+	// under a member no inquiry can name, so the two paths ask the same thing of the
+	// same record. This builder sends the participant's own bytes and will not
+	// rewrite them, so it refuses here rather than quietly typing the identifier
+	// itself: what a payer matches on has to be in the record.
+	if !memberIdentifierPresent(pm, in.MemberID, true) {
+		return PASInquiryRequest{}, errors.New("the Patient carries no member identifier typed MB (v2-0203) with a system and the member id, and a payer matches an inquiry on it")
 	}
 	coverage, cm, err := inquiryInput("Coverage", in.Coverage, "Coverage")
 	if err != nil {
@@ -256,7 +265,9 @@ func buildPASInquiryBundle(line string, in PASInquiryInputs) (PASInquiryRequest,
 	if patientKey(beneficiary.Reference) != "Patient/"+patientID {
 		return PASInquiryRequest{}, fmt.Errorf("the Coverage beneficiary %q is not the Patient", beneficiary.Reference)
 	}
-	provider, _, err := inquiryInput("Provider", in.Provider, "Organization", "PractitionerRole")
+	// The same set the submit builder checks, from the same one place: a request
+	// and the inquiry about it can never name parties of different types.
+	provider, _, err := inquiryInput("Provider", in.Provider, PASProviderTypes...)
 	if err != nil {
 		return PASInquiryRequest{}, err
 	}

@@ -1939,8 +1939,8 @@ The `needed` slice `ParsePendedResponse` returns flattens the same needs
 value and questionnaire context, then each nonconformant value that has text
 (the payer URL excluded). `Display` is the coding's display, else the input
 type's display or text. No questionnaire content or clinical answer is inferred.
-A hermetic/local mirror names a synthetic `pend-resolution-timer` item; that label
-is not a live payer questionnaire identifier.
+A hermetic/local mirror names the questionnaire its own seeded adjudication asks
+for, as a questionnaire identifier whose value is that questionnaire's canonical.
 
 **Item trace numbers.** The SDK's PAS submit and update builders write one
 `Claim.item.extension:itemTraceNumber` per item (system `urn:shn:pas:item-trace`,
@@ -2036,44 +2036,68 @@ The update Bundle payload carries :
 // SupplementalReport is a plain struct — build it yourself; shn-sdk ships no fixture
 // constructor for it. Its own CPT/display need not match the order's HCPCS code — G0151
 // is used here only because it is this worked example's own advertised family. The
-// G0151 family's resolution itself is NOT evidence-driven — on whichever lane actually
-// resolves it, the payer re-pends and its own pend-resolution timer is what later flips
-// the same claim to approved, independent of this report's specific content. Provenance
-// is required because FR-32 (SHN's own rule) says supplemental data must carry
-// attribution — not because either payer's verdict reads it.
+// G0151 family's resolution itself is NOT evidence-driven — the payer re-pends and its
+// own pend-resolution timer is what later flips the same claim to a decision,
+// independent of this report's specific content. Provenance is required because FR-32
+// (SHN's own rule) says supplemental data must carry attribution — not because either
+// payer's verdict reads it.
 supp := shnsdk.SupplementalReport{ReportID: "dr-uc04-operative", CPT: "G0151", Display: "Home health services"}
 supp.ProvenanceAgent = shnsdk.ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "acme-7f3a"} // required
 res, err := id.ResumePriorAuth(ctx, c, ep, payer, resume, supp)
-// res.Outcome == "approved", res.PreAuthRef != "" (shape AUTH-NNNN) — proven against the
-// hermetic in-process mirror; see the proven-scope statement immediately below for the
-// native-forward (live reference payer) lane, where this same call does not resolve.
+// res.Outcome == "pended" against the reference payer: it accepted the amendment and is
+// still holding the request. res.Resume carries the continuation.
+
+// Ask for the decision, with your own records for the member, the coverage, the
+// requesting provider and the payer.
+var records shnsdk.PASInquiryRecords
+got, err := id.Inquire(ctx, c, ep, payer, *res.Resume, records)
+// got.Outcome is the payer's own latest word: "pended" while pended, "approved" with
+// got.PreAuthRef (shape AUTH-NNNN) once it has decided.
+_ = got.PreAuthRef
+
+// Or let the client ask for you, for a bounded time you state:
+//   id.ResumePriorAuthWith(ctx, c, ep, payer, resume, supp,
+//       shnsdk.WithWait(20*time.Second), shnsdk.WithInquiryRecords(records))
 ```
 
 `ResumePriorAuth` validates `supp.ProvenanceAgent` before touching the wire — an
 absent agent returns an error immediately rather than a cryptic payer rejection.
 
-**What actually makes the payer re-evaluate, by lane — verified by building the exact
-bundle `ResumePriorAuth` builds.** That bundle carries a `Provenance` entry, no Da Vinci
-PAS `infoChanged` item extension, and `Claim.related[0].claim` keyed by `identifier`
-(never `reference`):
+**What an amendment does, and what decides — measured against the reference payer with no
+gateway in between.** The amendment CARRIES evidence. It does not decide. The reference
+payer resolves a pended request by its own internal timer and by nothing else, and an
+amendment that lands while the request is pended is answered `200` with a fresh pend (`A4`)
+and that timer re-armed. `ResumePriorAuth`'s bundle carries a `Provenance` entry, no Da Vinci
+PAS `infoChanged` item extension, and `Claim.related[0].claim` keyed by `identifier` (never
+`reference`); none of those choices changes the payer's verdict.
 
-- **Hermetic in-process mirror** (`internal/brpayermirror`, the `make up`/local-dev
-  lane): resolves on **either** a `Provenance` entry **or** `infoChanged` on the Claim
-  item (`amendmentRequestsResolution`). `ResumePriorAuth`'s bundle carries `Provenance`,
-  so it resolves via that branch on this lane.
-- **Live reference payer** (native-forward): the gateway's own gate
-  (`requestClaimHasInfoChanged`, `gateway/engine/nativepas.go`) checks the outbound
-  request for `infoChanged` before it will even poll for a timer-resolved approval — a
-  request without it gets `422 "amendment still insufficient"`, regardless of what the
-  payer itself does with it. `ResumePriorAuth`'s bundle does not carry `infoChanged`.
+**How the decision reaches you.** By asking. `Identity.Inquire` (or `POST /Claim/$inquire`
+through your gateway's ingress) is built from the request you sent and the answer you
+received, plus your own records, and reports the payer's own latest word — pended while
+pended, decided once decided. Your gateway never holds a leg open waiting for a better
+answer, and it never re-queries on your behalf unasked.
 
-**Proven scope.** `Identity.ResumePriorAuth` is proven to resolve a pend against the
-**hermetic in-process mirror** — its `Provenance` branch is satisfied. It is **not**
-proven, and as of this SDK version does **not**, resolve a pend against a **native-forward
-live reference payer**: that lane's own gate requires `infoChanged`, which
-`ResumePriorAuth` never sets, so the amendment gets `422 "amendment still insufficient"`
-and the pend stays open. If your integration targets a native-forward payer, `shn
-priorauth resume` / `Identity.ResumePriorAuth` does not complete this leg today.
+If you would rather your own call waited a little, `RunPriorAuthWith` / `ResumePriorAuthWith`
+take `WithWait(d)` (with `WithInquiryRecords`), and the originator routes take
+`?wait=<seconds>`. Both make a small, bounded number of inquiries and then stop; reaching
+that bound is not an error — the result is "pended, and here is the continuation". The
+default is no wait, because how long you are willing to wait is yours to state.
+
+**What this bounded wait is not.** Prior Authorization names **Subscription** as the way a
+requester learns a decision made later, and states it as a `SHALL`; an inquiry is the
+permitted manual status check, and at the 2.2.1 line the guide says it `SHOULD NOT` be used
+while waiting for final results. This network offers no notification path yet, so the
+bounded wait stands one in. For a payer that decides in seconds it is convenient; for one
+that decides in hours or days, keep the continuation and inquire when you are ready.
+
+**Proven scope.** `Identity.ResumePriorAuth` is proven live against the reference payer: the
+amendment is accepted and answered, and the payer's answer reaches you as the payer wrote it.
+The determination that follows is proven through `Identity.Inquire` on the same handle
+(`test/tworilive/sdkresume_test.go`). An earlier version of this section said the resume
+itself resolved the pend on the mirror and got `422 "amendment still insufficient"` against a
+live payer. Both halves were wrong: the mirror's resolution came from the same timer the real
+payer uses, and that `422` was minted by our own gateway's deleted poll gate — the reference
+payer never sends it.
 
 **Manual leg-by-leg path:**
 
@@ -2131,7 +2155,24 @@ and later.)
   but both extension definitions allow only item contexts, which validators
   enforce.
 - **The answer.** A `Bundle` of `ClaimResponse`s at 2.0.1 and 2.1.0; a `Parameters`
-  with `return` Bundles at 2.2.1.
+  with `return` Bundles at 2.2.1. Your gateway relays it to you exactly as the payer
+  wrote it, with the payer's own media type, in either shape.
+- **Through the Da Vinci ingress.** A system connected to a gateway's Da Vinci
+  ingress sends the inquiry to `POST /Claim/$inquire` on its own gateway, the same
+  way it sends a submission to `POST /Claim/$submit`. The request is carried to the
+  network as sent, bound to the one member every patient reference in it names — a
+  Bundle naming two members is refused — and routed by the Coverage it carries; a
+  Coverage naming no payer the gateway can resolve is refused rather than defaulted.
+  No SHN state is involved: the inquiry names the authorization, so your system is
+  the only thing that has to remember it.
+- **Who certifies it.** Neither gateway profile-validates your inquiry or the
+  payer's answer; both travel as written. The payer's own system certifies the
+  inquiry it receives, so a request that does not meet the prior-authorization
+  profile for its line comes back as that payer's refusal, not the network's. This
+  matters for one cardinality in particular: PAS 2.0.1 requires the inquiry Claim
+  to name at least one item (`Claim.item` 1..\*) and 2.1.0 and 2.2.1 do not
+  (0..\*), so an inquiry by authorization number alone is carried at every line and
+  answered — or refused — by the payer.
 - **The continuation handle.** A pended `PriorAuthResult.Resume` carries
   `Continuation` (`PriorAuthContinuation`): the PAS line, the payer holder, the
   submitted Claim's identifiers, type and priority, the member id, the provider NPI,
@@ -2148,17 +2189,45 @@ and later.)
 - **Waiting.** `RunPriorAuthWith` / `ResumePriorAuthWith` accept `WithWait(d)` and
   `WithInquiryRecords(records)`. The default is no wait (`RunPriorAuth` and
   `ResumePriorAuth` never wait). With a wait, the first inquiry runs 2 s after the
-  pend and later ones back off (4 s, then 5 s steps); at most 6 inquiries are sent and
-  the wait is capped at 120 s. Reaching the bound returns the pended decision, not an
-  error; cancellation follows the context.
+  pend and later ones back off (4 s, then 5 s steps); at most 6 inquiries are sent
+  (`MaxPriorAuthInquiries`) and the wait is capped at 30 s (`MaxPriorAuthWait`). The
+  cap is the schedule's own reach rather than a round number: the sixth and last
+  inquiry falls due at 26 s, so a longer bound would only hold your call open with no
+  inquiry left to make. Reaching the bound returns the pended decision, not an error;
+  cancellation follows the context. A decision you expect hours from now is not a
+  longer wait — it is a continuation you keep and use when you are ready.
+- **Keeping the handle.** The continuation is the durable result of a pend: it is what
+  you hold between the payer's pend and the payer's decision, and it is yours to
+  persist. A participant driving the SDK keeps `PriorAuthResult.Resume` (and with it
+  the `PriorAuthContinuation`) in its own system; it holds no clinical content, so it
+  can be stored beside your own record of the request. If instead you use a gateway's
+  own originator routes, that gateway keeps the continuation for you: it survives a
+  restart when the gateway is configured with a database, the answer says which
+  (`continuationDurable`), and an id a gateway minted and could not keep is refused
+  with `410` — never reported as an id that never existed. See CONFIGURATION.md in the
+  gateway module.
 - **Payers.** `shnsdk.Responder` answers an inquiry when its `Adjudicator` also
   implements `InquiryAdjudicator` (`Inquire(PASInquiry) (PASDecision, error)`),
   with that decision as a PAS response; otherwise it refuses with `501`. An inquiry
   does not change the Responder's pended-claim state.
-- **Standards note.** PAS 2.2.1 asks clients not to inquire while a decision is
-  pending and makes Subscription the notification mechanism; this network does not
-  offer Subscription. PAS 2.0.1 says the client can use the inquire operation to
-  query for the final result.
+- **Standards note.** Prior Authorization's mechanism for learning a decision made
+  later is **Subscription**, stated as a `SHALL`, and **this network does not offer
+  it**: no gateway on this path subscribes, notifies, or accepts a subscription, and
+  no partner integration should be built expecting one. PAS 2.2.1's guidance on the
+  inquire operation (`spec-9`) accordingly says a client `SHOULD NOT` use it to wait
+  for final results, while PAS 2.0.1 says the client can use it to query for the
+  final result. What this network offers is the inquiry: the manual status check, made
+  when you choose to make it, plus an opt-in bounded wait that stands in for the
+  notification path — never a claim that the bounded wait is what the guide
+  prescribes.
+- **Updating an authorization the payer has already decided.** Not supported here. An
+  amendment is for a request the payer is still holding: `shnsdk.Responder` refuses an
+  update to a decided claim with `409` and its reason, and a payer that behaves
+  otherwise is stating its own policy — the reference payer, for one, accepts such an
+  amendment, pends the authorization again and later issues a **different**
+  authorization number that replaces the earlier one, so a requester that amends a
+  decided authorization must re-read the number rather than assume the one it holds.
+  To change a decided authorization, submit a new request.
 
 ### 7b.3 UC-08: denied PAS response
 

@@ -365,6 +365,10 @@ func demoPARequest() PriorAuthRequest {
 		DOB:              "1975-04-02",
 		Family:           "Johansson",
 		NPI:              "9999999999",
+		Provider:         testRequestingProvider(),
+		Patient:          testMemberPatient("MBR-COVERED"),
+		Coverage:         testMemberCoverageSearch("MBR-COVERED"),
+		MemberIDSystem:   MemberSystem,
 		Clinical:         DemoLumbarContext(),
 		ProcedureCPT:     cpt,
 		ProcedureDisplay: display,
@@ -438,6 +442,10 @@ func TestRunPriorAuth_ProcedureSystem(t *testing.T) {
 	t.Run("explicit HCPCS system flows to the built ServiceRequest", func(t *testing.T) {
 		system := crdRequestOrderSystem(t, PriorAuthRequest{
 			Member: "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
+			Provider:         testRequestingProvider(),
+			Patient:          testMemberPatient("MBR-COVERED"),
+			Coverage:         testMemberCoverageSearch("MBR-COVERED"),
+			MemberIDSystem:   MemberSystem,
 			ProcedureSystem:  "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
 			ProcedureCPT:     "G0151",
 			ProcedureDisplay: "Services of a qualified physical therapist in the home health setting, each 15 minutes",

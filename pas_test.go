@@ -28,7 +28,7 @@ func conformantSubmitInputs(t *testing.T) ConformantClaimInputs {
 	q := demoLumbarQuestionnaire()
 	qrJSON, err := FillQuestionnaire(q, DemoLumbarContext(), QRContext{
 		PatientRef:  patientRef,
-		CoverageRef: "Coverage/" + conformantPASCoverageID,
+		CoverageRef: testMemberCoverageRef(member),
 		OrderRef:    "ServiceRequest/" + conformantPASServiceRequestID,
 		Authored:    created,
 	})
@@ -36,14 +36,17 @@ func conformantSubmitInputs(t *testing.T) ConformantClaimInputs {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
 	return ConformantClaimInputs{
-		QR:          qrJSON,
-		SR:          srJSON,
-		PatientRef:  patientRef,
-		CoverageRef: "Coverage/" + conformantPASCoverageID,
-		MemberID:    member,
-		Corr:        "convergence-pas-submit-0001",
-		Created:     created,
-		Payer:       CMSPayerIdentity,
+		Provider:       testRequestingProvider(),
+		Coverage:       testMemberCoverage(member),
+		MemberIDSystem: MemberSystem,
+		QR:             qrJSON,
+		SR:             srJSON,
+		PatientRef:     patientRef,
+		CoverageRef:    testMemberCoverageRef(member),
+		MemberID:       member,
+		Corr:           "convergence-pas-submit-0001",
+		Created:        created,
+		Payer:          CMSPayerIdentity,
 	}
 }
 
@@ -93,10 +96,9 @@ func coverageEntryFromBundle(t *testing.T, bundleJSON []byte) struct {
 }
 
 // TestConformantClaimBundleStampsBareMemberIdentifier pins the identifier-semantics
-// rule on the PAS producer side: the Coverage's urn:shn:coverage MB identifier value
-// is the BARE member id (never the Reference-shaped CoverageRef), while Coverage.id
-// stays the bundle-local conformant id — the id a 2.2 (qr-required) responder's
-// Coverage.id reader derives the QR-shell reference from, not this identifier.
+// rule on the PAS producer side: the Coverage the request carries is the
+// participant's OWN record — its own id and its own urn:shn:coverage MB identifier,
+// whose value is the BARE member id (never the Reference-shaped CoverageRef).
 func TestConformantClaimBundleStampsBareMemberIdentifier(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.MemberID = "MBR-COVERED"
@@ -105,8 +107,8 @@ func TestConformantClaimBundleStampsBareMemberIdentifier(t *testing.T) {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
 	}
 	cov := coverageEntryFromBundle(t, b)
-	if cov.ID != conformantPASCoverageID {
-		t.Errorf("Coverage.id = %q, want %q", cov.ID, conformantPASCoverageID)
+	if want := "cov-mbr-covered"; cov.ID != want {
+		t.Errorf("Coverage.id = %q, want the participant's own record id %q", cov.ID, want)
 	}
 	var found bool
 	for _, id := range cov.Identifier {
@@ -144,8 +146,8 @@ func TestConformantClaimUpdateBundleStampsBareMemberIdentifier(t *testing.T) {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
 	}
 	cov := coverageEntryFromBundle(t, b)
-	if cov.ID != conformantPASCoverageID {
-		t.Errorf("Coverage.id = %q, want %q", cov.ID, conformantPASCoverageID)
+	if want := "cov-mbr-covered"; cov.ID != want {
+		t.Errorf("Coverage.id = %q, want the participant's own record id %q", cov.ID, want)
 	}
 	var found bool
 	for _, id := range cov.Identifier {
@@ -197,67 +199,62 @@ func insuranceCoverageFromBundle(t *testing.T, bundleJSON []byte) map[string]jso
 	return ref
 }
 
-// assertInsuranceCoverageLogicalRef is the logical-reference shape pin, shared by
-// the submit/update/absolutize rows: insurance[0].coverage is a LOGICAL reference —
-// identifier only (urn:shn:coverage | BARE member id), NO literal "reference" key —
-// and it names the SAME business identifier the bundle's own Coverage entry carries,
-// so the bundle is self-consistent without a literal any payer would have to resolve.
-func assertInsuranceCoverageLogicalRef(t *testing.T, bundleJSON []byte, wantMember string) {
+// assertInsuranceCoverageNamesEntry is the coverage-reference shape pin, shared by
+// the submit/update/absolutize rows: insurance[0].coverage is a LITERAL reference to
+// the Coverage ENTRY the request carries — the participant's own record, by its own
+// id — so the payer can locate the policy, store what it was given, and match a later
+// inquiry against it.
+//
+// It was not always so. This element carried an identifier-only (logical) reference
+// from August until this row, adopted after a literal was live-refuted at a real Da
+// Vinci reference payer with HAPI-1094 "Resource Patient/<member> not found,
+// specified in path: Coverage.beneficiary". That measurement was CONFOUNDED: the
+// payer stores the Patient before the Coverage, the submitted Patient carried no
+// member identifier and so was never stored, and the Coverage's deliberately-relative
+// beneficiary therefore dangled. What failed was the member link, not the coverage
+// shape. With the member named, the literal shape is what every published example
+// uses and the only shape an inquiry can find an authorization by; the logical one is
+// unfindable by any inquiry spelling, and leaves the payer unable to read the payor
+// at all.
+func assertInsuranceCoverageNamesEntry(t *testing.T, bundleJSON []byte, wantMember string) {
 	t.Helper()
 	ref := insuranceCoverageFromBundle(t, bundleJSON)
-	if raw, ok := ref["reference"]; ok {
-		t.Errorf("Claim.insurance[0].coverage carries a literal reference %s; the logical-reference shape forbids it "+
-			"(a literal naming the bundle Coverage entry forces a Da Vinci RI payer to persist that "+
-			"entry and RI-check its deliberately-relative beneficiary → HAPI-1094)", raw)
+	if _, ok := ref["identifier"]; ok {
+		t.Errorf("Claim.insurance[0].coverage carries an identifier arm; base FHIR licenses a receiver to "+
+			"REJECT an identifier-only reference, and the reference payer stores nothing it cannot resolve: %s", bundleJSON)
 	}
-	idRaw, ok := ref["identifier"]
-	if !ok {
-		t.Fatalf("Claim.insurance[0].coverage has no identifier arm: %s", bundleJSON)
-	}
-	var id struct {
-		System string `json:"system"`
-		Value  string `json:"value"`
-	}
-	if err := json.Unmarshal(idRaw, &id); err != nil {
-		t.Fatalf("parse Claim.insurance[0].coverage.identifier: %v", err)
-	}
-	if id.System != systemSHNCoverage {
-		t.Errorf("Claim.insurance[0].coverage.identifier.system = %q, want %q", id.System, systemSHNCoverage)
-	}
-	if id.Value != wantMember {
-		t.Errorf("Claim.insurance[0].coverage.identifier.value = %q, want the BARE member id %q", id.Value, wantMember)
+	var literal string
+	if err := json.Unmarshal(ref["reference"], &literal); err != nil || literal == "" {
+		t.Fatalf("Claim.insurance[0].coverage names no literal reference: %s", bundleJSON)
 	}
 
-	// Self-consistency: the bundle's OWN Coverage entry keeps the conformant id AND
-	// carries exactly this identifier — so the logical reference resolves inside the
-	// bundle by business identifier, with nothing dangling.
+	// Self-consistency: the reference resolves to the bundle's own Coverage entry —
+	// the participant's record, carrying the member's business identifier.
 	cov := coverageEntryFromBundle(t, bundleJSON)
-	if cov.ID != conformantPASCoverageID {
-		t.Errorf("Coverage entry id = %q, want %q", cov.ID, conformantPASCoverageID)
+	want := "Coverage/" + cov.ID
+	if literal != want && literal != pasBundleBaseURL+"/"+want {
+		t.Errorf("Claim.insurance[0].coverage = %q, want the Coverage entry %q (or its fullUrl)", literal, want)
 	}
 	var matched bool
 	for _, entryID := range cov.Identifier {
-		if entryID.System == systemSHNCoverage && entryID.Value == id.Value {
+		if entryID.System == systemSHNCoverage && entryID.Value == wantMember {
 			matched = true
 		}
 	}
 	if !matched {
-		t.Errorf("the bundle's Coverage entry carries no %s|%s identifier — the logical reference "+
-			"resolves to nothing inside the bundle: %s", systemSHNCoverage, id.Value, bundleJSON)
+		t.Errorf("the bundle's Coverage entry carries no %s|%s identifier, so the payer cannot key the stored "+
+			"coverage on this member: %s", systemSHNCoverage, wantMember, bundleJSON)
+	}
+	// And the guard agrees, on its own signal rather than only the built bytes.
+	if err := checkPASCoverageResolves(bundleJSON); err != nil {
+		t.Errorf("checkPASCoverageResolves: %v", err)
 	}
 }
 
-// TestConformantClaimBundleInsuranceCoverageIsLogicalRef pins the logical-reference
-// shape on the $submit producer. History: gateway callers pass CoverageRef
-// "Coverage/<member>" while the bundle's Coverage entry id is restamped to
-// convergence-coverage, so insurance[0].coverage dangled. The fix first repointed it to
-// the literal "Coverage/convergence-coverage" — which a LIVE br-payer refuted
-// (findInBundle then resolves and PERSISTS the bundle Coverage, and HAPI RI-checks
-// its CQL-mandated RELATIVE beneficiary against br-payer's own server → HAPI-1094,
-// 7 red smoke-two-ri rows). The correct shape is a LOGICAL reference: the element
-// stays a FHIR Reference, carries the business identifier the Coverage entry itself
-// carries, and has no literal for any payer to (mis)resolve.
-func TestConformantClaimBundleInsuranceCoverageIsLogicalRef(t *testing.T) {
+// TestConformantClaimBundleInsuranceCoverageNamesEntry pins the shape on the $submit
+// producer: a caller's member-keyed CoverageRef ("Coverage/<member>") never reaches
+// the wire — the Claim names the Coverage ENTRY the request carries.
+func TestConformantClaimBundleInsuranceCoverageNamesEntry(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.MemberID = "MBR-COVERED"
 	in.CoverageRef = "Coverage/MBR-COVERED" // the real gateway-caller shape — deliberately NOT stamped
@@ -265,30 +262,38 @@ func TestConformantClaimBundleInsuranceCoverageIsLogicalRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
 	}
-	assertInsuranceCoverageLogicalRef(t, b, "MBR-COVERED")
+	assertInsuranceCoverageNamesEntry(t, b, "MBR-COVERED")
 }
 
-// TestConformantClaimBundleInsuranceCoverageSurvivesAbsolutization is the inverted
-// absolutize row: an identifier-only reference has NO literal to absolutize,
-// so absolutizeBundleRefs (AbsoluteRefs, reference-payer lane) must leave it byte-untouched
-// — still no "reference" key, still the same identifier.
-func TestConformantClaimBundleInsuranceCoverageSurvivesAbsolutization(t *testing.T) {
+// TestConformantClaimBundleInsuranceCoverageAbsolutizes is the absolutize row: on a
+// reference-payer lane the literal becomes the entry's own fullUrl, exactly as the
+// insurer's does, because that payer matches an in-bundle reference against the
+// entry fullUrl.
+func TestConformantClaimBundleInsuranceCoverageAbsolutizes(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.MemberID = "MBR-COVERED"
 	in.CoverageRef = "Coverage/MBR-COVERED"
 	in.PayerOrgEntry = true
+	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 	in.AbsoluteRefs = true
 	b, err := BuildConformantClaimBundle(in)
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle(AbsoluteRefs:true): %v", err)
 	}
-	assertInsuranceCoverageLogicalRef(t, b, "MBR-COVERED")
+	assertInsuranceCoverageNamesEntry(t, b, "MBR-COVERED")
+	ref := insuranceCoverageFromBundle(t, b)
+	var literal string
+	if err := json.Unmarshal(ref["reference"], &literal); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(literal, pasBundleBaseURL+"/Coverage/") {
+		t.Errorf("Claim.insurance[0].coverage = %q, want the Coverage entry's absolute fullUrl", literal)
+	}
 }
 
-// TestConformantClaimUpdateBundleInsuranceCoverageIsLogicalRef is the update-builder
-// sibling of TestConformantClaimBundleInsuranceCoverageIsLogicalRef (the
-// logical-reference shape applies to both PAS producers).
-func TestConformantClaimUpdateBundleInsuranceCoverageIsLogicalRef(t *testing.T) {
+// TestConformantClaimUpdateBundleInsuranceCoverageNamesEntry is the update-builder
+// sibling: an amendment is made under the policy the submission named.
+func TestConformantClaimUpdateBundleInsuranceCoverageNamesEntry(t *testing.T) {
 	in := conformantUpdateInputsFromGolden(t)
 	in.MemberID = "MBR-COVERED"
 	in.CoverageRef = "Coverage/MBR-COVERED" // the real gateway-caller shape
@@ -296,7 +301,119 @@ func TestConformantClaimUpdateBundleInsuranceCoverageIsLogicalRef(t *testing.T) 
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
 	}
-	assertInsuranceCoverageLogicalRef(t, b, "MBR-COVERED")
+	assertInsuranceCoverageNamesEntry(t, b, "MBR-COVERED")
+}
+
+// TestConformantClaimBundleRefusesWithoutCoverageRecord: a caller that cannot supply
+// the member's own Coverage is REFUSED, not given a minted one. A value the message
+// lacks is read from a participant's own system; when none can supply it, we refuse.
+func TestConformantClaimBundleRefusesWithoutCoverageRecord(t *testing.T) {
+	cases := []struct {
+		name     string
+		coverage []byte
+	}{
+		{"no record", nil},
+		{"empty record", []byte("  ")},
+		{"not a Coverage", []byte(`{"resourceType":"Patient","id":"MBR-COVERED"}`)},
+		{"no id", []byte(`{"resourceType":"Coverage","status":"active","beneficiary":{"reference":"Patient/MBR-COVERED"}}`)},
+		{"search result with no Coverage", []byte(`{"resourceType":"Bundle","type":"searchset","entry":[]}`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := conformantSubmitInputs(t)
+			in.Coverage = tc.coverage
+			if _, err := BuildConformantClaimBundle(in); err == nil {
+				t.Fatal("a request with no coverage record of the participant's own must be refused, never carry a minted coverage")
+			}
+		})
+	}
+}
+
+// TestConformantClaimUpdateBundleRefusesWithoutCoverageRecord: same refusal on the
+// amendment builder.
+func TestConformantClaimUpdateBundleRefusesWithoutCoverageRecord(t *testing.T) {
+	in := conformantUpdateInputsFromGolden(t)
+	in.Coverage = nil
+	if _, err := BuildConformantClaimUpdateBundle(in); err == nil {
+		t.Fatal("an amendment with no coverage record of the participant's own must be refused")
+	}
+}
+
+// TestCheckPASCoverageResolvesRefusesAnUnresolvableCoverage is the guard's own
+// rejection row, asserted on the guard's signal rather than a built request.
+//
+// It exists because validation cannot be this gate: measured against the pinned
+// IG-profile validator at the 2.0.1 lane, an identifier-only coverage, a literal to
+// an entry, a literal to NOTHING and both arms at once all return the same zero
+// errors with identical issue counts.
+func TestCheckPASCoverageResolvesRefusesAnUnresolvableCoverage(t *testing.T) {
+	const coverage = `{"resourceType":"Coverage","id":"cov-mbr-covered"}`
+	cases := []struct {
+		name   string
+		bundle string
+	}{
+		{"names nothing at all", `{"resourceType":"Bundle","entry":[` +
+			`{"fullUrl":"http://x/Claim/c","resource":{"resourceType":"Claim","id":"c","insurance":[{"sequence":1}]}},` +
+			`{"fullUrl":"http://x/Coverage/cov-mbr-covered","resource":` + coverage + `}]}`},
+		{"identifier only", `{"resourceType":"Bundle","entry":[` +
+			`{"fullUrl":"http://x/Claim/c","resource":{"resourceType":"Claim","id":"c","insurance":[{"sequence":1,` +
+			`"coverage":{"identifier":{"system":"urn:shn:coverage","value":"MBR-COVERED"}}}]}},` +
+			`{"fullUrl":"http://x/Coverage/cov-mbr-covered","resource":` + coverage + `}]}`},
+		{"dangling literal", `{"resourceType":"Bundle","entry":[` +
+			`{"fullUrl":"http://x/Claim/c","resource":{"resourceType":"Claim","id":"c","insurance":[{"sequence":1,` +
+			`"coverage":{"reference":"Coverage/MBR-COVERED"}}]}},` +
+			`{"fullUrl":"http://x/Coverage/cov-mbr-covered","resource":` + coverage + `}]}`},
+		{"names a resource that is not a Coverage", `{"resourceType":"Bundle","entry":[` +
+			`{"fullUrl":"http://x/Claim/c","resource":{"resourceType":"Claim","id":"c","insurance":[{"sequence":1,` +
+			`"coverage":{"reference":"Patient/MBR-COVERED"}}]}},` +
+			`{"fullUrl":"http://x/Patient/MBR-COVERED","resource":{"resourceType":"Patient","id":"MBR-COVERED"}}]}`},
+		{"no Claim", `{"resourceType":"Bundle","entry":[` +
+			`{"fullUrl":"http://x/Coverage/cov-mbr-covered","resource":` + coverage + `}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkPASCoverageResolves([]byte(tc.bundle)); err == nil {
+				t.Fatal("checkPASCoverageResolves accepted a request whose Claim names a coverage the Bundle does not resolve")
+			}
+		})
+	}
+	ok := `{"resourceType":"Bundle","entry":[` +
+		`{"fullUrl":"http://x/Claim/c","resource":{"resourceType":"Claim","id":"c","insurance":[{"sequence":1,` +
+		`"coverage":{"reference":"Coverage/cov-mbr-covered"}}]}},` +
+		`{"fullUrl":"http://x/Coverage/cov-mbr-covered","resource":` + coverage + `}]}`
+	if err := checkPASCoverageResolves([]byte(ok)); err != nil {
+		t.Fatalf("checkPASCoverageResolves refused a resolvable coverage: %v", err)
+	}
+}
+
+// TestConformantClaimBundleCarriesEachMembersOwnCoverage is the cross-member
+// contamination row. The builder used to mint a FIXED Coverage id
+// ("convergence-coverage") for EVERY member; a payer that stores by client-assigned
+// id therefore had one member's Coverage overwrite another's, and a member's stored
+// Claims ended up naming a Coverage that stated a different person. Two members, two
+// submissions: neither coverage displaces the other.
+func TestConformantClaimBundleCarriesEachMembersOwnCoverage(t *testing.T) {
+	build := func(member string) (string, []byte) {
+		in := conformantSubmitInputs(t)
+		in.MemberID = member
+		in.PatientRef = "Patient/" + member
+		in.Coverage = testMemberCoverage(member)
+		in.CoverageRef = testMemberCoverageRef(member)
+		b, err := BuildConformantClaimBundle(in)
+		if err != nil {
+			t.Fatalf("BuildConformantClaimBundle(%s): %v", member, err)
+		}
+		cov := coverageEntryFromBundle(t, b)
+		return cov.ID, b
+	}
+	firstID, first := build("MBR-COVERED")
+	secondID, second := build("MBR-PD-UC04")
+	if firstID == secondID {
+		t.Fatalf("both members' requests carry Coverage id %q — on a payer that stores by client-assigned id "+
+			"one member's coverage overwrites the other's:\n%s\n%s", firstID, first, second)
+	}
+	assertInsuranceCoverageNamesEntry(t, first, "MBR-COVERED")
+	assertInsuranceCoverageNamesEntry(t, second, "MBR-PD-UC04")
 }
 
 // TestBuildConformantClaimBundle_MatchesGolden: the SDK builder reproduces the
@@ -385,8 +502,8 @@ func TestBuildConformantClaimBundle_OwnsQRContextRefs(t *testing.T) {
 	if !foundQR {
 		t.Fatal("built bundle has no QuestionnaireResponse entry")
 	}
-	if coverageCtx != "Coverage/"+conformantPASCoverageID {
-		t.Errorf("QR qr-context Coverage ref = %q, want %q (builder must own/correct it)", coverageCtx, "Coverage/"+conformantPASCoverageID)
+	if want := testMemberCoverageRef("MBR-COVERED"); coverageCtx != want {
+		t.Errorf("QR qr-context Coverage ref = %q, want %q (builder must own/correct it)", coverageCtx, want)
 	}
 	if srCtx != "ServiceRequest/"+conformantPASServiceRequestID {
 		t.Errorf("QR qr-context ServiceRequest ref = %q, want %q (builder must own/correct it)", srCtx, "ServiceRequest/"+conformantPASServiceRequestID)
@@ -475,7 +592,7 @@ func TestBuildConformantClaimBundle_NoQR(t *testing.T) {
 // extension-requestedService is present → the SR ref.
 func TestConformantizePASClaim(t *testing.T) {
 	created := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	claimJSON, err := buildPASClaim("Patient/MBR-COVERED", "Coverage/MBR-COVERED", "corr-1", created)
+	claimJSON, err := buildPASClaim("Patient/MBR-COVERED", "Coverage/MBR-COVERED", "Organization/test-requesting-provider", "corr-1", created)
 	if err != nil {
 		t.Fatalf("buildPASClaim: %v", err)
 	}
@@ -1116,10 +1233,13 @@ func conformantUpdateInputsFromGolden(t *testing.T) ConformantClaimUpdateInputs 
 	}
 
 	return ConformantClaimUpdateInputs{
+		Provider:         testRequestingProvider(),
+		Coverage:         testMemberCoverage(member),
+		MemberIDSystem:   MemberSystem,
 		QR:               qrJSON,
 		SR:               srJSON,
 		PatientRef:       "Patient/" + member,
-		CoverageRef:      "Coverage/" + conformantPASCoverageID,
+		CoverageRef:      testMemberCoverageRef(member),
 		MemberID:         member,
 		Provenance:       provJSON,
 		DiagnosticReport: drJSON,
@@ -1377,8 +1497,10 @@ func TestBuildConformantClaimBundle_DeviceRequestOrder_NoPayerOrgEntry(t *testin
 	dr := []byte(`{"resourceType":"DeviceRequest","id":"x","status":"active","intent":"order",` +
 		`"subject":{"reference":"Patient/MBR-OX"},"codeCodeableConcept":{"coding":[{"system":` +
 		`"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E1390","display":"Oxygen concentrator"}]}}`)
-	out, err := BuildConformantClaimBundle(ConformantClaimInputs{
-		SR: dr, PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/MBR-OX", MemberID: "MBR-OX",
+	out, err := BuildConformantClaimBundle(ConformantClaimInputs{Coverage: testMemberCoverage("MBR-OX"),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: MemberSystem,
+		SR:             dr, PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/MBR-OX", MemberID: "MBR-OX",
 		Corr: "c1", Created: time.Unix(0, 0).UTC(),
 		Payer: CMSPayerIdentity,
 		// PayerOrgEntry deliberately left false (zero value) — this path must not depend on
@@ -1485,6 +1607,7 @@ func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 	in.ContainedInsurer = true
 	in.AbsoluteRefs = true
 	in.PayerOrgEntry = true
+	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 	// Reference-payer lane originates an HCPCS code on the SR; the Claim item productOrService must
 	// carry the SAME code (br-payer keys PAS on Claim.item.productOrService, not the SR).
 	in.SR = []byte(`{"resourceType":"ServiceRequest","status":"active","intent":"order",` +
@@ -1536,7 +1659,7 @@ func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 		if r.ResourceType == "Claim" && len(r.Item) > 0 && len(r.Item[0].ProductOrService.Coding) > 0 {
 			claimItemCode = r.Item[0].ProductOrService.Coding[0].Code
 		}
-		if r.ResourceType == "Organization" && r.ID == conformantPayerOrgID {
+		if r.ResourceType == "Organization" && r.ID == testPayerOrgID {
 			orgFound = true
 			orgID = r.ID
 			if len(r.Identifier) != 1 {
@@ -1553,7 +1676,7 @@ func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 	}
 
 	if !orgFound {
-		t.Fatalf("no cms-payer Organization BUNDLE ENTRY (id=%q) found — still contained? that is the A3 bug", conformantPayerOrgID)
+		t.Fatalf("no payer Organization BUNDLE ENTRY (the participant's own record, id=%q) found — still contained? that is the A3 bug", testPayerOrgID)
 	}
 	_ = orgID
 	if coveragePayorRef == "" {
@@ -1561,7 +1684,7 @@ func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 	}
 	if strings.HasPrefix(coveragePayorRef, "#") {
 		t.Fatalf("Coverage.payor still a contained ref %q — must resolve to the Organization ENTRY "+
-			"(Organization/%s or its absolute fullUrl) so br-payer's findInBundle resolves it", coveragePayorRef, conformantPayerOrgID)
+			"(Organization/%s or its absolute fullUrl) so br-payer's findInBundle resolves it", coveragePayorRef, testPayerOrgID)
 	}
 	if claimItemCode != "L8000" {
 		t.Fatalf("Claim.item[0].productOrService code = %q, want L8000 (the SR's HCPCS code) — "+
@@ -1662,6 +1785,7 @@ func TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable(t *
 	in.ContainedInsurer = true
 	in.AbsoluteRefs = true
 	in.PayerOrgEntry = true
+	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 
 	got, err := BuildConformantClaimUpdateBundle(in)
 	if err != nil {
@@ -1878,11 +2002,9 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_True(t *testing.T) {
 		t.Errorf("Claim.patient.reference %q does not match any bundle entry (relative: %q)", patient.Reference, patientRel)
 	}
 
-	// Claim.insurance[0].coverage is the ONE bundle-internal Coverage pointer that is
-	// NOT a literal: the logical-reference shape makes it a LOGICAL reference, so there is
-	// nothing for absolutizeBundleRefs to rewrite and the element must come out of the
-	// reference-payer lane exactly as the builder stamped it.
-	assertInsuranceCoverageLogicalRef(t, got, "MBR-COVERED")
+	// Claim.insurance[0].coverage names the Coverage ENTRY, absolutized like every
+	// other bundle-internal reference the reference-payer lane resolves by fullUrl.
+	assertInsuranceCoverageNamesEntry(t, got, "MBR-COVERED")
 
 	// Coverage.beneficiary.reference must STAY RELATIVE ("Patient/<id>") even under
 	// AbsoluteRefs — it is the ONE ref absolutizeBundleRefs deliberately excludes.
@@ -2009,8 +2131,10 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_False(t *testing.T) {
 // The DeviceRequest entry is stamped with the sibling id "convergence-dr".
 func TestBuildConformantClaimBundle_DeviceRequestOrder(t *testing.T) {
 	dr := []byte(`{"resourceType":"DeviceRequest","id":"x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-OX"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0431"}]}}`)
-	out, err := BuildConformantClaimBundle(ConformantClaimInputs{
-		SR: dr, PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/MBR-OX", MemberID: "MBR-OX",
+	out, err := BuildConformantClaimBundle(ConformantClaimInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage("MBR-OX"),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: MemberSystem,
+		SR:             dr, PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/MBR-OX", MemberID: "MBR-OX",
 		Corr: "c1", Created: time.Unix(0, 0).UTC(), PayerOrgEntry: true, AbsoluteRefs: true, ContainedInsurer: true,
 		Payer: CMSPayerIdentity,
 	})
@@ -2373,6 +2497,13 @@ func TestNeededItemsDeprecatedStillPopulated(t *testing.T) {
 // TestSubmitBuilderMintsItemTraceNumbers: the PAS submit and update builders
 // write one item trace number per Claim item at every line — system
 // PASItemTraceSystem, value "<correlation>.<sequence>".
+//
+// The SUBMIT's correlation is its own. The UPDATE'S IS THE SUBMISSION'S
+// (OriginalCorr): an item trace number identifies the service line, and an
+// amendment is about the lines the payer already holds. Restating them under a
+// fresh correlation named items the payer had never seen, and a later
+// Claim/$inquire narrowed by them matched nothing at all — measured against the
+// reference payer mirror, an amended authorization could not be found.
 func TestSubmitBuilderMintsItemTraceNumbers(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		sub := conformantSubmitInputs(t)
@@ -2388,7 +2519,7 @@ func TestSubmitBuilderMintsItemTraceNumbers(t *testing.T) {
 		for name, c := range map[string]struct {
 			bundle []byte
 			corr   string
-		}{"submit": {submit, sub.Corr}, "update": {update, upd.Corr}} {
+		}{"submit": {submit, sub.Corr}, "update": {update, upd.OriginalCorr}} {
 			claim, err := firstBundleResource(c.bundle, "Claim")
 			if err != nil {
 				t.Fatal(err)

@@ -35,6 +35,20 @@ type PriorAuthContinuation struct {
 	// ClaimResponseIdentifiers and PreAuthRef are what the payer answered with.
 	ClaimResponseIdentifiers []PASIdentifier `json:"claimResponseIdentifiers,omitempty"`
 	PreAuthRef               string          `json:"preAuthRef,omitempty"`
+	// AdministrationReferenceNumber is the administrative reference the payer
+	// stated for the ANSWER AS A WHOLE — the ClaimResponse's own extension,
+	// beside the per-item ones in Items.
+	//
+	// It is recorded and NOT sent as a narrowing fact on the inquiry, and the
+	// difference is measured rather than chosen. A payer states this reference
+	// while it holds the request and withdraws it once it decides: the pinned
+	// reference payer drops the root reference when no item remains pended, and
+	// answers an inquiry narrowed by it only while the pend stands. An inquiry
+	// that went on naming it would stop matching at exactly the moment the
+	// decision arrived — the one moment the requester is asking for. So the
+	// continuation keeps what the payer said, and asks by the facts that outlive
+	// the pend: the item trace numbers, the claim identifiers, the parties.
+	AdministrationReferenceNumber string `json:"administrationReferenceNumber,omitempty"`
 }
 
 // PASInquiryRecords are the requester's own records an inquiry embeds (see
@@ -50,26 +64,39 @@ type PASInquiryRecords struct {
 
 // NewPriorAuthContinuation records the continuation facts of a submitted PAS
 // request and the payer's answer to it: the request's Claim identifiers,
-// type, priority and items (sequence, product code, service date, trace
-// number), and the answer's ClaimResponse identifiers, authorization
-// reference and per-item authorization and administration reference numbers.
-// Every request item must carry a trace number. The answer may be empty (no
-// payer facts yet).
-func NewPriorAuthContinuation(line, payerHolder, memberID, providerNPI string, request, response []byte) (PriorAuthContinuation, error) {
+// type, priority, requesting-provider identifier and items (sequence, product
+// code, service date, trace number), and the answer's ClaimResponse
+// identifiers, authorization reference and per-item authorization and
+// administration reference numbers. Every request item must carry a trace
+// number. The answer may be empty (no payer facts yet).
+//
+// The provider identifier is read off the SUBMITTED BUNDLE — the Claim's own
+// provider reference, resolved to the entry that rode with it — like every
+// other fact here. A continuation derived a second way from the order the
+// request was built from could record one party while the wire named another.
+func NewPriorAuthContinuation(line, payerHolder, memberID string, request, response []byte) (PriorAuthContinuation, error) {
 	if _, ok := PASLineDef(line); !ok {
 		return PriorAuthContinuation{}, fmt.Errorf("shnsdk: continuation: unknown PAS line %q", line)
 	}
 	if payerHolder == "" || memberID == "" {
 		return PriorAuthContinuation{}, errors.New("shnsdk: continuation: the payer holder and the member id are required")
 	}
-	c := PriorAuthContinuation{Line: line, PayerHolder: payerHolder, MemberID: memberID, ProviderNPI: providerNPI}
+	c := PriorAuthContinuation{Line: line, PayerHolder: payerHolder, MemberID: memberID}
 	claim, err := firstBundleResource(request, "Claim")
 	if err != nil {
 		return PriorAuthContinuation{}, fmt.Errorf("shnsdk: continuation: request: %w", err)
 	}
+	if c.ProviderNPI, err = submittedProviderNPI(request); err != nil {
+		return PriorAuthContinuation{}, fmt.Errorf("shnsdk: continuation: request: %w", err)
+	}
 	var cl struct {
 		Identifier []PASIdentifier `json:"identifier"`
-		Type       struct {
+		Related    []struct {
+			Claim struct {
+				Identifier *PASIdentifier `json:"identifier"`
+			} `json:"claim"`
+		} `json:"related"`
+		Type struct {
 			Coding []PASCoding `json:"coding"`
 		} `json:"type"`
 		Priority struct {
@@ -91,6 +118,17 @@ func NewPriorAuthContinuation(line, payerHolder, memberID, providerNPI string, r
 		return PriorAuthContinuation{}, fmt.Errorf("shnsdk: continuation: request Claim: %w", err)
 	}
 	c.ClaimIdentifiers = cl.Identifier
+	// A request that AMENDS an earlier one names it (Claim.related[].claim), and
+	// that name is one of this authorization's own: the payer's answers go on
+	// referring to the request it first stored, so a continuation that knew only
+	// the amendment's identifier could not recognize a decision about the thing it
+	// is a continuation OF. Read off the bytes actually sent, like every other fact
+	// here — never carried in from a caller's memory of the earlier request.
+	for _, rel := range cl.Related {
+		if id := rel.Claim.Identifier; id != nil && validIdentifier(*id) && !slices.Contains(c.ClaimIdentifiers, *id) {
+			c.ClaimIdentifiers = append(c.ClaimIdentifiers, *id)
+		}
+	}
 	if len(cl.Type.Coding) > 0 {
 		c.ClaimType = cl.Type.Coding[0]
 	}
@@ -130,9 +168,13 @@ func NewPriorAuthContinuation(line, payerHolder, memberID, providerNPI string, r
 
 // Record adds the payer facts of an answer (a PAS response Bundle, a bare
 // ClaimResponse, or an inquiry answer) to the continuation: ClaimResponse
-// identifiers not yet held, the authorization reference, and per-item
-// authorization and administration reference numbers for the continuation's
-// items.
+// identifiers not yet held, the authorization reference, the answer's own
+// administrative reference number, and per-item authorization and
+// administration reference numbers for the continuation's items.
+//
+// Administrative reference numbers are read at BOTH levels because payers
+// state them at both: the pinned reference payer puts one on the ClaimResponse
+// itself and none on its items, so reading only the items recorded none.
 func (c *PriorAuthContinuation) Record(response []byte) error {
 	responses, err := claimResponsesIn(response)
 	if err != nil {
@@ -140,8 +182,9 @@ func (c *PriorAuthContinuation) Record(response []byte) error {
 	}
 	for _, raw := range responses {
 		var cr struct {
-			Identifier []PASIdentifier `json:"identifier"`
-			PreAuthRef string          `json:"preAuthRef"`
+			Identifier []PASIdentifier              `json:"identifier"`
+			PreAuthRef string                       `json:"preAuthRef"`
+			Extension  []map[string]json.RawMessage `json:"extension"`
 			Item       []struct {
 				ItemSequence int                          `json:"itemSequence"`
 				Extension    []map[string]json.RawMessage `json:"extension"`
@@ -157,6 +200,18 @@ func (c *PriorAuthContinuation) Record(response []byte) error {
 		}
 		if cr.PreAuthRef != "" {
 			c.PreAuthRef = cr.PreAuthRef
+		}
+		// The answer's OWN administrative reference, which this payer states at
+		// the root rather than on the items. Reading only the item-level ones
+		// recorded nothing at all for every answer the pinned reference payer
+		// sends, which is every answer this network has measured.
+		for _, e := range cr.Extension {
+			var url, v string
+			_ = json.Unmarshal(e["url"], &url)
+			_ = json.Unmarshal(e["valueString"], &v)
+			if url == pasExtAdministrationReferenceNumber && v != "" {
+				c.AdministrationReferenceNumber = v
+			}
 		}
 		for _, it := range cr.Item {
 			for i := range c.Items {
@@ -183,7 +238,26 @@ func (c *PriorAuthContinuation) Record(response []byte) error {
 
 // InquiryInputs returns the inquiry for this continuation with the given
 // inquiry id, identifiers, timestamp and the requester's records.
+//
+// It asks by the facts that OUTLIVE the pend — the item trace numbers the payer
+// echoes on every answer it sends about this request, the authorization numbers
+// once there are any, the parties and the member — and not by the administration
+// reference numbers the payer stated while it was holding the request.
+//
+// That last part is measured, not chosen. A payer states an administration
+// reference for a pend and withdraws it when it decides: the pinned reference
+// payer answers an inquiry narrowed by one WHILE the pend stands and stops
+// matching it once the claim resolves, because the resolved answer no longer
+// states it. An inquiry that went on naming it would therefore go blind at exactly
+// the moment the decision arrived — the one moment the requester is asking for.
+// Record has them (Items[i].AdministrationReferenceNumber and
+// AdministrationReferenceNumber), so the requester keeps what the payer said; a
+// caller that wants to ask by one anyway can still set it on the item it builds.
 func (c PriorAuthContinuation) InquiryInputs(id string, identifier PASIdentifier, records PASInquiryRecords, timestamp time.Time) PASInquiryInputs {
+	items := slices.Clone(c.Items)
+	for i := range items {
+		items[i].AdministrationReferenceNumber = ""
+	}
 	return PASInquiryInputs{
 		ID:              id,
 		Identifier:      identifier,
@@ -196,7 +270,7 @@ func (c PriorAuthContinuation) InquiryInputs(id string, identifier PASIdentifier
 		Coverage:        records.Coverage,
 		Provider:        records.Provider,
 		Insurer:         records.Insurer,
-		Items:           slices.Clone(c.Items),
+		Items:           items,
 	}
 }
 
@@ -245,6 +319,59 @@ func (c PriorAuthContinuation) matches(claimResponse []byte) bool {
 		return true
 	}
 	return c.PreAuthRef != "" && cr.PreAuthRef == c.PreAuthRef
+}
+
+// submittedProviderNPI reads the requesting provider's NPI out of the request
+// that was actually sent: the Claim's provider reference, resolved against the
+// entries it rode with (by their fullUrls and by each entry's relative
+// identity), then the NPI that record carries.
+//
+// A request whose Claim names a provider the Bundle does not resolve is a
+// refusal, not an empty identifier: the payer stored a party this requester
+// cannot name again, and recording nothing would hide that until an inquiry
+// silently matched nothing. A resolved provider carrying NO NPI records none —
+// that is a fact about the participant's record, not a failure to read it.
+func submittedProviderNPI(request []byte) (string, error) {
+	var b struct {
+		Entry []struct {
+			FullURL  string          `json:"fullUrl"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(request, &b); err != nil {
+		return "", err
+	}
+	byRef := map[string]json.RawMessage{}
+	ref := ""
+	for _, e := range b.Entry {
+		var r struct {
+			ResourceType string `json:"resourceType"`
+			ID           string `json:"id"`
+			Provider     struct {
+				Reference string `json:"reference"`
+			} `json:"provider"`
+		}
+		if json.Unmarshal(e.Resource, &r) != nil {
+			continue
+		}
+		if e.FullURL != "" {
+			byRef[e.FullURL] = e.Resource
+		}
+		if r.ResourceType != "" && r.ID != "" {
+			byRef[r.ResourceType+"/"+r.ID] = e.Resource
+		}
+		if r.ResourceType == "Claim" && ref == "" {
+			ref = r.Provider.Reference
+		}
+	}
+	if ref == "" {
+		return "", errors.New("the Claim names no requesting provider by reference")
+	}
+	resource, ok := byRef[ref]
+	if !ok {
+		return "", fmt.Errorf("the Claim names provider %q, which the request does not resolve", ref)
+	}
+	return PASProviderNPI(resource), nil
 }
 
 // firstBundleResource returns the first entry resource of type rt in a

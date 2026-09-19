@@ -33,11 +33,8 @@ const (
 	systemSubscriberRelationship = "http://terminology.hl7.org/CodeSystem/subscriber-relationship"
 	systemV2Identifier           = "http://terminology.hl7.org/CodeSystem/v2-0203"
 
-	// systemSHNCoverage is the SHN member-number identifier system. It is now named in
-	// TWO places on the same bundle — the Coverage entry's own MB identifier and the
-	// conformant PAS Claim's insurance[0].coverage LOGICAL reference (the
-	// logical-reference shape) — and the two MUST agree for that logical reference to
-	// resolve inside the bundle, so the string is single-sourced here rather than repeated.
+	// systemSHNCoverage is the SHN member-number identifier system, carried as the
+	// MB identifier on a Coverage this package builds.
 	systemSHNCoverage = "urn:shn:coverage"
 )
 

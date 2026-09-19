@@ -193,6 +193,13 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 
 	ep := shnsdk.Endpoints{HubURL: disc.Endpoints.Hub, AuthzURL: disc.Endpoints.Authz}
 
+	// What this network says it carries, read from the descriptor it already
+	// fetched. A pended prior authorization is continued by the inquiry, and a
+	// network that does not advertise that leg cannot carry one — so doctor says
+	// which of the two it is rather than leaving an operator to find out from a
+	// refusal.
+	inquiryAdvertised := advertisesPriorAuthInquiry(disc)
+
 	for _, p := range personas {
 		h := payerFor[p.MemberID]
 		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub}
@@ -249,6 +256,39 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		pass("priorauth %s: %s", p.MemberID, res.Outcome)
 
+		// A PEND IS A COMPLETE, CORRECT OUTCOME when the payer's answer carries a
+		// continuation: the payer has the request and has not decided yet, and the
+		// requester can ask it for the decision later instead of having to amend.
+		// doctor reports that as a pass on its own, whether or not the persona also
+		// advertises a post-amend outcome.
+		//
+		// A pend with NOTHING to continue is the one that is not: the decision could
+		// then never be asked for at all. Its rejection row lives in the cloud sweep
+		// (tools/cloudsmoke), which runs the same rule over an injectable leg; here
+		// the leg is the real one, which cannot produce that shape.
+		//
+		// Whether the CLI can DRIVE the inquiry is a separate question from whether
+		// the pend is correct, and it is answered by what the NETWORK advertises
+		// (below) rather than by assuming the leg is there — a CLI that offered an
+		// operation the network does not carry would turn a correct pend into a
+		// failure.
+		//
+		// That advertisement is about the network, not about any one peer: it says
+		// the exchange exists, not that this payer's gateway serves it. doctor never
+		// drives the inquiry, so the distinction costs nothing here and the line it
+		// prints says "advertises" rather than "can". A caller that means to DRIVE
+		// an inquiry needs the peer's own answer, not this.
+		if res.Outcome == "pended" {
+			if res.Resume == nil || res.Resume.Continuation == nil {
+				return fail(exitOutcome, "priorauth %s: pended with nothing to continue — the answer carries no continuation, so this authorization's decision can never be asked for", p.MemberID)
+			}
+			if inquiryAdvertised {
+				pass("priorauth %s: pended, and the answer carries a continuation the network advertises a prior-authorization inquiry for", p.MemberID)
+			} else {
+				pass("priorauth %s: pended, and the answer carries a continuation (this network advertises no prior-authorization inquiry to continue it with)", p.MemberID)
+			}
+		}
+
 		// Resume stage (pended→amend): if the persona advertises a post-amend outcome,
 		// the pended result must carry needed items + a resume handle; resume with a
 		// supplemental report attributed to the SAME order the persona pended on
@@ -287,6 +327,28 @@ func doctorNow() time.Time {
 		return doctorClock()
 	}
 	return time.Now()
+}
+
+// priorAuthInquiryTransaction is the transaction type the prior-authorization
+// inquiry rides under in the network's advertised operations. It is the literal
+// the descriptor carries, pinned here so a rename of the leg is caught by a
+// failing check rather than by a silent "this network has no inquiry".
+const priorAuthInquiryTransaction = "pas-claim-inquire"
+
+// advertisesPriorAuthInquiry reports whether this network carries the
+// prior-authorization inquiry — the exchange that continues a pended
+// authorization to its decision.
+//
+// It reads the descriptor's own advertised operations. A network built before the
+// inquiry existed advertises none, and the honest thing to tell an operator there
+// is that the pend is correct and its continuation simply cannot be carried yet.
+func advertisesPriorAuthInquiry(disc shnsdk.Discovery) bool {
+	for _, op := range disc.Operations {
+		if op.TransactionType == priorAuthInquiryTransaction {
+			return true
+		}
+	}
+	return false
 }
 
 // holderEntry is one row of the registrar /holders feed (subset doctor needs).

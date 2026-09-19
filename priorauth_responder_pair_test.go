@@ -246,6 +246,10 @@ func TestPriorAuthClientIntoResponder_PendedThenResumed(t *testing.T) {
 	// the submit pends and the resume — which attaches the report — approves.
 	req := PriorAuthRequest{
 		Member: "MBR-001", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
+		Provider:         testRequestingProvider(),
+		Patient:          testMemberPatient("MBR-001"),
+		Coverage:         testMemberCoverageSearch("MBR-001"),
+		MemberIDSystem:   MemberSystem,
 		Clinical:         DemoLumbarContextPriorSurgery(),
 		ProcedureSystem:  systemHCPCS,
 		ProcedureCPT:     "G0151",

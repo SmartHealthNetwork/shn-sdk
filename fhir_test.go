@@ -379,7 +379,8 @@ func TestBuildPatientAccessCapabilityStatement_DeclaredSet(t *testing.T) {
 // TestBuildProviderIngressCapabilityStatement_Shape pins the provider Da Vinci
 // ingress statement (FR-37 gap closed: per-role CapabilityStatements): the
 // versioned CRD/DTR/PAS 2.0.1 IG canonicals, the two FHIR operations the
-// ingress serves (PAS Claim/$submit, DTR $questionnaire-package), and
+// ingress serves (PAS Claim/$submit and Claim/$inquire, DTR
+// $questionnaire-package), and
 // determinism under a fixed clock. CRD is CDS Hooks (not FHIR REST) — it
 // appears via its IG canonical and the rest documentation, never as a
 // rest.resource.
@@ -413,6 +414,7 @@ func TestBuildProviderIngressCapabilityStatement_Shape(t *testing.T) {
 	raw := string(b)
 	for _, must := range []string{
 		"OperationDefinition/Claim-submit",
+		"OperationDefinition/Claim-inquiry",
 		"OperationDefinition/questionnaire-package",
 	} {
 		if !strings.Contains(raw, must) {

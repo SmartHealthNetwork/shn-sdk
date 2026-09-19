@@ -623,7 +623,7 @@ func BuildPatientAccessCapabilityStatement(created time.Time, declared []string)
 // per declared PAS line). A declared token for an unrelated contract (e.g.
 // pa.pdex, or a future workstream's) is ignored — this statement is CRD/DTR/PAS-only.
 func BuildProviderIngressCapabilityStatement(created time.Time, declared []string) ([]byte, error) {
-	doc := "Da Vinci ingress for foreign EHR/CDS clients: PAS Claim/$submit, DTR $questionnaire-package (FHIR operations below), and CRD CDS Hooks discovered at /cds-services. Version-specific endpoint codes are published at /.well-known/davinci-configuration (HRex 1.2.0)."
+	doc := "Da Vinci ingress for foreign EHR/CDS clients: PAS Claim/$submit and Claim/$inquire, DTR $questionnaire-package (FHIR operations below), and CRD CDS Hooks discovered at /cds-services. Version-specific endpoint codes are published at /.well-known/davinci-configuration (HRex 1.2.0)."
 	sec := "SMART Backend Services (client_credentials, private_key_jwt); configuration at /.well-known/smart-configuration."
 	var igs, pasProfiles []string
 	seenIG, seenProfile := map[string]bool{}, map[string]bool{}
@@ -681,6 +681,11 @@ func BuildProviderIngressCapabilityStatement(created time.Time, declared []strin
 					SupportedProfile: pasProfiles,
 					Operation: []fhir.CapabilityStatementRestResourceOperation{
 						{Name: "submit", Definition: "http://hl7.org/fhir/us/davinci-pas/OperationDefinition/Claim-submit"},
+						// The follow-up that asks for the decision on an
+						// authorization the payer pended. Declared here because
+						// the ingress serves it: a statement that named only
+						// $submit would advertise one surface and route another.
+						{Name: "inquire", Definition: "http://hl7.org/fhir/us/davinci-pas/OperationDefinition/Claim-inquiry"},
 					},
 				},
 				{

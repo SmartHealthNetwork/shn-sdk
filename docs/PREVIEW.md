@@ -217,10 +217,10 @@ that fill step; the demo path proves the wire mechanics, not a canned answer set
 On this preview environment the payer gateway native-forwards and relays the reference
 payer's pended Bundle **verbatim**; its `Task.input` names what it actually wants, coded
 `payer-url` and `questionnaires-needed` (a re-query URL and the still-outstanding
-questionnaire canonical), which is what your run prints. `pend-resolution-timer` is a
-synthetic label that exists only in the hermetic in-process mirror local/CI runs use
-(`internal/brpayermirror`) — it is not something the live reference payer ever puts on
-the wire.
+questionnaire canonical), which is what your run prints. The hermetic in-process mirror
+local and CI runs use (`internal/brpayermirror`) names the same kind of thing out of its
+own seeded adjudication — the questionnaire that family's pend asks for — so a hermetic
+run and a live one print a questionnaire either way.
 
 > **Outcome vocabulary:** `approved` | `no-pa-required` | `pended` | `denied`.
 > See `docs/PARTICIPANT_PROTOCOL.md` §7a.2 and §7b.

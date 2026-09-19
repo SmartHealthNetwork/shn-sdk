@@ -15,6 +15,14 @@
         },
         "identifier": [
           {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MB"
+                }
+              ]
+            },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC05"
           }
@@ -208,6 +216,24 @@
       }
     },
     {
+      "fullUrl": "Organization/org-hha-mbrpduc05",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "org-hha-mbrpduc05",
+        "name": "Cascade Home Health Services",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1639485762"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-hha-mbrpduc05"
+      }
+    },
+    {
       "fullUrl": "ServiceRequest/sr-mbrpduc05-g0151",
       "resource": {
         "resourceType": "ServiceRequest",
@@ -232,6 +258,11 @@
         "subject": {
           "reference": "Patient/MBR-PD-UC05"
         },
+        "performer": [
+          {
+            "reference": "Organization/org-hha-mbrpduc05"
+          }
+        ],
         "reasonCode": [
           {
             "coding": [

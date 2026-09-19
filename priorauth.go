@@ -48,7 +48,22 @@ type PriorAuthRequest struct {
 	// Patient is your own Patient resource for the member; its id is the member id,
 	// the id the payer resolves the patient by. Coverage is your own Coverage
 	// search result for that patient: a searchset Bundle holding the member's
-	// Coverage and the payor Organization it names. With both set, the coverage
+	// Coverage and the payor Organization it names.
+	//
+	// BOTH ARE REQUIRED. A prior authorization is made under a policy and names
+	// the payer and the member: the payer locates the policy from the Coverage the
+	// claim names, matches any later inquiry against the Coverage it stored, and
+	// scopes that inquiry's search by the payer organization the claim named. A
+	// claim carrying records this package made up is one no inquiry of yours can
+	// find again, so nothing here invents them and RunPriorAuth refuses before it
+	// sends anything. The search result must include the payor Organization its
+	// Coverage names — that is the payer the claim carries.
+	//
+	// (Through v0.50.x a request could omit both and still run a coverage check;
+	// that request now fails before its first leg. It is a breaking change, and
+	// deliberately not a silent one.)
+	//
+	// With both set, the coverage
 	// check is a CDS Hooks order-sign request (the order is signed and goes on to
 	// prior authorization) built from these records with BuildCRDRequest, and it
 	// names no FHIR server. With neither set, the check keeps the older request
@@ -58,6 +73,26 @@ type PriorAuthRequest struct {
 	// removed in a later release. Setting only one of them is an error.
 	Patient  []byte
 	Coverage []byte
+	// Provider is your own record for the party requesting the authorization: an
+	// Organization or a PractitionerRole, carrying its NPI. It is REQUIRED for the
+	// prior-authorization leg and rides the claim as a resolvable entry the
+	// Claim's provider references.
+	//
+	// A payer matches a later inquiry on the member id plus the ordering or
+	// rendering provider identifier, so a claim that identifies no provider is one
+	// no conformant inquiry can find again. Pass the record your own system holds;
+	// nothing here invents one.
+	Provider []byte
+	// MemberIDSystem is the namespace your own records name this member under.
+	// It is REQUIRED for the prior-authorization leg: a payer matches a claim,
+	// and any later inquiry about it, on the member id, so a claim whose Patient
+	// identifies nobody is stored under a member you cannot ask about again.
+	//
+	// With Patient set it is read from that record and this field is optional;
+	// stating a different namespace than your own record does is an error. With
+	// no Patient (the older coverage check, removed in a later release) there is
+	// no record to read, so this field is the only way to say it.
+	MemberIDSystem string
 	// Hook is the CDS Hooks hook of a coverage check built from your own
 	// records: "order-sign" (the default: the order is signed and goes on to
 	// prior authorization) or "order-select" (the order is still being chosen;
@@ -156,7 +191,37 @@ func (id Identity) RunPriorAuthWith(ctx context.Context, c *http.Client, ep Endp
 	return id.followUp(ctx, c, ep, payer, res, o)
 }
 
+// requirePriorAuthRecords refuses a prior authorization whose caller supplied no
+// records of its own, naming which one is missing.
+//
+// It is the precondition, not a restatement of the builders: every one of these
+// is separately refused deeper in, but by then the coverage check has been sent
+// and the caller reads a failure about the claim rather than about its inputs.
+func requirePriorAuthRecords(req PriorAuthRequest) error {
+	switch {
+	case len(bytes.TrimSpace(req.Patient)) == 0:
+		return errors.New("prior authorization: your own Patient record for this member is required (PriorAuthRequest.Patient): a payer matches a claim, and any later inquiry about it, on the member id")
+	case len(bytes.TrimSpace(req.Coverage)) == 0:
+		return errors.New("prior authorization: your own Coverage search result for this member is required (PriorAuthRequest.Coverage), including the payor Organization it names: a payer locates the policy from the coverage a claim names, and scopes a later inquiry by the payer the claim named")
+	case len(bytes.TrimSpace(req.Provider)) == 0:
+		return errors.New("prior authorization: your own record for the requesting provider is required (PriorAuthRequest.Provider): a payer matches an inquiry on the member id plus the ordering or rendering provider identifier")
+	}
+	if _, err := payerOrgFromCoverageSearch(req.Coverage); err != nil {
+		return fmt.Errorf("prior authorization: %w", err)
+	}
+	return nil
+}
+
 func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, req PriorAuthRequest) (PriorAuthResult, error) {
+	// The records this flow cannot invent, checked BEFORE the first leg is sent.
+	//
+	// They were required all along — a claim is made under a policy, names the
+	// payer and identifies the member — but the refusal used to surface three legs
+	// in, at the claim builder, after the coverage check had already been sent. A
+	// caller that supplies none of them now learns so before anything leaves.
+	if err := requirePriorAuthRecords(req); err != nil {
+		return PriorAuthResult{}, err
+	}
 	patientRef := "Patient/" + req.Member
 	coverageRef := "Coverage/" + req.Member
 
@@ -405,14 +470,44 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: generate claim correlation id: %w", err)
 	}
 	pasCorr := hex.EncodeToString(pasCorrRaw[:])
+	// The namespace your own records name this member under. It is READ from the
+	// Patient you supplied, never assumed: a payer matches a prior authorization
+	// on the member id, and a claim whose Patient identifies nobody is stored
+	// under a member the payer cannot find again.
+	memberSystem := req.MemberIDSystem
+	if len(req.Patient) > 0 {
+		fromRecord, err := memberIdentifierSystemOf(req.Patient, req.Member)
+		if err != nil {
+			return PriorAuthResult{}, fmt.Errorf("pas-submit: %w", err)
+		}
+		if memberSystem != "" && memberSystem != fromRecord {
+			return PriorAuthResult{}, fmt.Errorf("pas-submit: PriorAuthRequest.MemberIDSystem is %q and your own Patient record names the member under %q", memberSystem, fromRecord)
+		}
+		memberSystem = fromRecord
+	}
+	if memberSystem == "" {
+		return PriorAuthResult{}, fmt.Errorf("pas-submit: %w", errMemberIDSystemRequired)
+	}
+	// The payer this claim names: the Organization your own Coverage search result
+	// names as payor. Read from the records you supplied, never minted — the payer
+	// scopes a later inquiry's search by the insurer, so a claim naming a payer
+	// organization this package invented is one your inquiry can never match.
+	insurer, err := payerOrgFromCoverageSearch(req.Coverage)
+	if err != nil {
+		return PriorAuthResult{}, fmt.Errorf("pas-submit: %w", err)
+	}
 	bundleJSON, err := BuildConformantClaimBundle(ConformantClaimInputs{
-		QR:          qrJSON,
-		SR:          srJSON,
-		PatientRef:  patientRef,
-		CoverageRef: coverageRef,
-		MemberID:    req.Member,
-		Corr:        pasCorr,
-		Created:     id.now(),
+		QR:             qrJSON,
+		SR:             srJSON,
+		Provider:       req.Provider,
+		Coverage:       req.Coverage,
+		Insurer:        insurer,
+		PatientRef:     patientRef,
+		CoverageRef:    coverageRef,
+		MemberID:       req.Member,
+		MemberIDSystem: memberSystem,
+		Corr:           pasCorr,
+		Created:        id.now(),
 		// The same reason ResumePriorAuth carries these: a real payer resolves
 		// Claim.insurer and Coverage.payor against the bundle it was handed and refuses
 		// a reference it cannot find, so the generic unresolvable payer Organization
@@ -443,7 +538,7 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: parse claim response: %w", err)
 	}
 	if result.Outcome == "pended" {
-		cont, err := NewPriorAuthContinuation(LineOf(ContractPAPAS20), payer.ID, req.Member, req.NPI, bundleJSON, pasResp)
+		cont, err := NewPriorAuthContinuation(LineOf(ContractPAPAS20), payer.ID, req.Member, bundleJSON, pasResp)
 		if err != nil {
 			return PriorAuthResult{}, fmt.Errorf("pas-submit: record continuation: %w", err)
 		}
@@ -457,9 +552,12 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 			PatientRef:            patientRef,
 			CoverageRef:           coverageRef,
 			MemberID:              req.Member,
+			MemberIDSystem:        memberSystem,
 			SubjectPCI:            pci,
 			QRJSON:                json.RawMessage(qrJSON),
 			SRJSON:                json.RawMessage(srJSON),
+			ProviderJSON:          json.RawMessage(req.Provider),
+			CoverageJSON:          json.RawMessage(req.Coverage),
 			NeededItems:           result.NeededItems,
 		}
 	}
@@ -748,12 +846,21 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 	}
 	updateCorr := hex.EncodeToString(corrRaw[:])
 
+	// The same payer the submission named, from the same record the handle carries.
+	insurer, err := payerOrgFromCoverageSearch(resume.CoverageJSON)
+	if err != nil {
+		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: %w", err)
+	}
 	bundleJSON, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
 		QR:               resume.QRJSON,
 		SR:               resume.SRJSON,
+		Provider:         resume.ProviderJSON,
+		Coverage:         resume.CoverageJSON,
+		Insurer:          insurer,
 		PatientRef:       resume.PatientRef,
 		CoverageRef:      resume.CoverageRef,
 		MemberID:         resume.MemberID,
+		MemberIDSystem:   resume.MemberIDSystem,
 		Provenance:       provJSON,
 		DiagnosticReport: drJSON,
 		Corr:             updateCorr,
@@ -797,13 +904,13 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 		var cont *PriorAuthContinuation
 		if resume.Continuation != nil {
 			next, err := NewPriorAuthContinuation(resume.Continuation.Line, resume.Continuation.PayerHolder,
-				resume.Continuation.MemberID, resume.Continuation.ProviderNPI, bundleJSON, updResp)
+				resume.Continuation.MemberID, bundleJSON, updResp)
 			if err != nil {
 				return PriorAuthResult{}, fmt.Errorf("pas-update-submit: record continuation: %w", err)
 			}
 			cont = &next
 		} else if resume.MemberID != "" {
-			next, err := NewPriorAuthContinuation(LineOf(ContractPAPAS20), payer.ID, resume.MemberID, "", bundleJSON, updResp)
+			next, err := NewPriorAuthContinuation(LineOf(ContractPAPAS20), payer.ID, resume.MemberID, bundleJSON, updResp)
 			if err != nil {
 				return PriorAuthResult{}, fmt.Errorf("pas-update-submit: record continuation: %w", err)
 			}
@@ -815,6 +922,7 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 			PatientRef:            resume.PatientRef,
 			CoverageRef:           resume.CoverageRef,
 			MemberID:              resume.MemberID,
+			MemberIDSystem:        resume.MemberIDSystem,
 			SubjectPCI:            resume.SubjectPCI,
 			QRJSON:                resume.QRJSON,
 			SRJSON:                resume.SRJSON,
@@ -829,17 +937,37 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 // longer than MaxPriorAuthWait is shortened to it, and at most
 // MaxPriorAuthInquiries inquiries are sent per wait (PAS 2.2.1 asks clients to
 // avoid repeated inquiries; each is an audited exchange).
+//
+// MaxPriorAuthWait is what the schedule below can actually deliver: its sixth
+// and last inquiry falls due 26 s after the pend, so a longer bound would hold
+// your call open with no inquiry left to make. A decision that is hours away is
+// not a longer wait — keep the resume handle and inquire again later.
 const (
-	MaxPriorAuthWait      = 120 * time.Second
+	MaxPriorAuthWait      = 30 * time.Second
 	MaxPriorAuthInquiries = 6
 )
 
 // Inquiry schedule: the first inquiry runs 2 s after the pend, later ones
-// back off exponentially, capped at 5 s.
+// back off exponentially, capped at 5 s. The delays before the six inquiries
+// are 2, 4, 5, 5, 5, 5 seconds, so the last falls due at 26 s — the reach
+// MaxPriorAuthWait is set from, and TestPriorAuthWait_TheBoundIsReachable
+// holds the two together.
 const (
 	priorAuthFirstInquiry   = 2 * time.Second
 	priorAuthInquiryBackoff = 5 * time.Second
 )
+
+// priorAuthScheduleReach is the instant the last inquiry a wait may make falls
+// due, measured from the pend: the sum of the delays before each of the
+// MaxPriorAuthInquiries inquiries.
+func priorAuthScheduleReach() time.Duration {
+	total, delay := time.Duration(0), priorAuthFirstInquiry
+	for i := 0; i < MaxPriorAuthInquiries; i++ {
+		total += delay
+		delay = min(2*delay, priorAuthInquiryBackoff)
+	}
+	return total
+}
 
 // PriorAuthOption configures RunPriorAuthWith and ResumePriorAuthWith.
 type PriorAuthOption func(*priorAuthOptions)
@@ -1014,6 +1142,25 @@ func (id Identity) Inquire(ctx context.Context, c *http.Client, ep Endpoints, pa
 		result.Resume = &handle
 	}
 	return result, nil
+}
+
+// InquiryDecision reads a payer's `Claim/$inquire` answer for ONE request: the
+// ClaimResponse the continuation's own facts match — an item trace number it
+// sent, an identifier the payer answered it with, or its authorization
+// reference — and the determination that response carries.
+//
+// It is the requester's half of the inquiry, and it is exported so that a
+// requester driving the leg itself (a gateway running a participant's own
+// workflow, rather than this client's Inquire) matches an answer the SAME way.
+// Two readings of "which decision is mine" would differ the first time a payer
+// answered with several.
+//
+// An answer holding no matching response is ErrInquiryNoMatch, and one holding
+// several is ErrInquiryAmbiguous. Neither is resolved by taking the first: an
+// inquiry that matched nothing has not been answered, and one that matched twice
+// has not been answered unambiguously.
+func InquiryDecision(answer []byte, cont PriorAuthContinuation) (PriorAuthResult, error) {
+	return inquiryDecision(answer, cont)
 }
 
 // inquiryDecision finds the one ClaimResponse in an inquiry answer that is

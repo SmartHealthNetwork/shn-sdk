@@ -23,6 +23,7 @@ var expectedMember = map[string]string{
 	"uc07":        "MBR-PD-UC07",
 	"uc05":        "MBR-PD-UC05",
 	"uc05-nc":     "MBR-PD-UC05-NC",
+	"pending":     "MBR-PD-PEND",
 }
 
 // fixtureBundle is the minimal transaction-Bundle shape the invariants assert against.
@@ -72,7 +73,7 @@ func TestProviderDataBundle_NoContractedNPI(t *testing.T) {
 
 func TestProviderDataPersonas_NoDescoped(t *testing.T) {
 	// The shipped set is exactly uc02 + uc02-payerb + uc03 + uc04 + homeoxygen + uc08 + uc06 + uc01 +
-	// uc01-nc + uc07 + uc05 + uc05-nc.
+	// uc01-nc + uc07 + uc05 + uc05-nc + pending.
 	// With uc03 shipped there are NO descoped provider-data personas left. uc02 is the HospitalBeds
 	// persona (E0250 DeviceRequest + LOAD-BEARING M62.81 reasonCode → order-select covered / no-PA / no-DTR).
 	// uc02-payerb is uc02's SECOND-PAYER twin (Coverage.payor names urn:oid:...300|00078, member
@@ -84,11 +85,14 @@ func TestProviderDataPersonas_NoDescoped(t *testing.T) {
 	// active vs terminated Coverage).
 	// uc07 is the patient-authored twin of uc06 (same G0151/M62.81; distinct member).
 	// uc05/uc05-nc are the federated-query personas (G0151 order; operative DR is facility-seeded).
+	// pending is the pend persona (E0424 stationary-oxygen DeviceRequest — the conditional-coverage
+	// family the reference payer pends on a first $submit; the pend -> DTR package -> amend ->
+	// inquire follow-up runs on it).
 	got := ProviderDataPersonas()
 	want := map[string]bool{
 		"uc02": true, "uc02-payerb": true, "uc03": true, "uc04": true, "homeoxygen": true, "uc08": true, "uc06": true,
 		"uc01": true, "uc01-nc": true, "uc07": true,
-		"uc05": true, "uc05-nc": true,
+		"uc05": true, "uc05-nc": true, "pending": true,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("ProviderDataPersonas() = %v, want exactly %v", got, want)

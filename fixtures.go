@@ -42,8 +42,21 @@ var providerDataFS embed.FS
 // two-payer routing proof is a separate, engine-local hermetic routing fixture and does not
 // depend on this bundle at all; this one is for a REAL FHIR-SoR-backed multi-payer
 // demonstration (multi-payer partner onboarding), seeded but otherwise inert today.
+// pending is the PEND persona: a seeded E0424 (stationary oxygen system) DeviceRequest —
+// the one conditional-coverage family the Da Vinci reference payer pends on a first
+// $submit rather than approving or denying outright. It exists so the prior-authorization
+// follow-up (pend -> DTR package -> amend -> inquire) runs on a persona that genuinely
+// pends, instead of on an approve-family order coaxed into pending. Unlike the oxygen
+// DISPATCH personas (homeoxygen/uc03), E0424 is an order-SIGN family and advertises no CRD
+// questionnaire canonical, so its order names its ordering clinician (a Practitioner with
+// an NPI) rather than a DME supplier as performer; it carries the same two O2 observations
+// the pend's HomeOxygen questionnaire is answered from, so every attested value comes from
+// the persona's own record. Its NPI is Luhn-valid ("80840"+the first nine digits, per the CMS
+// check-digit rule): us-core-practitioner enforces that as an invariant (us-core-17), so a
+// made-up ten-digit string fails $validate — unlike the supplier NPIs on the Organization
+// personas, which US Core does not constrain the same way.
 func ProviderDataPersonas() []string {
-	return []string{"uc02", "uc02-payerb", "uc03", "uc04", "homeoxygen", "uc08", "uc06", "uc01", "uc01-nc", "uc07", "uc05", "uc05-nc"}
+	return []string{"uc02", "uc02-payerb", "uc03", "uc04", "homeoxygen", "uc08", "uc06", "uc01", "uc01-nc", "uc07", "uc05", "uc05-nc", "pending"}
 }
 
 // ProviderDataBundle returns a persona's transaction Bundle bytes (load into a FHIR SoR to

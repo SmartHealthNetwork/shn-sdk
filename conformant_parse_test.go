@@ -47,15 +47,17 @@ func demoConformantClaim(t *testing.T) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{
-		QR:          qrJSON,
-		SR:          srJSON,
-		PatientRef:  patientRef,
-		CoverageRef: coverageRef,
-		MemberID:    "MBR-COVERED",
-		Corr:        "corr-claim-demo-1",
-		Created:     time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC),
-		Payer:       CMSPayerIdentity,
+	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{Coverage: testMemberCoverage("MBR-COVERED"),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: MemberSystem,
+		QR:             qrJSON,
+		SR:             srJSON,
+		PatientRef:     patientRef,
+		CoverageRef:    coverageRef,
+		MemberID:       "MBR-COVERED",
+		Corr:           "corr-claim-demo-1",
+		Created:        time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC),
+		Payer:          CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)

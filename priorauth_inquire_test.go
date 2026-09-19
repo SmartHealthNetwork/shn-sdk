@@ -43,7 +43,9 @@ func (a *inquiringAdjudicator) inquiries() []PASInquiry {
 // pairInquiryRecords are the requester's own records for member MBR-001.
 func pairInquiryRecords() PASInquiryRecords {
 	return PASInquiryRecords{
-		Patient:  []byte(`{"resourceType":"Patient","id":"MBR-001","identifier":[{"system":"urn:shn:member","value":"MBR-001"}],"name":[{"family":"Johansson"}]}`),
+		// Typed MB, as a real participant's record is and as the submit path
+		// requires: a payer matches an inquiry on that identifier.
+		Patient:  testMemberPatient("MBR-001"),
 		Coverage: []byte(`{"resourceType":"Coverage","id":"cov-001","status":"active","beneficiary":{"reference":"Patient/MBR-001"},"payor":[{"reference":"Organization/payer-1"}]}`),
 		Provider: inquiryProvider,
 		Insurer:  inquiryInsurer,
@@ -79,7 +81,11 @@ func newInquiryPair(t *testing.T, decisions ...PASDecision) *inquiryPair {
 		payer: Payer{ID: h.responderID, EncPub: h.responderEnc, AuthzPub: h.authzPub},
 		req: PriorAuthRequest{
 			Member: "MBR-001", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
-			Clinical: DemoLumbarContextPriorSurgery(), ProcedureSystem: systemHCPCS, ProcedureCPT: "G0151",
+			Provider:       testRequestingProvider(),
+			Patient:        testMemberPatient("MBR-001"),
+			Coverage:       testMemberCoverageSearch("MBR-001"),
+			MemberIDSystem: MemberSystem,
+			Clinical:       DemoLumbarContextPriorSurgery(), ProcedureSystem: systemHCPCS, ProcedureCPT: "G0151",
 			ProcedureDisplay: "Home health physical therapy, each 15 minutes", DiagnosisICD10: "M54.16",
 		},
 	}
@@ -103,7 +109,12 @@ func TestClientInquire_UsesHandleFacts(t *testing.T) {
 	p := newInquiryPair(t, PASDecision{Outcome: PASApproved, PreAuthRef: "AUTH-7", ValidUntil: "2026-12-31"})
 	res := p.pend(t)
 	cont := res.Resume.Continuation
-	if cont.Line != "2.0" || cont.PayerHolder != p.payer.ID || cont.MemberID != "MBR-001" || cont.ProviderNPI != "9999999999" ||
+	// ProviderNPI is the NPI of the party the SUBMISSION named — the requesting
+	// provider record that rode the claim — not the ordering practitioner's NPI
+	// the request also carries ("9999999999"). A payer matches an inquiry on the
+	// identifier of the party the claim named, so recording any other one would
+	// send an inquiry about an authorization nobody stored.
+	if cont.Line != "2.0" || cont.PayerHolder != p.payer.ID || cont.MemberID != "MBR-001" || cont.ProviderNPI != "1417947384" ||
 		len(cont.Items) != 1 || cont.Items[0].ProductOrService.Code != "G0151" || cont.Items[0].TraceNumber.System != PASItemTraceSystem ||
 		len(cont.ClaimIdentifiers) == 0 || len(cont.ClaimResponseIdentifiers) == 0 {
 		t.Fatalf("continuation = %+v", cont)
@@ -324,6 +335,47 @@ func TestRunPriorAuth_DefaultNoWait(t *testing.T) {
 	}
 }
 
+// TestPriorAuthWait_TheBoundIsReachable holds the longest wait a caller may ask
+// for and the inquiry schedule to each other.
+//
+// They used to be two independent numbers: the schedule hands out 2, 4, 5, 5, 5,
+// 5 seconds, so its sixth and last inquiry falls due at 26 s — while a caller
+// could ask to wait 120. Every second past 26 held the call open with no inquiry
+// left to make, and no row could tell, because the rows that pass the maximum
+// drive a fake clock where everything fits.
+//
+// So this row asserts the relationship rather than the numbers. It goes red if
+// the maximum is raised past what the schedule delivers, or the schedule slowed
+// until its last inquiry falls outside the maximum.
+func TestPriorAuthWait_TheBoundIsReachable(t *testing.T) {
+	reach := priorAuthScheduleReach()
+	if reach != 26*time.Second {
+		t.Fatalf("the schedule's last inquiry falls due at %v, want 26s (2+4+5+5+5+5)", reach)
+	}
+	if reach > MaxPriorAuthWait {
+		t.Fatalf("the schedule's last inquiry falls due at %v, past the %v maximum — a caller asking for the maximum can never make the last inquiry the cap allows",
+			reach, MaxPriorAuthWait)
+	}
+	if MaxPriorAuthWait > reach+priorAuthInquiryBackoff {
+		t.Fatalf("the maximum wait is %v and the schedule stops asking at %v — the %v beyond it makes no inquiry, it only holds the caller's call open",
+			MaxPriorAuthWait, reach, MaxPriorAuthWait-reach)
+	}
+
+	// Drive it: a caller asking for the maximum, on a clock that moves only by the
+	// schedule's own delays, makes every inquiry the cap allows.
+	p := newInquiryPair(t, testPendedDecision())
+	timer := &fakeWaitTimer{now: time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)}
+	res, err := p.sender.RunPriorAuthWith(context.Background(), p.hubSrv.Client(), p.ep, p.payer, p.req,
+		WithWait(MaxPriorAuthWait), WithInquiryRecords(pairInquiryRecords()), withWaitTimer(timer))
+	if err != nil || res.Outcome != "pended" {
+		t.Fatalf("result %+v %v", res, err)
+	}
+	if n := len(p.adj.inquiries()); n != MaxPriorAuthInquiries {
+		t.Fatalf("a wait of %v made %d inquiries, want all %d — the schedule must fit inside the bound a caller may ask for",
+			MaxPriorAuthWait, n, MaxPriorAuthInquiries)
+	}
+}
+
 // TestRunPriorAuth_WaitCapsInquiries: a wait inquires at 2 s, then backs off
 // (4 s, then 5 s steps), sends at most MaxPriorAuthInquiries, never runs past
 // the wait (itself capped at MaxPriorAuthWait), stops at the first decision,
@@ -369,17 +421,18 @@ func TestRunPriorAuth_WaitCapsInquiries(t *testing.T) {
 	t.Run("wait bound", func(t *testing.T) {
 		p := newInquiryPair(t, testPendedDecision())
 		timer := &fakeWaitTimer{now: start}
-		p.adj.onInquire = func() { timer.advance(30 * time.Second) } // each inquiry takes 30 s
+		p.adj.onInquire = func() { timer.advance(8 * time.Second) } // each inquiry takes 8 s
 		res, err := p.sender.RunPriorAuthWith(context.Background(), p.hubSrv.Client(), p.ep, p.payer, p.req,
 			WithWait(10*time.Minute), records, withWaitTimer(timer))
 		if err != nil || res.Outcome != "pended" {
 			t.Fatalf("result %+v %v", res, err)
 		}
-		// 2+30, +4+30, +5+30, +5+30 = 136 s: the next step would pass the 120 s cap.
-		if n := len(p.adj.inquiries()); n != 4 {
-			t.Errorf("%d inquiries, want 4 within the 120 s cap", n)
+		// 2+8, +4+8, +5+8 = 35 s, and the third inquiry started at 24 s — inside the
+		// 30 s cap. The fourth would start at 35+5 = 40 s, past it.
+		if n := len(p.adj.inquiries()); n != 3 {
+			t.Errorf("%d inquiries, want 3 within the %s cap", n, MaxPriorAuthWait)
 		}
-		if elapsed := timer.Now().Sub(start); elapsed > MaxPriorAuthWait+30*time.Second {
+		if elapsed := timer.Now().Sub(start); elapsed > MaxPriorAuthWait+8*time.Second {
 			t.Errorf("waited %s", elapsed)
 		}
 

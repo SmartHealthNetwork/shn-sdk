@@ -241,17 +241,17 @@ func TestBuildPASInquiryBundle_RequiresMemberIdentifier(t *testing.T) {
 		if _, err := BuildPASInquiryBundle(line, in); err == nil || !strings.Contains(err.Error(), "system") {
 			t.Errorf("%s: a member identifier without a system was accepted: %v", line, err)
 		}
+		// An untyped member identifier is refused at EVERY line, not only where
+		// 2.1.0 slices it. This pin used to accept it at 2.0 and 2.2 — which is why
+		// nothing here caught the published SDK's pend-then-inquire flow being
+		// answered `400 Patient member identifier (type=MB) is required for inquiry`
+		// by the real payer, with the records its own reference participant ships.
+		// The submit path already requires the type; a submission and the inquiry
+		// about it must ask the same thing of the same record.
 		in = testInquiryInputs(line)
 		in.Patient = inquiryPatient(false)
-		_, err := BuildPASInquiryBundle(line, in)
-		if line != "2.1" {
-			if err != nil {
-				t.Errorf("%s: an untyped member identifier was refused: %v", line, err)
-			}
-			continue
-		}
-		if err == nil || !strings.Contains(err.Error(), "typed MB") {
-			t.Errorf("2.1: an untyped member identifier was accepted: %v", err)
+		if _, err := BuildPASInquiryBundle(line, in); err == nil || !strings.Contains(err.Error(), "typed MB") {
+			t.Errorf("%s: an untyped member identifier was accepted: %v", line, err)
 		}
 	}
 }

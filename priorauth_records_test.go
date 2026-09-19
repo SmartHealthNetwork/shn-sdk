@@ -86,14 +86,16 @@ func TestRunPriorAuth_CallerRecordsRefused(t *testing.T) {
 	patient, coverage := callerRecords("MBR-COVERED")
 	_, otherCoverage := callerRecords("MBR-OTHER")
 	for name, mutate := range map[string]func(*PriorAuthRequest){
-		"patient only":             func(r *PriorAuthRequest) { r.Patient = patient },
-		"coverage only":            func(r *PriorAuthRequest) { r.Coverage = coverage },
+		"patient only":             func(r *PriorAuthRequest) { r.Patient, r.Coverage = patient, nil },
+		"coverage only":            func(r *PriorAuthRequest) { r.Patient, r.Coverage = nil, coverage },
 		"another patient's record": func(r *PriorAuthRequest) { r.Patient, r.Coverage = patient, otherCoverage },
 		"no ordering practitioner": func(r *PriorAuthRequest) { r.Patient, r.Coverage, r.NPI = patient, coverage, "" },
 		"a hook this flow does not send": func(r *PriorAuthRequest) {
 			r.Patient, r.Coverage, r.Hook = patient, coverage, "order-dispatch"
 		},
-		"a hook without the caller's records": func(r *PriorAuthRequest) { r.Hook = "order-sign" },
+		"a hook without the caller's records": func(r *PriorAuthRequest) {
+			r.Patient, r.Coverage, r.Hook = nil, nil, "order-sign"
+		},
 		"coverage not a searchset": func(r *PriorAuthRequest) {
 			r.Patient, r.Coverage = patient, []byte(`{"resourceType":"Coverage","id":"c","beneficiary":{"reference":"Patient/MBR-COVERED"}}`)
 		},
@@ -105,7 +107,15 @@ func TestRunPriorAuth_CallerRecordsRefused(t *testing.T) {
 			id, ep, payer, _ := newPATestRig(t, f)
 			req := demoPARequest()
 			mutate(&req)
-			if _, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, req); err == nil || !strings.HasPrefix(err.Error(), "crd-order-select:") {
+			// A records refusal names the stage that made it: "prior authorization:"
+			// when the precondition catches it before anything is sent, and
+			// "crd-order-select:" when the coverage check's own builder does. Both
+			// send nothing, which is what the check after this one pins.
+			_, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, req)
+			if err == nil {
+				t.Fatal("err = nil, want a refusal")
+			}
+			if !strings.HasPrefix(err.Error(), "crd-order-select:") && !strings.HasPrefix(err.Error(), "prior authorization:") {
 				t.Fatalf("err = %v", err)
 			}
 			if f.capturedCRDRequest != nil {

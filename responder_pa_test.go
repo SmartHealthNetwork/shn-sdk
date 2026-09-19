@@ -71,16 +71,18 @@ func buildConformantClaim(t *testing.T, member, corr string, qrJSON []byte, now 
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{
-		QR:            qrJSON,
-		SR:            srJSON,
-		PatientRef:    patientRef,
-		CoverageRef:   coverageRef,
-		MemberID:      member,
-		Corr:          corr,
-		Created:       now,
-		Payer:         CMSPayerIdentity,
-		PayerOrgEntry: true,
+	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: MemberSystem,
+		QR:             qrJSON,
+		SR:             srJSON,
+		PatientRef:     patientRef,
+		CoverageRef:    coverageRef,
+		MemberID:       member,
+		Corr:           corr,
+		Created:        now,
+		Payer:          CMSPayerIdentity,
+		PayerOrgEntry:  true,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle: %v", err)
@@ -99,17 +101,19 @@ func buildConformantClaimAbsolute(t *testing.T, member, corr string, qrJSON []by
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{
-		QR:            qrJSON,
-		SR:            srJSON,
-		PatientRef:    patientRef,
-		CoverageRef:   "Coverage/" + member,
-		MemberID:      member,
-		Corr:          corr,
-		Created:       now,
-		PayerOrgEntry: true,
-		AbsoluteRefs:  true,
-		Payer:         CMSPayerIdentity,
+	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: MemberSystem,
+		QR:             qrJSON,
+		SR:             srJSON,
+		PatientRef:     patientRef,
+		CoverageRef:    "Coverage/" + member,
+		MemberID:       member,
+		Corr:           corr,
+		Created:        now,
+		PayerOrgEntry:  true,
+		AbsoluteRefs:   true,
+		Payer:          CMSPayerIdentity,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimBundle(absolute): %v", err)
@@ -450,7 +454,9 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 	if err != nil {
 		t.Fatalf("BuildProvenance: %v", err)
 	}
-	bundle, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
+	bundle, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
+		Provider:         testRequestingProvider(),
+		MemberIDSystem:   MemberSystem,
 		QR:               qrJSON,
 		SR:               srJSON,
 		PatientRef:       patientRef,
@@ -860,7 +866,7 @@ func TestResponderPended_TaskFactsAndTraceEcho(t *testing.T) {
 	if b.ReasonReference.Reference != claimURL || !strings.HasSuffix(b.For.Reference, "/Patient/MBR-001") {
 		t.Errorf("reason=%q for=%q, want the request Claim %q and patient", b.ReasonReference.Reference, b.For.Reference, claimURL)
 	}
-	cont, err := NewPriorAuthContinuation("2.0", "payer", "MBR-001", "", claim, ans)
+	cont, err := NewPriorAuthContinuation("2.0", "payer", "MBR-001", claim, ans)
 	if err != nil {
 		t.Fatal(err)
 	}

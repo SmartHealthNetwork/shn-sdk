@@ -37,8 +37,10 @@ func deniedClaimResponse(t *testing.T, dec PASDecision, code, display, corr stri
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	claim, err := BuildConformantClaimBundle(ConformantClaimInputs{
-		QR: qr, SR: sr, PatientRef: patientRef, CoverageRef: "Coverage/" + member,
+	claim, err := BuildConformantClaimBundle(ConformantClaimInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: MemberSystem,
+		QR:             qr, SR: sr, PatientRef: patientRef, CoverageRef: "Coverage/" + member,
 		MemberID: member, Corr: corr, Created: h.now, Payer: CMSPayerIdentity, PayerOrgEntry: true,
 	})
 	if err != nil {

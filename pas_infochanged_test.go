@@ -17,15 +17,17 @@ func infoChangedTestSR() []byte {
 }
 
 func infoChangedTestInputs(infoChanged bool) ConformantClaimInputs {
-	return ConformantClaimInputs{
-		SR:          infoChangedTestSR(),
-		PatientRef:  "Patient/MBR-PD-UC04",
-		CoverageRef: "Coverage/MBR-PD-UC04",
-		MemberID:    "MBR-PD-UC04",
-		Corr:        "corr-infochanged-0001",
-		Created:     fixedInfoChangedClock,
-		InfoChanged: infoChanged,
-		Payer:       CMSPayerIdentity,
+	return ConformantClaimInputs{Coverage: testMemberCoverage("MBR-PD-UC04"),
+		Provider:       testRequestingProvider(),
+		MemberIDSystem: MemberSystem,
+		SR:             infoChangedTestSR(),
+		PatientRef:     "Patient/MBR-PD-UC04",
+		CoverageRef:    "Coverage/MBR-PD-UC04",
+		MemberID:       "MBR-PD-UC04",
+		Corr:           "corr-infochanged-0001",
+		Created:        fixedInfoChangedClock,
+		InfoChanged:    infoChanged,
+		Payer:          CMSPayerIdentity,
 	}
 }
 

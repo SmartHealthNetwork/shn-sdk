@@ -58,6 +58,7 @@ func TestResponderPASOperationsReturnCompleteBundle(t *testing.T) {
 func TestPASOperationGraphRetainsInputsAndRejectsMutations(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry = true
+	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 	request, err := BuildConformantClaimBundle(in)
 	if err != nil {
 		t.Fatal(err)
@@ -121,6 +122,7 @@ func TestPASOperationGraphRetainsInputsAndRejectsMutations(t *testing.T) {
 func TestPASOperationGraphBoundsAndDuplicateKeys(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry = true
+	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 	request, _ := BuildConformantClaimBundle(in)
 	decision, _ := BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
 	if _, err := buildPASOperationResponse([]byte(`{"resourceType":"Bundle","resourceType":"Bundle","entry":[]}`), decision, in.Created); err == nil {
@@ -142,6 +144,7 @@ func TestPASOperationGraphBoundsAndDuplicateKeys(t *testing.T) {
 func TestPASOperationRejectsForeignSubjectForms(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry = true
+	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 	request, _ := BuildConformantClaimBundle(in)
 	decision, _ := BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
 	for _, field := range []string{"subjectReference", "patientReference", "subject"} {
@@ -219,6 +222,7 @@ func TestResponderPASUpdateGraphFailureReleasesPendingClaim(t *testing.T) {
 func TestPASOperationEncounterParticipantIsNotPatientSubject(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry = true
+	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 	request, _ := BuildConformantClaimBundle(in)
 	decision, _ := BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
 	for _, role := range []string{"Practitioner", "PractitionerRole", "RelatedPerson"} {
@@ -239,6 +243,7 @@ func TestPASOperationEncounterParticipantIsNotPatientSubject(t *testing.T) {
 func TestPASOperationResourceSpecificSubjectsRemainBound(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry = true
+	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 	request, _ := BuildConformantClaimBundle(in)
 	decision, _ := BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
 	for _, tc := range []struct{ resource, field string }{{"ResearchSubject", "individual"}, {"EnrollmentRequest", "candidate"}} {
