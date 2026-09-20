@@ -238,24 +238,19 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: build service request: %w", err)
 	}
-	// The Coverage's urn:shn:coverage MB identifier carries the BARE member id (the
-	// identifier-semantics rule); coverageRef above stays the REFERENCE-shaped value the
-	// QRContext/insurance roles need.
-	// The CRD prefetch Coverage must NAME its payer. A real payer's coverage-requirements
-	// service reads Coverage.payor to decide whose rules apply and refuses a payor it cannot
-	// identify, so the generic unidentified Organization reference this leg used to send is
-	// rejected outright — the whole prior-auth then fails at leg 1, before any of the PA
-	// flow runs. BuildCoverageWithPayer carries the contained payer Organization with the
-	// same identity every later leg of this flow already stamps.
-	covJSON, err := BuildCoverageWithPayer(patientRef, req.Member, CMSPayerIdentity)
-	if err != nil {
-		return PriorAuthResult{}, fmt.Errorf("crd-order-select: build coverage: %w", err)
+	// The payer this whole flow is made under is the one the caller's own Coverage
+	// names: the CRD prefetch, the questionnaire request and the claim all carry the
+	// caller's own records, and a payer that maps payer identity at its edge refuses
+	// any other. The identity is read the way the questionnaire request's payer will
+	// read it, so a payor reference that payer cannot resolve is refused before any leg.
+	if _, err := dtrPayerIdentity(req.Coverage); err != nil {
+		return PriorAuthResult{}, fmt.Errorf("prior authorization: %w", err)
 	}
 
 	// LEG 1 — CRD on the crd-order-select leg (which carries order-sign and
 	// order-select): order-sign from the caller's own records, or the older
 	// order-select request when the caller supplied none.
-	crdReq, err := priorAuthCRDRequest(req, srJSON, covJSON, patientRef)
+	crdReq, err := priorAuthCRDRequest(req, srJSON, patientRef)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: %w", err)
 	}
@@ -296,14 +291,20 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	}
 	canonical := StripCanonicalVersion(cov.Questionnaires[0])
 
-	// LEG 2 — DTR questionnaire fetch + local auto-fill. A 2.2 (qr-required) responder
-	// derives the QR shell's coverage reference from Coverage.id and fails closed without a
-	// STABLE, request-specific one, so the fetch leg needs its own id-stamped copy — reuse
-	// withResourceID (sdk/crd.go) rather than mutate covJSON, which the CRD leg above already
-	// sent as built. (covJSON does carry an id of its own: BuildCoverageWithPayer stamps the
-	// builder's fixed conformant id. Stamping a member-derived one here keeps the fetch leg's
-	// coverage reference distinguishable per request rather than reusing one constant.)
-	dtrCovJSON, err := withResourceID(covJSON, "coverage-"+req.Member)
+	// LEG 2 — DTR questionnaire fetch + local auto-fill. The Coverage this leg carries
+	// is the caller's own record — the first Coverage of its search result, the same
+	// record the CRD leg sent, naming the caller's payer — with the payor Organization
+	// that result carries beside it. requirePriorAuthRecords and dtrPayerIdentity have
+	// already refused a result that carries no such pair or one the payer cannot
+	// resolve, so both are read here, never built. A 2.2 (qr-required) responder derives
+	// the QR shell's coverage reference from Coverage.id and needs one that is stable per
+	// request, so this client re-keys its own copy of the record to coverage-<member>
+	// (withResourceID) rather than send the id the record carries in the caller's system.
+	dtrCov, payorOrg, ok := coverageAndPayorFromSearch(req.Coverage)
+	if !ok || payorOrg == nil {
+		return PriorAuthResult{}, errors.New("prior authorization: your Coverage search result carries no Coverage naming a payer organization")
+	}
+	dtrCovJSON, err := withResourceID(dtrCov, "coverage-"+req.Member)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: stamp coverage id: %w", err)
 	}
@@ -317,6 +318,10 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 			Coverages:      [][]byte{dtrCovJSON},
 			Questionnaires: cov.Questionnaires[:1],
 		}
+		// The payor Organization the Coverage names by reference travels with it,
+		// read from the caller's own search result, so the payer can read whose
+		// coverage this is.
+		pkgIn.Referenced = [][]byte{payorOrg}
 		if order, ci, ok := primaryCoverageOrder(obs); ok {
 			if len(order.Order) > 0 {
 				pkgIn.Orders = [][]byte{order.Order}
@@ -393,17 +398,9 @@ func priorAuthOrderID(member string) string { return "sr-" + member }
 
 // priorAuthCRDRequest is RunPriorAuth's coverage check request: an order-sign
 // (or, when req.Hook says so, order-select) request from req's own Patient and
-// Coverage, or, when req carries neither, the older order-select request.
-func priorAuthCRDRequest(req PriorAuthRequest, srJSON, covJSON []byte, patientRef string) ([]byte, error) {
+// Coverage, which requirePriorAuthRecords has already required.
+func priorAuthCRDRequest(req PriorAuthRequest, srJSON []byte, patientRef string) ([]byte, error) {
 	switch {
-	case len(req.Patient) == 0 && len(req.Coverage) == 0 && req.Hook != "":
-		return nil, errors.New("PriorAuthRequest.Hook applies to a request built from PriorAuthRequest.Patient and PriorAuthRequest.Coverage")
-	case len(req.Patient) == 0 && len(req.Coverage) == 0:
-		out, err := BuildConformantOrderSelectRequest(srJSON, covJSON, patientRef)
-		if err != nil {
-			return nil, fmt.Errorf("build order-select request: %w", err)
-		}
-		return out, nil
 	case len(req.Patient) == 0 || len(req.Coverage) == 0:
 		return nil, errors.New("PriorAuthRequest.Patient and PriorAuthRequest.Coverage are set together")
 	case req.NPI == "":
@@ -496,6 +493,11 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: %w", err)
 	}
+	// The claim is made under the payer the caller's own Coverage names.
+	payerIdentity, err := ParseCoveragePayer(req.Coverage, nil)
+	if err != nil {
+		return PriorAuthResult{}, fmt.Errorf("pas-submit: your Coverage search result names no payer identity: %w", err)
+	}
 	bundleJSON, err := BuildConformantClaimBundle(ConformantClaimInputs{
 		QR:             qrJSON,
 		SR:             srJSON,
@@ -518,7 +520,7 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 		// what a code-keyed payer decides on.
 		PayerOrgEntry: true,
 		AbsoluteRefs:  true,
-		Payer:         CMSPayerIdentity,
+		Payer:         payerIdentity,
 	})
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: build claim bundle: %w", err)
@@ -851,6 +853,11 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: %w", err)
 	}
+	// The claim is made under the payer the caller's own Coverage names.
+	payerIdentity, err := ParseCoveragePayer(resume.CoverageJSON, nil)
+	if err != nil {
+		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: your Coverage search result names no payer identity: %w", err)
+	}
 	bundleJSON, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
 		QR:               resume.QRJSON,
 		SR:               resume.SRJSON,
@@ -880,7 +887,7 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 		// procedure code instead of the builder's placeholder.
 		PayerOrgEntry: true,
 		AbsoluteRefs:  true,
-		Payer:         CMSPayerIdentity,
+		Payer:         payerIdentity,
 	})
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: build claim update bundle: %w", err)

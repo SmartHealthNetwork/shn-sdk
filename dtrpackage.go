@@ -34,6 +34,15 @@ type QuestionnairePackageInputs struct {
 	// Context is the payer's coverage-assertion-id (or another context id the
 	// payer gave) when the workflow holds one; empty when it holds none.
 	Context string
+	// Referenced are your own records, read from your system, that the payer
+	// needs to resolve references in the coverages or orders — the payor
+	// Organization a Coverage names by reference, above all: a payer that maps
+	// payer identity at its edge reads the Coverage's payor and refuses one it
+	// cannot resolve. Each is embedded exactly, as a referenced parameter;
+	// nothing is minted here. RunPriorAuth fills it with the payor Organization
+	// the caller's Coverage search result carries, and refuses a search result
+	// that carries none before any leg is sent.
+	Referenced [][]byte
 }
 
 // QuestionnairePackageParameters is a request built by
@@ -47,8 +56,8 @@ type QuestionnairePackageParameters struct {
 
 // QuestionnairePackageCopiedSpan says that Body[At:At+(End-Start)] is a copy
 // of bytes [Start, End) of an input resource: Coverages[Index] when
-// Parameter is "coverage", Orders[Index] when it is "order". The span is the
-// whole JSON value in both.
+// Parameter is "coverage", Orders[Index] when it is "order", Referenced[Index]
+// when it is "referenced". The span is the whole JSON value in each.
 type QuestionnairePackageCopiedSpan struct {
 	Parameter  string
 	Index      int
@@ -210,6 +219,17 @@ func buildQuestionnairePackageParameters(line string, in QuestionnairePackageInp
 			}
 		}
 		embed("order", i, o, s, e)
+	}
+	for i, r := range in.Referenced {
+		name := fmt.Sprintf("referenced %d", i)
+		s, e, d, err := pkgResource(name, r)
+		if err != nil {
+			return QuestionnairePackageParameters{}, err
+		}
+		if docString(d, d.Root(), "resourceType") == "" {
+			return QuestionnairePackageParameters{}, fmt.Errorf("%s is not a FHIR resource", name)
+		}
+		embed("referenced", i, r, s, e)
 	}
 	for i, q := range in.Questionnaires {
 		if q == "" || !utf8.ValidString(q) || strings.ContainsFunc(q, func(r rune) bool { return r <= ' ' || r == 0x7f }) {

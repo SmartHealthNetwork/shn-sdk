@@ -193,7 +193,12 @@ func BuildConformantOrderSelectRequest(serviceRequestJSON, coverageJSON []byte, 
 }
 
 // withResourceID returns the FHIR resource JSON with its top-level "id" set to id,
-// preserving every other field verbatim. Deterministic.
+// preserving every other field verbatim (re-marshalled, so member order may change).
+// Deterministic. It is this client re-keying its own copy of its own record — the
+// order and the Coverage it sends on the coverage check and the questionnaire request
+// keep the id the record carries in the caller's system there, and travel under a
+// request-specific id here so a responder that derives references from ids (a 2.2
+// questionnaire responder's QR shell) gets one that is stable per request.
 func withResourceID(resourceJSON []byte, id string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(resourceJSON, &m); err != nil {

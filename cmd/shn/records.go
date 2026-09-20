@@ -72,10 +72,10 @@ func testPersonaRecords(p shnsdk.DiscoveryPersona) (patient, coverage []byte, er
 	//
 	// Its identity is the persona's when the network states one. When the network
 	// PREDATES persona payerId it states none — and this driver does not invent a
-	// payer, it states the one its own prior-authorization leg already asserts
-	// (RunPriorAuth sends shnsdk.CMSPayerIdentity for every persona it drives). The
-	// record says what the request says; a participant sends what its own system
-	// holds.
+	// payer, it states the network's own test identity (shnsdk.CMSPayerIdentity),
+	// the one every leg then carries: RunPriorAuth runs under the payer this
+	// record names. The record says what the request says; a participant sends
+	// what its own system holds.
 	payerID := shnsdk.CMSPayerIdentity
 	if p.PayerID != nil && p.PayerID.System != "" && p.PayerID.Value != "" {
 		payerID = *p.PayerID

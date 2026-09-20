@@ -1516,12 +1516,17 @@ whose own input is the frame body:
   (this SDK: `ErrFramedDTRUnsupported`). The frame also carries
   `contractVersion` as usual.
 - **Receiver obligation.** A holder that declares `"v1op"` dispatches a
-  `dtr-questionnaire-fetch` request on its `operation` header and still
-  accepts the older questionnaire request (a JSON object with `canonical`
-  and optional `coverage`), framed without `operation` or bare, from
-  requesters that do not send the framed operation. The `operation` header
-  on any other transaction type is refused with `400`. The Smart Gateway, as a
-  payer, binds every patient a DTR request names (each coverage beneficiary,
+  `dtr-questionnaire-fetch` request on its `operation` header. The Smart
+  Gateway, as a payer, refuses a `dtr-questionnaire-fetch` request that names
+  no operation — the older questionnaire request (a JSON object with
+  `canonical` and optional `coverage`), framed without `operation` or bare —
+  with `400 questionnaire request names no operation: …`, before its payer's
+  system sees it: such a request is not the requester's own operation input,
+  and the package request the gateway used to rebuild from it carried only
+  the canonical and a coverage. `shnsdk.Responder` still answers the older
+  request. The `operation` header on any other transaction type is refused
+  with `400`. The Smart Gateway, as a payer, binds every patient a DTR request
+  names (each coverage beneficiary,
   order subject or patient, Patient resource and other patient reference) to
   the authorized patient before its payer's system sees the request: a
   second patient or another member is refused with `403`, and an unreadable
@@ -1904,6 +1909,7 @@ dtrReq   = BuildQuestionnairePackageParameters("2.0", {Coverages: [covJSON], Ord
 dtrResp  ← route(dtr-questionnaire-fetch / dtr-questionnaire-fetch → dtr-questionnaire,
                  frame(operation=questionnaire-package, dtrReq.Body))   # ONLY if the payer declares requestFrames "v1op" (§6.3)
          # a payer without "v1op": dtrReq = BuildQuestionnaireFetch(canon) (the deprecated older request), sent with no operation header
+         # — a Smart Gateway payer refuses it (400, "names no operation"); every routable gateway payer declares "v1op"
 qJSON    = ExtractQuestionnaireFromPackage(dtrResp)  # DTR-fetch returns a $questionnaire-package Bundle
 url      = ParseQuestionnaireURL(qJSON)          # MUST equal canon (canonical-substitution guard)
 qrJSON   = FillQuestionnaire(qJSON, clinical, qrContext)     # ONLY valid when url == SupportedQuestionnaireCanonical;
@@ -2695,6 +2701,40 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-09-21 — `RunPriorAuth` is made under the payer the caller's Coverage
+  names.** The prior-authorization loop read the payer identity for its
+  questionnaire request and its claim from a constant (the CMS test identity):
+  the DTR leg sent a Coverage built under that identity in place of the
+  caller's, and the claim's insurer check compared against it, so a payer that
+  maps payer identity at its edge refused the questionnaire request of every
+  caller whose Coverage names another payer, after the CRD leg had passed with
+  the caller's own record. The loop now reads the payer identity from the
+  caller's Coverage search result (`ParseCoveragePayer`), sends that result's
+  first Coverage on the DTR leg (id-stamped as before) together with the payor
+  Organization it names as a `referenced` parameter, and checks the claim's
+  insurer against that identity. `QuestionnairePackageInputs` gains
+  `Referenced` (records the payer needs to resolve references in the coverages
+  or orders, embedded exactly). A payor reference the payer cannot resolve
+  from those records (an absolute reference, say) is refused before any leg,
+  naming the reference. `shn doctor` and `shn priorauth` supply the caller's
+  records already and take the fix as is. Ships in sdk v0.53.0.
+- **2026-09-20 — The Smart Gateway no longer answers the older questionnaire
+  request (§6.3 receiver obligation).** A payer gateway refuses a
+  `dtr-questionnaire-fetch` request that names no operation with `400
+  questionnaire request names no operation: …`, framed as its answer, before
+  its payer's system sees it; it no longer rebuilds a `$questionnaire-package`
+  request from the `canonical`/`coverage`/`order` envelope (a rebuild carried
+  only those and lost every other parameter, including `referenced` and
+  `context`). A `questionnaire-package` or `next-question` operation's own
+  input is sent to the payer's system exactly, as before. Every routable
+  gateway payer declares `"v1op"`. A requester that reads the payer's
+  `requestFrames` from the `/holders` feed sends the framed operation:
+  `RunPriorAuth` does, given `Payer.RequestFrames`; `shn doctor`, `shn
+  priorauth` and the sample participant do from sdk v0.52.0, while the
+  published `shn` CLI before it (sdk v0.51.1) did not read the payer's
+  `requestFrames` and sent the older request. This refusal therefore ships in
+  the gateway release that follows sdk v0.52.0. `shnsdk.Responder` still
+  answers the older request.
 - **2026-09-20 — The `shn` CLI and the sample participant carry the payer's
   declared request frames (§6.3).** `shn doctor` and `shn priorauth` build
   their view of a payer from its `/holders` row and now carry that row's

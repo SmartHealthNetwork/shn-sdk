@@ -168,6 +168,72 @@ func checkPASInsurerResolves(bundle []byte) error {
 // "the member's Coverage and the payor Organization it names", and this is that
 // Organization. A search result that holds no such record is a refusal naming
 // what is missing, not a minted payer.
+// coveragePayorRef returns the reference the first payor of a Coverage carries.
+func coveragePayorRef(coverage []byte) string {
+	var cov struct {
+		Payor []struct {
+			Reference string `json:"reference"`
+		} `json:"payor"`
+	}
+	if json.Unmarshal(coverage, &cov) == nil && len(cov.Payor) > 0 {
+		return cov.Payor[0].Reference
+	}
+	return ""
+}
+
+// dtrPayerIdentity is the payer identity the questionnaire request will carry,
+// read the way the payer's edge reads it: the request carries the Coverage
+// bare and the payor Organization as a referenced parameter without a
+// fullUrl, so the payer resolves the Coverage's payor reference only as
+// Organization/<id> of that record. A payor reference the payer cannot
+// resolve that way — an absolute one, say — would pass the coverage check and
+// fail the questionnaire request, so it is refused here, before any leg,
+// naming the reference.
+func dtrPayerIdentity(coverageSearch []byte) (PayerIdentifier, error) {
+	coverage, payorOrg, ok := coverageAndPayorFromSearch(coverageSearch)
+	if !ok || payorOrg == nil {
+		return PayerIdentifier{}, errors.New("your Coverage search result carries no Coverage naming a payer organization")
+	}
+	var head struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+	}
+	_ = json.Unmarshal(payorOrg, &head)
+	key := head.ResourceType + "/" + head.ID
+	pid, err := ParseCoveragePayer(coverage, func(ref string) ([]byte, bool) {
+		if ref == key {
+			return payorOrg, true
+		}
+		return nil, false
+	})
+	if err != nil {
+		return PayerIdentifier{}, fmt.Errorf("your Coverage names its payer organization as %q, which the payer cannot resolve from the records the questionnaire request carries; name it as %s, the Organization your search result includes", coveragePayorRef(coverage), key)
+	}
+	return pid, nil
+}
+
+// coverageAndPayorFromSearch returns the first Coverage of the caller's
+// Coverage search result and the payor Organization it names, each exactly as
+// the search returned it; ok is false when the result is not a Bundle holding
+// a Coverage.
+func coverageAndPayorFromSearch(coverageSearch []byte) (coverage, payorOrg []byte, ok bool) {
+	entries, isBundle, err := coverageBundleEntries(coverageSearch)
+	if err != nil || !isBundle {
+		return nil, nil, false
+	}
+	for _, e := range entries {
+		if e.head.ResourceType == "Coverage" {
+			coverage = e.Resource
+			break
+		}
+	}
+	if coverage == nil {
+		return nil, nil, false
+	}
+	payorOrg, _ = payerOrgFromCoverageSearch(coverageSearch)
+	return coverage, payorOrg, true
+}
+
 func payerOrgFromCoverageSearch(coverageSearch []byte) ([]byte, error) {
 	if len(strings.TrimSpace(string(coverageSearch))) == 0 {
 		return nil, errPASInsurerRequired
