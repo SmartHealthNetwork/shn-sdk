@@ -136,8 +136,9 @@ type QuestionnaireFetchRequest struct {
 // Deprecated: this is the older questionnaire envelope, which carries neither
 // the order nor the payer's assertion id. Use BuildQuestionnairePackageParameters
 // and send it as a framed questionnaire-package operation to a payer that declares
-// RequestFrameV1Op. The envelope is still accepted by payers for now; its
-// output is unchanged.
+// RequestFrameV1Op. Responder still answers the envelope; a Smart Gateway
+// payer refuses it (400, naming the operation to send) from the gateway
+// release that follows sdk v0.52.0. The output is unchanged.
 func BuildQuestionnaireFetch(canonical string) ([]byte, error) {
 	return json.Marshal(QuestionnaireFetchRequest{Canonical: canonical})
 }

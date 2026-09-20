@@ -50,7 +50,7 @@ func resolveTestPayer(ctx context.Context, c *http.Client, disc shnsdk.Discovery
 		fmt.Fprintf(stderr, "shn %s: test payer %q has a malformed encPub: %v\n", cmd, h.ID, err)
 		return shnsdk.Payer{}, shnsdk.Endpoints{}, false, 1
 	}
-	return shnsdk.Payer{ID: h.ID, EncPub: encPub, AuthzPub: authzPub},
+	return shnsdk.Payer{ID: h.ID, EncPub: encPub, AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames},
 		shnsdk.Endpoints{HubURL: disc.Endpoints.Hub, AuthzURL: disc.Endpoints.Authz}, legacy, 0
 }
 

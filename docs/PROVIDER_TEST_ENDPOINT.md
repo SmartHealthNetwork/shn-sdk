@@ -27,6 +27,16 @@ without deploying anything of your own.
   ever. The published test members below are the ones the endpoint holds records for; a
   member it does not hold is carried under the id you send (§8), so any patient you use
   must be synthetic too.
+- **Application traffic evidence.** After owner activation, default capture includes raw
+  request and response bodies, headers, and authentication material, including synthetic
+  client secrets, bearer tokens and assertions. Evidence is accessible to ordinary staff
+  in the operator console, with indefinite retention. Use synthetic credentials only.
+  Collection is nonblocking and best effort: outages, capacity suspension, partial bodies
+  and gaps are possible; traffic rejected before the application edge is not captured.
+  This evidence is stored separately from routine stdout logs; raw bodies and tokens
+  are not added to stdout. As of 2026-09-19, cloud capture remains OFF pending measured
+  capacity acceptance and owner activation. Local two-reference-participant acceptance
+  enables the same collectors with synthetic data.
 - **Availability.** This endpoint remains available for integration testing, with no
   scheduled teardown date. It is a test service, not a production endpoint.
 - **No verification, no SLA.** Registration is self-service and unauthenticated beyond
@@ -71,14 +81,13 @@ body.
 
 ### 1.2 Hooks and CDS services
 
-Three services are advertised, one per hook the network carries. `GET /cds-services` needs
-no bearer, so you can read this before you register:
+Two services are advertised, one per hook the payers behind this endpoint carry.
+`GET /cds-services` needs no bearer, so you can read this before you register:
 
 | Service id | Hook |
 |---|---|
 | `shn-order-sign` | `order-sign` |
 | `shn-order-select` | `order-select` |
-| `shn-order-dispatch` | `order-dispatch` |
 
 Post your request to the service whose hook matches the `hook` in your body. **The hook is
 never changed on the way**, and each request goes to the payer's own service for that hook.
@@ -91,10 +100,13 @@ Three things worth knowing before you test:
   orders sent to `shn-order-select` — with the `context.selections` array that hook
   requires — come back as a well-formed empty answer (`{"cards":[],"systemActions":[]}`),
   which is the payer's answer, not an error.
-- **`order-dispatch` is advertised here but reaches no payer today.** Neither reference
-  payer runs the `order-dispatch` leg, so a well-formed `order-dispatch` request fails at
-  routing with `502 {"error":"hub routing failed"}` — earlier than the `422` above, and
-  without the hook list. Build against `order-sign` (§5, §6) or `order-select`.
+- **`order-dispatch` is not offered here.** Neither reference payer behind this endpoint
+  carries the `order-dispatch` leg, so the endpoint does not advertise it: `/cds-services`
+  lists `shn-order-sign` and `shn-order-select` only, and a request to
+  `/cds-services/shn-order-dispatch` answers `404` naming the service ids that are offered —
+  before routing, never as a generic `502`. Build against `order-sign` (§5, §6) or
+  `order-select`. The listing is what this endpoint's payers carry; when a payer here
+  carries `order-dispatch`, it is advertised again.
 
 `appointment-book`, `encounter-start` and `encounter-discharge` have no service here.
 
@@ -492,6 +504,20 @@ as you sent them.
 Submit the bundle from [Appendix A](#appendix-a--the-pas-request-bundle) (a `G0151` `Claim`
 bundle for `MBR-COVERED`, payer `00301`):
 
+**The member identity the payer matches on is `Patient.identifier`** — for `MBR-COVERED`,
+`http://example.org/MIN|12345678901`, as the appendix carries it. Your own identifiers may
+sit beside it on the same Patient; the Patient's `id`, its demographics and
+`Coverage.subscriberId` are not what the payer matches on, and `subscriberId` alone does
+not match. A Patient carrying only your own identifier (an MRN under your system) is a
+member the payer has never seen: it creates a Patient of its own for it, links the claim
+to a Coverage whose beneficiary is still its stored member, and its answer names two
+members — which the payer's gateway refuses as inconsistent patient linkage, and you see
+as a `502` (§8.3). Two shapes answer without an error and are still not the exchange you
+meant: a request without `Coverage.beneficiary`, or whose references point at an external
+base, is answered `200` with `A3` "Not Required" and no `CommunicationRequest` instead of
+the pend; and a `Claim.patient` given as an identifier only (`type` and `identifier`, no
+`reference`) makes the payer answer `500`.
+
 ```bash
 curl -s "https://pa-test.shn-preview.org/Claim/\$submit" \
   -H "Authorization: Bearer $TOKEN" \
@@ -670,7 +696,9 @@ canonical would request a different questionnaire.
 ### 6.3 PAS — an approval
 
 Submit the bundle from [Appendix A](#appendix-a--the-pas-request-bundle), with the three
-substitutions the appendix names for this route:
+substitutions the appendix names for this route. The member-identity rule and the two
+warnings in §5.3 hold here unchanged: the payer matches `Patient.identifier`
+`http://example.org/MIN|12345678901`, not the Patient id or `subscriberId`.
 
 ```bash
 curl -s "https://pa-test.shn-preview.org/Claim/\$submit" \
@@ -731,7 +759,9 @@ and this payer's decision for that order.
 | `MBR-COVERED` | Linda Johansson | `00301` (2.2 line) | `urn:oid:2.16.840.1.113883.6.300\|00301` | CRD coverage answer, questionnaire package, and a PAS pend with a `102089-0` `CommunicationRequest` you can relaunch DTR from (§5) |
 | `MBR-COVERED` | Linda Johansson | `00300` (2.0 line) | `urn:oid:2.16.840.1.113883.6.300\|00300` | CRD coverage answer, questionnaire package and a PAS approval, plus a PAS pend with a `Task` for `E1390` (§6.4); the DTR package names an unresolved member, and `doc-needed` is off-value-set (§6) |
 
-These are the published test members, and the only ones the endpoint holds records for. A
+These are the published test members, and the only ones the endpoint holds records for. In
+a PAS request both payers match the member on `Patient.identifier`
+(`http://example.org/MIN|12345678901` for `MBR-COVERED`, §5.3), not on the Patient id. A
 member id the endpoint does not hold — a patient from your own test environment, for example — is still
 carried, bound by the id you send (§8.1), but you must then supply `patient` and `coverage`
 yourself, and what the payer answers for a member it does not hold is the payer's own
@@ -779,9 +809,9 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
   configuration to one of them; the hook stays as it is.
 - **Hook and service disagree → `400`.** Sending `"hook": "order-sign"` to
   `shn-order-select` is refused; the error names both.
-- **The payer offers no service for your hook → `422`**, with the hooks it does offer. The
-  exception here today is `order-dispatch`: no payer behind this endpoint carries that leg,
-  so the request fails earlier, at routing, with `502` and no hook list (§1.2).
+- **The payer offers no service for your hook → `422`**, with the hooks it does offer. A hook
+  no payer here carries at all, `order-dispatch`, is not advertised and is refused earlier,
+  with `404` and the service ids that are offered (§1.2).
 
 ### 8.3 `502` — refused, never altered
 
@@ -800,14 +830,24 @@ carried at all. The cases:
   which is no entry of the Bundle"}` — the entry that made the reference, the element,
   the reference as the payer wrote it, and why it does not resolve. The answer is refused
   whole, never completed or trimmed on the way through; the payer's own record is the one
-  to correct.
+  to correct. A resource the payer places under a URN fullUrl (`urn:uuid` or `urn:oid`)
+  needs no `id`, and a `Type/id` reference inside it (which FHIR gives no base to resolve
+  against) is read as the one entry whose address ends in that `Type/id`; two such entries,
+  or none, is a refusal that says so.
 
 A `502` also covers a request that could not be routed at all — no payer behind this
-endpoint carries the leg the request needs. Today that is `order-dispatch` (§1.2); the body
-is `{"error":"hub routing failed"}`.
+endpoint carries the leg the request needs; the body is `{"error":"hub routing failed"}`.
+No advertised service reaches that case today (§1.2).
 
 A `502` is a failed exchange, not a payer verdict. Retrying an identical request will
 produce the same result.
+
+**A refusal the payer's gateway itself produces is not a `502`.** A member the payer does
+not hold, a request with no order to decide on, a validation failure: these come back with
+the payer's own status and error text — for example
+`400 {"error":"no order (ServiceRequest or DeviceRequest) in draftOrders"}` for an
+`order-sign` request whose `draftOrders` is empty. `502 hub routing failed` means the
+exchange machinery failed, not that the payer disagreed.
 
 ### 8.4 Rate and size limits
 
@@ -823,6 +863,19 @@ A body over the cap is refused before any of it is forwarded, with
 
 If you are scripting repeated registration/token/CRD/DTR/PAS runs in a loop, register once
 and reuse the client — a normal integration test needs a handful of registrations at most.
+
+### 8.5 When something fails, quote `X-Correlation-Id`
+
+Every answer from this endpoint carries an `X-Correlation-Id` header: the id the exchange
+is recorded under on our side. If a call does not do what you expect, send us that value
+and the time of the call, and we can find the request, the legs it ran and the answer the
+payer gave without you sending the body again. It is on refusals as much as on successes,
+including the endpoint's own `4xx` and `5xx` answers.
+
+You can also send your own. An `X-Correlation-Id` request header of up to 64 characters
+(letters, digits, `.`, `_` and `-`) is used as the id of the exchange and comes back on the
+answer, so the id your integration test already tracks is the one we find. A header outside
+that shape is ignored and an id is assigned instead.
 
 ---
 

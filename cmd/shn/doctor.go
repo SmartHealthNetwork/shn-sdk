@@ -202,7 +202,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 
 	for _, p := range personas {
 		h := payerFor[p.MemberID]
-		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub}
+		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames}
 		covered, _, err := devID.RunEligibility(ctx, c, ep, payer, "", p.MemberID, p.DOB, p.Family)
 		if err != nil {
 			return fail(exitNetworkHealth, "%s: eligibility round-trip failed: %v", p.MemberID, err)
@@ -231,7 +231,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 			return fail(exitOutcome, "priorauth %s: advertises expectedPriorAuth %q but no order (network descriptor is incomplete)", p.MemberID, p.ExpectedPriorAuth)
 		}
 		h := payerFor[p.MemberID]
-		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub}
+		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames}
 		paReq, err := withTestPersonaRecords(shnsdk.PriorAuthRequest{
 			Member:           p.MemberID,
 			DOB:              p.DOB,
@@ -359,6 +359,13 @@ type holderEntry struct {
 	SignPub  string                   `json:"signPub"`
 	BaseURL  string                   `json:"baseURL"`
 	PayerIDs []shnsdk.PayerIdentifier `json:"payerIds"`
+	// MessageFrames and RequestFrames are the holder's declared frame
+	// capabilities. A DTR questionnaire request is sent as a framed operation
+	// only to a payer declaring "v1op" (SupportsRequestFrameV1Op), and a payer
+	// gateway refuses the older questionnaire request, so the payer's own
+	// declaration travels with its view here.
+	MessageFrames []string `json:"messageFrames"`
+	RequestFrames []string `json:"requestFrames"`
 }
 
 // resolvePersonaPayer resolves the test counterparty for one persona.

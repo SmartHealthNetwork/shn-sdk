@@ -289,7 +289,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `baseURL` | Where the Hub delivers inbound envelopes. Must be a publicly resolvable https URL — no userinfo, no ASCII control characters (< 0x20) — and must not redirect at /substrate/inbound (the Hub refuses redirects). Originator-only clients are never dialed but the URL must still validate. |
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
 | `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`, FR-G42). Today's network-native set is `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1` (§8.6's bridgedContractVersions is the network's capability surface). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. Version-aware routing and translation consume these in later slices; today they are declaration + surfacing. |
-| `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted** (FR-G42): on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). |
+| `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted** (FR-G42): on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). Identities acquired **after** admission are attested through `PUT /register/{id}/payer-ids` (§2.4) — same authority, same rules — so a payer never re-onboards to become routable on a new one. |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
 
 **Proof-of-possession (`pop`).** In addition to the Trust admin gate, the
@@ -387,6 +387,28 @@ Accounts service is an additive convenience layer over it.
 > **Note:** The full self-serve round-trip (login → register → list →
 > revoke) is interactive (browser Cognito login) and is verified operator-side
 > after each deploy.
+
+**Payer identities acquired after onboarding.** A payer client re-declares the
+identities it is routed for with `PUT /clients/{id}/payer-ids` on the Accounts
+service, authenticated as the client's owner:
+
+```
+PUT /clients/<client id>/payer-ids
+Authorization: Bearer <developer token>
+
+{ "payerIds": [ { "system": "…", "value": "…" } ] }
+```
+
+The set REPLACES the client's declared identities (an explicit `[]` withdraws them
+all; an absent field is a `400`). Every identity in it must be one an operator
+vouched for your organization — the same check `/pop` applies at registration
+(FR-G42), so an unvouched one is refused
+`403 payer-id <system>|<value> not authorized for this org` and nothing is
+forwarded. Ask the operator to vouch it first. Accepted requests are forwarded to
+the registrar's `PUT /register/{id}/payer-ids` (§2.4) under the Accounts service's
+own admin credential; the registrar's refusals — notably `409` for an identity
+another holder already holds (AI-G12) — come back verbatim, and your client's
+declared set is left as it was. The client must be `active` and `role=payer`.
 
 ### 2.4 Credential lifecycle — revoke and deregister
 
@@ -509,6 +531,13 @@ holder registered with an earlier SDK comes to declare `"v1op"` (pass
 than v0.44.0); a hand-built rotate body that omits `requestFrames` clears it, and
 requests to you are then sent bare.
 
+**Rotation NEVER changes `payerIds`** — they are operator-attested, not
+self-declared (§2.3, FR-G42), so a rotate body may omit them (every library-driven
+rotate does) or repeat the set the registrar already holds, and the attested set is
+carried forward untouched either way. A body carrying a *different* set is refused
+`403` rather than silently dropped; the route that changes them is
+`PUT /register/{id}/payer-ids` below.
+
 **Re-declaring without new keys.** A `PUT /register/{id}` whose `encPub` and
 `signPub` equal the registered keys is accepted the same way (the `pop` is signed
 with the current key): it refreshes only the self-declared lists above. It is
@@ -525,12 +554,69 @@ Rejection cases (checks are ordered):
 | `id` in body does not match `{id}` in the path | 400 (`"id in body must match path"`) |
 | `id` or `baseURL` contains a control character | 400 (`"id/baseURL must not contain control characters"`) |
 | `role` or `baseURL` differs from the existing record | 400 (`"rotation changes keys only; role/baseURL must match"`) |
+| `payerIds` present and different from the attested set | 403 (`"payerIds are operator-attested; a holder cannot change its own payer identities"`) |
 | New `encPub` / `signPub` malformed (not valid base64 / wrong length) | 400 (`"malformed encPub/signPub"`) |
 | `pop` absent or malformed (not valid base64 / empty) | 400 (`"missing registration proof-of-possession"`) |
 | `pop` does not verify against the **new** `signPub` | 401 (`"registration proof-of-possession failed"`) |
 | Registrar store read/write unavailable (list or update) | 502 (`"store error"`) |
 | Lifecycle audit append failed (keys rolled back, fail-closed) | 502 (`"lifecycle audit failed"`) |
 | Success | 200 (OK) |
+
+**`PUT /register/{id}/payer-ids`** — operator-attested payer-identity update.
+
+A payer acquires identities after it is admitted: an EHR assigns it a payer id, it
+merges, it opens a line of business. This route REPLACES the holder's attested set
+without re-admission, under the same authority and the same rules as `POST /register`
+carried at admission — it is admission's attestation applied later, never a
+self-declaration.
+
+Auth: the `X-Holder-Assertion` header must be a **Trust admin** assertion, exactly as
+for `POST /register` (§2.3). A holder's own assertion is refused `401`: a holder
+declares its capabilities, never the identities the network routes to it (FR-G42).
+Participants reach this through their own front door instead — the accounts service's
+`PUT /clients/{id}/payer-ids` (§2.3a), which checks the identities against the ones an
+operator vouched for that org and then makes this call server-side. Hosted tenants get
+it from the control plane: change the tenant's `payerIds` and its reconcile loop
+publishes the difference.
+
+```
+PUT /register/external-payer/payer-ids
+X-Holder-Assertion: base64(json(assertion))   // Trust admin, audience="registrar"
+```
+
+```json
+{ "payerIds": [ { "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00078" },
+                { "system": "http://ehr.example.org/payer-id", "value": "204" } ] }
+```
+
+The set is a REPLACE, not a union: an identity the body omits is withdrawn, and an
+explicit `[]` withdraws all of them. An **absent** `payerIds` field is a malformed
+request, not "leave them alone" — re-declaring capabilities is `PUT /register/{id}`.
+A withdrawn `(system, value)` is immediately free for the holder that actually holds
+it. Success is 200, and `GET /holders` (and the operator payer-id view) carries the
+new set at once; the Hub and Authorization Framework see it on their next poll.
+
+Rejection cases (checks are ordered):
+
+| Condition | Status |
+|---|---|
+| Missing or invalid Trust admin credential (including a holder's own assertion) | 401 (`"missing or invalid Trust admin credential"`) |
+| `{id}` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
+| Body is not valid JSON | 400 (`"bad request body"`) |
+| `payerIds` absent | 400 (`"payerIds required (an empty array withdraws every identity)"`) |
+| More than 16 entries | 400 (`"too many payerIds"`) |
+| An entry missing `system` or `value` | 400 (`"payerIds entries require both system and value"`) |
+| An entry's `system`/`value` contains whitespace or `\|` (FHIR's reserved token delimiter — the same rule the self-serve path applies, §2.3a) | 400 (`"payerId system/value must not contain whitespace or '\|'"`) |
+| The same entry twice | 400 (`"payerIds entries must be distinct"`) |
+| No such (dynamic) holder | 404 (`"no such holder"`) |
+| The holder's role is not `payer` | 400 (`"payerIds are only valid for role=payer"`) |
+| A `(system, value)` is already bound to ANOTHER holder — ambiguity is refused, never resolved (AI-G12) | 409 (`"payer-id already registered to another holder"`) |
+| Registrar store read/write unavailable | 502 (`"store error"`) |
+| Lifecycle audit append failed (the set is rolled back, fail-closed) | 502 (`"lifecycle audit failed"`) |
+| Success | 200 (OK) |
+
+The transition is audited as `payer-ids-attested` (§2.5), with the admin key's label
+in `scope` — so the record says which authority attested the change.
 
 **Operational note — propagation window.** A 200 only updates the registrar feed.
 The new keys propagate to the Hub and the Authorization Framework on their next
@@ -556,7 +642,8 @@ separately (§4 tokens are per-leg, per-operation — see the concept mapping in
 ### 2.5 Auditing
 
 Every lifecycle transition — `registered`, `revoked`, `deregistered`, `rotated` (new keys),
-`redeclared` (a `PUT /register/{id}` that kept both keys, §2.4) — is signed
+`redeclared` (a `PUT /register/{id}` that kept both keys, §2.4), `payer-ids-attested`
+(a `PUT /register/{id}/payer-ids`, §2.4) — is signed
 by the registrar with its own signing key (public key = the manifest `registrarPub`,
 which the Audit Plane trusts as a signer; distinct from the Audit Plane's own
 `auditSignPub`) and appended to the canonical audit chain. A transition
@@ -1351,8 +1438,12 @@ responding gateway itself writes about the request once the leg is authenticated
 order to decide on, a subject that does not match the token (`403`), a consent it
 cannot confirm, an ingress validation failure at enforcement `strict` (`422
 ingress validation failed`) — those are its verdict, not its machinery, and
-travel the same way; only its own faults (`5xx`) and the pre-handler checks
-above stay bare. The Hub's generic `"hub routing failed"` therefore now means
+travel the same way, as does any `4xx` it writes about its own participant's
+answer after that system answered (a PAS response whose patient linkage is
+inconsistent or that names another patient, a questionnaire package carrying a
+subject, an answer that repeats a member name, an answer that fails validation
+at `strict`); only its own faults (`5xx`) and the pre-handler checks above stay
+bare. The Hub's generic `"hub routing failed"` therefore now means
 exactly what it says: routing failed, not "the far end disagreed with you."
 
 **Legacy peers see no change.** An exchange where either side is not
@@ -2604,6 +2695,28 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-09-20 — The `shn` CLI and the sample participant carry the payer's
+  declared request frames (§6.3).** `shn doctor` and `shn priorauth` build
+  their view of a payer from its `/holders` row and now carry that row's
+  `messageFrames` and `requestFrames`, so their questionnaire request is sent
+  as the framed `questionnaire-package` operation to a payer declaring
+  `"v1op"`; the published CLI before this (sdk v0.51.1) did not read the
+  payer's `requestFrames` and sent the older questionnaire request. Callers of
+  `RunPriorAuth` pass `Payer.RequestFrames` from the payer's `/holders` row
+  the same way. The sample participant reads the row when given the feed URL
+  and refuses a prior-authorization run, before anything is sent, against a
+  payer that does not declare `"v1op"`. A payer gateway that refuses the older
+  questionnaire request arrives with the gateway release that follows sdk
+  v0.52.0; every routable gateway payer already declares `"v1op"`.
+- **2026-09-20 — A recipient gateway's refusal of its own participant's answer
+  travels framed (§8, "Mechanical vs. application status").** After the payer's
+  system has answered, a `4xx` its gateway writes about that answer — a PAS
+  response whose patient linkage is inconsistent or that names another patient
+  (`403`), a questionnaire package carrying a subject (`403`), an answer that
+  repeats a member name (`403`), an answer that fails validation at `strict`
+  (`422`) — is framed as the gateway's answer with `200` to the Hub, so the
+  requester reads that status and reason instead of `502 hub routing failed`.
+  A `5xx` about the answer and a response-leg build failure stay bare, as before.
 - **2026-09-17 — SDK: CRD card builders retired, card and evidence readers corrected,
   decision EOBs state the payer's own reason.** `BuildCards` / `BuildCardsAtLine` now
   build nothing and return `ErrBuildCardsReplaced`: a CRD answer returns the requested

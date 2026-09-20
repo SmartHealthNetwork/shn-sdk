@@ -167,8 +167,8 @@ type DTRDef struct {
 	// input-parameters.json + OperationDefinition-questionnaire-package.json
 	// (2026-08-12) — `coverage` is min=1 at EVERY line (2.0.1/2.1.0/2.2.0 all require
 	// it; a real Da Vinci payer 400s "The 'coverage' parameter is required (min=1)"
-	// without it regardless of line, per the long-standing FR-G28 comment on
-	// buildQuestionnairePackageRequest), but 2.2.0 additionally TIGHTENS max from *
+	// without it regardless of line — the FR-G28 finding behind
+	// BuildQuestionnairePackageParameters' coverage input), but 2.2.0 additionally TIGHTENS max from *
 	// to 1 (min=1 max=1, i.e. exactly one) — the genuinely NEW per-line fact. true
 	// only at "2.2": the request builder refuses BEFORE the wire (a legible local
 	// refusal replacing what would otherwise be the partner's 400) when a caller
