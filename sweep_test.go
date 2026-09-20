@@ -51,7 +51,7 @@ import (
 // in the publish runbook while the tree carried the tags across releases; it
 // was retired as inconsistent with the published guides, not enforced.
 const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|Material-|infra/|goldengen|shn-platform|\bE[0-9][a-z][0-9]?\b|\bD[0-9]\b` +
-	`|\bK1\b|PR #[0-9]+|#[0-9]{2,}\b|docs/superpowers|(?i:\bslice[ -][0-9]\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
+	`|\bK1\b|PR #[0-9]+|#[0-9]{2,}\b|docs/superpowers|(?i:\bslice[ -][0-9][a-z]?\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
 	`|ledger[ -][0-9]|(?i:ledger[ -]item[ -][0-9])|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b|\b[SM]F[0-9]+\b` +
 	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})`
 
@@ -111,6 +111,10 @@ func TestInternalTokenPattern_Forms(t *testing.T) {
 	re := regexp.MustCompile(internalTokenPattern)
 
 	mustMatch := []string{
+		// A slice id with a letter suffix. `slice 1a` reached a new shipped file's comment
+		// because the arm ended in \b and the letter defeated the boundary.
+		`// slice 1a emits findings before any policy exists`,
+		`// Slice-2b owns the boundary migration`,
 		// Design-note pointers: section-only, date + section, bare date, and
 		// the sentence-initial capital that got past a case-sensitive arm.
 		`// (spec §1 invariant: ok:false ⇒ failure present)`,

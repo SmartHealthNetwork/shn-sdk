@@ -1345,9 +1345,15 @@ replay, an unknown `transactionType`, or a failure building the response leg
 itself (seal/authorize/encode). Everything the application produced — an
 adjudication denial, a partner payer's real `400`, a `422` validation reject —
 is an application **answer**, not a machinery failure, and (for a frame-capable
-exchange) travels inside the frame with **200 to the Hub**. The Hub's generic
-`"hub routing failed"` therefore now means exactly what it says: routing failed,
-not "the far end disagreed with you."
+exchange) travels inside the frame with **200 to the Hub**. So is any `4xx` the
+responding gateway itself writes about the request once the leg is authenticated
+— a member it does not hold (`400 unknown member`), a request it cannot read, no
+order to decide on, a subject that does not match the token (`403`), a consent it
+cannot confirm, an ingress validation failure at enforcement `strict` (`422
+ingress validation failed`) — those are its verdict, not its machinery, and
+travel the same way; only its own faults (`5xx`) and the pre-handler checks
+above stay bare. The Hub's generic `"hub routing failed"` therefore now means
+exactly what it says: routing failed, not "the far end disagreed with you."
 
 **Legacy peers see no change.** An exchange where either side is not
 frame-capable is byte-identical to the protocol's original, pre-message-frame

@@ -48,11 +48,26 @@ without deploying anything of your own.
 | `POST /cds-services/{id}` | yes | CRD — invoke one of the services in §1.2 |
 | `POST /Questionnaire/$questionnaire-package` | yes | DTR — fetch a questionnaire package |
 | `POST /Claim/$submit` | yes | PAS — submit a prior-authorization request |
+| `POST /Claim/$inquire` | yes | PAS — ask the payer for the decision it holds on a submission (§1.6) |
 | `GET /healthz` | no | Liveness |
 
-**Not offered.** `Claim/$inquire`, Subscription, `Questionnaire/$next-question` and
-`Questionnaire/$populate` are not exposed here. This endpoint is submission-only: once a
-payer pends a request, the pend's later resolution is not observable through it.
+**Not offered.** Subscription, `Questionnaire/$next-question` and `Questionnaire/$populate`
+are not exposed here. A payer's later decision on a pended request is not pushed to you
+(there is no notification path); you ask for it with `Claim/$inquire` (§1.6).
+
+**Two aliases, so you can test as you are configured today.** A `POST` to a path that
+is not in the table but ends in one of its operations — `/$submit` without `Claim/`, or
+`/fhir/Claim/$submit` — is served as that operation (`POST /Claim/$submit`). A
+`POST /cds-services/{id}` with an id this endpoint does not advertise, whose body `hook`
+is one an advertised service carries — `order-sign-crd` with `"hook":"order-sign"` — is
+served by that service (`shn-order-sign`). An aliased answer is the payer's answer
+unchanged, plus two headers naming the canonical form:
+`Link: </Claim/$submit>; rel="canonical"` (or `</cds-services/shn-order-sign>`) and a
+`Warning: 299` that says the same in words. The canonical forms are the table above and
+the ids in §1.2; use them in the configuration you take to production, because no other
+endpoint on the network serves the aliases. Any other path, and any id whose hook no
+advertised service carries, is answered `404` with the table or the advertised ids in the
+body.
 
 ### 1.2 Hooks and CDS services
 
@@ -122,22 +137,55 @@ The payer's answer body is relayed to you as the payer sent it. In particular:
 - HTTP-level signatures are not carried. CRD responses are served as
   `application/json`, DTR and PAS responses as `application/fhir+json`.
 
-### 1.5 The two reference payers
+### 1.5 The reference payers and their routes
 
 | Route | `Coverage.payor` identifier | Da Vinci line | Test member | Example order |
 |---|---|---|---|---|
 | `00301` | `urn:oid:2.16.840.1.113883.6.300\|00301` | **2.2** | `MBR-COVERED` | HCPCS `G0151` |
-| `00001` | `urn:oid:2.16.840.1.113883.6.300\|00001` | **2.0** | `MBR-COVERED` | HCPCS `L8000` |
+| `00300` | `urn:oid:2.16.840.1.113883.6.300\|00300` | **2.0** | `MBR-COVERED` | HCPCS `L8000`; `E1390` to pend |
 
 Start with **route `00301`** (§5). It is the current Da Vinci reference payer, it is on the
 2.2 line, and it is the route that demonstrates the whole loop: a CRD coverage answer, a
 questionnaire package, a PAS submission that **pends with a `CommunicationRequest`**, and a
-DTR relaunch keyed off that pend. Route `00001` (§6) is the 2.0-line route; its PAS
-submission is approved outright, so it does not exercise the pended path.
+DTR relaunch keyed off that pend. Route `00300` (§6) is the 2.0-line route: the same
+reference payer software, run as a hosted participant on the network and declaring the 2.0
+line. Its PAS submission for the worked example is approved outright; an
+oxygen-concentrator order (§6.4) **pends with a `Task`**, the 2.0-line pended shape.
+
+Both routes are hosted participants, and a hosted participant takes gateway fixes at
+published gateway releases: a fix announced for route `00301` or `00300` names the release
+that carries it, and the route answers the old way until that release is rolled.
+
+**Route `00001` is still available.** `urn:oid:2.16.840.1.113883.6.300|00001` reaches the
+platform's own instance of the same 2.0-line reference payer. It answers every call in §6
+identically, takes gateway fixes at every deploy rather than at a release, and writes its
+internal server address (`http://localhost:8081/fhir/…`) into the `fullUrl`s of its PAS
+answers. It is not the route to configure; a client already pointed at it can stay until it
+next changes configuration.
 
 The endpoint declares both the 2.0 and the 2.2 lines for CRD, DTR and PAS, and pairs with
 each payer on a line they share. A request that cannot be carried to the payer's line
 unchanged is refused rather than silently rewritten (§8).
+
+### 1.6 Inquiry
+
+`POST /Claim/$inquire` is answered on both routes. Send a PAS inquiry request Bundle
+(`profile-pas-inquiry-request-bundle`) whose Coverage names the route's payer identifier
+as in §1.5, whose Patient carries the member identifier you submitted with (typed `MB`),
+and whose Claim names the requesting provider you submitted with: both reference payers
+match an inquiry on the member identifier and the provider's NPI, and a query for a
+submission they cannot match is answered with an empty result, not an error.
+
+What comes back is the payer's own answer, relayed as sent. Measured on 2026-09-19 with the
+Inferno PAS test kits, both routes answer `HTTP 200` and a `Parameters` resource whose
+`responseBundle` parameter carries the PAS inquiry response Bundle — a `ClaimResponse` with
+the decision the payer holds (on route `00301`, a pended decision also carries the
+`CommunicationRequest` from §5.3). That is the PAS 2.2 inquiry answer, and it passes the
+2.2.1 kit's inquiry test on route `00301`. The 2.0-line payer behind route `00001` answers
+in the same shape, which the PAS 2.0.1 kit rejects (`expected Bundle, but received
+Parameters`): the 2.0.1 operation returns the response Bundle itself. A client on the 2.0
+line should read the Bundle out of the `Parameters` until that answer is carried at the
+2.0 line; this document will change when it is.
 
 ---
 
@@ -275,9 +323,9 @@ All three return:
 ```
 
 Tokens are short-lived (5 minutes) — fetch a fresh one per test run rather than caching
-across sessions. The endpoint is redeployed routinely, and a token issued just before a
-redeploy can be rejected before its five minutes are up; if a call that worked a moment
-ago returns `401`, request a new token and retry. Your registration is not affected.
+across sessions. The endpoint is redeployed routinely; a token stays valid for its five
+minutes across a redeploy, and so does your registration. If a call returns `401`, the
+token has expired or was never issued here: request a new one and retry.
 
 ```bash
 TOKEN=<access_token from above>
@@ -488,25 +536,25 @@ Expect `HTTP 200` and the same `HomeHealthAssessment` package. The payer resolve
 number to the pended claim: the `QuestionnaireResponse`'s `qr-context` extension names the
 order **as the payer stored it from your submission**, and `intendedUse` is `withpa`.
 
-This endpoint is submission-only, so how the pend later resolves is not observable here
-(§1.1).
+The pend's later resolution is not pushed to you; ask for it with `Claim/$inquire` (§1.6).
 
 ---
 
-## 6. Worked example — route `00001` (2.0 line)
+## 6. Worked example — route `00300` (2.0 line)
 
-A Da Vinci reference payer on the 2.0 line. Test member **`MBR-COVERED`**, HCPCS **`L8000`**
+The hosted conformance payer on the 2.0 line, the same Da Vinci reference payer software as
+§5 at its 2.0 line. Test member **`MBR-COVERED`**, HCPCS **`L8000`**
 (breast prosthesis, mastectomy bra), payer identifier
-`urn:oid:2.16.840.1.113883.6.300|00001`, hook `order-sign`. This payer adjudicates coverage
+`urn:oid:2.16.840.1.113883.6.300|00300`, hook `order-sign`. This payer adjudicates coverage
 against its own PlanDefinition and will not return a decision for an arbitrary CPT code.
 
 ### 6.1 CRD
 
 ```bash
-cat > crd-00001.json <<'EOF'
+cat > crd-00300.json <<'EOF'
 {
   "hook": "order-sign",
-  "hookInstance": "quickstart-00001-order-sign",
+  "hookInstance": "quickstart-00300-order-sign",
   "fhirServer": "https://provider.example/fhir",
   "context": {
     "userId": "Practitioner/p1",
@@ -538,7 +586,7 @@ cat > crd-00001.json <<'EOF'
       "status": "active",
       "beneficiary": {"reference": "Patient/MBR-COVERED"},
       "payor": [{"reference": "#cms-payer"}],
-      "contained": [{"resourceType": "Organization", "id": "cms-payer", "name": "Centers for Medicare and Medicaid Services", "identifier": [{"system": "urn:oid:2.16.840.1.113883.6.300", "value": "00001"}]}]
+      "contained": [{"resourceType": "Organization", "id": "cms-payer", "name": "Centers for Medicare and Medicaid Services", "identifier": [{"system": "urn:oid:2.16.840.1.113883.6.300", "value": "00300"}]}]
     }
   }
 }
@@ -547,7 +595,7 @@ EOF
 curl -s https://pa-test.shn-preview.org/cds-services/shn-order-sign \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d @crd-00001.json
+  -d @crd-00300.json
 ```
 
 Expect `HTTP 200`, an empty `"cards"` array and one `systemActions` update:
@@ -573,7 +621,7 @@ it to skip DTR — use route `00301` (§5) to exercise the CRD-to-DTR handoff.
 ### 6.2 DTR
 
 ```bash
-cat > dtr-00001.json <<'EOF'
+cat > dtr-00300.json <<'EOF'
 {
   "resourceType": "Parameters",
   "meta": {"profile": ["http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-qpackage-input-parameters"]},
@@ -586,7 +634,7 @@ cat > dtr-00001.json <<'EOF'
         "status": "active",
         "beneficiary": {"reference": "Patient/MBR-COVERED"},
         "payor": [{"reference": "#cms-payer"}],
-        "contained": [{"resourceType": "Organization", "id": "cms-payer", "active": true, "name": "Centers for Medicare and Medicaid Services", "identifier": [{"system": "urn:oid:2.16.840.1.113883.6.300", "value": "00001"}]}]
+        "contained": [{"resourceType": "Organization", "id": "cms-payer", "active": true, "name": "Centers for Medicare and Medicaid Services", "identifier": [{"system": "urn:oid:2.16.840.1.113883.6.300", "value": "00300"}]}]
       }
     },
     {
@@ -600,7 +648,7 @@ EOF
 curl -s "https://pa-test.shn-preview.org/Questionnaire/\$questionnaire-package" \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d @dtr-00001.json
+  -d @dtr-00300.json
 ```
 
 Expect `HTTP 200` and a `Parameters` resource whose `packagebundle` carries the real
@@ -628,12 +676,19 @@ substitutions the appendix names for this route:
 curl -s "https://pa-test.shn-preview.org/Claim/\$submit" \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d @pas-00001.json
+  -d @pas-00300.json
 ```
 
-Expect `HTTP 200` and a PAS response `Bundle` (`collection`) of nine entries containing
-exactly one `ClaimResponse` plus the resources it references. For this request the
-`ClaimResponse` has `outcome` `complete` and a review action of `A1` "Certified in total".
+Expect `HTTP 200` and a PAS response `Bundle` (`collection`) of ten entries containing
+exactly one `ClaimResponse` plus the resources it references, among them the payer's own
+`Organization/example`. For this request the `ClaimResponse` has `outcome` `complete` and
+a review action of `A1` "Certified in total".
+
+**The `fullUrl`s are the payer's own.** Six of the ten entries carry a `fullUrl` under this
+payer's own public host on the preview environment (`https://….shn-preview.org/fhir/…`),
+exactly as the payer sent them; the rest keep the `http://example.org/fhir/…` addresses from your request.
+None of them is meant to be fetched — every reference in the Bundle resolves to an entry
+inside it, so resolve by `fullUrl` within the Bundle, not over the network.
 
 **Where the authorization number is.** It is **not** in `ClaimResponse.preAuthRef`, which
 this payer leaves absent. It is on the item's adjudication, in the `number` sub-extension of
@@ -652,7 +707,20 @@ and `extension-itemPreAuthIssueDate`. As on route `00301`, the `ClaimResponse` n
 payer's own member record (`Patient/SubscriberExample`), not the patient id you sent.
 
 Approval and denial both come back as a Bundle; inspect the decision inside it. A pending
-decision uses review-action code `A4` — see §5.3 for the route that produces one.
+decision uses review-action code `A4` — see §5.3 for the 2.2-line pend (a
+`CommunicationRequest`) and §6.4 for the 2.0-line pend (a `Task`).
+
+### 6.4 A pend on this route — `E1390` with a `Task`
+
+This payer pends an oxygen-concentrator order. Take the §6.3 request and change both
+`"code": "L8000"` codings to `"code": "E1390"` (on `Claim.item.productOrService` and on the
+`ServiceRequest`), with a Bundle identifier of your own, and submit it the same way. Expect
+`HTTP 200` and a ten-entry Bundle whose `ClaimResponse` is `outcome` `queued` with review
+action `A4` "Pending", plus a `Task` (`status` `requested`, code
+`attachment-request-questionnaire`): the PAS 2.0 pended model, in which the payer asks for
+documentation through a `Task` rather than the `CommunicationRequest` of §5.3. The `G0151`
+home-health order of §5, sent to this route, is answered `A3` "Not certified" — a denial,
+and this payer's decision for that order.
 
 ---
 
@@ -661,13 +729,13 @@ decision uses review-action code `A4` — see §5.3 for the route that produces 
 | Member ID | Persona | Payer route | `Coverage.payor` identifier | Expect |
 |---|---|---|---|---|
 | `MBR-COVERED` | Linda Johansson | `00301` (2.2 line) | `urn:oid:2.16.840.1.113883.6.300\|00301` | CRD coverage answer, questionnaire package, and a PAS pend with a `102089-0` `CommunicationRequest` you can relaunch DTR from (§5) |
-| `MBR-COVERED` | Linda Johansson | `00001` (2.0 line) | `urn:oid:2.16.840.1.113883.6.300\|00001` | CRD coverage answer, questionnaire package and a PAS approval; the DTR package names an unresolved member, and `doc-needed` is off-value-set (§6) |
+| `MBR-COVERED` | Linda Johansson | `00300` (2.0 line) | `urn:oid:2.16.840.1.113883.6.300\|00300` | CRD coverage answer, questionnaire package and a PAS approval, plus a PAS pend with a `Task` for `E1390` (§6.4); the DTR package names an unresolved member, and `doc-needed` is off-value-set (§6) |
 
 These are the published test members, and the only ones the endpoint holds records for. A
 member id the endpoint does not hold — a patient from your own test environment, for example — is still
 carried, bound by the id you send (§8.1), but you must then supply `patient` and `coverage`
 yourself, and what the payer answers for a member it does not hold is the payer's own
-answer. On route `00001` the DTR limitation in §6.2 applies even to the published member.
+answer. On route `00300` the DTR limitation in §6.2 applies even to the published member.
 
 ---
 
@@ -685,20 +753,30 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
   member against its own synthetic roster. A CRD request whose `context.patientId`, a PAS
   bundle whose `Claim.patient`, or a DTR request whose Coverage beneficiary (or, if the
   Coverage names none, the order's subject) names a member it does not hold is bound by
-  that member id alone and carried, so you can drive the hook from a patient in your own test
-  environment. Two consequences: the endpoint holds no records for such a member, so leave
-  out `patient` or `coverage` prefetch and the request is refused (`422`, next bullet),
-  and a history key you leave out is left out of what the payer receives rather than
-  supplied; and the payer resolves the member on its own, so its answer for a member it
-  does not hold is the payer's own — the DTR prepopulation warning in §5.2 is the visible
-  case. A request that mixes members is still rejected with `403 Forbidden`.
+  that member id together with the birth date and family name of the Patient your request
+  carries for it (by the id alone when the request carries no such Patient) and carried, so
+  you can drive the hook from a patient in your own test environment. Three consequences:
+  the endpoint holds no records for such a member, so leave out `patient` or `coverage`
+  prefetch and the request is refused (`422`, next bullet), and a history key you leave out
+  is left out of what the payer receives rather than supplied; the payer binds the member
+  the same way from the same request, so send the Patient with the same `birthDate` and
+  `name[0].family` on every leg that carries it — a Patient that disagrees with a record
+  either side does hold is rejected with `403 Forbidden`; and the payer resolves the member
+  on its own, so its answer for a member it does not hold is the payer's own — the DTR
+  prepopulation warning in §5.2 is the visible case. A request that mixes members is still
+  rejected with `403 Forbidden`.
 - **A prefetch key the endpoint cannot supply → `422`.** If you leave out an advertised
   prefetch key and the endpoint's own records hold no matching patient or coverage, the
   request is refused rather than sent with a blank or invented value.
 
 ### 8.2 Hooks and services
 
-- **Unknown service id → `404`.** Post only to the three ids in §1.2.
+- **Unknown service id → served by its hook, else `404`.** An id this endpoint does not
+  advertise is served by the advertised service for the `hook` in your body, with the
+  canonical id named in the answer's `Link` and `Warning` headers (§1.1). When no
+  advertised service carries that hook, the `404` lists the advertised ids with the hook
+  each carries. If you see it, change the service id in your CDS Hooks client
+  configuration to one of them; the hook stays as it is.
 - **Hook and service disagree → `400`.** Sending `"hook": "order-sign"` to
   `shn-order-select` is refused; the error names both.
 - **The payer offers no service for your hook → `422`**, with the hooks it does offer. The
@@ -715,7 +793,14 @@ carried at all. The cases:
 - the payer does not accept the framed DTR operation;
 - the payer's PAS decision cannot be stated as sent — for example a decision that denies
   while also naming an authorization number, or decision detail outside the code systems
-  the decision record binds.
+  the decision record binds;
+- the payer's PAS response Bundle names a resource it does not carry. The body says which:
+  `{"error":"engine: invalid native PAS response Bundle: PAS response graph: entry 6
+  (ServiceRequest/1810) /subject references Patient \"https://…/Patient/MBR-COVERED\",
+  which is no entry of the Bundle"}` — the entry that made the reference, the element,
+  the reference as the payer wrote it, and why it does not resolve. The answer is refused
+  whole, never completed or trimmed on the way through; the payer's own record is the one
+  to correct.
 
 A `502` also covers a request that could not be routed at all — no payer behind this
 endpoint carries the leg the request needs. Today that is `order-dispatch` (§1.2); the body
@@ -733,6 +818,9 @@ produce the same result.
 | Concurrent requests in flight | 8 | `503` |
 | Request body | 5 MiB | `400` |
 
+A body over the cap is refused before any of it is forwarded, with
+`{"error":"request body exceeds 5 MiB"}`.
+
 If you are scripting repeated registration/token/CRD/DTR/PAS runs in a loop, register once
 and reuse the client — a normal integration test needs a handful of registrations at most.
 
@@ -744,8 +832,8 @@ A `200` and a payer decision prove the exchange reached the payer and the payer 
 request. That is **not** IG-profile certification, of the endpoint or of the payloads in this
 document, and a copy of these payloads will inherit their known findings.
 
-The `00001` payloads in §6 double as the automated payer-acceptance checks run against this
-endpoint; the captured synthetic fixture is accepted by the conformance payer, and it is
+The route `00300` payloads in §6 double as the automated payer-acceptance checks run against
+this endpoint; the captured synthetic fixture is accepted by the conformance payer, and it is
 **not certified against the full** `hl7.org/fhir/us/davinci-pas` profiles. The Inferno DTR and PAS test kits were run
 against this endpoint on 2026-09-03, with a PAS follow-up on 2026-09-10 (run records
 available on request). What is known about each:
@@ -785,12 +873,12 @@ A few further points if you copy these payloads:
 One bundle serves both routes. As written it is the **route `00301`** request (§5.3): a
 `G0151` order for `MBR-COVERED` against payer `00301`. Save it as `pas-00301.json`.
 
-For the **route `00001`** request (§6.3), save a copy as `pas-00001.json` with three
-substitutions:
+For the **route `00300`** request (§6.3), save a copy as `pas-00300.json` with three
+substitutions (for the pend in §6.4, use `"code": "E1390"` in substitution 1 instead):
 
 1. both `"code": "G0151"` codings → `"code": "L8000"` (on `Claim.item.productOrService` and
    on the `ServiceRequest`);
-2. the Coverage's `payor[0].identifier.value`, `"00301"` → `"00001"` (this is what routes the
+2. the Coverage's `payor[0].identifier.value`, `"00301"` → `"00300"` (this is what routes the
    request; a blind find-and-replace on `00301` also rewrites the Bundle `identifier.value`
    below, which substitution 3 replaces anyway);
 3. the Bundle `identifier.value` → any value of your own, so your submissions are
