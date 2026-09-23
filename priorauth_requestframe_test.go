@@ -49,6 +49,14 @@ func TestRunPriorAuth_FramesRequestsToDeclaringPayer(t *testing.T) {
 		"dtr-questionnaire-fetch": ContractPADTR20,
 		"pas-claim":               ContractPAPAS20,
 	}
+	// The first leg is a CDS Hooks request. Its own declared media type must
+	// survive the payer gateway's faithful forwarding to a CDS Hooks server;
+	// DTR and PAS remain FHIR operations.
+	wantMedia := map[string]string{
+		"crd-order-select":        "application/json",
+		"dtr-questionnaire-fetch": "application/fhir+json",
+		"pas-claim":               "application/fhir+json",
+	}
 	for txType, want := range wantClaim {
 		if !f.capturedRequestFramed[txType] {
 			t.Errorf("%s: request not framed, want framed (payer declares requestFrames v1)", txType)
@@ -56,6 +64,9 @@ func TestRunPriorAuth_FramesRequestsToDeclaringPayer(t *testing.T) {
 		}
 		if got := f.capturedRequestClaim[txType]; got != want {
 			t.Errorf("%s: contractVersion claim = %q, want %q", txType, got, want)
+		}
+		if got := f.capturedRequestMedia[txType]; got != wantMedia[txType] {
+			t.Errorf("%s: declared Content-Type = %q, want %q", txType, got, wantMedia[txType])
 		}
 	}
 }

@@ -733,8 +733,14 @@ func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoint
 		contractToken = "pa.pas@" + line
 	}
 	if operation != "" || (contractToken != "" && SupportsRequestFrameV1(payer.RequestFrames)) {
+		mediaType := "application/fhir+json"
+		if txType == "crd-order-select" {
+			// This leg carries a CDS Hooks order-sign/order-select request, not a
+			// FHIR resource. The receiver forwards this declared type unchanged.
+			mediaType = "application/json"
+		}
 		headers := map[string]string{
-			"Content-Type":             "application/fhir+json",
+			"Content-Type":             mediaType,
 			FrameHeaderContractVersion: contractToken,
 		}
 		if operation != "" {

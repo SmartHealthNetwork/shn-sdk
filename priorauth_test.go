@@ -61,6 +61,9 @@ type paFakeSubstrate struct {
 	// Populated unconditionally by routeHandler; nil until the first leg routes.
 	capturedRequestFramed map[string]bool
 	capturedRequestClaim  map[string]string
+	// capturedRequestMedia is the media type this participant declared inside
+	// each sealed request frame, before the payer gateway forwards the body.
+	capturedRequestMedia map[string]string
 
 	// doStamp/stampLeg/stampToken seal a SUCCESS response for the leg whose
 	// TransactionType equals stampLeg as a v1 frame carrying stampToken as its
@@ -335,6 +338,9 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 		if f.capturedRequestClaim == nil {
 			f.capturedRequestClaim = map[string]string{}
 		}
+		if f.capturedRequestMedia == nil {
+			f.capturedRequestMedia = map[string]string{}
+		}
 		if f.capturedRequestOperation == nil {
 			f.capturedRequestOperation = map[string]string{}
 		}
@@ -343,6 +349,7 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 			f.capturedRequestFramed[txType] = true
 			if hdr, unwrapped, ferr := DecodeHTTPFrame(reqPlain); ferr == nil {
 				f.capturedRequestClaim[txType] = hdr.Headers[FrameHeaderContractVersion]
+				f.capturedRequestMedia[txType] = hdr.Headers["Content-Type"]
 				f.capturedRequestOperation[txType] = hdr.Headers[FrameHeaderOperation]
 				reqPlain = unwrapped
 			}
