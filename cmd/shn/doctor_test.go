@@ -239,17 +239,18 @@ func (f *fakeNetwork) payloadFor(txType string, reqPlain []byte) []byte {
 				f.now.UTC().Format(time.RFC3339) + `","insurer":{"reference":"Organization/payer"},` +
 				`"outcome":"error","disposition":"denied"}`)
 		}
-		return []byte(`{"resourceType":"ClaimResponse","status":"active","type":{"coding":[{"code":"professional"}]},` +
-			`"use":"preauthorization","patient":{"reference":"Patient/X"},"created":"` +
-			f.now.UTC().Format(time.RFC3339) + `","insurer":{"reference":"Organization/payer"},` +
-			`"outcome":"complete","preAuthRef":"PA-APPROVED-123",` +
-			`"preAuthPeriod":{"end":"2026-12-31"}}`)
+		answer, err := shnsdk.BuildClaimResponse("PA-APPROVED-123", "2026-12-31", "Patient/X", "fixture-correlation", f.now)
+		if err != nil {
+			panic(err)
+		}
+		return answer
 	case "pas-claim-update":
 		// The amend approves (the operative report cleared the pend).
-		return []byte(`{"resourceType":"ClaimResponse","status":"active","type":{"coding":[{"code":"professional"}]},` +
-			`"use":"preauthorization","patient":{"reference":"Patient/X"},"created":"` +
-			f.now.UTC().Format(time.RFC3339) + `","insurer":{"reference":"Organization/payer"},` +
-			`"outcome":"complete","preAuthRef":"PA-APPROVED-AMEND","preAuthPeriod":{"end":"2026-12-31"}}`)
+		answer, err := shnsdk.BuildClaimResponse("PA-APPROVED-AMEND", "2026-12-31", "Patient/X", "fixture-correlation", f.now)
+		if err != nil {
+			panic(err)
+		}
+		return answer
 	}
 	return []byte(`{}`)
 }

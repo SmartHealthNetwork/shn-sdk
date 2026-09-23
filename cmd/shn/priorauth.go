@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+	"github.com/SmartHealthNetwork/shn-sdk/internal/splice"
 )
 
 // resolveTestPayer resolves Payer{ID,EncPub,AuthzPub} + Endpoints for the given
@@ -50,7 +51,7 @@ func resolveTestPayer(ctx context.Context, c *http.Client, disc shnsdk.Discovery
 		fmt.Fprintf(stderr, "shn %s: test payer %q has a malformed encPub: %v\n", cmd, h.ID, err)
 		return shnsdk.Payer{}, shnsdk.Endpoints{}, false, 1
 	}
-	return shnsdk.Payer{ID: h.ID, EncPub: encPub, AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames},
+	return shnsdk.Payer{ID: h.ID, EncPub: encPub, AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames, ContractVersions: h.ContractVersions},
 		shnsdk.Endpoints{HubURL: disc.Endpoints.Hub, AuthzURL: disc.Endpoints.Authz}, legacy, 0
 }
 
@@ -67,6 +68,7 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 	keys := fs.String("keys", "", "key directory holding your signing+encryption keys")
 	out := fs.String("out", ".", "alias for --keys (key directory)")
 	resumeOut := fs.String("resume-out", "shn-resume.json", "where to write the resume handle if the PA pends")
+	pasFactsPath := fs.String("pas-item-facts", "", "JSON file of participant-authored PAS facts keyed by member id (required for PAS 2.1+)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -148,6 +150,11 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "shn priorauth: persona %q: %v\n", *member, err)
 		return 1
 	}
+	req.ItemFacts, err = loadPASItemFactsForMember(*pasFactsPath, *member)
+	if err != nil {
+		fmt.Fprintf(stderr, "shn priorauth: participant PAS facts: %v\n", err)
+		return 1
+	}
 	res, err := devID.RunPriorAuth(ctx, c, ep, payer, req)
 	if err != nil {
 		fmt.Fprintf(stderr, "shn priorauth: %v\n", err)
@@ -185,6 +192,32 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "outcome=%s\n", res.Outcome)
 	}
 	return 0
+}
+
+func loadPASItemFactsForMember(path, member string) (*shnsdk.PASLineItemFacts, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := splice.Scan(raw, splice.DefaultLimits()); err != nil {
+		return nil, fmt.Errorf("facts file JSON invalid: %w", err)
+	}
+	var byMember map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &byMember); err != nil {
+		return nil, fmt.Errorf("parse facts file: %w", err)
+	}
+	row := byMember[member]
+	if len(row) == 0 {
+		return nil, fmt.Errorf("no PAS facts for member %q", member)
+	}
+	var facts shnsdk.PASLineItemFacts
+	if err := json.Unmarshal(row, &facts); err != nil {
+		return nil, fmt.Errorf("member %q: %w", member, err)
+	}
+	return &facts, nil
 }
 
 // cmdPriorAuthResume implements `shn priorauth resume`: load a resume handle, run the

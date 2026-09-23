@@ -1,9 +1,9 @@
 # Provider Test Endpoint — hosted Da Vinci prior-authorization test lane
 
 **Audience:** external partners building a Da Vinci prior-authorization client — EHR
-vendors, provider organizations, and the implementers working on their behalf. Everything
-here is self-service: you register your own client and need nothing configured on the SHN
-side.
+vendors, provider organizations, and the implementers working on their behalf. Client
+registration is self-service; exchanging patient messages also requires the identity and
+routing integration described below.
 
 **What it is.** A hosted, publicly reachable Da Vinci prior-authorization test endpoint —
 CRD (coverage requirements discovery), DTR (documentation templates and rules), and PAS
@@ -13,20 +13,33 @@ CRD (coverage requirements discovery), DTR (documentation templates and rules), 
 https://pa-test.shn-preview.org
 ```
 
-Register a client, get a token, and send real Da Vinci requests. Behind the endpoint your
-request is routed to a payer by the `Coverage.payor` identifier you send. Two Da Vinci
-reference payers sit behind it, one on the **2.2** line and one on the **2.0** line, so you
-can run the identical request pattern against two IG lines just by changing the Coverage,
-without deploying anything of your own.
+Register a client and get a token using §2–3. Native exchange requires either verified
+signed exchange context from an authorized integration, or authoritative subject linkage
+and resolvable routing hints in the request. Registration and bearer tokens do not supply
+signed exchange context or authoritative patient linkage. A bare patient id or patient
+demographics cannot establish that linkage. Without the required context or linkage and
+routing, the gateway refuses the exchange with `400 context_missing`.
+
+**Current integration gap.** The production FHIR connector does not yet supply authoritative
+network patient linkage. Test-door registration does not close this gap, and the resolver
+used by synthetic test fixtures is not production support. The examples below describe
+request shapes and payer answers; end-to-end execution requires a working exchange-context
+or authoritative-linkage integration. This prerequisite describes the repository's current
+native path; it is not a claim that a hosted deployment has completed that integration.
+
+With exchange context established, requests can target either of two Da Vinci reference
+payers, one on the **2.2** line and one on the **2.0** line. The unsigned addressing path
+uses the `Coverage.payor` identifier to resolve the payer; signed context must identify the
+intended recipient.
 
 **Terms of use.**
 
 - **Test lane only.** Every payer reachable from this endpoint is a test environment.
   Nothing here ever reaches a production payer.
 - **Synthetic data only.** Send only synthetic test data — no real patient information,
-  ever. The published test members below are the ones the endpoint holds records for; a
-  member it does not hold is carried under the id you send (§8), so any patient you use
-  must be synthetic too.
+  ever. The published test members below are the ones the endpoint holds records for.
+  Native carriage of an external member still requires authoritative exchange identity
+  (§8); possession of a patient id is insufficient. Every patient you use must be synthetic.
 - **Application traffic evidence.** After owner activation, default capture includes raw
   request and response bodies, headers, and authentication material, including synthetic
   client secrets, bearer tokens and assertions. Evidence is accessible to ordinary staff
@@ -127,12 +140,28 @@ What the endpoint does with your request:
 
 - It **removes `fhirServer` and `fhirAuthorization`** — the payer never gets a route into
   your systems, and the endpoint never calls back into them.
-- For an advertised prefetch key you leave out, it supplies the value **only from its own
-  synthetic records**. Nothing is invented.
-- Everything else in your request is carried to the payer as you sent it.
+- **Omitted prefetch keys remain absent.** Native carriage does not read local records or
+  assemble missing source data. Omitting a key does not request a local source-assembly
+  action, and does not by itself cause a missing-record `422`.
+- Once the exchange context and routing prerequisites above are met, everything else in
+  your request is carried to the payer as you sent it.
 
-The published test member `MBR-COVERED` is stored in those records under a different id, so
-**send `patient` and `coverage` yourself**, as the examples below do.
+At `strict`, the gateway also checks the required CDS Hooks context shapes for
+its advertised `order-select`, `order-sign`, and `order-dispatch` services. Each
+requires a correctly cased string `context.patientId`; `order-select` also
+requires string `userId`, string-array `selections`, and a `draftOrders` Bundle;
+`order-sign` requires string `userId` and a `draftOrders` Bundle;
+`order-dispatch` requires string-array `dispatchedOrders` and string `performer`.
+A supported malformed context is refused as `cds.request.context`. At `none`,
+`observe`, and `basic`, that deeper rule does not stop delivery. It does not
+compare the supplied patient id with the authenticated subject or look up a
+patient in the gateway's local records. The current source rule-set version is
+`participant-conformance/4`; deployed release availability may differ.
+
+**Send the prefetch data the payer needs yourself**, as the examples below do for `patient`
+and `coverage`. Supplied prefetch does not establish authoritative patient linkage. On the
+unsigned addressing path, absent or unresolvable patient/routing hints yield
+`context_missing`; this is a context refusal, not a local source-record lookup failure.
 
 ### 1.4 What comes back
 
@@ -348,8 +377,10 @@ TOKEN=<access_token from above>
 ## 4. The examples below
 
 Both worked examples use the published test member `MBR-COVERED` ("Linda Johansson") and
-differ only in the payer identifier and the ordered code. Each is a complete, runnable
-sequence: CRD, then DTR, then PAS. The PAS request bundle is in
+differ only in the payer identifier and the ordered code. Each shows the sequence CRD,
+then DTR, then PAS. Running it end to end depends on the identity/context integration
+prerequisite and current gap stated above; registration and a bearer token alone do not
+make the sequence runnable. The PAS request bundle is in
 [Appendix A](#appendix-a--the-pas-request-bundle) so the examples stay readable.
 
 ---
@@ -762,10 +793,11 @@ and this payer's decision for that order.
 These are the published test members, and the only ones the endpoint holds records for. In
 a PAS request both payers match the member on `Patient.identifier`
 (`http://example.org/MIN|12345678901` for `MBR-COVERED`, §5.3), not on the Patient id. A
-member id the endpoint does not hold — a patient from your own test environment, for example — is still
-carried, bound by the id you send (§8.1), but you must then supply `patient` and `coverage`
-yourself, and what the payer answers for a member it does not hold is the payer's own
-answer. On route `00300` the DTR limitation in §6.2 applies even to the published member.
+member id the endpoint does not hold requires authenticated exchange context or explicit
+authoritative identity linkage (§8.1). The endpoint does not derive external identity
+from the Patient's demographics. A payer's answer for a member it does not hold remains
+the payer's own answer. On route `00300` the DTR limitation in §6.2 applies even to the
+published member.
 
 ---
 
@@ -775,29 +807,24 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
 
 ### 8.1 Routing and membership
 
-- **Unknown payer identifier → `422`.** If `Coverage.payor[0].identifier.value` names no
-  payer registered on the network, the request is rejected with `422 Unprocessable Entity`
-  (`no registered payer for identifier …`) rather than silently going nowhere. The routes
-  in §1.5 are the ones documented here with test members.
-- **Unknown member → carried, bound by the id you send.** The endpoint first resolves the
-  member against its own synthetic roster. A CRD request whose `context.patientId`, a PAS
-  bundle whose `Claim.patient`, or a DTR request whose Coverage beneficiary (or, if the
-  Coverage names none, the order's subject) names a member it does not hold is bound by
-  that member id together with the birth date and family name of the Patient your request
-  carries for it (by the id alone when the request carries no such Patient) and carried, so
-  you can drive the hook from a patient in your own test environment. Three consequences:
-  the endpoint holds no records for such a member, so leave out `patient` or `coverage`
-  prefetch and the request is refused (`422`, next bullet), and a history key you leave out
-  is left out of what the payer receives rather than supplied; the payer binds the member
-  the same way from the same request, so send the Patient with the same `birthDate` and
-  `name[0].family` on every leg that carries it — a Patient that disagrees with a record
-  either side does hold is rejected with `403 Forbidden`; and the payer resolves the member
-  on its own, so its answer for a member it does not hold is the payer's own — the DTR
-  prepopulation warning in §5.2 is the visible case. A request that mixes members is still
-  rejected with `403 Forbidden`.
-- **A prefetch key the endpoint cannot supply → `422`.** If you leave out an advertised
-  prefetch key and the endpoint's own records hold no matching patient or coverage, the
-  request is refused rather than sent with a blank or invented value.
+- **Unresolvable unsigned routing → `400 context_missing`.** Without verified signed
+  context, the gateway needs authoritative subject linkage and request hints that resolve
+  a registered recipient. An unknown payer identifier or missing routing hints cannot
+  establish that context. The routes in §1.5 are the ones documented here with test members.
+- **External members require authoritative exchange identity.** SHN_ACCEPT_UNKNOWN_MEMBERS is a deprecated compatibility no-op.
+  Both `0` and `1` are ignored with a startup warning. Native exchange accepts a verified
+  signed context or explicit authoritative subject linkage; absent linkage is
+  `context_missing`. Patient demographics never supply missing network identity.
+  At `none` and `observe`, native carriage does not require a local roster entry or compare
+  payload patients. Explicit local source-data assembly and local business actions retain
+  their independent source and authority checks. This compatibility setting requests no
+  Patient insertion and authorizes no record disclosure.
+- **Local source actions have separate requirements.** Explicit local source-assembly
+  actions retain their own source and authority requirements. A local workflow that
+  explicitly builds a request from its participant's records must refuse when required
+  source facts are missing or disclosure is unauthorized. Native posting to the routes in
+  §1.1 does not invoke that assembly by leaving out prefetch. Omitted keys stay absent (§1.3);
+  the payer may itself require data to process the request.
 
 ### 8.2 Hooks and services
 
@@ -839,8 +866,16 @@ A `502` also covers a request that could not be routed at all — no payer behin
 endpoint carries the leg the request needs; the body is `{"error":"hub routing failed"}`.
 No advertised service reaches that case today (§1.2).
 
+A `504` is the one exchange failure the endpoint names rather than leaving generic: the
+leg to the payer produced no answer within the endpoint's gateway's wait (30 seconds; the
+Hub, the payer's gateway and the payer's own system share that budget). The body is
+`{"error":"no answer on the hub leg within 30s (hub leg timeout)"}` — the number is the
+gateway's own leg deadline — carried as an `OperationOutcome` with issue code `timeout` on
+the FHIR operation routes. The endpoint relays its gateway's `504` and body as they are.
+
 A `502` is a failed exchange, not a payer verdict. Retrying an identical request will
-produce the same result.
+produce the same result. A `504` is the same kind of failure with its cause named; a
+retry may succeed once the far side is answering within the budget again.
 
 **A refusal the payer's gateway itself produces is not a `502`.** A member the payer does
 not hold, a request with no order to decide on, a validation failure: these come back with

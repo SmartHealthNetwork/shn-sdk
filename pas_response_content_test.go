@@ -8,6 +8,9 @@ import (
 )
 
 func contentResponse(outcome, code, number string) string {
+	if code == "" && number == "" {
+		return fmt.Sprintf(`{"resourceType":"ClaimResponse","outcome":%q}`, outcome)
+	}
 	return fmt.Sprintf(`{"resourceType":"ClaimResponse","outcome":%q,"item":[{"adjudication":[{"extension":[{"url":%q,"extension":[{"url":%q,"valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/306","code":%q}]}},{"url":"number","valueString":%q}]}]}]}]}`, outcome, reviewActionExtURL, reviewActionCodeExtURL, code, number)
 }
 func contentBundle(resources ...string) []byte {

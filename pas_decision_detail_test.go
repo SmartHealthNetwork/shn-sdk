@@ -65,9 +65,9 @@ func TestParseClaimResponse_DecisionDetail(t *testing.T) {
 		t.Fatalf("approved result %+v (review action %+v)", res, res.ReviewAction)
 	}
 
-	// A bare approval states none of these.
+	// An authorization number without a decision is not an approval.
 	res, err = ParseClaimResponse([]byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"AUTH-2"}`))
-	if err != nil || res.ProcessNotes != nil || res.ReviewAction != nil || res.DenialReasons != nil {
-		t.Fatalf("bare approval %+v %v", res, err)
+	if err == nil || res.Outcome != "" {
+		t.Fatalf("number-only approval %+v %v", res, err)
 	}
 }

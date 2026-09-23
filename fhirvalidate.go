@@ -16,7 +16,8 @@ import (
 	"strings"
 )
 
-// Result reports whether a resource conforms to a profile and lists any issues.
+// Result is a lossy compatibility view of profile validation. Issues contains
+// only error/fatal diagnostics; it cannot certify terminology coverage.
 type Result struct {
 	Valid  bool
 	Issues []string
@@ -37,6 +38,8 @@ type Validator interface {
 type FakeValidator struct {
 	RejectIfContains string
 	Err              error
+	// Evidence is explicit synthetic support; nil proves neither check.
+	Evidence *ValidationEvidence
 }
 
 func NewFakeValidator() *FakeValidator { return &FakeValidator{} }
@@ -49,6 +52,27 @@ func (f *FakeValidator) Validate(_ context.Context, resourceJSON []byte, _ strin
 		return Result{Valid: false, Issues: []string{"fake: contains " + f.RejectIfContains}}, nil
 	}
 	return Result{Valid: true}, nil
+}
+
+// ValidateEvidence returns explicitly configured synthetic evidence. Legacy valid
+// defaults never imply support. RejectIfContains applies to the profile only.
+func (f *FakeValidator) ValidateEvidence(ctx context.Context, body []byte, _ string) (ValidationEvidence, error) {
+	if err := ctx.Err(); err != nil {
+		return unavailableValidation("execution-unavailable"), err
+	}
+	if f.Err != nil {
+		return unavailableValidation("execution-unavailable"), f.Err
+	}
+	if f.Evidence == nil {
+		return unavailableValidation("synthetic-support-unconfigured"), nil
+	}
+	ev := *f.Evidence
+	ev.Profile.Issues = append([]ValidationIssue(nil), ev.Profile.Issues...)
+	ev.Terminology.Issues = append([]ValidationIssue(nil), ev.Terminology.Issues...)
+	if f.RejectIfContains != "" && bytes.Contains(body, []byte(f.RejectIfContains)) {
+		ev.Profile = ValidationCheckEvidence{State: ValidationInvalid, Code: "synthetic-rejection", Issues: []ValidationIssue{{Severity: "error", Code: "synthetic-rejection"}}}
+	}
+	return ev, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -106,12 +130,13 @@ type validatorResponse struct {
 // ValidationMessage (level/message) and the legacy severity/details shape. A
 // level outside the recognised set is a decode failure, never a silent valid.
 type issue struct {
-	Level    string `json:"level"`
-	Message  string `json:"message"`
-	Severity string `json:"severity"`
-	Details  string `json:"details"`
-	Type     string `json:"type"`
-	Line     int    `json:"line"`
+	Level     string `json:"level"`
+	Message   string `json:"message"`
+	Severity  string `json:"severity"`
+	Details   string `json:"details"`
+	Type      string `json:"type"`
+	MessageID string `json:"messageId"`
+	Line      int    `json:"line"`
 }
 
 var recognisedLevels = map[string]bool{"FATAL": true, "ERROR": true, "WARNING": true, "INFORMATION": true}
@@ -130,17 +155,21 @@ func (i issue) text() string {
 	return i.Details
 }
 
-func truncateBytes(b []byte, n int) string {
-	if len(b) <= n {
-		return string(b)
-	}
-	return string(b[:n]) + "…"
+// Validate returns the lossy compatibility view of the shared wire decoder.
+func (h *HTTPValidator) Validate(ctx context.Context, resourceJSON []byte, profile string) (Result, error) {
+	v, err := h.validate(ctx, resourceJSON, profile)
+	return v.legacy(err)
 }
 
-// Validate posts resourceJSON to the HL7 validator server and returns a Result.
-// Network errors, non-2xx responses, and JSON decode errors all return a
-// non-nil error (the caller decides how to treat a validator outage).
-func (h *HTTPValidator) Validate(ctx context.Context, resourceJSON []byte, profile string) (Result, error) {
+// ValidateEvidence preserves safe issues and separate support evidence in one call.
+func (h *HTTPValidator) ValidateEvidence(ctx context.Context, resourceJSON []byte, profile string) (ValidationEvidence, error) {
+	v, err := h.validate(ctx, resourceJSON, profile)
+	return v.evidence, err
+}
+
+func (h *HTTPValidator) validate(ctx context.Context, resourceJSON []byte, profile string) (result decodedValidation, err error) {
+	attempted := false
+	defer func() { result.evidence.ExecutionAttempted = attempted }()
 	profiles := []string{}
 	if profile != "" {
 		profiles = []string{profile}
@@ -163,13 +192,13 @@ func (h *HTTPValidator) Validate(ctx context.Context, resourceJSON []byte, profi
 
 	encoded, err := json.Marshal(body)
 	if err != nil {
-		return Result{}, fmt.Errorf("shnsdk: httpvalidator marshal request: %w", err)
+		return executionFailure(fmt.Errorf("shnsdk: httpvalidator marshal request: %w", err))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		h.BaseURL+"/validate", bytes.NewReader(encoded))
 	if err != nil {
-		return Result{}, fmt.Errorf("shnsdk: httpvalidator build request: %w", err)
+		return executionFailure(fmt.Errorf("shnsdk: httpvalidator build request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -178,67 +207,17 @@ func (h *HTTPValidator) Validate(ctx context.Context, resourceJSON []byte, profi
 		client = http.DefaultClient
 	}
 
+	if err := ctx.Err(); err != nil {
+		return executionFailure(err)
+	}
+	attempted = true
 	resp, err := client.Do(req)
 	if err != nil {
-		return Result{}, fmt.Errorf("shnsdk: httpvalidator do request: %w", err)
+		return executionFailure(fmt.Errorf("shnsdk: httpvalidator do request: %w", err))
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode/100 != 2 {
-		return Result{}, fmt.Errorf("shnsdk: httpvalidator server returned %d", resp.StatusCode)
-	}
-
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
-	if err != nil {
-		return Result{}, fmt.Errorf("shnsdk: httpvalidator read response: %w", err)
-	}
-	if len(raw) > MaxResponseBytes {
-		return Result{}, fmt.Errorf("shnsdk: httpvalidator response exceeds %d bytes", MaxResponseBytes)
-	}
-	var vresp validatorResponse
-	if err := json.Unmarshal(raw, &vresp); err != nil {
-		return Result{}, fmt.Errorf("shnsdk: httpvalidator decode response: %w", err)
-	}
-	// Fail closed: a body without outcomes is not a verdict (a wrong URL, a
-	// proxy page or a changed schema must never read as valid).
-	if len(vresp.Outcomes) == 0 {
-		return Result{}, fmt.Errorf("shnsdk: httpvalidator response carries no outcomes (body %q)", truncateBytes(raw, 200))
-	}
-	var issues []string
-	for _, rawOutcome := range vresp.Outcomes {
-		trimmed := bytes.TrimSpace(rawOutcome)
-		if len(trimmed) == 0 || trimmed[0] != '{' {
-			return Result{}, fmt.Errorf("shnsdk: httpvalidator invalid outcome object")
-		}
-		var oc struct {
-			Issues json.RawMessage `json:"issues"`
-		}
-		if err := json.Unmarshal(rawOutcome, &oc); err != nil {
-			return Result{}, fmt.Errorf("shnsdk: httpvalidator decode outcome: %w", err)
-		}
-		rawIssues := bytes.TrimSpace(oc.Issues)
-		if len(rawIssues) == 0 || rawIssues[0] != '[' {
-			return Result{}, fmt.Errorf("shnsdk: httpvalidator missing or malformed issues")
-		}
-		var decoded []issue
-		if err := json.Unmarshal(rawIssues, &decoded); err != nil {
-			return Result{}, fmt.Errorf("shnsdk: httpvalidator decode issues: %w", err)
-		}
-		for _, iss := range decoded {
-			lvl := iss.level()
-			if !recognisedLevels[lvl] {
-				return Result{}, fmt.Errorf("shnsdk: httpvalidator unrecognised issue level %q (message %q)", lvl, iss.text())
-			}
-			if lvl == "ERROR" || lvl == "FATAL" {
-				issues = append(issues, iss.text())
-			}
-		}
-	}
-
-	return Result{
-		Valid:  len(issues) == 0,
-		Issues: issues,
-	}, nil
+	return decodeValidationResponse(resp, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -265,31 +244,31 @@ func NewOperationValidator(baseURL string) *OperationValidator {
 // Compile-time interface check.
 var _ Validator = (*OperationValidator)(nil)
 
-// operationOutcome is the subset of the FHIR OperationOutcome returned by
-// $validate that we care about.
-type operationOutcome struct {
-	ResourceType string `json:"resourceType"`
-	Issue        []struct {
-		Severity    string `json:"severity"`
-		Diagnostics string `json:"diagnostics"`
-	} `json:"issue"`
+// Validate returns a profile compatibility view. Only pinned 400/422 content
+// failures may be verdicts; all other non-2xx responses are execution failures.
+func (o *OperationValidator) Validate(ctx context.Context, resourceJSON []byte, profile string) (Result, error) {
+	v, err := o.validate(ctx, resourceJSON, profile)
+	return v.legacy(err)
 }
 
-// Validate POSTs resourceJSON to {BaseURL}/{resourceType}/$validate (with an
-// optional ?profile=) and maps the returned OperationOutcome to a Result. VALID
-// means no issue with severity error or fatal. If the response body parses as an
-// OperationOutcome its issues are used regardless of HTTP status; a non-2xx
-// response whose body is NOT a parseable OperationOutcome is treated as a
-// validator outage and returns an error (gateways fail closed on errors).
-func (o *OperationValidator) Validate(ctx context.Context, resourceJSON []byte, profile string) (Result, error) {
+// ValidateEvidence decodes the response once, preserving warnings and separating
+// profile results from the unproven terminology coverage of this adapter.
+func (o *OperationValidator) ValidateEvidence(ctx context.Context, resourceJSON []byte, profile string) (ValidationEvidence, error) {
+	v, err := o.validate(ctx, resourceJSON, profile)
+	return v.evidence, err
+}
+
+func (o *OperationValidator) validate(ctx context.Context, resourceJSON []byte, profile string) (result decodedValidation, err error) {
+	attempted := false
+	defer func() { result.evidence.ExecutionAttempted = attempted }()
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 	}
 	if err := json.Unmarshal(resourceJSON, &probe); err != nil {
-		return Result{}, fmt.Errorf("shnsdk: operationvalidator parse resourceType: %w", err)
+		return executionFailure(fmt.Errorf("shnsdk: operationvalidator parse resourceType: %w", err))
 	}
 	if probe.ResourceType == "" {
-		return Result{}, fmt.Errorf("shnsdk: operationvalidator resource is missing resourceType")
+		return executionFailure(fmt.Errorf("shnsdk: operationvalidator resource is missing resourceType"))
 	}
 
 	endpoint := o.BaseURL + "/" + probe.ResourceType + "/$validate"
@@ -297,9 +276,16 @@ func (o *OperationValidator) Validate(ctx context.Context, resourceJSON []byte, 
 		endpoint += "?profile=" + url.QueryEscape(profile)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(resourceJSON))
+	body := resourceJSON
+	if probe.ResourceType == "Parameters" {
+		// A bare Parameters body supplies $validate's arguments. Nest the exact
+		// resource under test so its own parameters are not mistaken for those
+		// arguments; preserve all original lexical values and whitespace.
+		body = append(append([]byte(`{"resourceType":"Parameters","parameter":[{"name":"resource","resource":`), resourceJSON...), []byte(`}]}`)...)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return Result{}, fmt.Errorf("shnsdk: operationvalidator build request: %w", err)
+		return executionFailure(fmt.Errorf("shnsdk: operationvalidator build request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/fhir+json")
 
@@ -308,40 +294,117 @@ func (o *OperationValidator) Validate(ctx context.Context, resourceJSON []byte, 
 		client = NewClient()
 	}
 
+	if err := ctx.Err(); err != nil {
+		return executionFailure(err)
+	}
+	attempted = true
 	resp, err := client.Do(req)
 	if err != nil {
-		return Result{}, fmt.Errorf("shnsdk: operationvalidator do request: %w", err)
+		return executionFailure(fmt.Errorf("shnsdk: operationvalidator do request: %w", err))
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
-	if err != nil {
-		return Result{}, fmt.Errorf("shnsdk: operationvalidator read response: %w", err)
-	}
-
-	var oo operationOutcome
-	parsed := json.Unmarshal(body, &oo) == nil && oo.ResourceType == "OperationOutcome"
-
-	// A parseable OperationOutcome wins regardless of HTTP status (a request-body
-	// parse failure returns an OO with an error issue, sometimes with non-2xx).
-	if !parsed {
-		if resp.StatusCode/100 != 2 {
-			return Result{}, fmt.Errorf("shnsdk: operationvalidator server returned %d with non-OperationOutcome body: %s",
-				resp.StatusCode, string(body))
-		}
-		return Result{}, fmt.Errorf("shnsdk: operationvalidator 2xx response was not a parseable OperationOutcome: %s",
-			string(body))
-	}
-
-	var issues []string
-	for _, iss := range oo.Issue {
-		if iss.Severity == "error" || iss.Severity == "fatal" {
-			issues = append(issues, iss.Diagnostics)
-		}
-	}
-
-	return Result{
-		Valid:  len(issues) == 0,
-		Issues: issues,
-	}, nil
+	return decodeValidationResponse(resp, false)
 }
+
+// decodeValidationResponse is the only response interpreter for both public
+// views. It reads the complete bounded body before accepting any verdict.
+func decodeValidationResponse(resp *http.Response, wrapper bool) (result decodedValidation, err error) {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
+	defer func() {
+		if err != nil {
+			captured := raw
+			if len(captured) > MaxResponseBytes {
+				captured = captured[:MaxResponseBytes]
+			}
+			err = &ValidationResponseError{status: resp.StatusCode, raw: bytes.Clone(captured), cause: err}
+		}
+	}()
+
+	if err != nil {
+		return executionFailure(fmt.Errorf("shnsdk: validator read response: %w", err))
+	}
+	if len(raw) > MaxResponseBytes {
+		return executionFailure(fmt.Errorf("shnsdk: validator response exceeds %d bytes", MaxResponseBytes))
+	}
+	if resp.StatusCode/100 != 2 && resp.StatusCode != 400 && resp.StatusCode != 422 {
+		return executionFailure(fmt.Errorf("shnsdk: validator server returned %d", resp.StatusCode))
+	}
+
+	var issues []wireValidationIssue
+	if wrapper {
+		var response validatorResponse
+		if err := json.Unmarshal(raw, &response); err != nil {
+			return executionFailure(fmt.Errorf("shnsdk: validator malformed response"))
+		}
+		if len(response.Outcomes) == 0 {
+			return executionFailure(fmt.Errorf("shnsdk: httpvalidator response carries no outcomes"))
+		}
+		for _, outcome := range response.Outcomes {
+			var oc struct {
+				Issues json.RawMessage `json:"issues"`
+			}
+			if err := json.Unmarshal(outcome, &oc); err != nil {
+				return executionFailure(fmt.Errorf("shnsdk: validator malformed outcome"))
+			}
+			rawIssues := bytes.TrimSpace(oc.Issues)
+			if len(rawIssues) == 0 || rawIssues[0] != '[' {
+				return executionFailure(fmt.Errorf("shnsdk: validator missing or malformed issues"))
+			}
+			var decoded []issue
+			if err := json.Unmarshal(rawIssues, &decoded); err != nil {
+				return executionFailure(fmt.Errorf("shnsdk: validator malformed issues"))
+			}
+			for _, iss := range decoded {
+				if !recognisedLevels[iss.level()] {
+					return executionFailure(fmt.Errorf("shnsdk: httpvalidator unrecognised issue level"))
+				}
+				issues = append(issues, wireValidationIssue{severity: strings.ToLower(iss.level()), code: iss.Type, text: iss.text(), messageID: iss.MessageID})
+			}
+		}
+	} else {
+		var outcome struct {
+			ResourceType string `json:"resourceType"`
+			Issue        []struct {
+				Severity    string   `json:"severity"`
+				Code        string   `json:"code"`
+				Diagnostics string   `json:"diagnostics"`
+				Expression  []string `json:"expression"`
+				Details     struct {
+					Coding []struct {
+						System string `json:"system"`
+						Code   string `json:"code"`
+					} `json:"coding"`
+				} `json:"details"`
+			} `json:"issue"`
+		}
+		if err := json.Unmarshal(raw, &outcome); err != nil || outcome.ResourceType != "OperationOutcome" || len(outcome.Issue) == 0 {
+			return executionFailure(fmt.Errorf("shnsdk: validator malformed OperationOutcome"))
+		}
+		for _, iss := range outcome.Issue {
+			switch iss.Severity {
+			case "fatal", "error", "warning", "information":
+			default:
+				return executionFailure(fmt.Errorf("shnsdk: validator unrecognised issue severity"))
+			}
+			if iss.Code == "" {
+				return executionFailure(fmt.Errorf("shnsdk: validator missing issue code"))
+			}
+			messageID := ""
+			if len(iss.Details.Coding) > 0 {
+				messageID = "unmapped"
+				if len(iss.Details.Coding) == 1 && iss.Details.Coding[0].System == "http://hl7.org/fhir/java-core-messageId" && iss.Details.Coding[0].Code != "" {
+					messageID = iss.Details.Coding[0].Code
+				}
+			}
+			issues = append(issues, wireValidationIssue{severity: iss.Severity, code: iss.Code, text: iss.Diagnostics, messageID: messageID, expression: iss.Expression})
+		}
+	}
+	return classifyValidation(issues, resp.StatusCode, wrapper)
+}
+
+var (
+	_ EvidenceValidator = (*HTTPValidator)(nil)
+	_ EvidenceValidator = (*OperationValidator)(nil)
+	_ EvidenceValidator = (*FakeValidator)(nil)
+)

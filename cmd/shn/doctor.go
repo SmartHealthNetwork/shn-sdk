@@ -60,6 +60,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	keys := fs.String("keys", "", "key directory holding your signing+encryption keys")
 	out := fs.String("out", ".", "alias for --keys (key directory)")
 	persona := fs.String("persona", "", "run only the persona with this member id (default: all seeded personas)")
+	pasFactsPath := fs.String("pas-item-facts", "", "JSON file of participant-authored PAS facts keyed by member id (required for PAS 2.1+)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -202,7 +203,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 
 	for _, p := range personas {
 		h := payerFor[p.MemberID]
-		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames}
+		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames, ContractVersions: h.ContractVersions}
 		covered, _, err := devID.RunEligibility(ctx, c, ep, payer, "", p.MemberID, p.DOB, p.Family)
 		if err != nil {
 			return fail(exitNetworkHealth, "%s: eligibility round-trip failed: %v", p.MemberID, err)
@@ -231,7 +232,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 			return fail(exitOutcome, "priorauth %s: advertises expectedPriorAuth %q but no order (network descriptor is incomplete)", p.MemberID, p.ExpectedPriorAuth)
 		}
 		h := payerFor[p.MemberID]
-		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames}
+		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames, ContractVersions: h.ContractVersions}
 		paReq, err := withTestPersonaRecords(shnsdk.PriorAuthRequest{
 			Member:           p.MemberID,
 			DOB:              p.DOB,
@@ -246,6 +247,10 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		}, p)
 		if err != nil {
 			return fail(exitOutcome, "priorauth %s: %v", p.MemberID, err)
+		}
+		paReq.ItemFacts, err = loadPASItemFactsForMember(*pasFactsPath, p.MemberID)
+		if err != nil {
+			return fail(exitOutcome, "priorauth %s: participant PAS facts: %v", p.MemberID, err)
 		}
 		res, err := devID.RunPriorAuth(ctx, c, ep, payer, paReq)
 		if err != nil {
@@ -364,8 +369,9 @@ type holderEntry struct {
 	// only to a payer declaring "v1op" (SupportsRequestFrameV1Op), and a payer
 	// gateway refuses the older questionnaire request, so the payer's own
 	// declaration travels with its view here.
-	MessageFrames []string `json:"messageFrames"`
-	RequestFrames []string `json:"requestFrames"`
+	MessageFrames    []string `json:"messageFrames"`
+	RequestFrames    []string `json:"requestFrames"`
+	ContractVersions []string `json:"contractVersions"`
 }
 
 // resolvePersonaPayer resolves the test counterparty for one persona.

@@ -115,3 +115,28 @@ func TestDBPing(t *testing.T) {
 		t.Fatalf("timed-out ping: %+v", timedOut)
 	}
 }
+
+func TestRegisterInfoCannotAlterHealth(t *testing.T) {
+	reg := health.New("holder", "dev")
+	attach, ok := any(reg).(interface{ RegisterInfo(string, func() any) })
+	if !ok {
+		t.Fatal("informational metadata attachment missing")
+	}
+	for _, name := range []string{"status", "checks", "service", "version", "uptimeSeconds"} {
+		attach.RegisterInfo(name, func() any { return "overwritten" })
+	}
+	value := "unavailable"
+	attach.RegisterInfo("conformance", func() any { return map[string]string{"availability": value} })
+	_, body := get(t, reg.Handler(), "/health")
+	if body["status"] != "ok" || body["service"] != "holder" {
+		t.Fatalf("metadata changed health: %v", body)
+	}
+	if body["conformance"].(map[string]any)["availability"] != "unavailable" {
+		t.Fatal(body)
+	}
+	value = "disabled"
+	_, body = get(t, reg.Handler(), "/health")
+	if body["conformance"].(map[string]any)["availability"] != "disabled" {
+		t.Fatal("snapshot was not refreshed")
+	}
+}

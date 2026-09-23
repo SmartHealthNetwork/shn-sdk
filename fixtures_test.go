@@ -223,6 +223,52 @@ func TestProviderDataBundle(t *testing.T) {
 	}
 }
 
+func TestProviderDataPASDraftClaimsBindEachOpenOrder(t *testing.T) {
+	for _, persona := range ProviderDataPersonas() {
+		if persona == "uc02" || persona == "uc02-payerb" {
+			continue
+		} // no PA is requested
+		raw, err := ProviderDataBundle(persona)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var bundle struct {
+			Entry []struct {
+				Resource json.RawMessage `json:"resource"`
+			} `json:"entry"`
+		}
+		if err := json.Unmarshal(raw, &bundle); err != nil {
+			t.Fatal(err)
+		}
+		var orders, claims [][]byte
+		for _, entry := range bundle.Entry {
+			var probe struct {
+				ResourceType string `json:"resourceType"`
+			}
+			if err := json.Unmarshal(entry.Resource, &probe); err != nil {
+				t.Fatal(err)
+			}
+			switch probe.ResourceType {
+			case "ServiceRequest", "DeviceRequest":
+				orders = append(orders, entry.Resource)
+			case "Claim":
+				claims = append(claims, entry.Resource)
+			}
+		}
+		for _, order := range orders {
+			matches := 0
+			for _, claim := range claims {
+				if _, err := PASClaimFactsFromSource(claim, order); err == nil {
+					matches++
+				}
+			}
+			if matches != 1 {
+				t.Errorf("%s has %d participant-authored draft Claims for its order, want one", persona, matches)
+			}
+		}
+	}
+}
+
 // TestProviderDataBundle_UnknownPersona pins the public-API error contract: an unknown persona
 // name (a typo) returns a non-nil error naming the persona, never silent empty bytes a caller
 // might POST as an empty SoR seed.

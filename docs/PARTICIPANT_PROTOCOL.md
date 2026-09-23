@@ -1,8 +1,10 @@
 # Participant Wire Protocol — Direct Integration Contract
 
 **Audience:** Partner engineers building a native integration with the Smart Health
-Network without running the Smart Gateway binary. The details here match the current
-public SDK and network behavior; field names and endpoint paths are exact.
+Network without running the Smart Gateway binary. The field names and endpoint
+paths are exact; sections marked **current source** describe the participant-selected validation
+implementation pending public SDK → Gateway → Kit release and deployment.
+Check the actual installed peer's capabilities before relying on that behavior.
 
 **Scope:** Preview environment — synthetic data only. This document specifies the **general participant wire contract**
 (identity, per-operation authorization, sealed envelopes, payload-blind routing); the worked flows
@@ -30,7 +32,7 @@ is audited before it is forwarded.
 **Two integration paths:**
 
 - **Integration path A** — run the SHN Smart Gateway binary. The gateway handles the
-  envelope, FHIR mapping, validation, and authority flow on your behalf.
+  envelope, FHIR mapping, participant-selected validation, and authority flow on your behalf.
 - **Integration path B (this document)** — implement the participant wire protocol
   directly. You manage keys, assertions, tokens, and envelopes yourself. The public
   `shn-sdk` (the `shnsdk` package + `shn` CLI) is the reference implementation of this
@@ -97,10 +99,10 @@ Two of the four advertised personas (`MBR-D-UC04`, `MBR-D-UC08`) also carry
 | `demo` | Always `true` on the preview network's descriptor. |
 | `syntheticDataOnly` | Always `true` — **synthetic personas only, never production PHI**. |
 | `wireProtocolVersion` | The wire-protocol version the network speaks (see below). A consumer rejects a descriptor whose version it does not support **before** running any leg. |
-| `igVersions` | Pinned IG versions the network validates against (server-side gate). |
+| `igVersions` | Pinned IG versions available to supported checks and authored/translated-message certification. Native relay at `none` does not imply a validation run. |
 | `contractVersions` | Legacy — no longer populated in the network descriptor: participant declarations are participant truth, carried per-participant in the registrar feed (§2.3) and the directory (§3). Field retained for wire compatibility. |
-| `igVersionsByLine` | Per-line IG pin sets: each contract line (`"2.0"`, `"2.1"`, `"2.2"`) maps to the IG versions that line validates against — same keys and composition as `igVersions`, which remains the 2.0-line snapshot. Additive field. |
-| `bridgedContractVersions` | Contract lines the network's gateways can build or bridge (version-matched routing and translation, §8.6) — the network's contract capability surface. Additive field. |
+| `igVersionsByLine` | Per-line IG pin sets for supported checks and construction/certification: each contract line (`"2.0"`, `"2.1"`, `"2.2"`) maps to its IG versions — same keys and composition as `igVersions`, which remains the 2.0-line snapshot. Additive field; it does not assert that each relayed message was validated. |
+| `bridgedContractVersions` | Contract lines network gateways can build or bridge (§8.6). Native carriage and proved adaptation are separate capabilities; this field is not a per-message certificate. Additive field. |
 | `endpoints.{hub,authz,registrar,patientAccess}` | The live participant-facing base URLs. `hub` is where you originate a leg (`POST /route`); `authz` mints/serves tokens; `registrar` serves the holder feed; `patientAccess` is the FHIR/Patient-Access surface (`GET /metadata`). |
 | `authzPublicKeyURL` | Where to fetch the Authorization Framework Ed25519 verifying key (`{authz}/pubkey`). |
 | `hubTransportKeyURL` | Where to fetch the Hub's Ed25519 transport verifying key (`{hub}/transport-key` → `{"pubkey": "<base64 ed25519>"}`). Responders use this key to verify `X-Hub-Assertion` on every inbound forward (§6.2a). |
@@ -288,7 +290,8 @@ Body (JSON, all keys base64-standard-encoded):
 | `signPub` | Base64 Ed25519 public key (32 bytes raw) — assertion verification |
 | `baseURL` | Where the Hub delivers inbound envelopes. Must be a publicly resolvable https URL — no userinfo, no ASCII control characters (< 0x20) — and must not redirect at /substrate/inbound (the Hub refuses redirects). Originator-only clients are never dialed but the URL must still validate. |
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
-| `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`, FR-G42). Today's network-native set is `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1` (§8.6's bridgedContractVersions is the network's capability surface). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. Version-aware routing and translation consume these in later slices; today they are declaration + surfacing. |
+| `requestFrames` | **Optional** receiver capability list for sealed requests (§6.3): `v1` for version claims, `v1op` for DTR operation input, `v1crd` for request-only CRD hook addressing. Declare only what the actual serving gateway/receiver accepts; SDK frame decoding alone does not prove `v1crd` support. Omitted means send bare requests. It is outside the PoP signing payload and is refreshed at rotation. No published `v1crd` gateway boundary is established yet (§6.4). |
+| `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`, FR-G42). The gateway can build CRD/DTR/PAS at 2.0, 2.1 and 2.2, plus PDex at 2.1; configured native backends can declare additional receive lines independently of SDK builders (§8.6). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. Native routing and authored line selection consume these declarations; a declaration alone is never validation or transformation evidence. |
 | `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted** (FR-G42): on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). Identities acquired **after** admission are attested through `PUT /register/{id}/payer-ids` (§2.4) — same authority, same rules — so a payer never re-onboards to become routable on a new one. |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
 
@@ -530,6 +533,10 @@ holder registered with an earlier SDK comes to declare `"v1op"` (pass
 `shn rotate --request-frames v1` while the Smart Gateway serving your base URL is older
 than v0.44.0); a hand-built rotate body that omits `requestFrames` clears it, and
 requests to you are then sent bare.
+For a holder served by a Smart Gateway, verify the receiver artifact before
+declaring `v1crd`; its request-only CRD hook support is independent of `v1op`
+and has no established published release mapping yet. Kit derives its declaration
+from verified gateway executable identity, not the SDK's codec list.
 
 **Rotation NEVER changes `payerIds`** — they are operator-attested, not
 self-declared (§2.3, FR-G42), so a rotate body may omit them (every library-driven
@@ -1173,7 +1180,7 @@ caller gets back from the console route that started the exchange. A leg is
 | `routed` | The leg was attempted: recipient resolved, contract line selected, seal → authorize (§4.1) → `POST {hub}/route` under way. Always followed by exactly one terminal outcome. | — |
 | `answered` | The counterpart answered and the response envelope verified end-to-end (§6.1 steps 6–8, `VerifyBound` §4.4). A frame-carried **non-2xx application answer** (§6.3 — an adjudication denial, a `422` validation reject, a partner payer's real `400`) is `answered`, not a failure. | The application response; a non-2xx answer is relayed **verbatim** with the recipient's own status, `Content-Type` and body. |
 | `denied` | The **Authorization Framework refused the request leg** — `403` from `POST {authz}/authorize` (§4.1: wrong role for the frame, or no consent on `federated-query-submit`). A policy decision, not an error; excluded from the operators' `LegError` alarm. | A `502` whose `error` carries `authorization denied`, from a route with no legitimate denied branch; a flow that has one treats it as a business outcome instead (the UC-05 federated query leaves the prior authorization pended with `consentDenied: true` rather than failing). |
-| `unreachable` | The **Hub leg did not complete**: your gateway could not reach `POST {hub}/route`; the Hub answered non-2xx — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), or the `502` it returns when the recipient is unknown, cannot be reached, or returns a response envelope the Hub cannot verify, on a payload-hash mismatch, or on an audit-append failure (§6.1a); or the Hub answered `200` with a body that is not a decodable envelope. The Hub's status and body are not relayed. | A `502` whose `error` carries `hub routing failed`. Retry under a fresh `correlationId` (§6.1a). |
+| `unreachable` | The **Hub leg did not complete**: your gateway could not reach `POST {hub}/route`; the Hub answered non-2xx — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), or the `502` it returns when the recipient is unknown, cannot be reached, or returns a response envelope the Hub cannot verify, on a payload-hash mismatch, or on an audit-append failure (§6.1a); or the Hub answered `200` with a body that is not a decodable envelope. The Hub's status and body are not relayed. Also the leg that produced **no answer within your gateway's wait** (the HTTP client timeout it posts to `POST {hub}/route` with — 30 seconds in the published Smart Gateway; the whole Hub → counterpart gateway → counterpart system path shares that budget). | A `502` whose `error` carries `hub routing failed`; for the timed-out leg, a `504` whose `error` reads `no answer on the hub leg within 30s (hub leg timeout)` (the number is the client's own timeout, which your gateway applies as its own deadline on the leg; `hub leg timed out` with no number when your own request deadline ended the wait first; a connection or TLS handshake that gives up before the Hub is reached is not called a timeout and stays the `502`). Retry under a fresh `correlationId` (§6.1a). |
 | `failed` | Anything else, on **your gateway's** side of the leg: the Authorization Framework unreachable or erroring (non-403), a seal/encode failure, or a response the Hub returned `200` for that fails your gateway's own verification (`VerifyBound`, correlation match, decrypt). Counted in `LegError` with `unreachable`. | A `502` whose `error` names the reason — `authorization failed`, `response leg authorization failed`, `response correlation mismatch`, …. |
 
 Two things are **not** leg outcomes:
@@ -1387,9 +1394,8 @@ rest          body        raw bytes — no additional encoding
 
 - `status` — the application's real HTTP status, `100`–`599`. Both 2xx and
   non-2xx answers are framed identically; there is no separate error shape.
-- `headers` — an **allowlist**, widened 2026-08-11 (multi-version-contracts
-  design §4, routing) to `Content-Type` and `contractVersion`, and widened
-  again for framed DTR operations to `operation` (request frames only, below).
+- `headers` — an **allowlist**: `Content-Type`, `contractVersion`, request-only
+  DTR `operation`, and request-only CRD `crdHook` (below).
   No other header (hop-by-hop, cookie, or otherwise) is ever carried inside a
   frame.
 - `contractVersion` — the full `<contract>@<line>` token (e.g. `pa.pas@2.0`) of
@@ -1400,29 +1406,40 @@ rest          body        raw bytes — no additional encoding
   answer by SHN gateways since **v0.37.0**, and — published-SDK stamp parity —
   by an SDK-based `Responder` that opts in
   (`ResponderConfig.StampContractVersion`) as of **v0.38.0** of this library.
-  **Verified** against the contract line the leg actually routed to (§8.6) by
-  SHN gateways since **v0.37.0**, and — the same v0.38.0 parity — by the
-  published SDK's own originators (`RunEligibility`, `RunPriorAuth`; the
-  package-private `unframeAnswer`'s `expectedToken` check, verbatim-mirroring
-  the gateway's verify) as of **v0.38.0**; disagreement is rejected before the
-  body reaches any parser, either way. An **absent** stamp is always tolerated
+  Older gateways verified a present stamp against the routed line and could
+  refuse a discrepancy. Current-source native relay carries a peer's declared
+  answer line as that peer's claim without relabeling or using a validator;
+  a gateway-authored answer still stamps the line it actually built. The
+  published SDK originators gained an expected-token check in v0.38.0. Current
+  source keeps its 2.0 request declaration, reads a producer-declared CRD 2.2
+  answer where the PA workflow has a tested reader, and surfaces an unsupported
+  successful reply as `PriorAuthConsumptionError` with the received body, media
+  type, status and version declaration. This is a local workflow outcome after
+  response authority is verified; the producer's declaration is not a validator
+  certificate. The same reply-bearing error applies when a PAS update or inquiry
+  cannot be parsed, matched, or recorded, and when local PAS construction fails
+  after a verified CRD or DTR reply; the latter carries that latest reply and
+  unwraps to the construction error. Check the installed SDK version's behavior
+  separately. An
+  **absent** stamp is tolerated
   (a pre-version responder, or a responder build that does not opt into
   stamping), exactly like an absent frame is tolerated today. A non-2xx frame
-  is never stamped: its body is relayed verbatim and never parsed as contract
-  content.
+  carries its author's status, media type, optional version declaration and body,
+  including non-FHIR errors;
+  it is not converted into a gateway conformance verdict.
 
 **Decoding is strict.** A decoder rejects (rather than silently degrading) on: an
 unknown version byte, a header length that overruns the payload or the 64 KiB
 cap, a non-JSON or malformed header, or an out-of-range `status`. Each of these
 is a distinct, typed decode failure. A header field outside the allowlist is
 **not** a reject: the reference decoder silently drops it and returns success
-(SHN gateways only ever emit the allowlisted headers, `Content-Type`, on
-contract-mapped legs `contractVersion` (§8.6), and on a framed DTR operation
-`operation`, so this rarely fires in practice). Because an unknown header is
+(SHN gateways only emit allowlisted headers: `Content-Type`, on contract-mapped
+legs `contractVersion` (§8.6), request-only DTR `operation`, and request-only
+CRD `crdHook`). Because an unknown header is
 dropped rather than refused, a receiver built before a header was allowlisted
 never sees it: a new header that changes how the body is read is therefore
-sent only to a receiver that declares the matching capability (see
-`v1op` below).
+sent only to a receiver that declares the matching capability (`v1op` for DTR,
+`v1crd` for CRD below).
 
 **Mechanical vs. application status — the rule that replaced
 `RESPONDER_RELAY_ERRORS`.** A responder returns a non-2xx status **to the Hub**
@@ -1432,17 +1449,15 @@ replay, an unknown `transactionType`, or a failure building the response leg
 itself (seal/authorize/encode). Everything the application produced — an
 adjudication denial, a partner payer's real `400`, a `422` validation reject —
 is an application **answer**, not a machinery failure, and (for a frame-capable
-exchange) travels inside the frame with **200 to the Hub**. So is any `4xx` the
-responding gateway itself writes about the request once the leg is authenticated
-— a member it does not hold (`400 unknown member`), a request it cannot read, no
-order to decide on, a subject that does not match the token (`403`), a consent it
-cannot confirm, an ingress validation failure at enforcement `strict` (`422
-ingress validation failed`) — those are its verdict, not its machinery, and
-travel the same way, as does any `4xx` it writes about its own participant's
-answer after that system answered (a PAS response whose patient linkage is
-inconsistent or that names another patient, a questionnaire package carrying a
-subject, an answer that repeats a member name, an answer that fails validation
-at `strict`); only its own faults (`5xx`) and the pre-handler checks above stay
+exchange) travels inside the frame with **200 to the Hub**. So is a
+responding gateway's refusal about the request once the leg is authenticated
+— missing routing or required local-action input, a subject that does not match
+the token (`403`), a consent it cannot confirm, an applicable `basic` or
+`strict` content refusal, or unavailable required strict evidence (`503`) —
+those are its verdict, not its machinery, and
+travel the same way, as does a content refusal it writes about its own
+participant's answer after that system answered. Its own transport/build
+faults and the pre-handler checks above stay
 bare. The Hub's generic `"hub routing failed"` therefore now means
 exactly what it says: routing failed, not "the far end disagreed with you."
 
@@ -1466,10 +1481,13 @@ response direction, with the frame's `status` field inert on a request (a
 `messageFrames` — a **separate** registry list, so the request and response
 directions negotiate, and can be rolled out, independently:
 
-- An originator frames a request iff the **recipient's** registry entry
-  advertises `"v1"` in its `requestFrames` capability list — a peer that never
-  declares it keeps receiving a byte-identical bare request, the same
-  one-recipient-at-a-time gate `messageFrames` uses for the response direction.
+- An originator frames an ordinary contract-mapped request when the
+  **recipient's** registry entry advertises `"v1"` in `requestFrames`.
+  Framed DTR operation input requires `"v1op"`; a declared CRD hook that
+  must survive opaque carriage requires `"v1crd"` (§6.4). These tokens are
+  independent. A peer declaring none receives a bare request when that is
+  compatible with the operation; a required unsupported header causes a
+  pre-dispatch capability refusal, never silent stripping.
 - **Receiver obligation.** A holder that declares `requestFrames` MUST accept
   **both** a framed and a bare inbound request — declaring the capability
   commits only to being *able* to decode a frame when one arrives, never to
@@ -1525,13 +1543,13 @@ whose own input is the frame body:
   and the package request the gateway used to rebuild from it carried only
   the canonical and a coverage. `shnsdk.Responder` still answers the older
   request. The `operation` header on any other transaction type is refused
-  with `400`. The Smart Gateway, as a payer, binds every patient a DTR request
-  names (each coverage beneficiary,
-  order subject or patient, Patient resource and other patient reference) to
-  the authorized patient before its payer's system sees the request: a
-  second patient or another member is refused with `403`, and an unreadable
-  or unbindable patient (a non-Patient reference, a Patient with no id, an
-  unknown member) or a package request with no coverage with `400`.
+  with `400`. Current-source gateways apply their own selected conformance level
+  to DTR contents (§8.1). At `strict`, a supported, evaluable patient mismatch
+  may be refused, and missing required evidence is reported as unavailable.
+  At `none` and `observe`, neither payload parsing nor a local member lookup
+  is a hidden prerequisite for native delivery. A separate action that reads
+  or discloses the participant's records still needs its own authority and
+  source-system facts.
 - **This SDK.** `BuildQuestionnairePackageParameters(line, …)` builds the
   `questionnaire-package` input with every resource embedded as your own
   bytes; `RunPriorAuth` sends it as a framed operation when the payer
@@ -1571,31 +1589,29 @@ whose own input is the frame body:
     `v1op` without `v1` is accepted with a warning, since requesters then
     frame only DTR operations to you and send your other requests bare.
 
-The Smart Gateway additionally *honors* a well-formed claim it can both
-natively build and validate for (native ∩ laned);
+The current-source Smart Gateway honors a well-formed claim at a supported
+native line without requiring a validator lane for unchanged carriage;
 this SDK's published `Responder` does not do per-line content negotiation, so
 it decodes and tolerates the claim without acting on it.
 
-**Ingress refusal — a claim the receiver cannot honor is a legible `422`, never
-a silent downgrade.** A Smart Gateway that decodes a request-frame
-`contractVersion` claim answers at that line only when it can *both* build and
-validate there; otherwise it refuses the leg before any application logic runs,
-naming what it does speak. Three distinct refusals, each a `422`:
+**Ingress refusal — a claim the receiver cannot honor is legible, never a
+silent downgrade.** Current-source native admission does not require a
+`$validate` lane. A gateway that cannot serve the declared representation
+refuses before dispatch; actual construction or translation still needs its
+separate proof, and `strict` can refuse unavailable required checks. Older
+published behavior sometimes refused a native but unlaned claim; that is
+historical, not a rule for unchanged current-source native carriage. Current
+refusal examples:
 
 - **Unknown / unbuildable line.** The claimed token is not in the receiver's
   native set for that leg's contract — e.g. a peer claims `pa.pas@3.0`:
   `request declares contract version pa.pas@3.0, which this gateway cannot build for leg pas-claim (it speaks pa.pas@2.0,pa.pas@2.1,pa.pas@2.2)`.
-- **Native but unlaned.** The receiver *can* build the line but has no
-  `$validate` lane configured for it, so it cannot certify its own answer —
-  it refuses rather than answer unvalidated (FR-36):
-  `request declares contract version pa.pas@2.2 but this gateway has no FHIR validator lane for line 2.2 — refusing to answer at an unvalidatable line (FR-36/FR-G29)`.
-  One `$validate` server hosts exactly one version of a given IG, so a line
-  without its own lane genuinely cannot be validated on another line's.
 - **Claim on a version-neutral leg.** `coverage-eligibility` carries no
   contract-version token (§8.6); a frame that claims one on that leg is
   malformed, not tolerated.
 
-A **bare** request (or a framed one carrying no claim) is never refused: the
+A **bare** request (or a framed one carrying no claim) is not refused merely
+because it lacks a version claim: the
 receiver symmetrically recomputes the line the originator would have selected —
 the sender's declared set × the receiver's declared set, highest common line,
 falling back to the receiver's own canonical line for a silent sender — so a
@@ -1606,6 +1622,76 @@ in-flight leg on the receiving side would break the declared-set change window
 described in the gateway's `docs/CONFIGURATION.md`.
 
 ---
+
+### 6.4 Authenticated native ingress context (current source)
+
+This is the Smart Gateway integration path's local ingress contract for a
+participant running its own gateway; direct wire implementers still use the
+Hub-facing holder contract in §§2–6.3.
+
+A participant's registered connector can send application bytes to **its own**
+Smart Gateway with `Authorization: Bearer <client access token>` and a
+`SHN-Exchange-Context: <signed JWT>` header. This is local ingress context, not
+a Hub header or an alternative network authority token. Register the client
+with its `client_id`, pinned ES384 or RS384 public key, allowed
+`context_operations`, and, only if it performs callback removal, the `E-01`
+`boundary_preparations` grant. The Authorization Framework still decides the
+separate network leg. An unsigned legacy adapter may extract routing hints from
+a readable message; a present but bad assertion never falls back to it.
+
+For example, a synthetic provider connector that has prepared an `order-sign`
+CRD request for a registered payer signs claims of this shape with its
+registered private key (the gateway computes the body digest over **exactly**
+the bytes it receives):
+
+```json
+{
+  "iss": "synthetic-provider-connector", "sub": "synthetic-provider-connector",
+  "aud": ["https://provider-gw.example/cds-services/shn-order-sign"],
+  "jti": "synthetic-correlation-001", "iat": 1800000000,
+  "nbf": 1800000000, "exp": 1800000120,
+  "holder": "synthetic-provider", "recipient": "synthetic-payer",
+  "leg": "crd-order-select", "operation": "crd-order-select",
+  "crd_hook": "order-sign", "subject_pci": "synthetic-network-pci",
+  "correlation_id": "synthetic-correlation-001",
+  "contract_version": "pa.crd@2.0", "content_type": "application/json",
+  "body_sha256": "<lowercase SHA-256 hex of the exact CRD body>",
+  "completed": [{"id":"E-01","version":"1"}]
+}
+```
+
+The example claims are illustrative, not a reusable token. Use the actual
+ingress URL as the sole `aud`, a fresh `jti`, current short-lived timestamps,
+and the authenticated client ID as both `iss` and `sub`. The gateway checks
+signature and registered algorithm, audience, bearer-client binding, holder,
+recipient, route, operation, hook, content type, digest, expiry and replay before
+dispatch. The `completed` entry is accepted only from a connector granted
+`E-01`, bound to this body and context. It certifies callback-authority removal,
+not patient consistency or general FHIR validity. Without that evidence, the
+gateway performs the registered E-01 edit when it can; unreadable CRD then
+fails as `adaptation_unavailable`, even at `none`. Forged or mismatched evidence
+is an authority/integrity refusal at every level.
+
+The CRD hook is addressing, so a declared `order-sign` must be carried to a
+recipient advertising request-frame capability `v1crd`. The sealed v1 request
+frame then carries `crdHook` alongside the body; the Hub sees neither. A
+gateway cannot silently strip the hook for a peer lacking `v1crd`: it refuses
+before dispatch. A legacy request with **no signed hook declaration** can use
+the existing readable-body addressing path. `v1crd` is independent of `v1`
+and `v1op`; decoder support alone does not authorize a holder declaration.
+This source tree implements the gateway contract, but no published Gateway or
+Kit artifact has yet established a `v1crd` release boundary. SDK-only
+responders must not advertise it merely because their frame codec knows the
+header. Static founding-holder capability cannot currently be redeclared via
+dynamic registration, so opaque signed CRD with a hook to such a peer awaits
+a verified deployment/manifest capability mechanism.
+
+The signed context supplies routing and subject declarations; it does not
+mint a new patient identity or certify that the body describes that subject.
+A gateway-local member roster is not required for an otherwise authorized
+native relay. Participant systems must provide authoritative identity linkage
+for their own source reads and clinical actions. The synthetic identity adapters
+do not establish production ingress for arbitrary new patients.
 
 ## 7. Worked example — eligibility round-trip
 
@@ -1861,6 +1947,14 @@ res, err := id.RunPriorAuth(ctx, httpClient, endpoints, payer, shnsdk.PriorAuthR
 // res.Outcome == "pended", res.Resume != nil (resume via ResumePriorAuth, §7b, to reach "approved")
 ```
 
+For a PAS 2.1 or later submit, set `PriorAuthRequest.ItemFacts` from the
+requesting participant's own draft Claim for this patient and order. It carries
+the Claim's `priority`, `item` certification type, service item request type,
+and `locationCodeableConcept` as CodeableConcepts. The SDK copies those exact
+values; absent facts refuse the submit. On an amendment, the SDK retains the
+prior Claim's values unless the participant supplies replacements. PAS 2.0
+retains its earlier wire behavior.
+
 To have the coverage check carry your own records, set `Patient` (your Patient resource for the
 member, whose id is the member id) and `Coverage` (your Coverage search result: a searchset
 Bundle with the member's Coverage and the payor Organization it names) together, and `NPI` (the
@@ -1951,16 +2045,21 @@ builder.
 
 ### 7a.4 What the network changes in a CRD or DTR message
 
-From Smart Gateway v0.44.0, a CDS Hooks or `$questionnaire-package` message reaches the other
-participant as its author sent it. The payer's answer comes back byte for byte, and the
-hook is never changed. The only changes are the four edits below. Each is made on the
-message's own bytes; everything else in the message is unchanged.
+Current-source native carriage preserves participant-authored bytes and the
+peer's application status/media type when no boundary edit is required. A
+CDS Hooks request still requires E-01 callback-authority removal: the trusted
+source connector may provide signed, byte-bound completion evidence (§6.4),
+or the provider gateway performs the registered edit if the body is readable.
+An unreadable CRD request without that evidence is refused as adaptation
+unavailable. Other registered edits below run only when the relevant local
+source action or explicit adaptation requests them; no enrichment is inserted
+merely to satisfy a parser. These edits are not optional conformance checks.
 
 | Edit | Made by | What changes |
 |---|---|---|
 | Callback removed | the provider's gateway, on a CDS Hooks request from the EHR | `fhirServer` and `fhirAuthorization` are removed. The payer never gets a route or a credential into the provider's systems. |
-| Prefetch obtained | the provider's gateway, on a CDS Hooks request from the EHR | An advertised prefetch key the EHR left out is added from the provider's own system of record: the Patient as read, a search as a `searchset` of the records exactly as returned (`urn:uuid:` entry addresses, no server links), `null` for no match. Nothing is made up. |
-| Coverage obtained | the provider's gateway, on a `$questionnaire-package` request from the EHR | One `coverage` parameter is appended from the provider's system of record, only when the request carries none. |
+| Prefetch obtained | the provider's gateway, only for an explicitly requested local source-assembly operation | An advertised prefetch key the EHR left out is added from the provider's own system of record: the Patient as read, a search as a `searchset` of the records exactly as returned (`urn:uuid:` entry addresses, no server links), `null` for no match. Nothing is made up; native relay does not silently fetch it. |
+| Coverage obtained | the provider's gateway, only for an explicitly requested local source-assembly operation | One `coverage` parameter may be appended from the provider's system of record when the request carries none; native relay does not silently fetch it. |
 | Payer identity mapping | the payer's gateway, on the request to its payer (only when configured) | Only the payer identifier strings of each Coverage, and of a PAS Claim's insurer when it names the payer. |
 
 - **Signatures.** A signature inside the message (`Bundle.signature`, `Provenance.signature`, a
@@ -1968,21 +2067,28 @@ message's own bytes; everything else in the message is unchanged.
   with `422 signed content cannot be edited`.
 - **No transport signatures.** HTTP-level signatures (signed header fields, a detached JWS)
   are not carried. Each Smart Gateway terminates HTTP, and a message frame (§6.3) carries only
-  `Content-Type`, `contractVersion` and `operation`. A participant that needs an end-to-end
-  signature signs inside the payload.
+  allowlisted `Content-Type`, `contractVersion`, request-only `operation` (DTR) and
+  request-only `crdHook` (CRD). A participant that needs an end-to-end
+  signature signs inside the payload. The local `SHN-Exchange-Context` assertion
+  is verified at ingress and is never forwarded as an application header.
 - **Hooks and services.** The payer's gateway sends each request to the CDS service the
   payer's own `/cds-services` listing offers for the request's hook. A hook the payer does not
   offer is refused before anything is sent, with `422` and the hooks it does offer:
   `{"error":"payer offers no CDS service for hook order-select","offered":[…]}`.
-- **Answers.** The payer's gateway checks a CDS Hooks answer against the CDS Hooks response
-  rules and refuses (`502`) one that breaks them; it never repairs one. The provider's gateway
-  returns the answer body exactly. The success media type is still the gateway's own:
-  `application/json` for CDS Hooks, `application/fhir+json` for a questionnaire package.
-- **Member id limitation.** `context.patientId`, and the patient references a request binds
-  (each order's subject, each Coverage's beneficiary), must use the patient's network member
-  id. A provider's gateway obtains prefetch only when its system of record names the patient
-  by that id. When the system names the patient differently, a request that leaves out
-  `patient` or `coverage` is refused (`422`), and history keys are left out.
+- **Answers.** A payer gateway at `none` carries its participant's CDS Hooks
+  answer without optional validation; `observe` reports supported problems
+  separately, `basic` enforces its structural rules, and `strict` enforces its
+  supported deeper rules. A native reply retains its author's status, body and
+  media type, including an empty or non-FHIR error body. A local workflow's
+  inability to interpret a delivered answer is reported separately.
+- **Identity boundary.** The declared network subject comes from authenticated
+  context or an authoritative participant identity integration, never a
+  demographic hash or an arbitrary gateway-local roster match. A local action
+  that obtains records must resolve the subject through the participant's own
+  source system and refuses when required facts are unavailable. Native relay
+  with complete signed context does not require that read. Current synthetic
+  identity adapters do not prove arbitrary-new-patient production admission
+  until an authoritative production identity integration is available.
 - **Gateway-originated requests.** A request that a provider's gateway builds for its own
   workflow names the patient by the member id. It changes the system of record's `Patient.id`
   and the patient reference on each carried record's patient path, and nothing else; the
@@ -2263,19 +2369,22 @@ and later.)
 - **Through the Da Vinci ingress.** A system connected to a gateway's Da Vinci
   ingress sends the inquiry to `POST /Claim/$inquire` on its own gateway, the same
   way it sends a submission to `POST /Claim/$submit`. The request is carried to the
-  network as sent, bound to the one member every patient reference in it names — a
-  Bundle naming two members is refused — and routed by the Coverage it carries; a
-  Coverage naming no payer the gateway can resolve is refused rather than defaulted.
+  network under authenticated exchange context when supplied (§6.4), or under
+  a legacy readable-body adapter that can establish the required subject and
+  recipient from the participant's own records. A Bundle naming multiple
+  patients can relay at `none`/`observe`; a supported `strict` patient rule can
+  refuse an evaluable mismatch. Missing authoritative subject or recipient
+  context is a routing/identity error, never a fabricated default payer.
   No SHN state is involved: the inquiry names the authorization, so your system is
   the only thing that has to remember it.
-- **Who certifies it.** Neither gateway profile-validates your inquiry or the
-  payer's answer; both travel as written. The payer's own system certifies the
-  inquiry it receives, so a request that does not meet the prior-authorization
-  profile for its line comes back as that payer's refusal, not the network's. This
-  matters for one cardinality in particular: PAS 2.0.1 requires the inquiry Claim
+- **Who certifies it.** At `none`, neither gateway optionally profile-validates
+  an unchanged inquiry or answer; `observe` and `basic` may record deeper
+  findings, while `strict` enforces its supported rules. The payer's system
+  still decides its own application response, which is carried with its real
+  status and body. One line-dependent cardinality matters: PAS 2.0.1 requires the inquiry Claim
   to name at least one item (`Claim.item` 1..\*) and 2.1.0 and 2.2.1 do not
-  (0..\*), so an inquiry by authorization number alone is carried at every line and
-  answered — or refused — by the payer.
+  (0..\*). An inquiry by authorization number alone is subject to the
+  participant gateway's selected rules and the payer's application decision.
 - **The continuation handle.** A pended `PriorAuthResult.Resume` carries
   `Continuation` (`PriorAuthContinuation`): the PAS line, the payer holder, the
   submitted Claim's identifiers, type and priority, the member id, the provider NPI,
@@ -2386,30 +2495,60 @@ and `ResumePriorAuth` / `RunPriorAuth` call for you.
 
 ## 8. FHIR conformance obligations
 
-### 8.1 Two-gate posture
+### 8.1 Participant-selected validation (current source; pending SDK → Gateway → Kit release)
 
-All FHIR resources exchanged through the network must conform to their
-applicable IG profiles. The network enforces a **two-gate** posture:
+Participants remain responsible for the correctness and applicable IG
+conformance of the messages they produce. Each participant selects one
+`CONFORMANCE_ENFORCEMENT` level on **its own** Smart Gateway, applying to
+incoming and outgoing messages. Unset means `none`; any other value than the
+four below is a configuration error. A sender at `none` cannot lower a
+receiver's `strict` setting. Older peers can still apply their own prior
+admission rules. There is no pair-wide negotiation or per-leg override.
 
-1. **Runtime US Core validation** — every resource is validated against base R4 +
-   US Core profiles at the gateway on egress (before sealing) and on ingress
-   (after decrypting). Both checks always run, at every enforcement level.
+| Level | Gateway content checks on native carriage | If a check cannot run |
+|---|---|---|
+| `none` (default) | No optional runtime payload validation, passive certification, observation worker, or conformance findings. | No check was attempted. Native relay does not need a validator. |
+| `observe` | Supported checks run independently as bounded, best-effort observation. | Original bytes, application status and permitted media type continue; observation may be unavailable or dropped. |
+| `basic` | Enforces documented, in-process structural rules for the operation; observes deeper supported rules without blocking. | Missing deeper evidence does not block; an actual structural failure names its rule. |
+| `strict` | Enforces supported structural, profile, terminology, graph and patient-consistency rules applicable to the operation and line. | Unavailable **required** evidence refuses the affected operation as unavailable (`503`), distinct from invalid content. |
 
-   What an invalid result *does* is the receiving gateway's own configured
-   choice (`CONFORMANCE_ENFORCEMENT`), not something the network imposes. At
-   `none` — the default when the value is unset — the verdict is recorded as a
-   conformance finding and the message is relayed as sent; at `strict` the
-   message is refused and the refusal names the rule and the issues behind it.
-   Your obligation above is unchanged either way: a gateway that relays your
-   non-conformant resource has recorded it, not accepted it, and the peer you
-   sent it to may be configured to refuse it.
+For example, with valid network authority and routing context, `none` relays a
+malformed PAS body or a body naming a different patient without inspecting it;
+`observe` makes the same delivery decision and may record a finding. `basic`
+rejects a PAS success that is not a Bundle, but does not require a referenced
+Organization to exist. `strict` applies a supported graph and patient rule
+when evidence exists. A mismatch in body patient references never changes the
+subject or scope of the network token and never authorizes a source-system
+read. A declared subject is not a certification of the body's clinical identity.
 
-   Two results refuse at every level, because neither is a statement about a
-   peer's conformance: an answer the gateway cannot read at all, and a payload
-   that gateway itself translated between IG lines.
+Network authentication, per-operation authorization, required consent and
+source labeling/disclosure, encryption, replay protection, routing, transport
+limits and mandatory exchange audit still apply at every level. A gateway
+performs an explicitly required boundary edit or cross-line translation only
+with the registered, truthful proof for **its own** changed bytes. Missing
+boundary evidence or a required transform checker is an adaptation problem,
+not a verdict on an unchanged peer message. The Hub never inspects the payload.
 
-2. **Da Vinci gap-report contract** — Da Vinci CRD/DTR/PAS-specific profile gaps
-   are tracked in the network's conformance gap report (maintained upstream).
+`GET /health` reports informational `conformance` fields `level`, `ruleSet`,
+`availability`, and `dropped` separately from readiness. Availability reflects
+recent, partial execution evidence, not a message certificate or a liveness
+guarantee. At `none`, validation is disabled; an empty findings list never
+means a message passed. Optional observation overload, validator timeout, or
+finding delivery loss cannot block `observe`/`basic` native relay. Findings
+identify the checking gateway, level, rule and actual decision; a scheduled
+finding is not proof that delivery occurred. Safe diagnostics exclude raw
+clinical content and identifiers. Durable Audit Plane findings/access remain
+tracked separately; gateway diagnostics alone are not a durable Audit Plane record.
+
+Conformance certification of authored builders and transforms remains a
+development/release obligation for a real-IG-qualified cut. The current
+native-only cut does not claim that qualification: its exact-source
+none/observe pair tests prove carriage and mandatory controls, while the full
+builder/profile corpus remains explicitly deferred. An actual gateway
+transformation still requires executed source and target proof at every level;
+the deferral cannot make an unproved edit deliverable. Da Vinci CRD/DTR/PAS
+profile gaps remain in the conformance gap report. A future passing gate would
+not mean every native message underwent runtime `$validate`.
 
 ### 8.2 Profiles by transaction type
 
@@ -2426,8 +2565,13 @@ applicable IG profiles. The network enforces a **two-gate** posture:
 
 Codes (LOINC, SNOMED-CT, ICD-10-CM, CPT) must be validated against the
 network's curated value sets or a terminology service. Do not synthesise or
-hallucinate codes; the FHIR validation gate — not the implementation — certifies
-conformance.
+hallucinate codes. An IG-profile `$validate` result certifies supported
+structure; a terminology gap may surface only as a warning. Curated code pins
+and terminology checks are separate evidence, and unavailable coverage is not
+a valid-code verdict. Runtime enforcement follows §8.1. The native-only release
+is unqualified for full authored-message IG certification; that obligation
+remains for a future qualified release. Executed proof for an actual registered
+transformation remains mandatory now.
 
 ### 8.4 CapabilityStatements
 
@@ -2555,10 +2699,14 @@ which lives inside the seal (§6.3).
   already-pinned `recipient` in the provider's in-memory pend state, not the
   durable exchange store — the store is metadata-only by its own invariant and
   gates nothing, so a routing decision cannot live there.
-- **The frame stamp verifies the routed line**, not the reverse — see §6.3: a
-  responder's framed 2xx answer carries the line it actually built at; the
-  originator rejects a stamp that disagrees with the line it routed the leg
-  to, and tolerates an absent one.
+- **The frame stamp describes the answer's actual source line**, not a
+  certification verdict — see §6.3. A gateway-authored answer states the line
+  it built at. A current-source native reply with a peer declaration preserves
+  that declaration even when it differs from the request line; an undeclared
+  peer reply remains unstamped. The receiver may still apply its own enabled
+  checks or require an explicit adaptation before local consumption. Older
+  published SDK/gateway stamp checks may refuse a discrepancy; verify the
+  installed pair before promising this current-source behavior.
 - **The foreign Da Vinci peer** (native-forward payer mode, `PAYER_DAVINCI_*`)
   is filtered by the same rule, sourced from the operator's declared
   `PAYER_DAVINCI_CONTRACT_VERSIONS` instead of the registry: a leg whose
@@ -2567,37 +2715,42 @@ which lives inside the seal (§6.3).
   Leaving `PAYER_DAVINCI_CONTRACT_VERSIONS` unset leaves native-forward legs
   unfiltered (today's default). See the gateway's `docs/CONFIGURATION.md`.
 
-**Native capability vs. the declared set — two separate axes (2026-08-11).**
-"What a build *can* produce" and "what a deployment *advertises* it speaks" are
-deliberately different sets, and only the second one routes:
+**Construction capability and native receive declarations.**
+The SDK builder set, a gateway's authored declaration, and its backend receive
+capability serve different purposes:
 
-- **Native set.** The Smart Gateway and this SDK build every PA contract at
+- **Native set.** The Smart Gateway and this SDK can construct PA contracts at
   **three** lines — `pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`,
-  `pa.pas@{2.0,2.1,2.2}` — plus `pa.pdex@2.1`. Each line's payloads are built
-  against that line's own IG package pins and validated against a `$validate`
-  lane loaded with *that line's* packages (one validator per line — a single
-  server cannot host two versions of the same IG). `shnsdk.NativeContractVersions()`
-  is the machine-readable list.
-- **Declared set.** What a deployment publishes — in its registration /
-  rotation `contractVersions`, its `CapabilityStatement`s' versioned
-  `implementationGuide` canonicals, its `.well-known/davinci-configuration`, and
-  the `/holders` feed peers select against (§1a, §2.3, §8.4, §8.5). It defaults
-  to the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`,
-  `pa.pdex@2.1`) and is operator-configurable to any **subset of the native
-  set**. Declaring a line the build cannot produce is a configuration error that
-  fails at boot, not a routing outcome; so is declaring a line with no
-  `$validate` lane configured for it. All four surfaces read one accessor, so a
-  deployment cannot declare one set locally and a different one to its peers.
-- **Selection routes on the declared sets** — the highest common line between
-  the *originator's* declared set and the *recipient's* declared set, exactly as
-  the rules above describe. Native capability beyond the declared set is
-  invisible to selection.
-- **Honoring an inbound claim is wider than the declared set.** A receiver
-  honors a request-frame `contractVersion` claim (§6.3) whenever it can both
-  natively build and validate at that line — *native ∩ laned*, which is a
-  superset of its declared set. That is what makes a declared-set change benign:
-  a peer still holding the receiver's previous, smaller declaration keeps routing
-  legs at the old line and they still complete.
+  `pa.pas@{2.0,2.1,2.2}` — plus `pa.pdex@2.1`. Native carriage at a declared
+  line is separate from construction and certification. Authored payloads and
+  actual translations require the applicable line's proof; a validator for one
+  IG line cannot certify another. `shnsdk.NativeContractVersions()` is the
+  machine-readable native set.
+- **Builder declaration.** `SHN_CONTRACT_VERSIONS` selects this gateway's
+  gateway-authored contract lines. It defaults to `pa.crd@2.0`, `pa.dtr@2.0`,
+  `pa.pas@2.0`, and `pa.pdex@2.1`, and must remain a subset of the SDK native
+  builder set. It neither certifies content nor requires an optional validator.
+- **Receive declaration.** Peers route using registration / rotation
+  `contractVersions` and the `/holders` feed. For a payer with an explicitly
+  configured backend receive contract, these declarations include the actual
+  CRD/DTR/PAS lines the backend accepts, including lines outside this SDK's
+  builder set. Unsupported backend lines are withdrawn from publication.
+  A receive declaration does not enable a new builder, transformation, profile
+  validator, or terminology checker. The payer's `/metadata` describes its
+  separate PDex Patient Access API; it does not mint future FHIR profiles for
+  opaque native receipt. The local Da Vinci configuration describes supported
+  operation routes separately from the SDK's ability to author messages.
+- **Authored selection uses builder and recipient declarations.** It first
+  selects the highest common line. If there is no intersection, a supported
+  native builder may construct at the recipient's line, independently of
+  optional validator availability. A future receive line beyond this build's
+  capabilities still cannot be selected for gateway-authored construction.
+- **Participant-supplied native bytes use receive capability.** A configured
+  receiver can carry an authenticated request at its backend's declared line
+  without interpreting the payload as an SDK-built representation. None and
+  observe retain native delivery; basic and strict apply their supported
+  checks, with unavailable required checks reported honestly. Configuring a
+  backend line does not waive routing, authority, or boundary obligations.
 - **A declared set may grow, never swap or shrink.** Adding a line is safe in
   either order (the sender's stale view simply keeps selecting the older line
   until the feed converges). Removing one can strand a pended exchange that
@@ -2606,7 +2759,7 @@ deliberately different sets, and only the second one routes:
   `docs/CONFIGURATION.md` for the opt-in procedure and the change window.
 
 **Cross-version translation, and what a carry-extension partner may see on the
-wire (2026-08-12).** When no shared declared line and no native-reach line
+wire (2026-08-12).** When no compatible native route
 exist for a leg, routing tries one more thing before refusing: a **transform
 chain** — per-adjacent-step modules (`pa.pas`/`pa.dtr`: `2.0↔2.1`, `2.1↔2.2`,
 composed for longer hops) that adapt this build's own bytes to the
@@ -2699,8 +2852,33 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ## 9. Status and roadmap
 
+**Source/release boundary.** The four-level contract in §8.1 and
+signed-context/v1crd path in §6.4 describe current repository source. They are
+not a claim that the public SDK, released gateway, pinned Kit or preview fleet
+already runs the complete path. Published version pins and verified receiver
+artifacts must be cut in SDK → Gateway → Kit order; a static founding holder
+cannot acquire `v1crd` through dynamic registration today. Hermetic source
+checks do not establish real-pair, cloud or partner acceptance. Native ingress
+for an arbitrary new production patient still lacks the authoritative identity
+integration. These are acceptance dependencies, not a reason
+to invent context or silently weaken the signed/verified wire rules.
+
 ### Changelog
 
+- **2026-09-21 — The Smart Gateway names a Hub leg that timed out (§6.1b outcome
+  table).** An originating gateway whose Hub leg produced no answer within its
+  HTTP client's timeout (30 seconds in the published gateway) collapsed the
+  timeout into the generic `502 hub routing failed`, indistinguishable from a
+  Hub that could not be reached, so the only way to learn the cause was the
+  Hub's own log. The requester now reads `504` with `error` set to `no answer
+  on the hub leg within 30s (hub leg timeout)`, the number taken from the
+  client's own timeout, applied by the gateway as its own deadline on the leg
+  (`hub leg timed out`, no number, when the caller's own request deadline
+  ended the wait first; a connection that gives up before the Hub is reached
+  is not called a timeout and stays the `502`), and the
+  gateway logs one line with the leg, the counterpart and the correlation id.
+  The leg outcome stays `unreachable`; every other Hub-leg transport fault is
+  still `502 hub routing failed`. Ships in the next gateway release.
 - **2026-09-21 — `RunPriorAuth` is made under the payer the caller's Coverage
   names.** The prior-authorization loop read the payer identity for its
   questionnaire request and its claim from a constant (the CMS test identity):

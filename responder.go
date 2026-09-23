@@ -118,15 +118,15 @@ type ResponderConfig struct {
 	// published-SDK parity — v0.38.0): every SUCCESS (2xx) framed answer gets
 	// a FrameHeaderContractVersion header. The TOKEN is computed internally, per
 	// leg, from the request's TransactionType (contractTokenForTxType — the SAME
-	// mapping RunPriorAuth's originator side uses to build its expectedToken:
+	// mapping RunPriorAuth's originator side uses to build its request token:
 	// crd-order-select→pa.crd@2.0, dtr-questionnaire-fetch→pa.dtr@2.0,
 	// pas-claim/pas-claim-update→pa.pas@2.0) rather than a caller-supplied
 	// literal — this SDK Responder answers ALL of those legs behind ONE
 	// ResponderConfig/Adjudicator (unlike the gateway, which the caller could
 	// restrict to a single contract), so a single string value applied
 	// uniformly across legs would stamp two of the three contract families
-	// WRONG and break RunPriorAuth's own per-leg verification (unframeAnswer's
-	// contractVersion check) against a Responder built with this SDK. coverage-eligibility
+	// WRONG and misdeclare the built response to a RunPriorAuth originator.
+	// coverage-eligibility
 	// has no contract token (version-neutral, mirrors the gateway) and is NEVER
 	// stamped regardless of this field. OPTIONAL: false (the default) preserves
 	// today's behavior byte-for-byte — a success frame is sealed with no

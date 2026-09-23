@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // MessageFrameV1 is the capability token a holder advertises in its registry
@@ -42,7 +43,9 @@ const RequestFrameV1 = "v1"
 // it (SupportedMessageFrames precedent) — the capability defaults ON for SHN
 // builds. A registration keeps what its build declared until it registers or
 // rotates again, so a holder registered with an earlier build declares v1op
-// only after it re-declares from this one.
+// only after it re-declares from this one. A gateway with an additional receiver
+// must declare that capability from its verified serving artifact; the SDK
+// registrant alone does not establish gateway support.
 func SupportedRequestFrames() []string { return []string{RequestFrameV1, RequestFrameV1Op} }
 
 // SupportsRequestFrameV1 reports whether a holder's advertised request frames
@@ -94,6 +97,24 @@ func SupportsRequestFrameV1Op(frames []string) bool {
 // payload, so the Hub never sees it.
 const FrameHeaderOperation = "operation"
 
+// FrameHeaderCRDHook is request-only CRD addressing, inside the sealed frame.
+// It is never an HTTP header or plaintext routing credential.
+const FrameHeaderCRDHook = "crdHook"
+
+// RequestFrameV1CRD declares CRD hook-aware request service selection. Codec
+// support alone does not entitle a responder to advertise this capability.
+// It does not imply DTR operation support.
+const RequestFrameV1CRD = "v1crd"
+
+func SupportsRequestFrameV1CRD(frames []string) bool {
+	for _, f := range frames {
+		if f == RequestFrameV1CRD {
+			return true
+		}
+	}
+	return false
+}
+
 // DTR operations named by FrameHeaderOperation.
 const (
 	FrameOperationQuestionnairePackage = "questionnaire-package"
@@ -120,9 +141,9 @@ type HTTPFrameHeader struct {
 }
 
 // FrameHeaderContractVersion is the frame header carrying the full
-// "<contract>@<line>" token of the line the sealed payload was BUILT at
-// (each frame is one contract's message; the token is
-// content-descriptive like Content-Type, not a negotiation echo). Inside the
+// "<contract>@<line>" token of the representation its producer declares (or
+// a gateway builder actually built). It is content-descriptive like
+// Content-Type, not a negotiation echo or a validation certificate. Inside the
 // ciphertext, so the Hub cannot see it. Absence means "pre-version contract"
 // (the frames-absent lane precedent) and is always tolerated.
 const FrameHeaderContractVersion = "contractVersion"
@@ -132,7 +153,7 @@ const FrameHeaderContractVersion = "contractVersion"
 // hop-by-hop, internal headers). Widening it is a spec change — contractVersion
 // was added with the multi-version contracts design, and operation with framed
 // DTR operations.
-var allowedFrameHeaders = map[string]bool{"Content-Type": true, FrameHeaderContractVersion: true, FrameHeaderOperation: true}
+var allowedFrameHeaders = map[string]bool{"Content-Type": true, FrameHeaderContractVersion: true, FrameHeaderOperation: true, FrameHeaderCRDHook: true}
 
 // IsFramed reports whether payload begins with the v1 frame magic. Bare legacy
 // payloads are all text formats, which cannot begin 0x00 — see the spec's
@@ -231,18 +252,51 @@ func DecodeHTTPFrame(payload []byte) (HTTPFrameHeader, []byte, error) {
 // engine's RelayError: the exchange machinery succeeded — the counterparty
 // answered, negatively. Callers errors.As for it to show the real payload.
 type AppAnswerError struct {
-	Status      int
-	ContentType string
-	Body        []byte
+	Status          int
+	ContentType     string
+	ContractVersion string
+	Body            []byte
 }
 
 func (e *AppAnswerError) Error() string {
-	const max = 512
-	b := e.Body
-	if len(b) > max {
-		b = b[:max]
+	return fmt.Sprintf("shnsdk: recipient answered %d", e.Status)
+}
+
+// PriorAuthConsumptionError reports that an authored PA workflow could not
+// consume an already authenticated application answer or build its next local
+// action after one. Body is the peer's exact, size-limited latest reply; Leg
+// names the authored step that failed. Error deliberately omits the body and
+// frame metadata. It is distinct from an authority or transport refusal.
+type PriorAuthConsumptionError struct {
+	Leg             string
+	Code            string
+	Status          int
+	ContentType     string
+	ContractVersion string
+	Body            []byte
+	Cause           error
+}
+
+func (e *PriorAuthConsumptionError) Error() string {
+	if e.Leg != "" && e.Code != "" {
+		return fmt.Sprintf("shnsdk: %s: %s", e.Leg, e.Code)
 	}
-	return fmt.Sprintf("shnsdk: recipient answered %d: %s", e.Status, b)
+	return "shnsdk: prior authorization could not consume received answer"
+}
+
+func (e *PriorAuthConsumptionError) Unwrap() error { return e.Cause }
+
+type receivedAnswer struct {
+	status          int
+	contentType     string
+	contractVersion string
+	body            []byte
+}
+
+func consumptionFailure(leg, code string, answer receivedAnswer, cause error) error {
+	return &PriorAuthConsumptionError{Leg: leg, Code: code, Status: answer.status,
+		ContentType: answer.contentType, ContractVersion: answer.contractVersion,
+		Body: answer.body, Cause: cause}
 }
 
 // unframeAnswer applies the originator side of frame negotiation to an opened
@@ -256,17 +310,11 @@ func (e *AppAnswerError) Error() string {
 // rolling deploys). The payer's advertised frames are therefore advisory only and
 // not an input here.
 //
-// expectedToken is the contractVersion stamp-verify check (multi-version contracts design, published-SDK
-// parity — v0.38.0): when non-empty (the caller knows the contract-version token
-// this leg was routed/built at) AND the 2xx frame carries a non-empty
-// FrameHeaderContractVersion stamp that DIFFERS from it, the answer is rejected —
-// tamper or skew, either way not the payload this leg negotiated. Verbatim
-// semantics of the gateway's response-leg verify (gateway/engine/gateway.go
-// roundTripInner). An ABSENT stamp is always tolerated (the frames-absent-lane
-// precedent — a pre-version responder, or a responder that never sets
-// ResponderConfig.StampContractVersion), and expectedToken == "" (the caller has no
-// routed-token expectation, e.g. RunEligibility — coverage-eligibility is not a
-// contract) skips the check entirely.
+// expectedToken identifies the representation this SDK built for an authored
+// request, not a required echo on the response. A different producer declaration
+// is consumed only where this workflow has a proven reader; otherwise the exact
+// received answer is available through PriorAuthConsumptionError. An absent stamp
+// retains legacy behavior, and the version-neutral eligibility leg has no check.
 func unframeAnswer(plaintext []byte, expectedToken string) ([]byte, error) {
 	if !IsFramed(plaintext) {
 		return plaintext, nil
@@ -275,13 +323,36 @@ func unframeAnswer(plaintext []byte, expectedToken string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: decode response frame: %w", err)
 	}
+	if hdr.Headers[FrameHeaderCRDHook] != "" {
+		return nil, errors.New("shnsdk: CRD hook is request-only")
+	}
+	if hdr.Headers[FrameHeaderOperation] != "" {
+		return nil, errors.New("shnsdk: operation is request-only")
+	}
 	if hdr.Status/100 != 2 {
-		return nil, &AppAnswerError{Status: hdr.Status, ContentType: hdr.Headers["Content-Type"], Body: body}
+		return nil, &AppAnswerError{Status: hdr.Status, ContentType: hdr.Headers["Content-Type"], ContractVersion: hdr.Headers[FrameHeaderContractVersion], Body: body}
 	}
 	if expectedToken != "" {
-		if stamped := hdr.Headers[FrameHeaderContractVersion]; stamped != "" && stamped != expectedToken {
-			return nil, fmt.Errorf("shnsdk: response contract version mismatch: frame declares %s, leg routed %s", stamped, expectedToken)
+		if stamped := hdr.Headers[FrameHeaderContractVersion]; stamped != "" && stamped != expectedToken &&
+			!(expectedToken == ContractPACRD20 && (stamped == ContractPACRD21 || stamped == ContractPACRD22)) &&
+			!readablePASReplyLine(expectedToken, stamped) {
+			return nil, &PriorAuthConsumptionError{Status: hdr.Status, ContentType: hdr.Headers["Content-Type"], ContractVersion: stamped, Body: body}
 		}
 	}
 	return body, nil
+}
+
+// PAS request and answer lines are independently declared. This SDK's typed
+// PAS reader accepts the supported PAS line family; the later response parser
+// still checks the actual ClaimResponse content and returns the exact producer
+// body on a local consumption failure. Unknown lines remain unavailable.
+func readablePASReplyLine(requestToken, answerToken string) bool {
+	requestContract, requestLine, requestOK := strings.Cut(requestToken, "@")
+	answerContract, answerLine, answerOK := strings.Cut(answerToken, "@")
+	if !requestOK || !answerOK || requestContract != "pa.pas" || answerContract != "pa.pas" {
+		return false
+	}
+	_, requestSupported := PASLineDef(requestLine)
+	_, answerSupported := PASLineDef(answerLine)
+	return requestSupported && answerSupported
 }

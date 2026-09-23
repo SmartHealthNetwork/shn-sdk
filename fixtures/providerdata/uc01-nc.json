@@ -25,6 +25,10 @@
             },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC01-NC"
+          },
+          {
+            "system": "urn:shn:pci",
+            "value": "pci:80ffbce4a961e06ddfa9311f4422a515"
           }
         ],
         "name": [

@@ -511,12 +511,16 @@ func TestBuildConformantClaimUpdateBundle_NamesTheSameParty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
+	priorClaim, err := SubmittedPASClaim(submit)
+	if err != nil {
+		t.Fatalf("read submitted Claim: %v", err)
+	}
 	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-1","status":"completed","subject":{"reference":"Patient/MBR-1"}}`)
 	prov := []byte(`{"resourceType":"Provenance","id":"prov-1","recorded":"2026-06-01T12:00:00Z","target":[{"reference":"QuestionnaireResponse/qr-1"}],"agent":[{"who":{"identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567890"}}}]}`)
 	update, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID),
 		QR: qr, SR: in.SR, Provider: in.Provider, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
 		MemberID: in.MemberID, MemberIDSystem: in.MemberIDSystem, Provenance: prov, Corr: "corr-2", OriginalCorr: in.Corr,
-		Created: in.Created, Payer: in.Payer, PayerOrgEntry: true,
+		Created: in.Created, Payer: in.Payer, PayerOrgEntry: true, PriorClaim: priorClaim,
 	})
 	if err != nil {
 		t.Fatalf("update: %v", err)
@@ -527,7 +531,7 @@ func TestBuildConformantClaimUpdateBundle_NamesTheSameParty(t *testing.T) {
 	if _, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID),
 		QR: qr, SR: in.SR, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
 		MemberID: in.MemberID, MemberIDSystem: in.MemberIDSystem, Provenance: prov, Corr: "corr-2", OriginalCorr: in.Corr,
-		Created: in.Created, Payer: in.Payer, PayerOrgEntry: true,
+		Created: in.Created, Payer: in.Payer, PayerOrgEntry: true, PriorClaim: priorClaim,
 	}); err == nil {
 		t.Fatal("an amendment naming no provider must be refused")
 	}
