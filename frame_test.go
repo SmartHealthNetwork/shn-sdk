@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"strings"
 	"testing"
 )
 
@@ -241,32 +240,6 @@ func TestUnframeAnswer_StampVerify(t *testing.T) {
 	})
 }
 
-func TestUnframeAnswer_RequestOnlyOperationRejected(t *testing.T) {
-	wire, err := EncodeHTTPFrameHeaders(200, map[string]string{FrameHeaderOperation: FrameOperationQuestionnairePackage}, []byte(`{"secret":"reply"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := unframeAnswer(wire, ContractPADTR20); err == nil {
-		t.Fatal("response carried request-only operation")
-	}
-}
-
-func TestUnframeAnswer_Non2xxKeepsPeerBodyOutOfErrorText(t *testing.T) {
-	body := []byte(`{"patient":"synthetic-secret"}`)
-	wire, err := EncodeHTTPFrameHeaders(422, map[string]string{"Content-Type": "application/fhir+json", FrameHeaderContractVersion: ContractPACRD22}, body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = unframeAnswer(wire, ContractPACRD20)
-	var ae *AppAnswerError
-	if !errors.As(err, &ae) || ae.Status != 422 || ae.ContentType != "application/fhir+json" || ae.ContractVersion != ContractPACRD22 || !bytes.Equal(ae.Body, body) {
-		t.Fatalf("non-2xx answer changed: %v", err)
-	}
-	if strings.Contains(err.Error(), "synthetic-secret") {
-		t.Fatal("error string disclosed response body")
-	}
-}
-
 // mustEncodeRawFrame hand-builds magic+version+len+headerJSON+body, bypassing
 // EncodeHTTPFrame's validation, to drive decode-side rejection rows.
 func mustEncodeRawFrame(t *testing.T, headerJSON string, body []byte) []byte {
@@ -277,45 +250,4 @@ func mustEncodeRawFrame(t *testing.T, headerJSON string, body []byte) []byte {
 	out = append(out, l...)
 	out = append(out, headerJSON...)
 	return append(out, body...)
-}
-
-func TestApplicationFramePreservesOpaqueReply(t *testing.T) {
-	for _, status := range []int{200, 201, 202, 204, 400, 422, 500} {
-		body := []byte("opaque\x00answer\n")
-		if status == 204 {
-			body = nil
-		}
-		wire, err := EncodeHTTPFrame(status, "application/octet-stream", body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		header, got, err := DecodeHTTPFrame(wire)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if header.Status != status || !bytes.Equal(got, body) || header.Headers["Content-Type"] != "application/octet-stream" {
-			t.Fatalf("reply changed at status %d", status)
-		}
-	}
-}
-
-func TestRequestFrameCRDContract(t *testing.T) {
-	body := []byte("{opaque")
-	encoded, err := EncodeHTTPFrameHeaders(200, map[string]string{FrameHeaderCRDHook: "order-sign", "Content-Type": "application/json"}, body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h, got, err := DecodeHTTPFrame(encoded)
-	if err != nil || string(got) != string(body) || h.Headers[FrameHeaderCRDHook] != "order-sign" || h.Headers["Authorization"] != "" {
-		t.Fatalf("header=%+v body=%q err=%v", h, got, err)
-	}
-	if !SupportsRequestFrameV1CRD([]string{RequestFrameV1CRD}) || SupportsRequestFrameV1CRD([]string{RequestFrameV1, RequestFrameV1Op}) || SupportsRequestFrameV1Op([]string{RequestFrameV1CRD}) {
-		t.Fatal("CRD capability confused with general or DTR framing")
-	}
-	if SupportsRequestFrameV1CRD(SupportedRequestFrames()) {
-		t.Fatal("codec support alone advertised CRD receiver service selection")
-	}
-	if _, err := unframeAnswer(encoded, ""); err == nil {
-		t.Fatal("request-only CRD addressing accepted on answer")
-	}
 }

@@ -653,14 +653,8 @@ func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoint
 	// Hub-payload-blindness is unaffected — this wraps `payload` before Seal).
 	contractToken := contractTokenForTxType(txType)
 	if operation != "" || (contractToken != "" && SupportsRequestFrameV1(payer.RequestFrames)) {
-		mediaType := "application/fhir+json"
-		if txType == "crd-order-select" {
-			// This leg carries a CDS Hooks order-sign/order-select request, not a
-			// FHIR resource. The receiver forwards this declared type unchanged.
-			mediaType = "application/json"
-		}
 		headers := map[string]string{
-			"Content-Type":             mediaType,
+			"Content-Type":             "application/fhir+json",
 			FrameHeaderContractVersion: contractToken,
 		}
 		if operation != "" {

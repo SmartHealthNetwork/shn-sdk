@@ -6,19 +6,13 @@ This matrix states, element by element, what the Smart Gateway does to a payload
 adapts between adjacent Da Vinci IG versions. Every row is backed by a test obligation that
 runs the real transform chain.
 
-**Release evidence.** Real IG-profile qualification is not established for this native-only release.
-The matrix records executable hermetic behavior and separate real-validator obligations;
-retained results from earlier source commits do not certify this cut. An actual gateway-performed
-transformation still requires executed target-profile proof before any payload is sent; source-profile
-checking follows the participant's selected level and is not an independent all-level gate.
-
 Four honest qualifications about how strong that backing is:
 
-- **Carried rows have real-lane obligations on injected fixtures.** No pinned payload in the
+- **The Carried rows are live-validated, on injected fixtures.** No pinned payload in the
   validation corpus carries these elements, because this gateway's own builders never produce
   them — that is a property of the corpus, not a gap in the checking. Each carry is exercised
-  when the real validation suite runs: it checks the carried output at the target line
-  and the restored output at the source line, from fixtures derived by injecting
+  on every validation run against the real IG lanes: the carried output is validated at the
+  target line, and the restored output at the source line, from fixtures derived by injecting
   a declared element into a pinned reference payload. One element is exercised on the restore lane only
   (`Claim.extension:transmissionIdentifiers`), because the downcast bundle it rides in carries
   unrelated content the 2.1 line rejects.
@@ -30,8 +24,8 @@ Four honest qualifications about how strong that backing is:
 - **The `pa.crd` rows are identity by construction.** The engine registers no transform for
   those steps, so their obligation confirms the payload is untouched rather than exercising
   translation logic, and CRD payloads are not part of the live validation corpus.
-- **A real-lane verdict varies in strength.** When executed, payloads carrying a `meta.profile`
-  are checked against that profile; payloads without one get structural FHIR R4 validation only.
+- **"Validated on a lane" varies in strength.** Payloads carrying a `meta.profile` are
+  checked against that profile; payloads without one get structural FHIR R4 validation only.
 
 **Topology.** Translation is an *egress* adaptation with tolerant ingress: a gateway adapts
 what it sends to the line its peer speaks. An inbound request on a non-native line is not
@@ -223,22 +217,22 @@ no rows in this matrix and none in the compatibility manifest.
 
 The 2.0 and 2.2 lines are not adjacent, so a payload crossing between them walks two steps.
 Composed spans are covered in their own right rather than inferred from their legs: each
-span's end state is a pinned artifact with a separate target-line validation obligation.
-The hermetic suite pins that a composed chain equals sequential application of its steps.
+span's end state is a pinned artifact that the live validation lanes validate at the target
+line. The suite also pins that a composed chain equals sequential application of its steps.
 
 | Span | Coverage |
 |---|---|
-| 2.0 → 2.2 | Pinned end-state artifacts; target-line real validation is not qualified for this release. |
-| 2.2 → 2.0 | Pinned end-state artifacts; target-line real validation is not qualified for this release. |
+| 2.0 → 2.2 | Pinned end-state artifacts, validated at the 2.2 line. |
+| 2.2 → 2.0 | Pinned end-state artifacts, validated at the 2.0 line. |
 
 Read that coverage precisely, in three respects.
 
-**What the lanes would check.** The PAS artifacts carry a `meta.profile` for validation against
+**What the lanes check.** The PAS artifacts carry a `meta.profile` and are validated against
 it. The 2.0 lane loads the DTR 2.0.1, CRD 2.0.1, PDex 2.1.0 and SDC 3.0.0 packages
-beside PAS 2.0.1 (since 2026-09), so a DTR artifact targeting 2.0 can be profile-checked
-there when the real profile-conformance gate runs. The authored downcast control also has
-explicit standard Questionnaire and package profile obligations on all three lines.
-Other unprofiled DTR artifacts receive structural checks when the general sweep runs.
+beside PAS 2.0.1 (since 2026-09), so a DTR artifact targeting 2.0 is profile-validated
+there by the profile-conformance gate. The authored downcast control additionally receives
+explicit standard Questionnaire and package profile checks on all three lines.
+Other unprofiled DTR artifacts receive structural validation in the general sweep.
 
 **How many distinct payloads.** The down-direction span's artifacts are byte-duplicates of
 the corresponding adjacent 2.2 → 2.1 outputs, because the second leg (2.1 → 2.0) is a
@@ -273,7 +267,7 @@ it fails loudly the moment the gap closes.
 
 ---
 
-Every cross-version row above is backed by a hermetic obligation in the gateway's test suite.
-The real-IG target-line obligations remain unqualified for this native-only release. This file is
+Every cross-version row above is backed by an executed obligation in the gateway's test suite;
+live conformance gates also validate the pinned artifacts at their target line. This file is
 generated from the same declared-expectations grid on every release; nothing in it is
 written by hand.

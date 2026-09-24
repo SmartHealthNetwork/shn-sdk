@@ -143,15 +143,6 @@ shn priorauth --member MBR-COVERED \
 # → outcome=approved preAuthRef=PA-… validUntil=…
 ```
 
-For PAS 2.1 and later, `shn priorauth` and `shn doctor` need the requesting
-participant's own Claim priority, certification type, service request type,
-and place of service. Supply `--pas-item-facts ./pas-facts.json` to either
-command. The file is a JSON object keyed by member id; each member value has
-`Priority`, `CertificationType`, `ServiceItemRequestType`, and
-`LocationCodeableConcept` fields containing the exact FHIR CodeableConcepts
-from that participant's draft preauthorization Claim. A missing member or
-missing fact refuses the PAS submit. PAS 2.0 retains its earlier behavior.
-
 Manage your clients with `shn clients --accounts <url>` (list) and
 `shn revoke <id> --accounts <url>` (revoke). To re-key an existing holder, `rotate` is
 a holder-self RFC 7592 path you run directly against the registrar
@@ -275,17 +266,6 @@ directly if you are building a native integration or test harness.
 | `FillQuestionnaireFromAnswers(questionnaireJSON, answers, author, qc)` | Fill ANY DTR questionnaire into a conformant `QuestionnaireResponse` from a caller-supplied `map[string]Answer` (keyed by `linkId`; an `Answer` carries a typed value or an `AnswerCoding{System,Code,Display}`), with information-origin attribution — for manually/attestation-sourced answers when the questionnaire isn't the built-in one. |
 | `BuildConformantClaimBundle(ConformantClaimInputs{QR, SR, PatientRef, CoverageRef, MemberID, Corr, Created})` / `ParseClaimResponse` | PAS preauthorization submit Bundle (the conformant Da Vinci lean shape — Claim + Patient + Coverage + payor Organization + ServiceRequest + QuestionnaireResponse; `Created` drives the deterministic bundle id/timestamp) + the `ClaimResponse` parser → `PriorAuthResult` (`Outcome:"approved"` + `PreAuthRef`/`ValidUntil`; on approvals and denials also the payer's `ProcessNotes` with their types, the deciding `ReviewAction` with its X12 886 reasons, and any CARC/RARC `DenialReasons`, all as sent). Denied (the X12 review-action code `A3` "Not Certified" — this network's own conformant denial code; the reference payer's observed `A2` denial shape is also accepted) and pended responses parse to their own outcomes; a X12 `A2` that carries an authorization number parses as `Outcome:"approved"` + `Partial:true` instead (X12 306's actual meaning for `A2` is "Certified – partial") — an ambiguous response returns an error, never a wrong `Outcome`. The amended re-POST sibling is `BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{…})`. **`MemberID` is required** and is the *bare* member id (`"MBR-COVERED"`). It is stamped in two places: the bundle's Coverage carries it as the `urn:shn:coverage` Member-Number identifier, and the Claim's `insurance[0].coverage` is a **logical reference** to that same business identifier — `{"identifier": {"system": "urn:shn:coverage", "value": "MBR-COVERED"}}`, with **no literal `reference`**, so the bundle is self-consistent and does not ask a receiving payer to resolve an SHN-local resource id. `CoverageRef` stays the FHIR *reference* (`"Coverage/MBR-COVERED"`) for the caller's other roles. The two are deliberately different spellings of different things — `BuildCoverage`/`BuildCoverageWithPayer` take the bare member id too, and refuse a `Coverage/`-prefixed value rather than stamp it. |
 | `VerifyBound(tok, authzPub, now, frame, op, corr, holder, subject, payloadHash)` | Verify a token is bound to exactly this leg, INCLUDING `payloadHash = sha256hex(ciphertext)` (STRICT, AI-2) — the SDK verifies, never mints. Seal-then-authorize: seal the payload first, then authorize against its ciphertext. |
-
-`RunPriorAuth` builds its CRD, DTR and PAS requests at their declared 2.0 lines.
-A successful framed answer with a non-empty `contractVersion` must declare the
-exact line routed for that leg; a differing declaration is refused before the
-workflow parses the body. An absent declaration remains compatible with older
-responders. `PriorAuthConsumptionError` remains declared for source
-compatibility, but the restored workflow does not emit it or retain successful
-reply bodies as local parse/construction evidence. An `*AppAnswerError` carries
-a payer's non-2xx status, body, media type and optional version declaration
-without converting that answer into a workflow verdict; its `Error()` string
-reports only the status and never includes clinical body content.
 
 **Also exported** (responder + participation helpers; see godoc and `docs/PREVIEW.md` §3c):
 `NewResponder` / `ResponderConfig` (the payer-side inbound responder handling all five

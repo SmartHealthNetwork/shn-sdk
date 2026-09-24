@@ -12,13 +12,6 @@ import (
 // MUST/REQUIRED rule; a warning breaks a SHOULD rule.
 type Severity string
 
-// CDSResponseCardsRule and CDSCardObjectRule identify envelope shape checks
-// shared by the response certifier and participant structural checks.
-const (
-	CDSResponseCardsRule = "response.cards"
-	CDSCardObjectRule    = "card.object"
-)
-
 const (
 	SeverityError   Severity = "error"
 	SeverityWarning Severity = "warning"
@@ -57,9 +50,9 @@ const (
 var cdsHooksRules = []CDSHooksRule{
 	{"response.json", SeverityError, "the body is one well-formed JSON value whose objects have unique member names", "RFC 8259 §2 and §4; " + citeCDSResponse, false},
 	{"response.object", SeverityError, "the body is a JSON object", citeCDSResponse + ": the response is a JSON object", false},
-	{CDSResponseCardsRule, SeverityError, "cards is present and is an array (it may be empty)", citeCDSResponse + ": cards REQUIRED, array of Cards, may be empty", false},
+	{"response.cards", SeverityError, "cards is present and is an array (it may be empty)", citeCDSResponse + ": cards REQUIRED, array of Cards, may be empty", false},
 	{"response.systemActions", SeverityError, "systemActions, when present, is an array", citeCDSResponse + ": systemActions OPTIONAL, array of Actions", false},
-	{CDSCardObjectRule, SeverityError, "each card is a JSON object", citeCDSResponse + ": array of Cards", false},
+	{"card.object", SeverityError, "each card is a JSON object", citeCDSResponse + ": array of Cards", false},
 	{"card.uuid", SeverityError, "a card uuid, when present, is a string", citeCDSCard + ": uuid OPTIONAL string", false},
 	{"card.summary", SeverityError, "each card has a non-empty summary string", citeCDSCard + ": summary REQUIRED string", false},
 	{"card.summary.length", SeverityError, "a card summary has fewer than 140 characters", citeCDSCard + ": summary is a one-sentence, <140-character message", false},
@@ -144,7 +137,7 @@ func CheckCDSHooksResponse(body []byte, line string) []Violation {
 	}
 	cards, ok := obj["cards"].([]any)
 	if !ok {
-		c.add(CDSResponseCardsRule, "cards")
+		c.add("response.cards", "cards")
 	}
 	for i, card := range cards {
 		c.card(card, fmt.Sprintf("cards[%d]", i))
@@ -188,7 +181,7 @@ func isArray(v any) bool  { _, ok := v.([]any); return ok }
 func (c *cdsChecker) card(v any, path string) {
 	card, ok := v.(map[string]any)
 	if !ok {
-		c.add(CDSCardObjectRule, path)
+		c.add("card.object", path)
 		return
 	}
 	if !optionalOfType(card, "uuid", isString) {

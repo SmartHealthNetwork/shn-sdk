@@ -47,7 +47,6 @@ type Registry struct {
 
 	mu     sync.Mutex
 	checks []CheckFunc
-	info   map[string]func() any
 }
 
 // New creates a Registry. version comes from the SHN_VERSION env by
@@ -64,27 +63,6 @@ func (r *Registry) Register(fn CheckFunc) {
 	r.checks = append(r.checks, fn)
 }
 
-// RegisterInfo attaches non-sensitive operational metadata, independent of checks.
-// Readers must return bounded in-memory snapshots without I/O or checker work.
-// Reserved health keys cannot be replaced. A repeated information name replaces
-// its reader; nil removes it. Callbacks run outside the registry lock.
-func (r *Registry) RegisterInfo(name string, read func() any) {
-	switch name {
-	case "", "service", "version", "uptimeSeconds", "status", "checks":
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.info == nil {
-		r.info = make(map[string]func() any)
-	}
-	if read == nil {
-		delete(r.info, name)
-	} else {
-		r.info[name] = read
-	}
-}
-
 type payload struct {
 	Service       string  `json:"service"`
 	Version       string  `json:"version,omitempty"`
@@ -99,10 +77,6 @@ func (r *Registry) Handler() http.Handler {
 		r.mu.Lock()
 		fns := make([]CheckFunc, len(r.checks))
 		copy(fns, r.checks)
-		info := make(map[string]func() any, len(r.info))
-		for name, read := range r.info {
-			info[name] = read
-		}
 		r.mu.Unlock()
 		p := payload{
 			Service:       r.service,
@@ -119,14 +93,7 @@ func (r *Registry) Handler() http.Handler {
 			p.Checks = append(p.Checks, c)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		out := map[string]any{"service": p.Service, "uptimeSeconds": p.UptimeSeconds, "status": p.Status, "checks": p.Checks}
-		if p.Version != "" {
-			out["version"] = p.Version
-		}
-		for name, read := range info {
-			out[name] = read()
-		}
-		_ = json.NewEncoder(w).Encode(out)
+		_ = json.NewEncoder(w).Encode(p)
 	})
 }
 
