@@ -146,18 +146,6 @@ What the endpoint does with your request:
 - Once the exchange context and routing prerequisites above are met, everything else in
   your request is carried to the payer as you sent it.
 
-At `strict`, the gateway also checks the required CDS Hooks context shapes for
-its advertised `order-select`, `order-sign`, and `order-dispatch` services. Each
-requires a correctly cased string `context.patientId`; `order-select` also
-requires string `userId`, string-array `selections`, and a `draftOrders` Bundle;
-`order-sign` requires string `userId` and a `draftOrders` Bundle;
-`order-dispatch` requires string-array `dispatchedOrders` and string `performer`.
-A supported malformed context is refused as `cds.request.context`. At `none`,
-`observe`, and `basic`, that deeper rule does not stop delivery. It does not
-compare the supplied patient id with the authenticated subject or look up a
-patient in the gateway's local records. The current source rule-set version is
-`participant-conformance/4`; deployed release availability may differ.
-
 **Send the prefetch data the payer needs yourself**, as the examples below do for `patient`
 and `coverage`. Supplied prefetch does not establish authoritative patient linkage. On the
 unsigned addressing path, absent or unresolvable patient/routing hints yield

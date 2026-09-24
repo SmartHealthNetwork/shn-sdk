@@ -1411,22 +1411,18 @@ rest          body        raw bytes — no additional encoding
   answer line as that peer's claim without relabeling or using a validator;
   a gateway-authored answer still stamps the line it actually built. The
   published SDK originators gained an expected-token check in v0.38.0. Current
-  source keeps its 2.0 request declaration, reads a producer-declared CRD 2.2
-  answer where the PA workflow has a tested reader, and surfaces an unsupported
-  successful reply as `PriorAuthConsumptionError` with the received body, media
-  type, status and version declaration. This is a local workflow outcome after
-  response authority is verified; the producer's declaration is not a validator
-  certificate. The same reply-bearing error applies when a PAS update or inquiry
-  cannot be parsed, matched, or recorded, and when local PAS construction fails
-  after a verified CRD or DTR reply; the latter carries that latest reply and
-  unwraps to the construction error. Check the installed SDK version's behavior
-  separately. An
-  **absent** stamp is tolerated
+  source keeps its 2.0 request declaration and refuses a successful framed
+  answer whose non-empty declaration differs from the routed line, before
+  parsing its body. `PriorAuthConsumptionError` remains an exported declaration
+  for source compatibility, but the restored workflow does not emit it or
+  retain successful reply bodies as local parse/construction evidence. Check
+  the installed SDK version's behavior separately. An **absent** stamp is tolerated
   (a pre-version responder, or a responder build that does not opt into
   stamping), exactly like an absent frame is tolerated today. A non-2xx frame
-  carries its author's status, media type, optional version declaration and body,
-  including non-FHIR errors;
-  it is not converted into a gateway conformance verdict.
+  becomes `AppAnswerError`, which carries its author's status, media type,
+  optional version declaration and body, including non-FHIR errors; its
+  `Error()` text reports only the status so clinical body content is not
+  disclosed. It is not converted into a gateway conformance verdict.
 
 **Decoding is strict.** A decoder rejects (rather than silently degrading) on: an
 unknown version byte, a header length that overruns the payload or the 64 KiB

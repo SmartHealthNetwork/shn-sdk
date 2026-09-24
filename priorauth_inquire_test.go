@@ -229,13 +229,7 @@ func TestInquiryDecision_Matching(t *testing.T) {
 		Items:                    []PASInquiryItem{{Sequence: 1, TraceNumber: PASIdentifier{System: PASItemTraceSystem, Value: "c.1"}}},
 		ClaimResponseIdentifiers: []PASIdentifier{{System: "urn:p", Value: "cr-1"}},
 	}
-	const approvalAdjudication = `[{"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction","extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode","valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/306","code":"A1"}]}}]}]}]`
 	approved := func(extra string) string {
-		if strings.Contains(extra, `"adjudication":[]`) {
-			extra = strings.Replace(extra, `"adjudication":[]`, `"adjudication":`+approvalAdjudication, 1)
-		} else {
-			extra += `,"item":[{"itemSequence":1,"adjudication":` + approvalAdjudication + `}]`
-		}
 		return `{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"AUTH-1"` + extra + `}`
 	}
 	byTrace := approved(`,"item":[{"itemSequence":1,"extension":[{"url":"` + pasExtItemTraceNumber + `","valueIdentifier":{"system":"` + PASItemTraceSystem + `","value":"c.1"}}],"adjudication":[]}]`)
@@ -265,11 +259,6 @@ func TestInquiryDecision_Matching(t *testing.T) {
 		if err != nil || res.Outcome != "approved" || res.PreAuthRef != "AUTH-1" {
 			t.Errorf("%s: %+v %v", name, res, err)
 		}
-		selected, selectErr := SelectPASInquiryAnswer([]byte(row.answer), cont)
-		if selectErr != nil || selected.Result.Outcome != res.Outcome || !bytes.Contains(selected.Response, []byte(`"preAuthRef":"AUTH-1"`)) || !bytes.Contains(selected.Bundle, selected.Response) {
-			t.Errorf("%s: selection lost exact response/Bundle scope: %v", name, selectErr)
-		}
-
 	}
 	if _, err := inquiryDecision([]byte(`{"resourceType":"OperationOutcome"}`), cont); err == nil {
 		t.Error("an OperationOutcome answer was read as a decision")

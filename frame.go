@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // MessageFrameV1 is the capability token a holder advertises in its registry
@@ -262,11 +261,10 @@ func (e *AppAnswerError) Error() string {
 	return fmt.Sprintf("shnsdk: recipient answered %d", e.Status)
 }
 
-// PriorAuthConsumptionError reports that an authored PA workflow could not
-// consume an already authenticated application answer or build its next local
-// action after one. Body is the peer's exact, size-limited latest reply; Leg
-// names the authored step that failed. Error deliberately omits the body and
-// frame metadata. It is distinct from an authority or transport refusal.
+// PriorAuthConsumptionError is retained as the published typed error for a PA
+// workflow that cannot consume an authenticated application answer. Restored
+// request construction no longer emits it, but callers may still compile
+// against and inspect this public transport metadata carrier.
 type PriorAuthConsumptionError struct {
 	Leg             string
 	Code            string
@@ -286,19 +284,6 @@ func (e *PriorAuthConsumptionError) Error() string {
 
 func (e *PriorAuthConsumptionError) Unwrap() error { return e.Cause }
 
-type receivedAnswer struct {
-	status          int
-	contentType     string
-	contractVersion string
-	body            []byte
-}
-
-func consumptionFailure(leg, code string, answer receivedAnswer, cause error) error {
-	return &PriorAuthConsumptionError{Leg: leg, Code: code, Status: answer.status,
-		ContentType: answer.contentType, ContractVersion: answer.contractVersion,
-		Body: answer.body, Cause: cause}
-}
-
 // unframeAnswer applies the originator side of frame negotiation to an opened
 // response payload: any payload bearing the frame magic is decoded — its body
 // (2xx) or an *AppAnswerError (non-2xx) — and a bare payload passes through
@@ -310,11 +295,17 @@ func consumptionFailure(leg, code string, answer receivedAnswer, cause error) er
 // rolling deploys). The payer's advertised frames are therefore advisory only and
 // not an input here.
 //
-// expectedToken identifies the representation this SDK built for an authored
-// request, not a required echo on the response. A different producer declaration
-// is consumed only where this workflow has a proven reader; otherwise the exact
-// received answer is available through PriorAuthConsumptionError. An absent stamp
-// retains legacy behavior, and the version-neutral eligibility leg has no check.
+// expectedToken is the contractVersion stamp-verify check (multi-version contracts design, published-SDK
+// parity — v0.38.0): when non-empty (the caller knows the contract-version token
+// this leg was routed/built at) AND the 2xx frame carries a non-empty
+// FrameHeaderContractVersion stamp that DIFFERS from it, the answer is rejected —
+// tamper or skew, either way not the payload this leg negotiated. Verbatim
+// semantics of the gateway's response-leg verify (gateway/engine/gateway.go
+// roundTripInner). An ABSENT stamp is always tolerated (the frames-absent-lane
+// precedent — a pre-version responder, or a responder that never sets
+// ResponderConfig.StampContractVersion), and expectedToken == "" (the caller has no
+// routed-token expectation, e.g. RunEligibility — coverage-eligibility is not a
+// contract) skips the check entirely.
 func unframeAnswer(plaintext []byte, expectedToken string) ([]byte, error) {
 	if !IsFramed(plaintext) {
 		return plaintext, nil
@@ -333,26 +324,9 @@ func unframeAnswer(plaintext []byte, expectedToken string) ([]byte, error) {
 		return nil, &AppAnswerError{Status: hdr.Status, ContentType: hdr.Headers["Content-Type"], ContractVersion: hdr.Headers[FrameHeaderContractVersion], Body: body}
 	}
 	if expectedToken != "" {
-		if stamped := hdr.Headers[FrameHeaderContractVersion]; stamped != "" && stamped != expectedToken &&
-			!(expectedToken == ContractPACRD20 && (stamped == ContractPACRD21 || stamped == ContractPACRD22)) &&
-			!readablePASReplyLine(expectedToken, stamped) {
-			return nil, &PriorAuthConsumptionError{Status: hdr.Status, ContentType: hdr.Headers["Content-Type"], ContractVersion: stamped, Body: body}
+		if stamped := hdr.Headers[FrameHeaderContractVersion]; stamped != "" && stamped != expectedToken {
+			return nil, fmt.Errorf("shnsdk: response contract version mismatch: frame declares %s, leg routed %s", stamped, expectedToken)
 		}
 	}
 	return body, nil
-}
-
-// PAS request and answer lines are independently declared. This SDK's typed
-// PAS reader accepts the supported PAS line family; the later response parser
-// still checks the actual ClaimResponse content and returns the exact producer
-// body on a local consumption failure. Unknown lines remain unavailable.
-func readablePASReplyLine(requestToken, answerToken string) bool {
-	requestContract, requestLine, requestOK := strings.Cut(requestToken, "@")
-	answerContract, answerLine, answerOK := strings.Cut(answerToken, "@")
-	if !requestOK || !answerOK || requestContract != "pa.pas" || answerContract != "pa.pas" {
-		return false
-	}
-	_, requestSupported := PASLineDef(requestLine)
-	_, answerSupported := PASLineDef(answerLine)
-	return requestSupported && answerSupported
 }

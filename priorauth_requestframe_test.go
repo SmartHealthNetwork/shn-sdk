@@ -1,13 +1,12 @@
 package shnsdk
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +16,8 @@ import (
 // priorauth_requestframe_test.go — the Originator's REQUEST-framing (request-frame
 // contract, published-SDK parity — v0.38.0): RunPriorAuth frames each
 // contract-mapped leg's REQUEST toward a requestFrames-declaring payer, with the
-// per-leg token contractTokenForTxType computes for that request. A payer that does not declare
+// SAME per-leg token contractTokenForTxType computes for both the request stamp
+// AND the response unframeAnswer verify. A payer that does not declare
 // requestFrames gets a BYTE-IDENTICAL bare request (Payer.RequestFrames unset —
 // the zero value every pre-v0.38.0 test/caller already uses).
 
@@ -68,23 +68,6 @@ func TestRunPriorAuth_FramesRequestsToDeclaringPayer(t *testing.T) {
 		if got := f.capturedRequestMedia[txType]; got != wantMedia[txType] {
 			t.Errorf("%s: declared Content-Type = %q, want %q", txType, got, wantMedia[txType])
 		}
-	}
-}
-
-func TestRunPriorAuth_UsesAdvertisedPASLineOnWire(t *testing.T) {
-	_, signPriv, _ := ed25519.GenerateKey(rand.Reader)
-	payerPub, payerPriv, _ := box.GenerateKey(rand.Reader)
-	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
-	f := &paFakeSubstrate{signPriv: signPriv, payerEnc: payerPriv, payerPub: payerPub,
-		payerID: "payer", now: now, paRequired: true}
-	id, ep, payer, _ := newPATestRig(t, f)
-	payer.RequestFrames = []string{RequestFrameV1}
-	payer.ContractVersions = []string{"pa.pas@2.0", "pa.pas@2.2"}
-	if _, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest()); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.capturedRequestClaim["pas-claim"]; got != "pa.pas@2.2" {
-		t.Fatalf("PAS request frame contract=%q, want advertised native 2.2", got)
 	}
 }
 
@@ -161,7 +144,7 @@ func TestRunEligibility_NeverFramed(t *testing.T) {
 // TestUnframeAnswer_ContractTokenForTxType proves the per-leg token map itself
 // (crd/dtr/pas map to distinct contracts; coverage-eligibility and any unknown
 // txType are version-neutral) — the single source both the request-frame stamp
-// and the local reader's request-line context.
+// and the response expectedToken read.
 func TestContractTokenForTxType(t *testing.T) {
 	cases := map[string]string{
 		"crd-order-select":        ContractPACRD20,
@@ -178,9 +161,10 @@ func TestContractTokenForTxType(t *testing.T) {
 	}
 }
 
-// TestRunPriorAuth_ResponseStampVerify covers response-line consumption on the
-// full PA round trip: a PAS reply at an unsupported line remains available to
-// the caller, while matching and absent declarations retain legacy behavior.
+// TestRunPriorAuth_ResponseStampVerify covers the contractVersion stamp-verify rows on the
+// FULL orchestrator round trip (unlike TestUnframeAnswer_StampVerify's unit-level
+// coverage): the pas-claim leg's response is framed with a matching / mismatched /
+// absent contractVersion stamp.
 func TestRunPriorAuth_ResponseStampVerify(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -205,9 +189,11 @@ func TestRunPriorAuth_ResponseStampVerify(t *testing.T) {
 
 			res, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest())
 			if tc.wantErr {
-				var ce *PriorAuthConsumptionError
-				if !errors.As(err, &ce) || ce.Leg != "pas-claim" || ce.ContractVersion != tc.stampToken || ce.Status != 200 || !bytes.Equal(ce.Body, f.payloadFor("pas-claim", nil)) {
-					t.Fatalf("unsupported producer line did not preserve the received PAS answer: %v", err)
+				if err == nil {
+					t.Fatal("RunPriorAuth: expected a contract-version mismatch error, got nil")
+				}
+				if !strings.Contains(err.Error(), "contract version mismatch") {
+					t.Errorf("error = %v, want it to mention a contract version mismatch", err)
 				}
 				return
 			}

@@ -36,7 +36,6 @@ func conformantSubmitInputs(t *testing.T) ConformantClaimInputs {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
 	return ConformantClaimInputs{
-		ItemFacts:      syntheticPASLineItemFacts(),
 		Provider:       testRequestingProvider(),
 		Coverage:       testMemberCoverage(member),
 		MemberIDSystem: MemberSystem,
@@ -828,11 +827,9 @@ func TestBuildConformantClaimUpdateBundleAtLine_DeltasByLine(t *testing.T) {
 			t.Fatalf("unmarshal bundle: %v", err)
 		}
 		hasRelationship := false
-		primarySeen := false
 		for _, e := range bundle.Entry {
 			var probe struct {
 				ResourceType string `json:"resourceType"`
-				ID           string `json:"id"`
 				Related      []struct {
 					Relationship *struct {
 						Coding []struct {
@@ -848,10 +845,6 @@ func TestBuildConformantClaimUpdateBundleAtLine_DeltasByLine(t *testing.T) {
 			if probe.ResourceType != "Claim" {
 				continue
 			}
-			if probe.ID != conformantPASClaimUpdateID {
-				continue // PAS 2.1+ also carries the unmodified prior Claim.
-			}
-			primarySeen = true
 			if len(probe.Related) == 0 {
 				t.Fatalf("line %s: Claim has no related[]", tc.line)
 			}
@@ -862,9 +855,6 @@ func TestBuildConformantClaimUpdateBundleAtLine_DeltasByLine(t *testing.T) {
 					}
 				}
 			}
-		}
-		if !primarySeen {
-			t.Fatalf("line %s: amended Claim missing", tc.line)
 		}
 		if hasRelationship != tc.want {
 			t.Errorf("line %s: Claim.related[0].relationship present=%v, want %v", tc.line, hasRelationship, tc.want)
@@ -923,13 +913,10 @@ func TestStripMetaProfile(t *testing.T) {
 	}
 }
 
-// TestParseClaimResponse_Approved: an approved ClaimResponse (A1 + complete +
+// TestParseClaimResponse_Approved: an approved ClaimResponse (outcome complete +
 // preAuthRef) parses to Outcome "approved" with the preAuthRef + validUntil.
 func TestParseClaimResponse_Approved(t *testing.T) {
-	cr, buildErr := BuildClaimResponse("PA-0123456789ab", "2026-09-02", "Patient/synthetic", "corr", time.Unix(1700000000, 0))
-	if buildErr != nil {
-		t.Fatal(buildErr)
-	}
+	cr := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","use":"preauthorization","preAuthRef":"PA-0123456789ab","preAuthPeriod":{"end":"2026-09-02"}}`)
 	res, err := ParseClaimResponse(cr)
 	if err != nil {
 		t.Fatalf("ParseClaimResponse: %v", err)
@@ -1244,17 +1231,8 @@ func conformantUpdateInputsFromGolden(t *testing.T) ConformantClaimUpdateInputs 
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	submitted, err := BuildConformantClaimBundle(conformantSubmitInputs(t))
-	if err != nil {
-		t.Fatalf("build original submitted Claim: %v", err)
-	}
-	priorClaim, err := SubmittedPASClaim(submitted)
-	if err != nil {
-		t.Fatalf("read original submitted Claim: %v", err)
-	}
 
 	return ConformantClaimUpdateInputs{
-		ItemFacts:        syntheticPASLineItemFacts(),
 		Provider:         testRequestingProvider(),
 		Coverage:         testMemberCoverage(member),
 		MemberIDSystem:   MemberSystem,
@@ -1267,7 +1245,6 @@ func conformantUpdateInputsFromGolden(t *testing.T) ConformantClaimUpdateInputs 
 		DiagnosticReport: drJSON,
 		Corr:             "convergence-pas-update-0001",
 		OriginalCorr:     "convergence-pas-submit-0001",
-		PriorClaim:       priorClaim,
 		Created:          created,
 		Payer:            CMSPayerIdentity,
 	}
@@ -1810,7 +1787,7 @@ func TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable(t *
 	in.PayerOrgEntry = true
 	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 
-	got, err := BuildConformantClaimUpdateBundleAtLine("2.2", in)
+	got, err := BuildConformantClaimUpdateBundle(in)
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle(PayerOrgEntry:true): %v", err)
 	}

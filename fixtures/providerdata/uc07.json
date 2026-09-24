@@ -25,10 +25,6 @@
             },
             "system": "urn:shn:member",
             "value": "MBR-PD-UC07"
-          },
-          {
-            "system": "urn:shn:pci",
-            "value": "pci:8d36b6185f8b7271909dddc0c00576bb"
           }
         ],
         "name": [
@@ -296,104 +292,6 @@
       "request": {
         "method": "PUT",
         "url": "ServiceRequest/sr-mbrpduc07-g0151"
-      }
-    },
-    {
-      "fullUrl": "Claim/claim-pas-draft-sr-mbrpduc07-g0151",
-      "resource": {
-        "resourceType": "Claim",
-        "id": "claim-pas-draft-sr-mbrpduc07-g0151",
-        "status": "draft",
-        "type": {
-          "coding": [
-            {
-              "system": "http://terminology.hl7.org/CodeSystem/claim-type",
-              "code": "professional"
-            }
-          ]
-        },
-        "use": "preauthorization",
-        "patient": {
-          "reference": "Patient/MBR-PD-UC07"
-        },
-        "created": "2026-06-01",
-        "provider": {
-          "reference": "Organization/org-hha-mbrpduc07"
-        },
-        "priority": {
-          "coding": [
-            {
-              "system": "http://terminology.hl7.org/CodeSystem/processpriority",
-              "code": "normal"
-            }
-          ]
-        },
-        "insurance": [
-          {
-            "sequence": 1,
-            "focal": true,
-            "coverage": {
-              "reference": "Coverage/cov-mbrpduc07"
-            }
-          }
-        ],
-        "item": [
-          {
-            "sequence": 1,
-            "productOrService": {
-              "coding": [
-                {
-                  "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
-                  "code": "G0151",
-                  "display": "Services of a qualified physical therapist in the home health setting, each 15 minutes"
-                }
-              ],
-              "text": "Services of a qualified physical therapist in the home health setting"
-            },
-            "extension": [
-              {
-                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService",
-                "valueReference": {
-                  "reference": "ServiceRequest/sr-mbrpduc07-g0151"
-                }
-              },
-              {
-                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-certificationType",
-                "valueCodeableConcept": {
-                  "coding": [
-                    {
-                      "system": "https://codesystem.x12.org/005010/1322",
-                      "code": "I"
-                    }
-                  ]
-                }
-              },
-              {
-                "url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceItemRequestType",
-                "valueCodeableConcept": {
-                  "coding": [
-                    {
-                      "system": "https://codesystem.x12.org/005010/1525",
-                      "code": "IN"
-                    }
-                  ]
-                }
-              }
-            ],
-            "locationCodeableConcept": {
-              "coding": [
-                {
-                  "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set",
-                  "code": "12"
-                }
-              ]
-            }
-          }
-        ]
-      },
-      "request": {
-        "method": "PUT",
-        "url": "Claim/claim-pas-draft-sr-mbrpduc07-g0151"
       }
     }
   ]

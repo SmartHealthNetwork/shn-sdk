@@ -188,9 +188,14 @@ func TestUnframeAnswer(t *testing.T) {
 	}
 }
 
-// TestUnframeAnswer_StampVerify distinguishes the request's built line from the
-// producer's response declaration. The CRD reader handles the known 2.2 answer;
-// unsupported PAS lines remain local consumption failures with the raw reply.
+// TestUnframeAnswer_StampVerify covers the contractVersion stamp-verify rows (multi-version contracts design,
+// published-SDK parity — v0.38.0): unframeAnswer(frame, expectedToken)
+// verbatim-mirrors the gateway's response-leg verify (gateway/engine/gateway.go
+// roundTripInner) — non-empty expectation + present stamp + MISMATCH → reject;
+// matching stamp → accept; ABSENT stamp is always tolerated regardless of
+// expectation (the frames-absent-lane precedent); expectedToken == "" (the
+// caller has no routed-token expectation) skips the check even when a stamp is
+// present.
 func TestUnframeAnswer_StampVerify(t *testing.T) {
 	body := []byte(`{"resourceType":"ClaimResponse"}`)
 
@@ -214,30 +219,10 @@ func TestUnframeAnswer_StampVerify(t *testing.T) {
 		}
 	})
 
-	t.Run("CRD 2.2 answer to a 2.0 request is readable", func(t *testing.T) {
-		got, err := unframeAnswer(stamped(t, ContractPACRD22), ContractPACRD20)
-		if err != nil || !bytes.Equal(got, body) {
-			t.Fatalf("got %q, %v; want intact producer answer", got, err)
-		}
-	})
-
-	t.Run("independent supported PAS answer is readable", func(t *testing.T) {
-		for _, pair := range [][2]string{{ContractPAPAS22, ContractPAPAS20}, {ContractPAPAS20, ContractPAPAS21}} {
-			got, err := unframeAnswer(stamped(t, pair[1]), pair[0])
-			if err != nil || !bytes.Equal(got, body) {
-				t.Fatalf("request %s, answer %s: got %q, %v; want intact answer", pair[0], pair[1], got, err)
-			}
-		}
-	})
-
-	t.Run("unknown PAS answer stamp rejected", func(t *testing.T) {
-		_, err := unframeAnswer(stamped(t, "pa.pas@9.9"), ContractPAPAS22)
-		var ce *PriorAuthConsumptionError
-		if !errors.As(err, &ce) || ce.Status != 200 || ce.ContentType != "application/fhir+json" || ce.ContractVersion != "pa.pas@9.9" || !bytes.Equal(ce.Body, body) {
-			t.Fatalf("local refusal lost verified answer: %v", err)
-		}
-		if strings.Contains(err.Error(), "ClaimResponse") {
-			t.Fatal("error string disclosed response body")
+	t.Run("mismatched stamp rejected", func(t *testing.T) {
+		_, err := unframeAnswer(stamped(t, "pa.pas@2.1"), "pa.pas@2.0")
+		if err == nil {
+			t.Fatal("mismatched contractVersion stamp must be rejected")
 		}
 	})
 

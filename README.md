@@ -277,19 +277,15 @@ directly if you are building a native integration or test harness.
 | `VerifyBound(tok, authzPub, now, frame, op, corr, holder, subject, payloadHash)` | Verify a token is bound to exactly this leg, INCLUDING `payloadHash = sha256hex(ciphertext)` (STRICT, AI-2) — the SDK verifies, never mints. Seal-then-authorize: seal the payload first, then authorize against its ciphertext. |
 
 `RunPriorAuth` builds its CRD, DTR and PAS requests at their declared 2.0 lines.
-The payer may declare a different response line: the built-in CRD reader can
-consume 2.0, 2.1 and 2.2 coverage answers. If this authored workflow cannot
-interpret an authenticated successful reply, `errors.As` finds
-`*PriorAuthConsumptionError`; its `Body`, `Status`, `ContentType` and
-`ContractVersion` expose the received answer, while its `Error()` string omits
-clinical content. This includes parse, match, and continuation-record failures
-on PAS updates and inquiries, including inquiries made by `WithWait`. If local
-PAS construction fails after CRD or DTR, the error carries the latest verified
-reply and unwraps to the construction error. `Leg` names the authored step that
-failed; `Body` and the frame fields describe that latest reply. An
-`*AppAnswerError` still carries a payer's non-2xx status,
-body, media type and optional version declaration without converting that answer
-into a workflow verdict.
+A successful framed answer with a non-empty `contractVersion` must declare the
+exact line routed for that leg; a differing declaration is refused before the
+workflow parses the body. An absent declaration remains compatible with older
+responders. `PriorAuthConsumptionError` remains declared for source
+compatibility, but the restored workflow does not emit it or retain successful
+reply bodies as local parse/construction evidence. An `*AppAnswerError` carries
+a payer's non-2xx status, body, media type and optional version declaration
+without converting that answer into a workflow verdict; its `Error()` string
+reports only the status and never includes clinical body content.
 
 **Also exported** (responder + participation helpers; see godoc and `docs/PREVIEW.md` §3c):
 `NewResponder` / `ResponderConfig` (the payer-side inbound responder handling all five

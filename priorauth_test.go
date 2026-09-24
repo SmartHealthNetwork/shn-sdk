@@ -40,12 +40,7 @@ type paFakeSubstrate struct {
 	// paRequired controls the CRD cards verdict. false → no-pa-required short-circuit.
 	paRequired bool
 	// malformCards makes the CRD leg return non-JSON, to drive a leg-attributed error.
-	malformCards     bool
-	crdRawAnswer     []byte
-	dtrRawAnswer     []byte
-	pasRawAnswer     []byte
-	updateRawAnswer  []byte
-	inquireRawAnswer []byte
+	malformCards bool
 	// frameLeg, if non-empty, seals a v1 HTTP frame carrying frameStatus/frameBody
 	// as the response payload for the leg whose TransactionType equals frameLeg,
 	// instead of payloadFor's normal answer — drives the framed-app-error
@@ -109,8 +104,6 @@ var paResponseOp = map[string]string{
 	"crd-order-select":        "crd-cards",
 	"dtr-questionnaire-fetch": "dtr-questionnaire",
 	"pas-claim":               "pas-response",
-	"pas-claim-update":        "pas-update-response",
-	"pas-claim-inquire":       "pas-inquire-response",
 }
 
 func (f *paFakeSubstrate) mint(tok Token) Token {
@@ -148,9 +141,6 @@ func (f *paFakeSubstrate) authorizeHandler(w http.ResponseWriter, r *http.Reques
 func (f *paFakeSubstrate) payloadFor(txType string, reqPlain []byte) []byte {
 	switch txType {
 	case "crd-order-select":
-		if f.crdRawAnswer != nil {
-			return f.crdRawAnswer
-		}
 		if f.malformCards {
 			return []byte("this is not json cards {{{")
 		}
@@ -165,9 +155,6 @@ func (f *paFakeSubstrate) payloadFor(txType string, reqPlain []byte) []byte {
 		return []byte(`{"cards":[{"summary":"PA verdict","indicator":"info",` +
 			`"extension":{` + ext + `}}]}`)
 	case "dtr-questionnaire-fetch":
-		if f.dtrRawAnswer != nil {
-			return f.dtrRawAnswer
-		}
 		// §6.2: uniform leg shape — the substrate returns a $questionnaire-package
 		// collection Bundle wrapping the lumbar-MRI questionnaire the SDK
 		// FillQuestionnaire recognizes. RunPriorAuth extracts the bare Questionnaire.
@@ -182,91 +169,13 @@ func (f *paFakeSubstrate) payloadFor(txType string, reqPlain []byte) []byte {
 		}
 		return pkg
 	case "pas-claim":
-		if f.pasRawAnswer != nil {
-			return f.pasRawAnswer
-		}
-		answer, err := BuildClaimResponse("PA-APPROVED-123", "2026-12-31", "Patient/X", "fixture-correlation", f.now)
-		if err != nil {
-			panic(err)
-		}
-		return answer
-	case "pas-claim-update":
-		return f.updateRawAnswer
-	case "pas-claim-inquire":
-		return f.inquireRawAnswer
+		return []byte(`{"resourceType":"ClaimResponse","status":"active","type":{"coding":[{"code":"professional"}]},` +
+			`"use":"preauthorization","patient":{"reference":"Patient/X"},"created":"` +
+			f.now.UTC().Format(time.RFC3339) + `","insurer":{"reference":"Organization/payer"},` +
+			`"outcome":"complete","preAuthRef":"PA-APPROVED-123",` +
+			`"preAuthPeriod":{"end":"2026-12-31"}}`)
 	}
 	return []byte(`{}`)
-}
-
-func TestRunPriorAuth_ReceivedDTRAndPASParseFailuresExposeReply(t *testing.T) {
-	for _, tc := range []struct {
-		name, leg string
-		dtr, pas  []byte
-	}{
-		{"DTR", "dtr-questionnaire-fetch", []byte(`{"secret":"synthetic-dtr"}`), nil},
-		{"PAS", "pas-claim", nil, []byte(`{"secret":"synthetic-pas"}`)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, signPriv, _ := ed25519.GenerateKey(rand.Reader)
-			payerPub, payerPriv, _ := box.GenerateKey(rand.Reader)
-			now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
-			f := &paFakeSubstrate{signPriv: signPriv, payerEnc: payerPriv, payerPub: payerPub,
-				payerID: "payer", now: now, paRequired: true, dtrRawAnswer: tc.dtr, pasRawAnswer: tc.pas}
-			id, ep, payer, _ := newPATestRig(t, f)
-			_, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest())
-			var ce *PriorAuthConsumptionError
-			want := tc.dtr
-			if tc.pas != nil {
-				want = tc.pas
-			}
-			if !errors.As(err, &ce) || ce.Leg != tc.leg || !bytes.Equal(ce.Body, want) || ce.Status != 200 {
-				t.Fatalf("local parse failure lost authenticated answer: %v", err)
-			}
-			if strings.Contains(err.Error(), "synthetic-") {
-				t.Fatal("error string disclosed response body")
-			}
-		})
-	}
-}
-
-// A received CRD 2.2 indeterminate assertion cannot become a clinical
-// no-PA-required decision simply because PARequired() is false for that code.
-func TestRunPriorAuth_IndeterminateCRDReplyIsLocalConsumptionFailure(t *testing.T) {
-	_, signPriv, _ := ed25519.GenerateKey(rand.Reader)
-	payerPub, payerPriv, _ := box.GenerateKey(rand.Reader)
-	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
-	in := paRequiredInputs("2.2")
-	in.Orders[0].Coverage[0].Covered = "indeterminate"
-	in.Orders[0].Coverage[0].PANeeded = "indeterminate"
-	in.Orders[0].Coverage[0].Reasons = []json.RawMessage{json.RawMessage(`{"text":"source cannot decide"}`)}
-	answer, err := BuildCRDResponse("2.2", in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := &paFakeSubstrate{signPriv: signPriv, payerEnc: payerPriv, payerPub: payerPub,
-		payerID: "payer", now: now, crdRawAnswer: answer, doStamp: true,
-		stampLeg: "crd-order-select", stampToken: ContractPACRD22}
-	id, ep, payer, _ := newPATestRig(t, f)
-	result, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest())
-	var ce *PriorAuthConsumptionError
-	if !errors.As(err, &ce) || !bytes.Equal(ce.Body, answer) || ce.ContractVersion != ContractPACRD22 || result.Outcome != "" {
-		t.Fatalf("indeterminate CRD became a clinical outcome or lost reply: result=%+v error=%v", result, err)
-	}
-}
-
-func TestRunPriorAuth_PARequiredWithoutQuestionnaireExposesReply(t *testing.T) {
-	_, signPriv, _ := ed25519.GenerateKey(rand.Reader)
-	payerPub, payerPriv, _ := box.GenerateKey(rand.Reader)
-	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
-	answer := []byte(`{"cards":[{"summary":"PA required","indicator":"info","extension":{"covered":"covered","paNeeded":"auth-needed"}}]}`)
-	f := &paFakeSubstrate{signPriv: signPriv, payerEnc: payerPriv, payerPub: payerPub,
-		payerID: "payer", now: now, crdRawAnswer: answer}
-	id, ep, payer, _ := newPATestRig(t, f)
-	result, err := id.RunPriorAuth(context.Background(), http.DefaultClient, ep, payer, demoPARequest())
-	var ce *PriorAuthConsumptionError
-	if !errors.As(err, &ce) || ce.Leg != "crd-order-select" || !bytes.Equal(ce.Body, answer) || result.Outcome != "" {
-		t.Fatalf("missing questionnaire lost received answer or invented outcome: result=%+v error=%v", result, err)
-	}
 }
 
 // crdSystemActionAnswer answers a CRD request with its first draft order in
@@ -464,7 +373,6 @@ func demoPARequest() PriorAuthRequest {
 		Family:           "Johansson",
 		NPI:              "9999999999",
 		Provider:         testRequestingProvider(),
-		ItemFacts:        syntheticPASLineItemFacts(),
 		Patient:          testMemberPatient("MBR-COVERED"),
 		Coverage:         testMemberCoverageSearch("MBR-COVERED"),
 		MemberIDSystem:   MemberSystem,

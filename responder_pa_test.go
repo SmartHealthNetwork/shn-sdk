@@ -454,10 +454,6 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 	if err != nil {
 		t.Fatalf("BuildProvenance: %v", err)
 	}
-	prior, err := SubmittedPASClaim(buildConformantClaim(t, member, origCorr, qrJSON, now))
-	if err != nil {
-		t.Fatalf("read submitted Claim: %v", err)
-	}
 	bundle, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
 		Provider:         testRequestingProvider(),
 		MemberIDSystem:   MemberSystem,
@@ -473,7 +469,6 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 		Created:          now,
 		Payer:            CMSPayerIdentity,
 		PayerOrgEntry:    true,
-		PriorClaim:       prior,
 	})
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)

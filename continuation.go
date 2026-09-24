@@ -22,10 +22,6 @@ type PriorAuthContinuation struct {
 	PayerHolder string `json:"payerHolder"`
 	// ClaimIdentifiers are the submitted Claim's identifiers.
 	ClaimIdentifiers []PASIdentifier `json:"claimIdentifiers"`
-	// ClaimReferences are exact references the sent request itself stated for
-	// its Claim: Claim/<id>, its Bundle fullUrl, and any explicit related Claim
-	// references. They are request identity metadata, never payer-derived facts.
-	ClaimReferences []string `json:"claimReferences,omitempty"`
 	// ClaimType and Priority are the submitted Claim's type and priority.
 	ClaimType PASCoding `json:"claimType"`
 	Priority  PASCoding `json:"priority"`
@@ -86,11 +82,10 @@ func NewPriorAuthContinuation(line, payerHolder, memberID string, request, respo
 		return PriorAuthContinuation{}, errors.New("shnsdk: continuation: the payer holder and the member id are required")
 	}
 	c := PriorAuthContinuation{Line: line, PayerHolder: payerHolder, MemberID: memberID}
-	claim, refs, err := sentClaimLinkage(request)
+	claim, err := firstBundleResource(request, "Claim")
 	if err != nil {
 		return PriorAuthContinuation{}, fmt.Errorf("shnsdk: continuation: request: %w", err)
 	}
-	c.ClaimReferences = refs
 	if c.ProviderNPI, err = submittedProviderNPI(request); err != nil {
 		return PriorAuthContinuation{}, fmt.Errorf("shnsdk: continuation: request: %w", err)
 	}
@@ -308,8 +303,10 @@ func (c PriorAuthContinuation) matches(claimResponse []byte) bool {
 			if json.Unmarshal(e["valueIdentifier"], &trace) != nil {
 				continue
 			}
-			if c.matchesItemTrace(trace) {
-				return true
+			for _, own := range c.Items {
+				if validIdentifier(trace) && own.TraceNumber == trace {
+					return true
+				}
 			}
 		}
 	}
@@ -318,7 +315,7 @@ func (c PriorAuthContinuation) matches(claimResponse []byte) bool {
 			return true
 		}
 	}
-	if r := cr.Request.Identifier; r != nil && c.matchesRequestIdentifier(*r) {
+	if r := cr.Request.Identifier; r != nil && validIdentifier(*r) && slices.Contains(c.ClaimIdentifiers, *r) {
 		return true
 	}
 	return c.PreAuthRef != "" && cr.PreAuthRef == c.PreAuthRef

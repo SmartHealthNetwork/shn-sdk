@@ -8,8 +8,9 @@ runs the real transform chain.
 
 **Release evidence.** Real IG-profile qualification is not established for this native-only release.
 The matrix records executable hermetic behavior and separate real-validator obligations;
-retained results from earlier source commits do not certify this cut. An actual transformation
-still requires executed valid source and target profile proof before any payload is sent.
+retained results from earlier source commits do not certify this cut. An actual gateway-performed
+transformation still requires executed target-profile proof before any payload is sent; source-profile
+checking follows the participant's selected level and is not an independent all-level gate.
 
 Four honest qualifications about how strong that backing is:
 

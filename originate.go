@@ -51,10 +51,6 @@ type Payer struct {
 	// questionnaire request is sent as a framed operation IFF it declares
 	// RequestFrameV1Op ("v1op"), and as the older questionnaire request otherwise.
 	RequestFrames []string
-	// ContractVersions are this payer's advertised tokens from /holders.
-	// PAS origination selects a natively buildable line from this evidence.
-	// Empty means a legacy peer without a declaration.
-	ContractVersions []string
 }
 
 // RunEligibility runs one coverage-eligibility round-trip through the substrate and

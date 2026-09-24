@@ -269,9 +269,6 @@ func TestPriorAuthClientIntoResponder_PendedThenResumed(t *testing.T) {
 	if res.Resume == nil {
 		t.Fatal("pended result carries no resume handle")
 	}
-	if _, err := priorClaimID(res.Resume.PriorClaimJSON, res.Resume.OriginalCorrelationID); err != nil {
-		t.Fatalf("resume handle lost the submitted Claim source: %v", err)
-	}
 
 	amended, err := senderIdent.ResumePriorAuth(context.Background(), hubSrv.Client(), ep, payer,
 		*res.Resume, demoSupplementalReport())
@@ -342,23 +339,26 @@ func TestPriorAuthClientIntoResponder_PendedThenResumed(t *testing.T) {
 
 	t.Run("amendment-is-a-conformant-claim-update", func(t *testing.T) {
 		b := parsePairBundle(t, hub.leg(t, "pas-claim-update"))
+		urls := b.fullUrls()
 
 		claim, _ := b.resourceOfType(t, "Claim")
 
-		// PAS 2.0.1 permits one Claim entry. The amendment names the business
-		// identifier of the submitted Claim retained in the resume handle.
+		// A real payer finds the authorization being amended through
+		// Claim.related[].claim.reference, and requires that prior Claim to be present in the
+		// bundle — otherwise 400 "The prior Claim referenced in Claim.related.claim must be
+		// included in the Bundle".
 		related, _ := claim["related"].([]any)
 		if len(related) == 0 {
 			t.Fatal("amended Claim carries no related[] — the payer cannot find the authorization being amended")
 		}
 		rel0, _ := related[0].(map[string]any)
 		relClaim, _ := rel0["claim"].(map[string]any)
-		identifier, _ := relClaim["identifier"].(map[string]any)
-		if identifier["system"] != pasCorrelationSystem || identifier["value"] != res.Resume.OriginalCorrelationID {
-			t.Fatalf("amendment prior identifier = %v, want the submitted Claim's own identifier", identifier)
+		priorRef, _ := relClaim["reference"].(string)
+		if priorRef == "" {
+			t.Fatal("Claim.related[0].claim carries no reference — an identifier alone does not resolve for a payer that reads .reference")
 		}
-		if priorRef, _ := relClaim["reference"].(string); priorRef != "" {
-			t.Fatalf("PAS 2.0.1 amendment invented a second Claim reference %q", priorRef)
+		if !urls[priorRef] {
+			t.Errorf("Claim.related[0].claim.reference = %q resolves to no bundle entry; entries are %v", priorRef, keysOf(urls))
 		}
 
 		// And it must be told the information CHANGED, or it carries the prior decision

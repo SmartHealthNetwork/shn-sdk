@@ -3,7 +3,6 @@ package shnsdk_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,7 +64,7 @@ func TestHTTPValidatorDecodesWrapperLevelMessage(t *testing.T) {
 	if res.Valid || len(res.Issues) != 1 || res.Issues[0] != "Profile X not found" {
 		t.Fatalf("want Valid=false with the wrapper message, got %+v", res)
 	}
-	v = httpValidatorStub(t, `{"outcomes":[{"issues":[{"level":"WARNING","type":"INVARIANT","message":"unresolved value set"}]}]}`)
+	v = httpValidatorStub(t, `{"outcomes":[{"issues":[{"level":"WARNING","message":"unresolved value set"}]}]}`)
 	res, err = v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
 	if err != nil || !res.Valid {
 		t.Fatalf("a WARNING-only outcome is valid, got %+v err=%v", res, err)
@@ -80,7 +79,7 @@ func TestHTTPValidatorRejectsUnknownIssueShape(t *testing.T) {
 	} {
 		v := httpValidatorStub(t, body)
 		_, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
-		if err == nil || !strings.Contains(errors.Unwrap(err).Error(), "unrecognised issue level") {
+		if err == nil || !strings.Contains(err.Error(), "unrecognised issue level") {
 			t.Fatalf("body %s: want fail-closed error naming the issue level, got %v", body, err)
 		}
 	}
@@ -90,14 +89,14 @@ func TestHTTPValidatorRejectsEmptyOutcomes(t *testing.T) {
 	for _, body := range []string{`{"outcomes":[]}`, `{"outcomes":null}`, `{"sessionId":"x"}`} {
 		v := httpValidatorStub(t, body)
 		_, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
-		if err == nil || !strings.Contains(errors.Unwrap(err).Error(), "no outcomes") {
+		if err == nil || !strings.Contains(err.Error(), "no outcomes") {
 			t.Fatalf("body %s: want fail-closed error naming empty outcomes, got %v", body, err)
 		}
 	}
 }
 
 func TestHTTPValidatorRejectsFatal(t *testing.T) {
-	v := httpValidatorStub(t, `{"outcomes":[{"issues":[{"level":"FATAL","type":"INVALID","message":"cannot parse"}]}]}`)
+	v := httpValidatorStub(t, `{"outcomes":[{"issues":[{"level":"FATAL","message":"cannot parse"}]}]}`)
 	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
 	if err != nil || res.Valid || len(res.Issues) != 1 {
 		t.Fatalf("FATAL must be a failure verdict: %+v err=%v", res, err)
@@ -121,7 +120,7 @@ func TestHTTPValidatorRejectsMalformedOutcomeEntries(t *testing.T) {
 		`{"outcomes":[{"issues":null}]}`,
 		`{"outcomes":[{"issues":"nope"}]}`,
 		`{"outcomes":[{"issues":{}}]}`,
-		`{"outcomes":[{"issues":[{"level":"WARNING","type":"INVARIANT","message":"ok"}]},null]}`,
+		`{"outcomes":[{"issues":[{"level":"WARNING","message":"ok"}]},null]}`,
 	} {
 		v := httpValidatorStub(t, body)
 		_, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
@@ -146,8 +145,8 @@ func TestHTTPValidatorAcceptsExplicitEmptyIssueArrays(t *testing.T) {
 
 func TestHTTPValidatorAcceptsUnknownAdditionalFields(t *testing.T) {
 	for _, body := range []string{
-		`{"outcomes":[{"issues":[{"level":"WARNING","type":"INVARIANT","message":"ok","extra":true}],"extra":true}]}`,
-		`{"outcomes":[{"issues":[{"severity":"information","type":"INFORMATIONAL","details":"ok","extra":true}],"extra":true}]}`,
+		`{"outcomes":[{"issues":[{"level":"WARNING","message":"ok","extra":true}],"extra":true}]}`,
+		`{"outcomes":[{"issues":[{"severity":"information","details":"ok","extra":true}],"extra":true}]}`,
 	} {
 		v := httpValidatorStub(t, body)
 		res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
@@ -190,7 +189,7 @@ func TestHTTPValidator_ValidWhenNoErrors(t *testing.T) {
 			"outcomes": []any{
 				map[string]any{
 					"issues": []any{
-						map[string]any{"severity": "information", "type": "INFORMATIONAL", "details": "All OK"},
+						map[string]any{"severity": "information", "details": "All OK"},
 					},
 				},
 			},
@@ -218,7 +217,7 @@ func TestHTTPValidator_InvalidOnError(t *testing.T) {
 			"outcomes": []any{
 				map[string]any{
 					"issues": []any{
-						map[string]any{"severity": "error", "type": "INVALID", "details": "Foo"},
+						map[string]any{"severity": "error", "details": "Foo"},
 					},
 				},
 			},
@@ -323,8 +322,8 @@ func TestOperationValidator_ValidWithWarnings(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"resourceType": "OperationOutcome",
 			"issue": []any{
-				map[string]any{"severity": "warning", "code": "invariant", "diagnostics": "dom-6 narrative"},
-				map[string]any{"severity": "information", "code": "informational", "diagnostics": "All OK"},
+				map[string]any{"severity": "warning", "diagnostics": "dom-6 narrative"},
+				map[string]any{"severity": "information", "diagnostics": "All OK"},
 			},
 		})
 	}))
@@ -346,7 +345,7 @@ func TestOperationValidator_InvalidOnError(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"resourceType": "OperationOutcome",
 			"issue": []any{
-				map[string]any{"severity": "error", "code": "invalid", "diagnostics": "Object must have some content"},
+				map[string]any{"severity": "error", "diagnostics": "Object must have some content"},
 			},
 		})
 	}))
@@ -381,7 +380,7 @@ func TestOperationValidator_PostsToTypeValidatePathWithProfile(t *testing.T) {
 		w.Header().Set("Content-Type", "application/fhir+json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"resourceType": "OperationOutcome",
-			"issue":        []any{map[string]any{"severity": "information", "code": "informational"}},
+			"issue":        []any{},
 		})
 	}))
 	defer stub.Close()
@@ -416,16 +415,16 @@ func TestOperationValidator_ErrorOnNon2xxUnparseableBody(t *testing.T) {
 	}
 }
 
-func TestOperationValidator_PinnedBadRequestContentOutcome(t *testing.T) {
+func TestOperationValidator_UsesOperationOutcomeDespiteNon2xx(t *testing.T) {
 	// A request-body parse failure returns an OperationOutcome with an error
-	// issue and a recognized content code. This is the pinned 400 contract.
+	// issue, possibly with a non-2xx status. The OO issues must win.
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/fhir+json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]any{
 			"resourceType": "OperationOutcome",
 			"issue": []any{
-				map[string]any{"severity": "error", "code": "invalid", "diagnostics": "parse failure"},
+				map[string]any{"severity": "error", "diagnostics": "parse failure"},
 			},
 		})
 	}))
@@ -434,7 +433,7 @@ func TestOperationValidator_PinnedBadRequestContentOutcome(t *testing.T) {
 	v := shnsdk.NewOperationValidator(stub.URL)
 	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
 	if err != nil {
-		t.Fatalf("a pinned 400 content outcome must not surface as a transport error, got %v", err)
+		t.Fatalf("a parseable OperationOutcome must not surface as a transport error, got %v", err)
 	}
 	if res.Valid {
 		t.Fatal("expected Valid=false from the OperationOutcome error issue")

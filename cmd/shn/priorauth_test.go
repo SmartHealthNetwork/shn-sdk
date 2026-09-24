@@ -9,29 +9,6 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-func TestLoadPASItemFactsForMemberRefusesAbsentOrUnrelatedSource(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "facts.json")
-	if err := os.WriteFile(path, []byte(`{"MBR-ONE":{"Priority":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/processpriority","code":"stat"}]}}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	facts, err := loadPASItemFactsForMember(path, "MBR-ONE")
-	if err != nil || !strings.Contains(string(facts.Priority), `"code":"stat"`) {
-		t.Fatalf("participant source priority lost: %+v %v", facts, err)
-	}
-	if _, err := loadPASItemFactsForMember(path, "MBR-TWO"); err == nil {
-		t.Fatal("another member's PAS facts accepted")
-	}
-	if err := os.WriteFile(path, []byte(`{"MBR-ONE":{},"MBR-ONE":{"Priority":{"coding":[{"code":"normal"}]}}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadPASItemFactsForMember(path, "MBR-ONE"); err == nil {
-		t.Fatal("duplicate member facts accepted")
-	}
-	if facts, err := loadPASItemFactsForMember("", "MBR-ONE"); err != nil || facts != nil {
-		t.Fatalf("absent source should defer to line-aware SDK refusal: %+v %v", facts, err)
-	}
-}
-
 // TestPriorAuth_Approved drives `shn priorauth` against the fake network (reusing the
 // doctor fake, now extended with the three PA legs): it resolves Payer+Endpoints from
 // the discovery descriptor and runs the MBR-COVERED→approved prior-auth path, printing the

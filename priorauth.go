@@ -83,10 +83,6 @@ type PriorAuthRequest struct {
 	// no conformant inquiry can find again. Pass the record your own system holds;
 	// nothing here invents one.
 	Provider []byte
-	// ItemFacts are the participant's actual PAS 2.1+ certification, request
-	// type and place of service. The SDK cannot infer these from the order or
-	// an example Claim, and refuses PAS authoring when they are absent.
-	ItemFacts *PASLineItemFacts
 	// MemberIDSystem is the namespace your own records name this member under.
 	// It is REQUIRED for the prior-authorization leg: a payer matches a claim,
 	// and any later inquiry about it, on the member id, so a claim whose Patient
@@ -258,23 +254,20 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: %w", err)
 	}
-	crdReply, err := id.runLegReply(ctx, c, ep, payer, pci,
+	crdResp, err := id.runLeg(ctx, c, ep, payer, pci,
 		"crd-order-select", "crd-order-select", "crd-cards", crdReq)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: %w", err)
 	}
 	// The payer's coverage information: an update system action on the order (or, from a
 	// payer on an earlier build, the card extension object ParseCRDResponse also reads).
-	obs, err := ParseCRDResponse(crdReply.body)
+	obs, err := ParseCRDResponse(crdResp)
 	if err != nil {
-		return PriorAuthResult{}, consumptionFailure("crd-order-select", "parse CRD response", crdReply, err)
+		return PriorAuthResult{}, fmt.Errorf("crd-order-select: parse CRD response: %w", err)
 	}
 	cov, ok := obs.Primary()
 	if !ok {
-		return PriorAuthResult{}, consumptionFailure("crd-order-select", "CRD response carries no coverage information", crdReply, nil)
-	}
-	if cov.Covered != CoveredCovered && cov.Covered != CoveredConditional && cov.Covered != CoveredNotCovered {
-		return PriorAuthResult{}, consumptionFailure("crd-order-select", "coverage decision unavailable", crdReply, nil)
+		return PriorAuthResult{}, fmt.Errorf("crd-order-select: the CRD response carries no coverage information")
 	}
 	// A NOT-COVERED verdict is its own outcome, distinct from "no PA needed" — both
 	// skip the PA legs, but one says "go ahead, no authorization required" and the other
@@ -287,17 +280,14 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		// Proceed to get the payer's FORMAL determination. A not-covered card carries no
 		// questionnaire, so there is no DTR leg to run: submit the claim as-is and let the
 		// payer's ClaimResponse carry the denial and its rationale.
-		return id.submitPriorAuthClaim(ctx, c, ep, payer, pci, req, srJSON, patientRef, coverageRef, nil, crdReply)
+		return id.submitPriorAuthClaim(ctx, c, ep, payer, pci, req, srJSON, patientRef, coverageRef, nil)
 	}
-	if cov.PANeeded == PANeededNoAuth || cov.PANeeded == PANeededSatisfied {
+	if !cov.PARequired() {
 		// No PA needed for this order — terminal, short-circuit (no DTR/PAS legs).
 		return PriorAuthResult{Outcome: "no-pa-required"}, nil
 	}
-	if !cov.PARequired() {
-		return PriorAuthResult{}, consumptionFailure("crd-order-select", "prior authorization requirement unavailable", crdReply, nil)
-	}
 	if !cov.NeedsDTR() {
-		return PriorAuthResult{}, consumptionFailure("crd-order-select", "PA-required card carried no questionnaire", crdReply, nil)
+		return PriorAuthResult{}, fmt.Errorf("shnsdk: PA-required card carried no questionnaire")
 	}
 	canonical := StripCanonicalVersion(cov.Questionnaires[0])
 
@@ -318,7 +308,7 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: stamp coverage id: %w", err)
 	}
-	var dtrReply receivedAnswer
+	var dtrResp []byte
 	if SupportsRequestFrameV1Op(payer.RequestFrames) {
 		// A payer that accepts framed DTR operations receives the
 		// $questionnaire-package input itself: the Coverage, the payer's own
@@ -342,7 +332,7 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		if err != nil {
 			return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: build questionnaire-package request: %w", err)
 		}
-		dtrReply, err = id.runOperationLegReply(ctx, c, ep, payer, pci,
+		dtrResp, err = id.runOperationLeg(ctx, c, ep, payer, pci,
 			"dtr-questionnaire-fetch", "dtr-questionnaire-fetch", "dtr-questionnaire",
 			FrameOperationQuestionnairePackage, pkg.Body)
 		if err != nil {
@@ -356,7 +346,7 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		if err != nil {
 			return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: build fetch request: %w", err)
 		}
-		dtrReply, err = id.runLegReply(ctx, c, ep, payer, pci,
+		dtrResp, err = id.runLeg(ctx, c, ep, payer, pci,
 			"dtr-questionnaire-fetch", "dtr-questionnaire-fetch", "dtr-questionnaire", dtrReq)
 		if err != nil {
 			return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: %w", err)
@@ -365,18 +355,18 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	// §6.2: the DTR-fetch leg responds with a $questionnaire-package collection Bundle;
 	// extract the bare Questionnaire (strict, package-only — no dual-shape tolerance)
 	// before the F5 canonical check + auto-fill.
-	questionnaireJSON, err := ExtractQuestionnaireFromPackage(dtrReply.body)
+	questionnaireJSON, err := ExtractQuestionnaireFromPackage(dtrResp)
 	if err != nil {
-		return PriorAuthResult{}, consumptionFailure("dtr-questionnaire-fetch", "parse questionnaire package", dtrReply, err)
+		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: %w", err)
 	}
 	fetchedURL, err := ParseQuestionnaireURL(questionnaireJSON)
 	if err != nil {
-		return PriorAuthResult{}, consumptionFailure("dtr-questionnaire-fetch", "parse questionnaire url", dtrReply, err)
+		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: parse questionnaire url: %w", err)
 	}
 	if fetchedURL != canonical {
 		// Canonical-substitution guard (F5): the fetched questionnaire must be the one
 		// the CRD card advertised, else the payer swapped questionnaires under us.
-		return PriorAuthResult{}, consumptionFailure("dtr-questionnaire-fetch", "questionnaire canonical mismatch", dtrReply, nil)
+		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: fetched questionnaire %q != advertised canonical %q", fetchedURL, canonical)
 	}
 	qc := QRContext{
 		PatientRef:  patientRef,
@@ -396,11 +386,11 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 		qrJSON, err = BuildQuestionnaireResponseShell(questionnaireJSON, qc)
 	}
 	if err != nil {
-		return PriorAuthResult{}, consumptionFailure("dtr-questionnaire-fetch", "build questionnaire response", dtrReply, err)
+		return PriorAuthResult{}, fmt.Errorf("dtr-questionnaire-fetch: build questionnaire response: %w", err)
 	}
 
 	// LEG 3 — PAS submit.
-	return id.submitPriorAuthClaim(ctx, c, ep, payer, pci, req, srJSON, patientRef, coverageRef, qrJSON, dtrReply)
+	return id.submitPriorAuthClaim(ctx, c, ep, payer, pci, req, srJSON, patientRef, coverageRef, qrJSON)
 }
 
 // priorAuthOrderID is the id the coverage check gives the order it builds.
@@ -470,15 +460,11 @@ func primaryCoverageOrder(obs CRDObservation) (CRDObservedOrder, CoverageInforma
 // handle on a pend). qrJSON may be nil — a payer whose card advertised no questionnaire
 // gets a claim with no QuestionnaireResponse entry (the builder's documented
 // no-questionnaire lane), which is the shape the ProceedOnNotCovered path submits to
-// obtain a FORMAL determination after an advisory not-covered card. latest is
-// the last verified CRD or DTR reply, retained if local PAS construction fails.
-func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci string, req PriorAuthRequest, srJSON []byte, patientRef, coverageRef string, qrJSON []byte, latest receivedAnswer) (PriorAuthResult, error) {
-	localFailure := func(code string, cause error) (PriorAuthResult, error) {
-		return PriorAuthResult{}, consumptionFailure("pas-claim", code, latest, cause)
-	}
+// obtain a FORMAL determination after an advisory not-covered card.
+func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci string, req PriorAuthRequest, srJSON []byte, patientRef, coverageRef string, qrJSON []byte) (PriorAuthResult, error) {
 	var pasCorrRaw [16]byte
 	if _, err := rand.Read(pasCorrRaw[:]); err != nil {
-		return localFailure("generate claim correlation id", err)
+		return PriorAuthResult{}, fmt.Errorf("pas-submit: generate claim correlation id: %w", err)
 	}
 	pasCorr := hex.EncodeToString(pasCorrRaw[:])
 	// The namespace your own records name this member under. It is READ from the
@@ -489,15 +475,15 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 	if len(req.Patient) > 0 {
 		fromRecord, err := memberIdentifierSystemOf(req.Patient, req.Member)
 		if err != nil {
-			return localFailure("read member identifier system", err)
+			return PriorAuthResult{}, fmt.Errorf("pas-submit: %w", err)
 		}
 		if memberSystem != "" && memberSystem != fromRecord {
-			return localFailure("member identifier system mismatch", fmt.Errorf("PriorAuthRequest.MemberIDSystem is %q and your own Patient record names the member under %q", memberSystem, fromRecord))
+			return PriorAuthResult{}, fmt.Errorf("pas-submit: PriorAuthRequest.MemberIDSystem is %q and your own Patient record names the member under %q", memberSystem, fromRecord)
 		}
 		memberSystem = fromRecord
 	}
 	if memberSystem == "" {
-		return localFailure("member identifier system required", errMemberIDSystemRequired)
+		return PriorAuthResult{}, fmt.Errorf("pas-submit: %w", errMemberIDSystemRequired)
 	}
 	// The payer this claim names: the Organization your own Coverage search result
 	// names as payor. Read from the records you supplied, never minted — the payer
@@ -505,19 +491,14 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 	// organization this package invented is one your inquiry can never match.
 	insurer, err := payerOrgFromCoverageSearch(req.Coverage)
 	if err != nil {
-		return localFailure("read payer organization", err)
+		return PriorAuthResult{}, fmt.Errorf("pas-submit: %w", err)
 	}
 	// The claim is made under the payer the caller's own Coverage names.
 	payerIdentity, err := ParseCoveragePayer(req.Coverage, nil)
 	if err != nil {
-		return localFailure("read payer identity", err)
+		return PriorAuthResult{}, fmt.Errorf("pas-submit: your Coverage search result names no payer identity: %w", err)
 	}
-	pasLine, err := selectPayerPASLine(payer)
-	if err != nil {
-		return localFailure("select PAS line", err)
-	}
-	bundleJSON, err := BuildConformantClaimBundleAtLine(pasLine, ConformantClaimInputs{
-		ItemFacts:      req.ItemFacts,
+	bundleJSON, err := BuildConformantClaimBundle(ConformantClaimInputs{
 		QR:             qrJSON,
 		SR:             srJSON,
 		Provider:       req.Provider,
@@ -542,34 +523,26 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 		Payer:         payerIdentity,
 	})
 	if err != nil {
-		return localFailure("build claim bundle", err)
-	}
-	priorClaim, err := SubmittedPASClaim(bundleJSON)
-	if err != nil {
-		return localFailure("read submitted Claim", err)
-	}
-	if _, err := priorClaimID(priorClaim, pasCorr); err != nil {
-		return localFailure("bind submitted Claim", err)
+		return PriorAuthResult{}, fmt.Errorf("pas-submit: build claim bundle: %w", err)
 	}
 	// Pass pasCorr as the envelope correlationID so the payer ledger keys the
 	// pended claim on the same value the ClaimUpdate's Claim.related references
 	// (pasCorr). The substrate's own originate path does the same. The conformant
 	// pas-claim leg/op are the only PA-submit contract (the minimized
 	// pas-claim leg + pas-submit op have been removed).
-	pasReply, err := id.runLegWithCorrReply(ctx, c, ep, payer, pci,
+	pasResp, err := id.runLegWithCorr(ctx, c, ep, payer, pci,
 		"pas-claim", "pas-submit", "pas-response", pasCorr, bundleJSON)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: %w", err)
 	}
-	pasResp := pasReply.body
 	result, err := parsePASOutcome(pasResp)
 	if err != nil {
-		return PriorAuthResult{}, consumptionFailure("pas-claim", "parse claim response", pasReply, err)
+		return PriorAuthResult{}, fmt.Errorf("pas-submit: parse claim response: %w", err)
 	}
 	if result.Outcome == "pended" {
-		cont, err := NewPriorAuthContinuation(pasLine, payer.ID, req.Member, bundleJSON, pasResp)
+		cont, err := NewPriorAuthContinuation(LineOf(ContractPAPAS20), payer.ID, req.Member, bundleJSON, pasResp)
 		if err != nil {
-			return PriorAuthResult{}, consumptionFailure("pas-claim", "record continuation", pasReply, err)
+			return PriorAuthResult{}, fmt.Errorf("pas-submit: record continuation: %w", err)
 		}
 		// Fill the serializable resume handle from this leg's context: the
 		// submit correlation the ClaimUpdate.related[] references, the bound subject,
@@ -578,8 +551,6 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 		result.Resume = &PriorAuthResume{
 			Continuation:          &cont,
 			OriginalCorrelationID: pasCorr,
-			PASLine:               pasLine,
-			PriorClaimJSON:        priorClaim,
 			PatientRef:            patientRef,
 			CoverageRef:           coverageRef,
 			MemberID:              req.Member,
@@ -595,8 +566,8 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 	return result, nil
 }
 
-// runLegReply runs ONE sealed request/response round-trip through the substrate and
-// retains the authenticated answer and frame metadata. It is the generalization of RunEligibility's
+// runLeg runs ONE sealed request/response round-trip through the substrate and
+// returns the decrypted response payload. It is the generalization of RunEligibility's
 // sealed-leg plumbing: resolve nothing (caller passes pci) → seal the payload (AI-2:
 // seal-then-authorize) → Authorize the request leg bound to sha256hex(ciphertext) →
 // route through the Hub → assert envelope metadata → VerifyBound the response leg →
@@ -607,14 +578,12 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 //	txType  — envelope TransactionType (e.g. "crd-order-select", "pas-claim")
 //	reqOp   — request-leg authz operation (e.g. "crd-order-select", "pas-submit")
 //	respOp  — response-leg authz operation (e.g. "crd-cards", "pas-response")
-func (id Identity) runLegReply(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp string, payload []byte) (receivedAnswer, error) {
+func (id Identity) runLeg(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp string, payload []byte) ([]byte, error) {
 	var corrRaw [16]byte
 	if _, err := rand.Read(corrRaw[:]); err != nil {
-		return receivedAnswer{}, fmt.Errorf("generate correlation id: %w", err)
+		return nil, fmt.Errorf("generate correlation id: %w", err)
 	}
-	var answer receivedAnswer
-	_, err := id.runLegFramed(ctx, c, ep, payer, pci, txType, reqOp, respOp, hex.EncodeToString(corrRaw[:]), "", payload, &answer)
-	return answer, err
+	return id.runLegWithCorr(ctx, c, ep, payer, pci, txType, reqOp, respOp, hex.EncodeToString(corrRaw[:]), payload)
 }
 
 // contractTokenForTxType returns the request-frame contract-version claim (the
@@ -623,8 +592,10 @@ func (id Identity) runLegReply(ctx context.Context, c *http.Client, ep Endpoints
 // NOT do per-line content negotiation: every Build* helper the PA-chain legs use
 // targets a single fixed native line (BuildClaimResponse's "speaks PAS line 2.0"
 // comment is the precedent), so the token is a static per-leg constant rather than a
-// selected one. It frames the request toward a requestFrames-declaring payer;
-// the peer may independently declare a different response line.
+// selected one. It is used BOTH to frame the request (toward a requestFrames-
+// declaring payer) and as the expected stamp on that leg's response
+// (unframeAnswer's stamp verify) — the same token both directions, exactly like the
+// gateway's roundTripInner reads content.ProfileID for both.
 func contractTokenForTxType(txType string) string {
 	switch txType {
 	case "crd-order-select":
@@ -638,50 +609,13 @@ func contractTokenForTxType(txType string) string {
 	}
 }
 
-// selectPayerPASLine chooses the highest PAS line this SDK can build and the
-// payer actually advertises. An absent declaration is the legacy 2.0 path;
-// a nonempty incompatible declaration is a capability refusal, not a guess.
-func selectPayerPASLine(payer Payer) (string, error) {
-	if len(payer.ContractVersions) == 0 {
-		return "2.0", nil
-	}
-	for _, line := range []string{"2.2", "2.1", "2.0"} {
-		for _, token := range payer.ContractVersions {
-			if token == "pa.pas@"+line {
-				return line, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("payer %q advertises no PAS line this SDK can build", payer.ID)
-}
-
-func payerAtPASLine(payer Payer, line string) (Payer, error) {
-	if _, ok := PASLineDef(line); !ok {
-		return Payer{}, fmt.Errorf("pended PAS line %q is unsupported", line)
-	}
-	if len(payer.ContractVersions) == 0 {
-		if line != "2.0" {
-			return Payer{}, fmt.Errorf("payer %q no longer declares pended PAS line %s", payer.ID, line)
-		}
-	} else {
-		found := false
-		for _, token := range payer.ContractVersions {
-			found = found || token == "pa.pas@"+line
-		}
-		if !found {
-			return Payer{}, fmt.Errorf("payer %q no longer declares pended PAS line %s", payer.ID, line)
-		}
-	}
-	payer.ContractVersions = []string{"pa.pas@" + line}
-	return payer, nil
-}
-
-// runLegWithCorrReply uses the claim's own correlation id for the envelope, so
-// a payer can find the pended claim when a later update references it.
-func (id Identity) runLegWithCorrReply(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp, correlationID string, payload []byte) (receivedAnswer, error) {
-	var answer receivedAnswer
-	_, err := id.runLegFramed(ctx, c, ep, payer, pci, txType, reqOp, respOp, correlationID, "", payload, &answer)
-	return answer, err
+// runLegWithCorr is runLeg with a caller-supplied correlationID. Used when the
+// envelope correlationID must equal the bundle's own claim correlation — specifically
+// the pas-claim leg, where the payer ledger keys the pended claim on the ENVELOPE
+// correlationID and the follow-up ClaimUpdate's Claim.related references it by the
+// same value (pasCorr). All other legs use runLeg (fresh random correlation each leg).
+func (id Identity) runLegWithCorr(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp, correlationID string, payload []byte) ([]byte, error) {
+	return id.runLegFramed(ctx, c, ep, payer, pci, txType, reqOp, respOp, correlationID, "", payload)
 }
 
 // runOperationLeg is runLeg for a framed DTR operation: the request is sealed
@@ -691,31 +625,24 @@ func (id Identity) runLegWithCorrReply(ctx context.Context, c *http.Client, ep E
 // RequestFrameV1Op (ErrFramedDTRUnsupported) — such a payer would drop the
 // header and misread the body.
 func (id Identity) runOperationLeg(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp, operation string, payload []byte) ([]byte, error) {
-	answer, err := id.runOperationLegReply(ctx, c, ep, payer, pci, txType, reqOp, respOp, operation, payload)
-	return answer.body, err
-}
-
-func (id Identity) runOperationLegReply(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp, operation string, payload []byte) (receivedAnswer, error) {
 	switch {
 	case txType != "dtr-questionnaire-fetch":
-		return receivedAnswer{}, fmt.Errorf("the operation header is not defined for %s", txType)
+		return nil, fmt.Errorf("the operation header is not defined for %s", txType)
 	case operation != FrameOperationQuestionnairePackage && operation != FrameOperationNextQuestion:
-		return receivedAnswer{}, fmt.Errorf("unsupported DTR operation %q", operation)
+		return nil, fmt.Errorf("unsupported DTR operation %q", operation)
 	case !SupportsRequestFrameV1Op(payer.RequestFrames):
-		return receivedAnswer{}, fmt.Errorf("%w: payer %s does not declare request frame %s", ErrFramedDTRUnsupported, payer.ID, RequestFrameV1Op)
+		return nil, fmt.Errorf("%w: payer %s does not declare request frame %s", ErrFramedDTRUnsupported, payer.ID, RequestFrameV1Op)
 	}
 	var corrRaw [16]byte
 	if _, err := rand.Read(corrRaw[:]); err != nil {
-		return receivedAnswer{}, fmt.Errorf("generate correlation id: %w", err)
+		return nil, fmt.Errorf("generate correlation id: %w", err)
 	}
-	var answer receivedAnswer
-	_, err := id.runLegFramed(ctx, c, ep, payer, pci, txType, reqOp, respOp, hex.EncodeToString(corrRaw[:]), operation, payload, &answer)
-	return answer, err
+	return id.runLegFramed(ctx, c, ep, payer, pci, txType, reqOp, respOp, hex.EncodeToString(corrRaw[:]), operation, payload)
 }
 
 // runLegFramed is the shared leg runner. operation is "" except for a framed
 // DTR operation (runOperationLeg has checked the payer declares it).
-func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp, correlationID, operation string, payload []byte, received *receivedAnswer) ([]byte, error) {
+func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp, correlationID, operation string, payload []byte) ([]byte, error) {
 	now := id.now()
 
 	// REQUEST-line claim (request-frame contract, published-SDK parity —
@@ -725,13 +652,6 @@ func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoint
 	// the gateway's roundTripInner). The claim rides INSIDE the seal (AI-2's
 	// Hub-payload-blindness is unaffected — this wraps `payload` before Seal).
 	contractToken := contractTokenForTxType(txType)
-	if txType == "pas-claim" || txType == "pas-claim-update" || txType == "pas-claim-inquire" {
-		line, err := selectPayerPASLine(payer)
-		if err != nil {
-			return nil, err
-		}
-		contractToken = "pa.pas@" + line
-	}
 	if operation != "" || (contractToken != "" && SupportsRequestFrameV1(payer.RequestFrames)) {
 		mediaType := "application/fhir+json"
 		if txType == "crd-order-select" {
@@ -860,25 +780,10 @@ func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoint
 	}
 	// Unframe (a frame-capable payer's non-2xx APPLICATION answer surfaces as
 	// *AppAnswerError, verbatim) — shared by every runLeg/runLegWithCorr caller.
-	// The request token identifies this SDK's built representation. Local
-	// workflow consumption decides whether it can read the peer's own answer line.
-	body, err := unframeAnswer(plaintext, contractToken)
-	var consumption *PriorAuthConsumptionError
-	if errors.As(err, &consumption) {
-		consumption.Leg = txType
-		consumption.Code = "unsupported response version"
-	}
-	if err != nil || received == nil {
-		return body, err
-	}
-	*received = receivedAnswer{status: http.StatusOK, body: body}
-	if IsFramed(plaintext) {
-		hdr, _, _ := DecodeHTTPFrame(plaintext) // already decoded successfully above
-		received.status = hdr.Status
-		received.contentType = hdr.Headers["Content-Type"]
-		received.contractVersion = hdr.Headers[FrameHeaderContractVersion]
-	}
-	return body, nil
+	// expectedToken = contractToken: the SAME line this leg's request was built
+	// (and, when capable, framed) at is what a 2xx framed answer must be stamped
+	// with, or leave unstamped (tolerated) — verified by unframeAnswer.
+	return unframeAnswer(plaintext, contractToken)
 }
 
 // SupplementalReport is the NEW clinical evidence a ClaimUpdate amendment attaches,
@@ -933,14 +838,6 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 	if supp.ReportID == "" {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: SupplementalReport.ReportID is required")
 	}
-	line := resume.PASLine
-	if line == "" && resume.Continuation != nil {
-		line = resume.Continuation.Line
-	}
-	payer, err := payerAtPASLine(payer, line)
-	if err != nil {
-		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: %w", err)
-	}
 
 	drJSON, err := BuildDiagnosticReport(supp.ReportID, resume.PatientRef, supp.CPT, supp.Display)
 	if err != nil {
@@ -967,7 +864,7 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: your Coverage search result names no payer identity: %w", err)
 	}
-	bundleJSON, err := BuildConformantClaimUpdateBundleAtLine(line, ConformantClaimUpdateInputs{
+	bundleJSON, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
 		QR:               resume.QRJSON,
 		SR:               resume.SRJSON,
 		Provider:         resume.ProviderJSON,
@@ -981,7 +878,6 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 		DiagnosticReport: drJSON,
 		Corr:             updateCorr,
 		OriginalCorr:     resume.OriginalCorrelationID,
-		PriorClaim:       resume.PriorClaimJSON,
 		Created:          id.now(),
 		// A Da Vinci PAS amended re-POST is not merely "the submit bundle again": the
 		// payer has to be able to find the authorization being amended, and to be told
@@ -1005,15 +901,14 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 
 	// The conformant pas-claim-update leg/op are the only PA-update contract
 	// (the minimized pas-claim-update leg + pas-update-submit op have been removed).
-	updReply, err := id.runLegReply(ctx, c, ep, payer, resume.SubjectPCI,
+	updResp, err := id.runLeg(ctx, c, ep, payer, resume.SubjectPCI,
 		"pas-claim-update", "pas-update-submit", "pas-update-response", bundleJSON)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: %w", err)
 	}
-	updResp := updReply.body
 	result, err := parsePASOutcome(updResp)
 	if err != nil {
-		return PriorAuthResult{}, consumptionFailure("pas-claim-update", "parse update response", updReply, err)
+		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: parse update response: %w", err)
 	}
 	if result.Outcome == "pended" {
 		// The payer re-pended the amendment. Carry a still-usable Resume (same
@@ -1024,21 +919,19 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 			next, err := NewPriorAuthContinuation(resume.Continuation.Line, resume.Continuation.PayerHolder,
 				resume.Continuation.MemberID, bundleJSON, updResp)
 			if err != nil {
-				return PriorAuthResult{}, consumptionFailure("pas-claim-update", "record continuation", updReply, err)
+				return PriorAuthResult{}, fmt.Errorf("pas-update-submit: record continuation: %w", err)
 			}
 			cont = &next
 		} else if resume.MemberID != "" {
-			next, err := NewPriorAuthContinuation(line, payer.ID, resume.MemberID, bundleJSON, updResp)
+			next, err := NewPriorAuthContinuation(LineOf(ContractPAPAS20), payer.ID, resume.MemberID, bundleJSON, updResp)
 			if err != nil {
-				return PriorAuthResult{}, consumptionFailure("pas-claim-update", "record continuation", updReply, err)
+				return PriorAuthResult{}, fmt.Errorf("pas-update-submit: record continuation: %w", err)
 			}
 			cont = &next
 		}
 		result.Resume = &PriorAuthResume{
 			Continuation:          cont,
 			OriginalCorrelationID: resume.OriginalCorrelationID,
-			PASLine:               line,
-			PriorClaimJSON:        resume.PriorClaimJSON,
 			PatientRef:            resume.PatientRef,
 			CoverageRef:           resume.CoverageRef,
 			MemberID:              resume.MemberID,
@@ -1230,11 +1123,6 @@ func (id Identity) Inquire(ctx context.Context, c *http.Client, ep Endpoints, pa
 	if cont.PayerHolder != payer.ID {
 		return PriorAuthResult{}, fmt.Errorf("pas-inquire: the handle is for payer %q, not %q", cont.PayerHolder, payer.ID)
 	}
-	var err error
-	payer, err = payerAtPASLine(payer, cont.Line)
-	if err != nil {
-		return PriorAuthResult{}, fmt.Errorf("pas-inquire: %w", err)
-	}
 	var raw [8]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-inquire: generate inquiry id: %w", err)
@@ -1245,22 +1133,21 @@ func (id Identity) Inquire(ctx context.Context, c *http.Client, ep Endpoints, pa
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-inquire: %w", err)
 	}
-	inqReply, err := id.runLegReply(ctx, c, ep, payer, resume.SubjectPCI,
+	answer, err := id.runLeg(ctx, c, ep, payer, resume.SubjectPCI,
 		"pas-claim-inquire", "pas-inquire", "pas-inquire-response", inq.Body)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-inquire: %w", err)
 	}
-	answer := inqReply.body
 	result, err := inquiryDecision(answer, *cont)
 	if err != nil {
-		return PriorAuthResult{}, consumptionFailure("pas-claim-inquire", "select inquiry decision", inqReply, err)
+		return PriorAuthResult{}, fmt.Errorf("pas-inquire: %w", err)
 	}
 	if result.Outcome == "pended" {
 		next := *cont
 		next.Items = slices.Clone(cont.Items)
 		next.ClaimResponseIdentifiers = slices.Clone(cont.ClaimResponseIdentifiers)
 		if err := next.Record(answer); err != nil {
-			return PriorAuthResult{}, consumptionFailure("pas-claim-inquire", "record continuation", inqReply, err)
+			return PriorAuthResult{}, fmt.Errorf("pas-inquire: %w", err)
 		}
 		handle := resume
 		handle.Continuation = &next
@@ -1289,18 +1176,10 @@ func InquiryDecision(answer []byte, cont PriorAuthContinuation) (PriorAuthResult
 	return inquiryDecision(answer, cont)
 }
 
-// PASInquirySelection retains the selected answer and its original Bundle scope.
-// The bytes are evidence for a local consumer, not permission to act or a
-// replacement for the complete received response.
-type PASInquirySelection struct {
-	Result   PriorAuthResult
-	Response json.RawMessage
-	Bundle   json.RawMessage
-}
-
-// SelectPASInquiryAnswer applies the same authorization selection as
-// InquiryDecision while retaining the response's exact enclosing reference scope.
-func SelectPASInquiryAnswer(answer []byte, cont PriorAuthContinuation) (PASInquirySelection, error) {
+// inquiryDecision finds the one ClaimResponse in an inquiry answer that is
+// about the continuation's request and classifies it. The answer is a Bundle
+// (PAS 2.0.1, 2.1.0) or a Parameters holding Bundles (2.2.1).
+func inquiryDecision(answer []byte, cont PriorAuthContinuation) (PriorAuthResult, error) {
 	var head struct {
 		ResourceType string `json:"resourceType"`
 		Parameter    []struct {
@@ -1308,7 +1187,7 @@ func SelectPASInquiryAnswer(answer []byte, cont PriorAuthContinuation) (PASInqui
 		} `json:"parameter"`
 	}
 	if err := json.Unmarshal(answer, &head); err != nil {
-		return PASInquirySelection{}, fmt.Errorf("parse inquiry answer: %w", err)
+		return PriorAuthResult{}, fmt.Errorf("parse inquiry answer: %w", err)
 	}
 	var bundles []json.RawMessage
 	switch head.ResourceType {
@@ -1321,14 +1200,14 @@ func SelectPASInquiryAnswer(answer []byte, cont PriorAuthContinuation) (PASInqui
 			}
 		}
 	default:
-		return PASInquirySelection{}, fmt.Errorf("inquiry answer is a %q, not a Bundle or Parameters", head.ResourceType)
+		return PriorAuthResult{}, fmt.Errorf("inquiry answer is a %q, not a Bundle or Parameters", head.ResourceType)
 	}
 	var matchBundle, matchResponse json.RawMessage
 	var responsesInBundle, matches int
 	for _, b := range bundles {
 		responses, err := claimResponsesIn(b)
 		if err != nil {
-			return PASInquirySelection{}, fmt.Errorf("parse inquiry answer: %w", err)
+			return PriorAuthResult{}, fmt.Errorf("parse inquiry answer: %w", err)
 		}
 		for _, cr := range responses {
 			if cont.matches(cr) {
@@ -1339,25 +1218,13 @@ func SelectPASInquiryAnswer(answer []byte, cont PriorAuthContinuation) (PASInqui
 	}
 	switch {
 	case matches == 0:
-		return PASInquirySelection{}, ErrInquiryNoMatch
+		return PriorAuthResult{}, ErrInquiryNoMatch
 	case matches > 1:
-		return PASInquirySelection{}, ErrInquiryAmbiguous
+		return PriorAuthResult{}, ErrInquiryAmbiguous
+	case responsesInBundle == 1:
+		// The Bundle holds only this decision: its Tasks are this decision's.
+		return parsePASOutcome(matchBundle)
+	default:
+		return parsePASOutcome(matchResponse)
 	}
-	scope := matchResponse
-	if responsesInBundle == 1 {
-		scope = matchBundle
-	}
-	result, err := parsePASOutcome(scope)
-	if err != nil {
-		return PASInquirySelection{}, err
-	}
-	return PASInquirySelection{Result: result, Response: matchResponse, Bundle: matchBundle}, nil
-}
-
-// inquiryDecision finds the one ClaimResponse in an inquiry answer that is
-// about the continuation's request and classifies it. The answer is a Bundle
-// (PAS 2.0.1, 2.1.0) or a Parameters holding Bundles (2.2.1).
-func inquiryDecision(answer []byte, cont PriorAuthContinuation) (PriorAuthResult, error) {
-	selected, err := SelectPASInquiryAnswer(answer, cont)
-	return selected.Result, err
 }
