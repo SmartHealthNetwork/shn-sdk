@@ -13,13 +13,48 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 )
 
+// Issue is one OperationOutcome issue as the validator reported it.
+type Issue struct {
+	// Severity is fatal, error, warning or information.
+	Severity string
+	// Code is the OperationOutcome issue.code (a FHIR IssueType), or "" when
+	// absent or not a string. A HAPI FHIR validator reports "processing" for
+	// nearly every issue, so Code alone does not say what kind of issue it is.
+	Code string
+	// MessageID is the validator's own identifier for the kind of issue: the
+	// details.coding code in the java-core-messageId system, or else the
+	// operationoutcome-message-id extension. "" when the validator sends
+	// neither.
+	MessageID string
+	// Expression is the issue's FHIRPath location in the checked resource
+	// (issue.expression); nil when the validator sends none.
+	Expression []string
+	// Diagnostics is the validator's own text.
+	Diagnostics string
+}
+
 // Result reports whether a resource conforms to a profile and lists any issues.
+//
+// Issues, and every Issue field except Severity and Code, are the validator's
+// own text and can contain values from the checked payload: never log them,
+// and return them only to the sender of the message that was checked. Severity
+// and Code are safe to log only when they are values from their FHIR value
+// sets.
 type Result struct {
 	Valid  bool
 	Issues []string
+	// Details is every issue the validator reported, at every severity, in the
+	// order reported. It is additive to Issues, which keeps only error and
+	// fatal diagnostics. OperationValidator fills it; HTTPValidator does not,
+	// and FakeValidator does only when RejectIssue is set. An invalid Result
+	// with nil Details, and an error or fatal Issue with an empty MessageID,
+	// are unclassified: a caller that sorts issues by kind must treat them as
+	// the most serious kind, never as having none.
+	Details []Issue
 }
 
 // Validator validates a FHIR resource (JSON) against an IG profile URL.
@@ -36,7 +71,12 @@ type Validator interface {
 // to simulate a validator outage (Validate returns Result{}, Err).
 type FakeValidator struct {
 	RejectIfContains string
-	Err              error
+	// RejectIssue, when set, is the rejection's single Details entry, with the
+	// rejection's diagnostics and (when empty) severity "error". A warning or
+	// information severity yields an invalid result whose Details hold no error,
+	// which is unclassified (see Result). Nil leaves Details nil.
+	RejectIssue *Issue
+	Err         error
 }
 
 func NewFakeValidator() *FakeValidator { return &FakeValidator{} }
@@ -46,7 +86,18 @@ func (f *FakeValidator) Validate(_ context.Context, resourceJSON []byte, _ strin
 		return Result{}, f.Err
 	}
 	if f.RejectIfContains != "" && bytes.Contains(resourceJSON, []byte(f.RejectIfContains)) {
-		return Result{Valid: false, Issues: []string{"fake: contains " + f.RejectIfContains}}, nil
+		msg := "fake: contains " + f.RejectIfContains
+		res := Result{Valid: false, Issues: []string{msg}}
+		if f.RejectIssue != nil {
+			iss := *f.RejectIssue
+			iss.Expression = slices.Clone(iss.Expression)
+			if iss.Severity == "" {
+				iss.Severity = "error"
+			}
+			iss.Diagnostics = msg
+			res.Details = []Issue{iss}
+		}
+		return res, nil
 	}
 	return Result{Valid: true}, nil
 }
@@ -246,8 +297,7 @@ func (h *HTTPValidator) Validate(ctx context.Context, resourceJSON []byte, profi
 // ---------------------------------------------------------------------------
 
 // OperationValidator validates via the standard FHIR $validate operation against
-// a FHIR server base URL (e.g. a HAPI FHIR server). This is the substrate's REAL
-// per-message validator (FR-36).
+// a FHIR server base URL (e.g. a HAPI FHIR server).
 type OperationValidator struct {
 	BaseURL string
 	Client  *http.Client
@@ -273,6 +323,88 @@ type operationOutcome struct {
 		Severity    string `json:"severity"`
 		Diagnostics string `json:"diagnostics"`
 	} `json:"issue"`
+}
+
+// javaCoreMessageIDSystem is the coding system HAPI uses for its message ids.
+const javaCoreMessageIDSystem = "http://hl7.org/fhir/java-core-messageId"
+
+// messageIDExtension is the OperationOutcome extension carrying the same id.
+const messageIDExtension = "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id"
+
+// outcomeDetails decodes each issue of an OperationOutcome body into an Issue,
+// leniently and separately from the verdict: a member of an unexpected shape
+// becomes "" or nil, and never makes the outcome unreadable. The verdict
+// (operationOutcome above) reads only severity and diagnostics, as it always
+// has, and Validate overwrites each Issue's Severity and Diagnostics with the
+// verdict's own, so the two always agree.
+func outcomeDetails(body []byte) []Issue {
+	var oo struct {
+		Issue []map[string]json.RawMessage `json:"issue"`
+	}
+	if json.Unmarshal(body, &oo) != nil {
+		return nil
+	}
+	var out []Issue
+	for _, m := range oo.Issue {
+		out = append(out, Issue{
+			Severity:    rawString(m["severity"]),
+			Code:        rawString(m["code"]),
+			MessageID:   messageID(m),
+			Expression:  rawStrings(m["expression"]),
+			Diagnostics: rawString(m["diagnostics"]),
+		})
+	}
+	return out
+}
+
+// messageID is the issue's java-core message id: details.coding first, then
+// the first message-id extension that carries a value.
+func messageID(m map[string]json.RawMessage) string {
+	var details struct {
+		Coding []map[string]json.RawMessage `json:"coding"`
+	}
+	if json.Unmarshal(m["details"], &details) == nil {
+		for _, c := range details.Coding {
+			if rawString(c["system"]) == javaCoreMessageIDSystem {
+				if id := rawString(c["code"]); id != "" {
+					return id
+				}
+			}
+		}
+	}
+	var exts []map[string]json.RawMessage
+	if json.Unmarshal(m["extension"], &exts) == nil {
+		for _, e := range exts {
+			if rawString(e["url"]) != messageIDExtension {
+				continue
+			}
+			if id := rawString(e["valueString"]); id != "" {
+				return id
+			}
+			if id := rawString(e["valueCode"]); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+// rawString is v as a JSON string, or "" when absent or not a string.
+func rawString(v json.RawMessage) string {
+	var s string
+	if json.Unmarshal(v, &s) != nil {
+		return ""
+	}
+	return s
+}
+
+// rawStrings is v as a JSON array of strings, or nil when absent or not one.
+func rawStrings(v json.RawMessage) []string {
+	var s []string
+	if json.Unmarshal(v, &s) != nil {
+		return nil
+	}
+	return s
 }
 
 // Validate POSTs resourceJSON to {BaseURL}/{resourceType}/$validate (with an
@@ -334,6 +466,21 @@ func (o *OperationValidator) Validate(ctx context.Context, resourceJSON []byte, 
 	}
 
 	var issues []string
+	details := outcomeDetails(body)
+	// Severity and Diagnostics in Details come from the same decode as the
+	// verdict, so every error or fatal diagnostic in Issues has its matching
+	// Details entry. Both decodes accept the same elements, so the lengths
+	// agree whenever the verdict decodes; the rebuild below is a guard that no
+	// input is known to reach.
+	if len(details) != len(oo.Issue) {
+		details = make([]Issue, len(oo.Issue))
+	}
+	for i, iss := range oo.Issue {
+		details[i].Severity, details[i].Diagnostics = iss.Severity, iss.Diagnostics
+	}
+	if len(details) == 0 {
+		details = nil
+	}
 	for _, iss := range oo.Issue {
 		if iss.Severity == "error" || iss.Severity == "fatal" {
 			issues = append(issues, iss.Diagnostics)
@@ -341,7 +488,8 @@ func (o *OperationValidator) Validate(ctx context.Context, resourceJSON []byte, 
 	}
 
 	return Result{
-		Valid:  len(issues) == 0,
-		Issues: issues,
+		Valid:   len(issues) == 0,
+		Issues:  issues,
+		Details: details,
 	}, nil
 }
