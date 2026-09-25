@@ -127,12 +127,13 @@ What the endpoint does with your request:
 
 - It **removes `fhirServer` and `fhirAuthorization`** — the payer never gets a route into
   your systems, and the endpoint never calls back into them.
-- For an advertised prefetch key you leave out, it supplies the value **only from its own
-  synthetic records**. Nothing is invented.
+- It **adds nothing**. A prefetch key you leave out is left out of what the payer receives.
+- If you leave out `coverage`, the endpoint looks the member's coverage up in its own
+  synthetic records only to choose the payer; that coverage is not sent to the payer.
 - Everything else in your request is carried to the payer as you sent it.
 
-The published test member `MBR-COVERED` is stored in those records under a different id, so
-**send `patient` and `coverage` yourself**, as the examples below do.
+So **send every prefetch value you want the payer to see**. The examples below carry all six
+keys: the member's `patient` and `coverage`, and the four history keys as empty searchsets.
 
 ### 1.4 What comes back
 
@@ -406,7 +407,11 @@ cat > crd-00301.json <<'EOF'
       "beneficiary": {"reference": "Patient/MBR-COVERED"},
       "payor": [{"reference": "#cms-payer"}],
       "contained": [{"resourceType": "Organization", "id": "cms-payer", "name": "Centers for Medicare and Medicaid Services", "identifier": [{"system": "urn:oid:2.16.840.1.113883.6.300", "value": "00301"}]}]
-    }
+    },
+    "serviceHistory": {"resourceType": "Bundle", "type": "searchset", "total": 0},
+    "deviceHistory": {"resourceType": "Bundle", "type": "searchset", "total": 0},
+    "medicationHistory": {"resourceType": "Bundle", "type": "searchset", "total": 0},
+    "questionnaireResponses": {"resourceType": "Bundle", "type": "searchset", "total": 0}
   }
 }
 EOF
@@ -617,7 +622,11 @@ cat > crd-00300.json <<'EOF'
       "beneficiary": {"reference": "Patient/MBR-COVERED"},
       "payor": [{"reference": "#cms-payer"}],
       "contained": [{"resourceType": "Organization", "id": "cms-payer", "name": "Centers for Medicare and Medicaid Services", "identifier": [{"system": "urn:oid:2.16.840.1.113883.6.300", "value": "00300"}]}]
-    }
+    },
+    "serviceHistory": {"resourceType": "Bundle", "type": "searchset", "total": 0},
+    "deviceHistory": {"resourceType": "Bundle", "type": "searchset", "total": 0},
+    "medicationHistory": {"resourceType": "Bundle", "type": "searchset", "total": 0},
+    "questionnaireResponses": {"resourceType": "Bundle", "type": "searchset", "total": 0}
   }
 }
 EOF
@@ -795,20 +804,18 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
   member id and the Patient your request carries for it, so you can drive the hook from a
   patient in your own test environment. Send the same Patient, unchanged, on every leg of
   one exchange. Three consequences: the endpoint holds no records for such a member, so
-  leave out `coverage` prefetch and the request is refused (`422`, next bullet), while a
-  `patient` key you leave out is left out of what the payer receives and, because this
-  endpoint runs `observe`, recorded as a finding, and a history key you leave out is left
-  out with the reason recorded; the payer handles the member as it would directly; and the
+  leave out `coverage` prefetch and the request is refused (`422`, next bullet), while any
+  other key you leave out is left out of what the payer receives; the payer handles the
+  member as it would directly; and the
   payer resolves the member on its own, so its answer for a member it does not hold is the
   payer's own — the DTR prepopulation warning in §5.2 is the visible case. A request whose
   payload names a second patient is refused (`403 Forbidden`) only when the gateway runs
   `strict`; this endpoint runs below strict, so such a request is carried under the patient
   it is bound to.
-- **A coverage the endpoint cannot supply → `422`.** If you leave out `coverage` prefetch
-  and the endpoint's own records hold no matching coverage, the request is refused rather
-  than sent with a blank or invented value. This endpoint runs `observe`, so a `patient` it
-  cannot supply is left out and recorded as a finding, and a history key is left out with the
-  reason recorded.
+- **A coverage the endpoint cannot find → `422`.** If you leave out `coverage` prefetch
+  and the endpoint's own records hold no matching coverage, there is no payer to send the
+  request to, so it is refused rather than routed on a blank or invented value. The
+  endpoint adds nothing to your request, so any other key you leave out is simply left out.
 
 ### 8.2 Hooks and services
 
@@ -846,10 +853,15 @@ carried at all. The cases:
   against) is read as the one entry whose address ends in that `Type/id`; two such entries,
   or none, is a refusal that says so.
 
-A `502` also covers a request that could not be routed at all — no payer behind this
-endpoint carries the leg the request needs; the body is `{"error":"hub routing failed"}`.
-No advertised service reaches that case today (§1.2). A request under a correlation id
-already used within the Hub's two-hour replay window also gets this `502` (§8.5).
+A `502` whose body is `{"error":"hub routing failed"}` means the endpoint's gateway
+could not reach the Hub at all. When the Hub refuses the exchange, the endpoint answers
+with the Hub's reason — for example `502 {"error":"hub refused the exchange: unknown
+recipient"}` (a Hub refusal is about the endpoint's gateway, not your request) — and
+an authorization or consent denial is a `403 {"error":"authorization denied"}`. When the
+payer's gateway was reached but its answer was lost on the way back, the `502` says so —
+`the recipient received this request and answered, but its answer was lost …` or `the
+recipient may have received this request …` — because the payer may have acted on it:
+check the outcome (for PAS, `$inquire`) before resending.
 
 A `504` is the one exchange failure the endpoint names rather than leaving generic: the
 leg to the payer produced no answer within the endpoint's gateway's wait (30 seconds; the
@@ -858,17 +870,25 @@ Hub, the payer's gateway and the payer's own system share that budget). The body
 gateway's own leg deadline — carried as an `OperationOutcome` with issue code `timeout` on
 the FHIR operation routes. The endpoint relays its gateway's `504` and body as they are.
 
-A `502` is a failed exchange, not a payer verdict. Retrying an identical request will
-produce the same result. A `504` is the same kind of failure with its cause named. A retry
-may succeed once the far side is answering within the budget again, but only under a new
-`X-Correlation-Id` or with none sent: a retry under the same id is refused (§8.5).
+A `502` is a failed exchange, not a payer verdict. Its message says whether the payer
+may have received the request: when it says so, check the outcome (for PAS, `$inquire`)
+before resending; when it does not (`hub routing failed`, `the payer's system could not be
+reached`), nothing reached the payer, and a retry may succeed once the far side is
+reachable again. A `504` is a failure with its cause named, and says so too when the
+request had already been sent. You may retry under the same `X-Correlation-Id`: it is your
+trace value, and reusing it is never refused (§8.5).
 
 **A refusal the payer's gateway itself produces is not a `502`.** A member the payer does
 not hold, a request with no order to decide on, a validation failure: these come back with
 the payer's own status and error text — for example
 `400 {"error":"no order (ServiceRequest or DeviceRequest) in draftOrders"}` for an
-`order-sign` request whose `draftOrders` is empty. `502 hub routing failed` means the
-exchange machinery failed, not that the payer disagreed.
+`order-sign` request whose `draftOrders` is empty. So do the payer gateway's own
+failures: `502 {"error":"the payer's system could not be reached"}` when the payer's
+own system never got the request, a `502` saying the payer's system may have acted on it
+when it got the request and gave no usable answer, `502` or `503` when it could not read
+the payer's records. On a PAS submission, any refusal the payer gateway makes after the
+payer's system answered says so too: check the outcome with `$inquire` before resending. `502 hub routing failed` means only that the endpoint's gateway
+could not reach the Hub.
 
 ### 8.4 Rate and size limits
 
@@ -894,18 +914,20 @@ payer gave without you sending the body again. It is on refusals as much as on s
 including the endpoint's own `4xx` and `5xx` answers.
 
 You can also send your own. An `X-Correlation-Id` request header of up to 64 characters
-(letters, digits, `.`, `_` and `-`) is used as the id of the exchange and comes back on the
-answer, so the id your integration test already tracks is the one we find. A header outside
-that shape is ignored and an id is assigned instead.
+(letters, digits, `.`, `_` and `-`) is your call's trace value: it comes back on the answer,
+and our log records it beside the exchange, so the id your integration test already tracks
+is the one we find. A header outside that shape is ignored and an id is assigned instead.
+Reusing a trace value, or retrying under it, is never refused: each call's exchange runs
+under its own id, which every answer also carries as `X-SHN-Leg-Id`.
 
-A correlation id names one patient's authorization at the payer, and once a request
-carrying an id has been routed through the Hub, that id is spent. For two hours from its
-first use, any request under it is refused before it reaches the payer, and the endpoint
-answers `502`. That covers a resend of the same submission, a different patient's
-submission and any other call. After those two hours, a different patient's submission
-under an id another patient's authorization already holds is still refused, with `409`,
-before the payer is asked. Ids are not scoped to your client, so send a new, unique id (a
-UUID, for example) on every request, or send none and one is assigned.
+A PAS submission is different in one way. If its Claim names its own correlation
+(`Claim.identifier` with system `urn:shn:correlation`), that value is the payer's key for
+the authorization, and the answer's `X-Correlation-Id` reports it. So is an
+`X-Correlation-Id` you send that equals one of the Claim's own identifiers: an amendment
+that names that identifier in `Claim.related` finds the authorization. A resend of the same
+submission lands on the same authorization. A different patient's submission under a
+Claim correlation another patient's authorization already holds is refused with `409`
+before the payer is asked, so give each authorization its own Claim correlation.
 
 ---
 

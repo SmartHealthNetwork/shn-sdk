@@ -241,8 +241,8 @@ its own pend-resolution **timer** is what later flips the claim to approved, ind
 of the supplemental report's specific content — the SDK client re-queries the pend until
 the timer resolves it. If the amendment reaches the payer at the instant its timer is
 writing that same claim, the payer's store refuses the amendment's write with a version
-conflict (HTTP 409) instead of persisting it; the payer gateway re-issues the identical
-amendment once and relays whatever that answers. `Provenance` is required regardless because FR-32 (SHN's own rule)
+conflict (HTTP 409) instead of persisting it. The payer gateway relays that 409 as the
+payer's answer; re-send the amendment (a new request) and the payer answers it. `Provenance` is required regardless because FR-32 (SHN's own rule)
 says supplemental data must carry attribution — it is not a payer verdict input:
 
 ```sh

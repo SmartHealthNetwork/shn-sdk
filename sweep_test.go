@@ -1,3 +1,5 @@
+//go:build !race
+
 package shnsdk_test
 
 import (

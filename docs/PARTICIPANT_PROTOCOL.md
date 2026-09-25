@@ -791,7 +791,7 @@ are:
   `PUT /register/{id}` (each gated action consumes its assertion once).
 
 The Hub's `POST /route` verifies the assertion for transport identity but does not
-single-use it here; replay protection on routing is the per-correlation guard (§5.1).
+single-use it here; replay protection on routing is the per-envelope guard (§5.1).
 Generate a fresh `jti` per assertion regardless of target.
 
 ### 3.5 Construction sequence
@@ -1033,10 +1033,12 @@ The Hub enforces:
 - `authorityFrame` must be non-empty (400 otherwise).
 - `correlationId` must be non-empty (400 otherwise).
 - `timestamp` must parse as RFC 3339 and be within ±5 minutes of Hub clock (400 otherwise).
-- The correlation ID must not have been seen in the last 2 hours (409 replay rejection).
-  It is recorded once the envelope passes verification — before recipient lookup,
+- The envelope must not have been routed in the last 2 hours (409 replay rejection).
+  The Hub keys this on the pair the token binds — the `correlationId` and the
+  ciphertext's hash — so exactly a byte-identical envelope is refused. It is
+  recorded once the envelope passes verification — before recipient lookup,
   auditing, or forwarding — and is never released after that; a failed attempt
-  burns its id. See §6.1a for the retry rule.
+  spends that envelope, not its `correlationId`. See §6.1a for the retry rule.
 
 ### 5.2 Payload encryption
 
@@ -1097,7 +1099,7 @@ The Hub:
 
 1. Verifies the assertion (audience `"hub"`, `HolderID` == `envelope.metadata.sender`).
 2. Verifies the authz token (`VerifyBound` with request `operation` and `frame`).
-3. Rejects stale/future timestamps and replayed correlation IDs.
+3. Rejects stale/future timestamps and replayed envelopes (the same `correlationId` and ciphertext).
 4. Appends a `"routed"` audit record to the Audit Plane (mandatory; 502 on failure).
 5. Forwards the **same envelope bytes** to `recipient.BaseURL + /substrate/inbound`.
 6. Verifies the response envelope's authz token (response `operation`, same
@@ -1110,54 +1112,91 @@ The originator reads the response from the `POST /route` reply — there is no
 polling or callback.
 
 On error the Hub returns a JSON error body `{"error": "<message>"}` with an
-appropriate 4xx/5xx status. An error response never releases the envelope's
-`correlationId` — retry under a fresh one (§6.1a).
+appropriate 4xx/5xx status, and the header `X-SHN-Delivered` saying whether the
+recipient's gateway received the request: `no` when the Hub refused before
+forwarding, or the recipient's gateway was not reached or refused the request
+at its edge (`4xx`); `yes` when the recipient answered and the Hub could not
+read, decode, verify or audit the answer; `unknown` when the recipient answered
+`5xx`, the connection failed after the request was sent, or it did not answer
+before the forward gave up, so it may have received the request. An error
+without the header did not come from the Hub (a load balancer in front of it,
+say); a Smart Gateway reads a `5xx` of that kind as `unknown`. A failed forward
+names the recipient's status, never its body: `forward to recipient failed: the
+recipient answered 503`, `… the recipient refused it (403)`, `… the recipient
+could not be reached`, `… the connection failed after the request was sent`,
+`… the recipient's answer could not be read`, `… the recipient did not answer
+in time`. An error response never releases the envelope — retry with a freshly
+sealed one (§6.1a).
 
-### 6.1a Retries — a fresh `correlationId` per attempt
+### 6.1a Retries — a freshly sealed envelope per attempt
 
-The Hub records a `correlationId` once the envelope passes verification (§5.1) —
-before recipient lookup, auditing, or forwarding — and never releases it,
-whether the exchange then succeeds or fails. Within the 2-hour replay window
-(§5.1) any second envelope carrying the same `correlationId` is rejected
-`409 {"error":"replay detected"}` — **including your own legitimate resend after
-an error**. In particular, a `502` from a failed exchange — recipient
+The Hub records each envelope once it passes verification (§5.1) — before
+recipient lookup, auditing, or forwarding — and never releases it, whether the
+exchange then succeeds or fails. The record is the pair the request token binds:
+the `correlationId` and the ciphertext's hash. Within the 2-hour replay window
+(§5.1) a second byte-identical envelope is rejected
+`409 {"error":"replay detected"}` — **including your own resend of the same bytes
+after an error**. In particular, a `502` from a failed exchange — recipient
 unreachable, a forward or audit-append failure, or a mis-constructed response
-envelope — does not free the id for reuse. (A request refused at verification
-itself — a 400/401/403, or the 502 payload-hash mismatch — is rejected before the id
-is recorded; the fresh-id rule below is correct in either case, so you never
-need to distinguish.)
+envelope — does not free that envelope for reuse. (A request refused at
+verification itself — a 400/401/403, or the 502 payload-hash mismatch — is
+rejected before it is recorded; the rule below is correct in either case, so you
+never need to distinguish.)
 
-To retry after any non-2xx from `POST /route`, build the leg again from scratch:
+To retry after any non-2xx from `POST /route`, build the leg again:
 
-1. Mint a **fresh random** `correlationId` (§5.1).
+1. Keep the `correlationId`, or mint a **fresh random** one (§5.1). Both are
+   accepted: the Hub never spends an id, only an envelope. The recipient keys
+   its own records on the envelope's `correlationId` (a payer gateway files a
+   PAS submit's authorization under it), so keep it to land a retried
+   submission on the same authorization; a fresh one is a new submission.
 2. **Re-seal** the payload (§5.2). Sealed boxes are non-deterministic, so the
    ciphertext — and with it the payload hash — changes on every seal.
-3. Request a **fresh token** bound to the new `correlationId` and the new
-   payload hash (§4.1). Tokens are per-leg by design; there is nothing to reuse.
+3. Request a **fresh token** bound to the `correlationId` and the new payload
+   hash (§4.1). Tokens are per-leg by design; there is nothing to reuse.
 4. `POST /route` the new envelope.
 
+A fresh `correlationId` over the original ciphertext, with a fresh token bound to
+it, is also a new envelope and is routed.
+
 SDK callers get this for free: `RunEligibility`, `RunPriorAuth`, and the other
-originate helpers mint a fresh `correlationId` on every call, so a retry is
-simply calling the helper again.
+originate helpers seal afresh (and mint a fresh `correlationId`) on every call,
+so calling the helper again is a new, separate submission.
 
 **Why the guard does not roll back on failure.** The payload-blind Hub cannot
 distinguish a legitimate byte-identical resend from an attacker replaying a
 captured envelope + assertion — they are the same bytes, and rejecting them is
 the point of the guard (§5.1). Nor can the Hub know whether a failed forward
-actually reached the recipient (a timeout can fire after delivery), so releasing
-the id could deliver the same `correlationId` twice. Never releasing it also
-keeps the audit chain unambiguous: one `correlationId` is at most one routed
-attempt — `routed` + `answered`, or `routed` + `failed`, never two `routed`
-records.
+actually reached the recipient (a timeout can fire after delivery). Never
+releasing an envelope keeps each one to at most one routed attempt — `routed` +
+`answered`, or `routed` + `failed`, never two `routed` records for the same
+bytes.
 
 **A retry is a new exchange.** It gets its own audit trail and its own
-processing at the recipient. Linkage that must survive a retry rides in the
-payload, not the envelope: the prior-authorization amend leg, for example,
-references its pended claim via `Claim.related` → the original submit leg's
-`correlationId` (§7b.2), which is independent of the amend leg's own envelope
-`correlationId`. If a failed attempt may nonetheless have reached the recipient
-(a timeout, or a `502` returned after forwarding), reconcile through the
-payload's FHIR business identifiers — never by resending the same envelope.
+processing at the recipient, which may see the same `correlationId` more than
+once. Linkage that must survive a retry rides in the payload, not the envelope:
+the prior-authorization amend leg, for example, references its pended claim via
+`Claim.related` → the original submit's `urn:shn:correlation` (§7b.2), which is
+independent of the amend leg's own envelope `correlationId`. A payer gateway
+keys a submit's authorization on the envelope `correlationId` — which an SHN
+gateway's ingress sets to the Claim's own correlation — so a retry under the
+same `correlationId` lands on the same authorization rather than filing a
+second one. If a failed
+attempt may nonetheless have reached the recipient (a timeout, or a `502`
+returned after forwarding), reconcile through the payload's FHIR business
+identifiers.
+
+**At an SHN gateway's Da Vinci ingress.** A participant's own system may send an
+`X-Correlation-Id` header: it is the call's **trace** value, not the leg's
+envelope `correlationId`. Each call's leg is sent under a freshly minted
+`correlationId` — or, on a PAS submit or update, the Claim's own identity: its
+`urn:shn:correlation`, or else the caller's trace value when that value is one of
+the Claim's own identifiers (so an amend naming it in `related` binds) — so a
+caller that reuses a trace value, or retries, is never refused for it and never
+lands on another request's payer-side record. Every answer carries `X-Correlation-Id` (the caller's value,
+the Claim's correlation when it names one, else the leg's id) and
+`X-SHN-Leg-Id` (the id the leg was sent under, which the gateways' leg log lines
+carry).
 
 ### 6.1b Leg outcomes — what an originator sees
 
@@ -1171,10 +1210,10 @@ caller gets back from the console route that started the exchange. A leg is
 | Outcome | Meaning | What the caller sees |
 |---|---|---|
 | `routed` | The leg was attempted: recipient resolved, contract line selected, seal → authorize (§4.1) → `POST {hub}/route` under way. Always followed by exactly one terminal outcome. | — |
-| `answered` | The counterpart answered and the response envelope verified end-to-end (§6.1 steps 6–8, `VerifyBound` §4.4). A frame-carried **non-2xx application answer** (§6.3 — an adjudication denial, a `422` validation reject, a partner payer's real `400`) is `answered`, not a failure. | The application response; a non-2xx answer is relayed **verbatim** with the recipient's own status, `Content-Type` and body. |
-| `denied` | The **Authorization Framework refused the request leg** — `403` from `POST {authz}/authorize` (§4.1: wrong role for the frame, or no consent on `federated-query-submit`). A policy decision, not an error; excluded from the operators' `LegError` alarm. | A `502` whose `error` carries `authorization denied`, from a route with no legitimate denied branch; a flow that has one treats it as a business outcome instead (the UC-05 federated query leaves the prior authorization pended with `consentDenied: true` rather than failing). |
-| `unreachable` | The **Hub leg did not complete**: your gateway could not reach `POST {hub}/route`; the Hub answered non-2xx — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), or the `502` it returns when the recipient is unknown, cannot be reached, or returns a response envelope the Hub cannot verify, on a payload-hash mismatch, or on an audit-append failure (§6.1a); or the Hub answered `200` with a body that is not a decodable envelope. The Hub's status and body are not relayed. Also the leg that produced **no answer within your gateway's wait** (the HTTP client timeout it posts to `POST {hub}/route` with — 30 seconds in the published Smart Gateway; the whole Hub → counterpart gateway → counterpart system path shares that budget). | A `502` whose `error` carries `hub routing failed`; for the timed-out leg, a `504` whose `error` reads `no answer on the hub leg within 30s (hub leg timeout)` (the number is the client's own timeout, which your gateway applies as its own deadline on the leg; `hub leg timed out` with no number when your own request deadline ended the wait first; a connection or TLS handshake that gives up before the Hub is reached is not called a timeout and stays the `502`). Retry under a fresh `correlationId` (§6.1a). |
-| `failed` | Anything else, on **your gateway's** side of the leg: the Authorization Framework unreachable or erroring (non-403), a seal/encode failure, or a response the Hub returned `200` for that fails your gateway's own verification (`VerifyBound`, correlation match, decrypt). Counted in `LegError` with `unreachable`. | A `502` whose `error` names the reason — `authorization failed`, `response leg authorization failed`, `response correlation mismatch`, …. |
+| `answered` | The counterpart answered and the response envelope verified end-to-end (§6.1 steps 6–8, `VerifyBound` §4.4). A frame-carried **non-2xx answer** is `answered`, not a failure: an application answer (§6.3 — an adjudication denial, a `422` validation reject, a partner payer's real `400`), and since shn-gateway v0.54.0 the counterpart gateway's own failure (§8, "Mechanical vs. application status" — its system unreachable, a record it could not read). The counterpart reports it, so it is not counted in your `LegError`; the counterpart's operators see it, and to the Hub, which cannot see inside the frame, the leg was answered. | The application response; a non-2xx answer is relayed **verbatim** with the recipient's own status, `Content-Type` and body. |
+| `denied` | The **Authorization Framework refused the request leg** — `403` from `POST {authz}/authorize` (§4.1: wrong role for the frame, or no consent on `federated-query-submit`). A policy decision, not an error; excluded from the operators' `LegError` alarm. | A `403` whose `error` carries `authorization denied` (a `502` before shn-gateway v0.54.0), from a route with no legitimate denied branch; a flow that has one treats it as a business outcome instead (the UC-05 federated query leaves the prior authorization pended with `consentDenied: true` rather than failing). |
+| `unreachable` | The **Hub leg did not complete**: the recipient was not reached, or, for a leg that timed out after your gateway sent it, may have been (the `504` says so): your gateway could not reach `POST {hub}/route`; or the Hub refused the leg — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), or the `502` it returns when the recipient is unknown, cannot be reached, or refuses the forward at its edge, on a payload-hash mismatch, or on an audit-append failure before the forward (each marked `X-SHN-Delivered: no`). A recipient that does not frame its answers is refused at its edge in the Hub's eyes, so its `4xx` application answer reads this way too. Also the leg that produced **no answer within your gateway's wait** (the HTTP client timeout it posts to `POST {hub}/route` with — 30 seconds in the published Smart Gateway; the whole Hub → counterpart gateway → counterpart system path shares that budget). | The Hub not reached: a `502` whose `error` is `hub routing failed`. The Hub's refusal, with `error` reading `hub refused the exchange: <the Hub's reason>`: a `409 … replay detected` keeps the Hub's status; every other Hub `4xx` concerns your gateway's standing with the Hub (its registration, its token, its clock), not the caller's request, and is a `502` — e.g. `502 … stale or future timestamp`, `502 … unknown sender`; a Hub `5xx` keeps its status, e.g. `502 … unknown recipient`. A recipient gateway that refused the forward at its edge: `502 the recipient's gateway refused the exchange (403)`. Before shn-gateway v0.54.0, every one of these was `502 hub routing failed`. The timed-out leg: a `504` whose `error` reads `no answer on the hub leg within 30s (hub leg timeout)` (the number is the client's own timeout, which your gateway applies as its own deadline on the leg; `hub leg timed out` with no number when your own request deadline ended the wait first; either adds `the recipient may have received this request: check its outcome before resending` when the request had already been sent to the Hub; a connection or TLS handshake that gives up before the Hub is reached is not called a timeout and stays the `502`). Retry with a freshly sealed envelope (§6.1a). |
+| `failed` | Anything else, on **your gateway's** side of the leg: the Authorization Framework unreachable or erroring (non-403), a seal/encode failure. Also a leg **the recipient's gateway was reached for** whose answer was lost: the Hub marks its `502` with `X-SHN-Delivered` (`yes`: the recipient answered and the Hub could not read, decode, verify or audit the answer; `unknown`: the recipient answered `5xx`, the connection failed after the request was sent, or it did not answer before the forward gave up), a `5xx` with no marker (not from the Hub), a connection to the Hub that failed after your gateway sent the request, or the Hub returned `200` and the answer could not be read or fails your gateway's own verification (not an envelope, `VerifyBound`, correlation match, decrypt, frame decode). Counted in `LegError` with `unreachable`. | A `502` whose `error` names the reason — `authorization failed`, …. A leg the recipient was reached for reads `the recipient received this request and answered, but its answer was lost on the way back (…)` or `… its answer could not be accepted (…)`, or `the recipient may have received this request (…)`: the recipient may have acted on it, so check the request's outcome (for PAS, `$inquire`) before resending. |
 
 Two things are **not** leg outcomes:
 
@@ -1392,6 +1431,18 @@ rest          body        raw bytes — no additional encoding
   again for framed DTR operations to `operation` (request frames only, below).
   No other header (hop-by-hop, cookie, or otherwise) is ever carried inside a
   frame.
+- `Content-Type` on a **request** frame — the media type of the body. An SHN
+  gateway frames the body's own media type (`application/json` for a CDS Hooks
+  request, `application/fhir+json` for a FHIR one) and, on a framed DTR
+  operation, the FHIR JSON media type the participant's own system declared
+  (`application/fhir+json` or `application/json`, with its parameters such as
+  `fhirVersion`). PAS submit, update and inquiry requests are not framed, so
+  they carry no declared media type. A payer gateway sends its own system each
+  request with that leg's media type as `Content-Type` and `Accept` —
+  `application/json` for CDS Hooks, `application/fhir+json` for the FHIR
+  operations, or the declared FHIR media type a DTR request frame carried — as
+  a direct client would. On a CDS Hooks leg the frame's `Content-Type` is not
+  used: earlier releases stamp `application/fhir+json` on every request frame.
 - `contractVersion` — the full `<contract>@<line>` token (e.g. `pa.pas@2.0`) of
   the exchange-contract line the response body was **built at** — content-
   descriptive, like `Content-Type`, not a negotiation echo. Present only on
@@ -1435,22 +1486,34 @@ is an application **answer**, not a machinery failure, and (for a frame-capable
 exchange) travels inside the frame with **200 to the Hub**. So is any `4xx` the
 responding gateway itself writes about the request once the leg is authenticated
 — a member it does not hold when it requires known members (`400 unknown member`), a request it cannot read, no
-order to decide on, an eligibility subject that does not match the token (`403`), a consent it
+order to decide on, an eligibility subject that does not match the token (`403`; a payer that
+declares its own eligibility endpoint carries such a request instead), a consent it
 cannot confirm, an ingress validation failure at enforcement `strict` (`422
 ingress validation failed`) — those are its verdict, not its machinery, and
 travel the same way, as does any `4xx` it writes about its own participant's
 answer after that system answered (an answer that repeats a member name, and at
 `strict` a PAS response whose patient linkage is inconsistent or that names
 another patient, a questionnaire package carrying a subject, or an answer that
-fails validation); only its own faults (`5xx`) and the pre-handler checks above stay
-bare. The Hub's generic `"hub routing failed"` therefore now means
-exactly what it says: routing failed, not "the far end disagreed with you."
+fails validation). Since shn-gateway v0.54.0 so does its own failure once the leg
+is authenticated (`5xx`): its participant's system that could not be reached
+(`502 the payer's system could not be reached`) or that received the request and
+gave no answer it could carry (`502 the payer's system received this request but
+gave no answer this gateway could carry; it may have acted on it: check its
+outcome before resending`), a system-of-record read that failed (`502`, or `503`
+while that system is unavailable), a validator it cannot reach. (A record it
+cannot write after its payer answered withholds nothing: the answer is relayed,
+§7b.2.) The requester reads that gateway's status and message. On a PAS
+submit or update, any refusal the gateway makes after its payer's system answered
+(a failure of its own, or its refusal of the payer's answer) adds `the payer's
+system received and answered this request: check its outcome before resending`. Only the pre-handler checks
+above and a failure building the response leg itself stay bare, and the Hub
+reports those as a failed forward that names the recipient's status (§6.1).
 
 **Legacy peers see no change.** An exchange where either side is not
 frame-capable is byte-identical to the protocol's original, pre-message-frame
 contract: bare FHIR payload on the wire, implicit `200` on success, and a
-non-2xx application answer collapsing to the Hub's generic
-`"hub routing failed"` at the requester. There is no environment variable
+non-2xx application answer reaching the requester as the Hub's failed forward,
+which names the recipient's status but never its body (§6.1). There is no environment variable
 governing this — a prior, now-removed release-specific mechanism
 (`RESPONDER_RELAY_ERRORS`, a JSON wrapper) covered the same problem for a single
 release before message-frame negotiation replaced it; see the gateway's
@@ -1958,14 +2021,19 @@ builder.
 
 From Smart Gateway v0.44.0, a CDS Hooks or `$questionnaire-package` message reaches the other
 participant as its author sent it. The payer's answer comes back byte for byte, and the
-hook is never changed. The only changes are the four edits below. Each is made on the
-message's own bytes; everything else in the message is unchanged.
+hook is never changed. The only changes are the edits below. Each is made on the
+message's own bytes; everything else in the message is unchanged. By default a provider's
+gateway makes only the first of them to a request its EHR sends: the prefetch, Coverage and
+Patient edits are the provider's opt-in (`ENRICH_NATIVE_REQUESTS=true` on its gateway), and
+without it the request is carried as the EHR sent it. A Coverage a request leaves out is
+read from the provider's system of record either way, only to choose the payer.
 
 | Edit | Made by | What changes |
 |---|---|---|
 | Callback removed | the provider's gateway, on a CDS Hooks request from the EHR | `fhirServer` and `fhirAuthorization` are removed. The payer never gets a route or a credential into the provider's systems. |
-| Prefetch obtained | the provider's gateway, on a CDS Hooks request from the EHR | An advertised prefetch key the EHR left out is added from the provider's own system of record: the Patient as read, a search as a `searchset` of the records exactly as returned (`urn:uuid:` entry addresses, no server links), `null` for no match. Nothing is made up. |
-| Coverage obtained | the provider's gateway, on a `$questionnaire-package` request from the EHR | One `coverage` parameter is appended from the provider's system of record, only when the request carries none. |
+| Prefetch obtained (opt-in) | the provider's gateway, on a CDS Hooks request from the EHR | An advertised prefetch key the EHR left out is added from the provider's own system of record: the Patient as read, a search as a `searchset` of the records exactly as returned (`urn:uuid:` entry addresses, no server links), `null` for no match. Nothing is made up. |
+| Coverage obtained (opt-in) | the provider's gateway, on a `$questionnaire-package` request from the EHR | One `coverage` parameter is appended from the provider's system of record, only when the request carries none. |
+| Patient obtained (opt-in) | the provider's gateway, on a `$questionnaire-package` request from the EHR | One `referenced` parameter holding the provider's own Patient record is appended, only when the request carries no Patient for the bound patient and the provider's system of record holds the patient under the id the request names. |
 | Payer identity mapping | the payer's gateway, on the request to its payer (only when configured) | Only the payer identifier strings of each Coverage, and of a PAS Claim's insurer when it names the payer. |
 
 - **Signatures.** A signature inside the message (`Bundle.signature`, `Provenance.signature`, a
@@ -1986,10 +2054,12 @@ message's own bytes; everything else in the message is unchanged.
   `application/json` for CDS Hooks, `application/fhir+json` for a questionnaire package.
 - **Member id limitation.** `context.patientId`, and the patient references a request binds
   (each order's subject, each Coverage's beneficiary), must use the patient's network member
-  id. A provider's gateway obtains prefetch only when its system of record names the patient
-  by that id. When the system names the patient differently, a request that leaves out
-  `coverage` is refused (`422`); one that leaves out `patient` is refused the same way at
-  `strict` and sent without it below `strict`; history keys are left out.
+  id. A provider's gateway that has opted in obtains prefetch only when its system of record
+  names the patient by that id. When the system names the patient differently, a request
+  that leaves out `coverage` is refused (`422`); one that leaves out `patient` is refused the
+  same way at `strict` and sent without it below `strict`; history keys are left out. Without
+  the opt-in nothing is added, and the Coverage read to choose the payer is found under the
+  system's own Patient id.
 - **Gateway-originated requests.** A request that a provider's gateway builds for its own
   workflow names the patient by the member id. It changes the system of record's `Patient.id`
   and the patient reference on each carried record's patient path, and nothing else; the
@@ -2125,11 +2195,24 @@ Wire contract:
 | Response `operation` | `pas-update-response` |
 | Response frame | `payer-coverage` |
 
+**The payer's system decides; the payer gateway's pend ledger records and never
+gates.** A Smart Gateway serving a payer forwards every amendment to its payer's system
+and relays the answer, whatever its own ledger holds for the authorization (no pend
+recorded there, a decision already recorded, or another amendment still with the payer).
+The answer checks at the participant's chosen conformance level still apply. The ledger
+records the answer only onto the authorization it already holds for the same requester;
+anything else is relayed and not recorded. A record the gateway cannot write after the
+payer answered does not withhold the answer: it is relayed, and the gateway reports the
+failure to its operator. The payer's own `409` (for example a version conflict while
+it resolves the same claim) is relayed as its answer; whether to resend is the
+requester's decision.
+
 The update Bundle payload carries :
 
 - `Claim` with `related[]` referencing the **original submit correlation identifier**
-  (this binds the amendment to the pended claim; the payer rejects an update whose
-  `related[]` does not match an open pended claim).
+  (this binds the amendment to the pended claim; the payer's system decides what an
+  update whose `related[]` names no authorization it holds means, and the reference
+  payer refuses one whose prior it never stored).
 - The **unchanged** `QuestionnaireResponse` and `ServiceRequest` from exchange-1.
 - An operative **`DiagnosticReport`** (US Core Note profile) — the new clinical
   evidence.
@@ -2398,17 +2481,72 @@ and `ResumePriorAuth` / `RunPriorAuth` call for you.
 All FHIR resources exchanged through the network must conform to their
 applicable IG profiles. The network enforces a **two-gate** posture:
 
-1. **Runtime US Core validation** — a gateway validates each resource against
-   base R4 + US Core profiles on egress (before sealing) and on ingress (after
-   decrypting), at the enforcement levels that run checks.
+1. **Runtime validation** — at the enforcement levels that run checks, a gateway
+   validates FHIR resources on egress (before sealing) and on ingress (after
+   decrypting) with its FHIR `$validate` endpoint. What each check covers:
+
+   - A resource is checked against the profiles it declares in its own
+     `meta.profile`, and otherwise against its base FHIR R4 definition. A
+     resource that declares no profile is checked for base R4 shape only, with
+     no Da Vinci or US Core profile applied.
+   - A few resources a gateway builds are checked against a named profile,
+     whatever they declare: the DTR QuestionnaireResponse it sends, against the
+     DTR QuestionnaireResponse profile of the leg's IG line; a
+     QuestionnaireResponse it populates, against the base R4
+     QuestionnaireResponse; and a PAS inquiry it builds, against the PAS inquiry
+     request-bundle profile of the line.
+   - Of a CDS Hooks request, the draft order is validated, and on `order-select`
+     and `order-sign` the Coverage too; a CDS Hooks answer is checked against
+     the CDS Hooks response rules.
+   - A PAS request carried from the participant's own system (the `$submit`
+     ingress) is not `$validate`d, by either gateway; only the content checks
+     and the network rules below apply to it. A PAS submit or update a gateway
+     builds from its participant's records is validated: the Bundle for base R4
+     shape, and its QuestionnaireResponse attachments against the DTR profile.
+   - A payer's DTR questionnaire package is not validated.
+   - Of coverage eligibility, both gateways validate the request and the answer:
+     the answer the payer's gateway builds from its participant's records or,
+     when the payer declares its own endpoint (`PAYER_ELIGIBILITY_URL`), the
+     payer system's answer.
+
+   A level applies only to what these checks cover: `strict` refuses a defect a
+   check finds, and `structural` refuses broken structure a check finds. Neither
+   checks a resource or a profile the list above leaves out.
 
    Whether those checks run, and what an invalid result *does*, is each gateway's
    own configured choice (`CONFORMANCE_ENFORCEMENT`), not something the network
    imposes. At `none` no payload conformance check runs and no finding is
    recorded; at `observe` — the default when the value is unset — every check
    runs, each defect is recorded as a conformance finding and the message is
-   carried as sent, apart from the gateway's registered edits (§7a.4); at `strict`
+   carried as sent, apart from the gateway's registered edits (§7a.4); at `structural`
+   every check runs, a message whose structure is broken is refused and every
+   other defect is recorded as at `observe`; at `strict`
    the message is refused and the refusal names the rule and the issues behind it.
+
+   At `structural`, broken structure is: a missing required element, an element the
+   resource does not define, a value of the wrong JSON type, a value that cannot
+   be read (a malformed date, or a code outside a core FHIR code list such as
+   `Claim.status`), a CDS Hooks answer that cannot be read or lacks a required
+   member or has one of the wrong type, and a request or answer the gateway
+   cannot read. A FHIR validation issue is read by the validator's own message id,
+   and only two kinds of FHIR issue are recorded rather than refused: invariants,
+   and a code outside its code list (a code the bound value set or code system
+   does not contain, or a code system the validator cannot check, licensed ones
+   included), as the validator's recognized code-list issues report it. Every
+   other FHIR profile issue — cardinality, fixed and pattern values, slicing,
+   extensions, lengths, any other terminology issue, or an issue the gateway
+   cannot classify — and every fatal issue refuses at `structural`. Outside FHIR validation
+   these are recorded, not refused: CDS Hooks summary length, topic and selection
+   behavior, another patient in one message, and the content business rules
+   (QuestionnaireResponse attestation, amendment provenance, the EOB decision rules,
+   an unresolvable `Claim.insurer`, prefetch the participant's system cannot
+   supply). A validator that cannot run is
+   recorded at `structural`, not refused. On a PAS 2.1 or 2.2 request Bundle that
+   declares the PAS request-bundle profile, the Claim entry may match either of
+   two candidate profiles; when only a deeper rule fails the Claim's own profile,
+   the validator's reports that the Claim matched neither candidate, and the other
+   candidate's own requirements, are recorded as consequences of that deeper
+   failure, not refused.
    Your obligation above is unchanged at every level: a gateway that relays your
    non-conformant resource has not accepted it, and the peer you sent it to may be
    configured to refuse it.
@@ -2420,8 +2558,9 @@ applicable IG profiles. The network enforces a **two-gate** posture:
    own system), routing, replay, a repeated member name in any body, the contract line
    stamped on an answer's frame, and the check of a payload that gateway itself
    translated between IG lines. An answer the
-   gateway cannot read, or one about another patient, is a conformance defect:
-   refused at `strict`, relayed as sent below it.
+   gateway cannot read is a conformance defect: refused at `structural` and `strict`,
+   relayed as sent below them. An answer about another patient is refused at
+   `strict` and relayed as sent below it.
 
 2. **Da Vinci gap-report contract** — Da Vinci CRD/DTR/PAS-specific profile gaps
    are tracked in the network's conformance gap report (maintained upstream).
@@ -2716,6 +2855,22 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-09-25 — Conformance enforcement adds `structural` (§8.1).**
+  `CONFORMANCE_ENFORCEMENT` is `none`, `observe`, `structural` or `strict`. `structural`
+  runs every check, refuses a message whose structure is broken, with the status
+  and body `strict` uses, and records every other defect as `observe` does; a
+  validator that cannot run is recorded. The default when the value is unset is
+  still `observe`. A gateway now sends a `Parameters` resource to its validator
+  inside the operation's `resource` parameter, so the validator reads it; a
+  validator that answers that it was given no resource is treated as unavailable
+  at every level. Ships in shn-gateway v0.54.0.
+- **2026-09-25 — Native requests carried as sent unless the provider opts in (§7a.4).**
+  From Smart Gateway v0.54.0, a provider's gateway adds nothing to a CDS Hooks or
+  `$questionnaire-package` request its EHR sends, apart from removing the callback. The
+  prefetch, Coverage and Patient edits run only when the provider's gateway sets
+  `ENRICH_NATIVE_REQUESTS=true`. A Coverage a request leaves out is still read from the
+  provider's system of record to choose the payer, and is not added. Send every prefetch
+  value the payer should see, or opt in.
 - **2026-09-24 — Members and the payer's patient.** On the CRD, DTR, PAS and
   inquiry legs, a member a system of record does not hold is carried unless the
   gateway sets `REQUIRE_KNOWN_MEMBERS=true`; eligibility, federated query and
@@ -2728,6 +2883,43 @@ property. Until then, build to the rule: preserve what you do not recognise.
   an inquiry's decision) is filed under its own identification of the member,
   never under the token's patient, and it emits `subject.binding-differs` when
   the two differ.
+- **2026-09-24 — The requester sees what happened behind the Hub (§6.1,
+  §6.1b outcomes).** A Smart Gateway no longer reports every failure behind the
+  Hub as `502 hub routing failed`. The Hub's own refusal reaches the caller with
+  the Hub's status and reason (`hub refused the exchange: …`); an Authorization
+  Framework denial is a `403`; a leg the recipient was reached for, whose answer
+  was lost, says so and that the recipient may have acted on the request. The
+  Hub marks errors after the forward with `X-SHN-Delivered` and names the
+  recipient's own status on a failed forward; every Hub error carries the
+  marker, `no` when nothing was forwarded. `hub routing failed` now means only
+  that your gateway could not reach the Hub. A Hub `4xx` other than `409` is a
+  `502` to the caller. A responding gateway's own
+  failure after the leg is authenticated (its participant's system unreachable
+  or silent, a system-of-record read that failed, a validator it cannot reach)
+  is framed as its answer with `200` to the Hub, like its `4xx` refusals (§8,
+  "Mechanical vs. application status"), so the requester reads that gateway's
+  status and message; it is an `answered` leg. On a PAS submit or update, any
+  refusal the payer gateway makes after its payer's system answered says so, so
+  the requester checks before resending. Ships in shn-gateway v0.54.0.
+- **2026-09-24 — A payer gateway's pend ledger records and never gates (§7b.2).** A
+  Smart Gateway serving a payer sends every PAS amendment to its payer's system and
+  relays the answer, whatever its own ledger holds for the authorization. Earlier it
+  refused an amendment itself with `409` when it held no pend for the prior claim, had
+  already recorded a decision, or had another amendment in progress. A payer's own
+  `409` (a version conflict while it resolves the same claim) is relayed as its answer,
+  where the gateway used to re-send the amendment once. A record the gateway cannot
+  write after the payer answered no longer withholds the answer. A re-pend never reopens
+  an amendment still with the payer. Ships in shn-gateway v0.54.0.
+- **2026-09-24 — The Hub spends an envelope, never a `correlationId` (§5.1,
+  §6.1a).** The Hub's replay guard now keys the pair its token binds — the
+  `correlationId` and the ciphertext's hash — so only a byte-identical envelope
+  is refused (`409`). A retry sealed afresh is routed under the same
+  `correlationId` or a new one; before this change any reuse of a
+  `correlationId` within two hours was refused. At an SHN gateway's Da Vinci
+  ingress the caller's `X-Correlation-Id` is a trace value only: each call's leg
+  is sent under a freshly minted id (or the PAS Claim's `urn:shn:correlation`),
+  and every answer also carries `X-SHN-Leg-Id`. A payer gateway keys a PAS
+  submit's authorization on the Claim's correlation, as before.
 - **2026-09-24 — Conformance enforcement has three levels (§8.1).**
   `CONFORMANCE_ENFORCEMENT` is `none`, `observe` or `strict`. `none` now runs no
   payload conformance check and records no finding; `observe`, the new level and
