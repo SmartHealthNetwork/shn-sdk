@@ -869,7 +869,7 @@ in one direction for one correlation.
 |---|---|---|
 | `frame` | Yes | Authority frame; see §4.3 |
 | `operation` | Yes | Operation string; see §4.3 |
-| `subjectPCI` | Yes | Must start with `"pci:"` — the Trust-issued patient identifier |
+| `subjectPCI` | Yes | Must start with `"pci:"` — the network's opaque patient identifier |
 | `correlationId` | Yes | Must be non-empty; binds the minted token to one leg |
 | `custodian` | For `federated-query-submit` only | The facility holder ID; used to resolve patient consent at the Global Person Consent service |
 | `payloadHash` | For every **envelope** op | `sha256hex` (64 lowercase hex) of the envelope **ciphertext**. **Seal the payload FIRST, then authorize** against the ciphertext (seal-then-authorize) so the minted token binds THIS payload. Absent for the one non-envelope op, `patient-access-read` (a REST bearer read) |
@@ -1434,15 +1434,15 @@ adjudication denial, a partner payer's real `400`, a `422` validation reject —
 is an application **answer**, not a machinery failure, and (for a frame-capable
 exchange) travels inside the frame with **200 to the Hub**. So is any `4xx` the
 responding gateway itself writes about the request once the leg is authenticated
-— a member it does not hold (`400 unknown member`), a request it cannot read, no
-order to decide on, a subject that does not match the token (`403`), a consent it
+— a member it does not hold when it requires known members (`400 unknown member`), a request it cannot read, no
+order to decide on, an eligibility subject that does not match the token (`403`), a consent it
 cannot confirm, an ingress validation failure at enforcement `strict` (`422
 ingress validation failed`) — those are its verdict, not its machinery, and
 travel the same way, as does any `4xx` it writes about its own participant's
-answer after that system answered (a PAS response whose patient linkage is
-inconsistent or that names another patient, a questionnaire package carrying a
-subject, an answer that repeats a member name, an answer that fails validation
-at `strict`); only its own faults (`5xx`) and the pre-handler checks above stay
+answer after that system answered (an answer that repeats a member name, and at
+`strict` a PAS response whose patient linkage is inconsistent or that names
+another patient, a questionnaire package carrying a subject, or an answer that
+fails validation); only its own faults (`5xx`) and the pre-handler checks above stay
 bare. The Hub's generic `"hub routing failed"` therefore now means
 exactly what it says: routing failed, not "the far end disagreed with you."
 
@@ -1525,13 +1525,21 @@ whose own input is the frame body:
   and the package request the gateway used to rebuild from it carried only
   the canonical and a coverage. `shnsdk.Responder` still answers the older
   request. The `operation` header on any other transaction type is refused
-  with `400`. The Smart Gateway, as a payer, binds every patient a DTR request
-  names (each coverage beneficiary,
-  order subject or patient, Patient resource and other patient reference) to
-  the authorized patient before its payer's system sees the request: a
-  second patient or another member is refused with `403`, and an unreadable
-  or unbindable patient (a non-Patient reference, a Patient with no id, an
-  unknown member) or a package request with no coverage with `400`.
+  with `400`. The Smart Gateway, as a payer, identifies the patient a DTR request
+  names by its own system before its payer's system sees the request, and
+  does not compare that patient with the one the leg's token names. At
+  enforcement `strict` every patient the request names (each coverage
+  beneficiary, order subject or patient, Patient resource and other patient
+  reference) must be that one patient: a second patient is refused with
+  `403`, and a non-Patient reference, a Patient with no id or a package
+  request with no coverage with `400`. Below `strict` these are carried as
+  sent (recorded as a finding at `observe`). At every level, a request the
+  payer cannot read, a coverage parameter that is not a JSON object (or, on a
+  payer that maps its payer identity, not a Coverage) and a `next-question`
+  round naming no patient subject are refused with `400`; a
+  request left naming no patient at all is refused with `strict`'s refusal;
+  and, when the gateway requires known members, so is a member it does not
+  hold (`400 unknown member`).
 - **This SDK.** `BuildQuestionnairePackageParameters(line, …)` builds the
   `questionnaire-package` input with every resource embedded as your own
   bytes; `RunPriorAuth` sends it as a framed operation when the payer
@@ -1625,17 +1633,14 @@ Response operation: `eligibility-response`
 
 ### Step-by-step
 
-**Step 1 — Resolve the patient PCI**
+**Step 1 — Identify the patient**
 
-```
-pci = ResolvePCI(memberID, birthDate, familyName)
-     → "pci:a1b2c3d4e5f6a1b2c3d4"
-```
-
-Note: today the PCI is derived deterministically via `shnsdk.ResolvePCI`
-(SHA-256 over `lowercase(memberID|birthDate|familyName)`, first 16 bytes,
-`"pci:"` prefix). This is a demo scheme only. External participants must treat the
-PCI as an opaque, Trust-assigned identifier and must not re-derive it from demographics.
+Obtain the patient's network identifier (the `subjectPCI` of Step 4) from
+`shnsdk.ResolvePCI`, passing the member's identifier and demographics as your system of
+record holds them; the Smart Gateway does this through its system-of-record connector. Treat
+the result as an opaque string: carry it as the SDK returns it and as tokens name it, and do
+not parse it, reimplement how it is produced, or depend on its format beyond the `pci:`
+prefix. How it is produced is internal to the network and may change.
 
 **Step 2 — Generate a correlation ID**
 
@@ -1975,14 +1980,16 @@ message's own bytes; everything else in the message is unchanged.
   offer is refused before anything is sent, with `422` and the hooks it does offer:
   `{"error":"payer offers no CDS service for hook order-select","offered":[…]}`.
 - **Answers.** The payer's gateway checks a CDS Hooks answer against the CDS Hooks response
-  rules and refuses (`502`) one that breaks them; it never repairs one. The provider's gateway
+  rules; at `strict` it refuses (`502`) one that breaks them, and below `strict` it relays it
+  as sent (recorded as a finding at `observe`). It never repairs one. The provider's gateway
   returns the answer body exactly. The success media type is still the gateway's own:
   `application/json` for CDS Hooks, `application/fhir+json` for a questionnaire package.
 - **Member id limitation.** `context.patientId`, and the patient references a request binds
   (each order's subject, each Coverage's beneficiary), must use the patient's network member
   id. A provider's gateway obtains prefetch only when its system of record names the patient
   by that id. When the system names the patient differently, a request that leaves out
-  `patient` or `coverage` is refused (`422`), and history keys are left out.
+  `coverage` is refused (`422`); one that leaves out `patient` is refused the same way at
+  `strict` and sent without it below `strict`; history keys are left out.
 - **Gateway-originated requests.** A request that a provider's gateway builds for its own
   workflow names the patient by the member id. It changes the system of record's `Patient.id`
   and the patient reference on each carried record's patient path, and nothing else; the
@@ -2391,22 +2398,30 @@ and `ResumePriorAuth` / `RunPriorAuth` call for you.
 All FHIR resources exchanged through the network must conform to their
 applicable IG profiles. The network enforces a **two-gate** posture:
 
-1. **Runtime US Core validation** — every resource is validated against base R4 +
-   US Core profiles at the gateway on egress (before sealing) and on ingress
-   (after decrypting). Both checks always run, at every enforcement level.
+1. **Runtime US Core validation** — a gateway validates each resource against
+   base R4 + US Core profiles on egress (before sealing) and on ingress (after
+   decrypting), at the enforcement levels that run checks.
 
-   What an invalid result *does* is the receiving gateway's own configured
-   choice (`CONFORMANCE_ENFORCEMENT`), not something the network imposes. At
-   `none` — the default when the value is unset — the verdict is recorded as a
-   conformance finding and the message is relayed as sent; at `strict` the
-   message is refused and the refusal names the rule and the issues behind it.
-   Your obligation above is unchanged either way: a gateway that relays your
-   non-conformant resource has recorded it, not accepted it, and the peer you
-   sent it to may be configured to refuse it.
+   Whether those checks run, and what an invalid result *does*, is each gateway's
+   own configured choice (`CONFORMANCE_ENFORCEMENT`), not something the network
+   imposes. At `none` no payload conformance check runs and no finding is
+   recorded; at `observe` — the default when the value is unset — every check
+   runs, each defect is recorded as a conformance finding and the message is
+   carried as sent, apart from the gateway's registered edits (§7a.4); at `strict`
+   the message is refused and the refusal names the rule and the issues behind it.
+   Your obligation above is unchanged at every level: a gateway that relays your
+   non-conformant resource has not accepted it, and the peer you sent it to may be
+   configured to refuse it.
 
-   Two results refuse at every level, because neither is a statement about a
-   peer's conformance: an answer the gateway cannot read at all, and a payload
-   that gateway itself translated between IG lines.
+   Some checks refuse at every level, because none of them is a statement about
+   a peer's conformance: authentication, authority (including a token
+   presented with a request other than the one it was issued for), consent, the
+   patient binding (each gateway identifies the member the request names by its
+   own system), routing, replay, a repeated member name in any body, the contract line
+   stamped on an answer's frame, and the check of a payload that gateway itself
+   translated between IG lines. An answer the
+   gateway cannot read, or one about another patient, is a conformance defect:
+   refused at `strict`, relayed as sent below it.
 
 2. **Da Vinci gap-report contract** — Da Vinci CRD/DTR/PAS-specific profile gaps
    are tracked in the network's conformance gap report (maintained upstream).
@@ -2701,6 +2716,28 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-09-24 — Members and the payer's patient.** On the CRD, DTR, PAS and
+  inquiry legs, a member a system of record does not hold is carried unless the
+  gateway sets `REQUIRE_KNOWN_MEMBERS=true`; eligibility, federated query and
+  patient-authored DTR still refuse it (`400 unknown member`). On the CRD, DTR,
+  PAS and inquiry legs a payer gateway identifies the patient the request names
+  by its own system and no longer compares it with the token's patient; the
+  receiving gateway on eligibility, federated query and patient-authored DTR
+  keeps that comparison. Everything a payer gateway keeps about an exchange (the
+  pended authorization, the decision ExplanationOfBenefit, the correlation and
+  an inquiry's decision) is filed under its own identification of the member,
+  never under the token's patient, and it emits `subject.binding-differs` when
+  the two differ.
+- **2026-09-24 — Conformance enforcement has three levels (§8.1).**
+  `CONFORMANCE_ENFORCEMENT` is `none`, `observe` or `strict`. `none` now runs no
+  payload conformance check and records no finding; `observe`, the new level and
+  now the default when the value is unset, runs every check, records each defect
+  as a finding and carries the message as sent, apart from the gateway's
+  registered edits (§7a.4); `strict`'s conformance refusals are unchanged. An
+  answer a gateway cannot read is now refused only at `strict`. Authentication,
+  authority, consent, the patient binding, routing, replay, a repeated member
+  name, the contract line stamped on an answer's frame and the check of a payload
+  a gateway translated between IG lines refuse at every level.
 - **2026-09-21 — The Smart Gateway names a Hub leg that timed out (§6.1b outcome
   table).** An originating gateway whose Hub leg produced no answer within its
   HTTP client's timeout (30 seconds in the published gateway) collapsed the
@@ -3151,7 +3188,6 @@ property. Until then, build to the rule: preserve what you do not recognise.
 | Feature | Notes |
 |---|---|
 | **Push-notify on admission** | Hub + authz poll today (~3-second cycle); push-notify is the tracked fast-follow |
-| **Trust-issued PCI** | Today: deterministic hash (demo only); goal: unguessable Trust-minted PCI |
 | **Distributed replay cache** | Today: single-Hub in-process guard; goal: shared cache for horizontal scale |
 | **Audit reader access control** | Today: audit chain is open; goal: role-gated reads |
 

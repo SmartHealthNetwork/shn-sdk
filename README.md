@@ -234,7 +234,7 @@ covered, reason, err := id.RunEligibility(ctx, http.DefaultClient,
     "1234567890", // ordering NPI
     "MBR-COVERED", "1975-04-02", "Johansson",
 )
-// RunEligibility: resolve PCI → build CoverageEligibilityRequest → authorize the
+// RunEligibility: identify the patient → build CoverageEligibilityRequest → authorize the
 // leg → seal+route the envelope → verify the bound response token → open → parse.
 ```
 
@@ -251,7 +251,7 @@ directly if you are building a native integration or test harness.
 | Symbol | Purpose |
 |---|---|
 | `GenerateIdentity(holderID)` | Fresh Ed25519 (signing) + X25519 (encryption) keypairs. |
-| `ResolvePCI(memberID, birthDate, familyName)` | Demo patient-correlation identifier (opaque; treat as Trust-assigned). |
+| `ResolvePCI(memberID, birthDate, familyName)` | The network's patient identifier for a member, for a custom system-of-record connector. Opaque: carry it as returned and as tokens name it; do not parse it, reimplement how it is produced, or depend on its format beyond the `pci:` prefix. |
 | `Identity.Assertion(audience, now, ttl)` | Signed holder assertion (the `X-Holder-Assertion` header value). |
 | `Identity.Authorize(ctx, client, authzURL, req)` | Obtain a per-operation, scope-bound `Token`. |
 | `Identity.Registration(role, baseURL)` | Build a proof-of-possession `RegistrationRequest`. |

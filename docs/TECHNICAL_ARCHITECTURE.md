@@ -43,7 +43,7 @@ Everything else in this document is an elaboration of these five ideas.
 | **Authorization Framework** | The central token-issuing service. Policy-evaluates every requested operation (default-deny) and mints signed, scope-bound tokens. Verification of those tokens is decentralized — every party checks them locally. |
 | **Frame** | The legal basis under which an operation occurs. Five frames are defined: `provider-tpo` (provider treatment/payment/operations), `payer-coverage` (payer coverage decisions), `facility-disclosure` (a facility disclosing records in answer to a federated query), `patient-access` (the patient reading their own data), and `patient-authorship` (the patient authoring data). Patient consent for a federated query is modeled as a *gating conjunct* on the provider's `provider-tpo` query — confirmed against the Consent service at token issuance — not as a frame of its own; and the patient-reading and patient-authoring frames are deliberately kept distinct and never collapsed into one "patient access" concept. |
 | **Leg** | One direction of one exchange (request or response). The unit of authorization and of audit: every leg gets its own token and its own audit record. |
-| **PCI** | The network-level patient identifier — a derived, opaque `pci:`-prefixed value. Member IDs, MRNs, and other real-world identifiers cross the network **only inside sealed payloads**; all routing metadata and all audit records carry the PCI instead. |
+| **PCI** | The network-level patient identifier — a `pci:`-prefixed opaque value; how it is produced is internal and may change. Member IDs, MRNs, and other real-world identifiers cross the network **only inside sealed payloads**; all routing metadata and all audit records carry the PCI instead. |
 | **Envelope** | The wire unit: cleartext routing metadata (sender, recipient, transaction type, frame, correlation ID, authorization token, timestamp) plus an opaque ciphertext sealed to the recipient's public key. |
 | **Registry** | The directory of admitted holders: ID, role, encryption public key, signing public key, and base URL. Sourced from a provisioning manifest plus dynamic runtime admissions. |
 | **SHN** | The operator of every shared service — the Hub, the Authorization Framework, the Consent service, the Registrar, the Accounts service, the Audit Plane, and the PHG (patient surface). Its routing core, the Hub, is the conduit: it holds no decryption keys and no re-identifiable patient provenance. |
@@ -61,8 +61,8 @@ same unit. Understanding this unit means understanding the system.
  sender gateway                      Hub (payload-blind)                 recipient gateway
  ──────────────                      ───────────────────                 ─────────────────
  1. validate the FHIR payload
-    (egress, always observed;
-    refused at strict)
+    (egress, at observe and
+    strict; refused at strict)
  2. SEAL the payload to the
     recipient's public key
  3. obtain a TOKEN from the
@@ -76,10 +76,10 @@ same unit. Understanding this unit means understanding the system.
                                      7. replay + timestamp guards
                                      8. forward the ciphertext
                                         (cannot decrypt)      ─────────▶ 9. verify the token, open the
-                                                                            envelope, validate (ingress),
-                                                                            check the payload is about the
-                                                                            patient the token names,
-                                                                            do the work
+                                                                            envelope, validate (ingress,
+                                                                            at observe and strict),
+                                                                            identify the patient by its
+                                                                            own system, do the work
                                      11. verify the RESPONSE   ◀───────  10. seal the response back, with
                                          token + sender                      a fresh response-leg token
                                      12. append two SIGNED audit            bound to the SAME correlation
@@ -108,9 +108,12 @@ Key properties of every leg:
   against the published verification key.
 - **Audit is fail-closed.** The Hub appends a signed audit record *before* forwarding a request
   and after relaying the response. If the audit append fails, the message does not flow.
-- **Validation is load-bearing.** Every FHIR resource is validated against a real FHIR
-  validator on egress *and* ingress at the gateways. A validator outage means rejection, never
-  pass-through.
+- **Validation is load-bearing where a participant asks for it.** At `observe` (the default)
+  and `strict` the gateways validate FHIR resources against a real FHIR validator on egress
+  *and* ingress (a payer's answer relayed verbatim is not re-validated on egress). At `strict`
+  a defect or a validator outage means rejection; at `observe` it is recorded and the message
+  is carried. A payload a gateway itself translated between IG lines is validated and refused
+  at every level.
 - **Replay is bounded.** Correlation IDs are one-time-use within a window at the Hub; holder
   assertions carry one-time JTIs; envelope timestamps must fall within a small clock-skew
   window.
@@ -163,8 +166,8 @@ The holder-side termination point, run once per holder with a configured role:
 
 The gateway owns all cryptography and conformance work for its holder: envelope
 sealing/opening, token acquisition and verification, holder assertions, per-message FHIR
-validation, and the patient-binding check (the decrypted payload's patient must resolve to the
-PCI named in the token).
+validation, and the patient-binding checks (per leg, as "Is the payload about the right
+patient?" below describes).
 
 ### The holder data boundary
 
@@ -348,11 +351,11 @@ Supporting mechanisms:
 | May they do this? | Default-deny policy in the Authorization Framework: role→frame→operation gated, minimum-necessary scope minted per operation. |
 | Is this token for *this* exchange? | Strict binding verification — frame, operation, correlation ID, holder, patient subject, and ciphertext hash must all match — checked independently by the Hub, the recipient, and the sender (response leg). |
 | Is this a replay? | Hub-side seen-correlation-ID cache with TTL, plus a tight envelope-timestamp window. |
-| Is the payload about the right patient? | The recipient resolves the decrypted payload's patient to a PCI and requires it to equal the token's subject. |
+| Is the payload about the right patient? | The recipient resolves the decrypted payload's patient by its own system. On eligibility, federated query and patient-authored DTR it requires that patient to equal the token's subject. On the Da Vinci CRD, DTR and PAS legs the payer handles the patient the request names as it would directly, and files everything it records about the exchange under its own binding of that patient, never under the token's. |
 | Can anyone read it in transit? | Payloads are sealed to the recipient's X25519 key; only the recipient can open them. The Hub has no key. |
 | Did it really happen / was history edited? | Hub-signed, hash-chained, append-only audit with externally anchored signed checkpoints; the whole chain is independently re-verifiable. |
-| Is the data well-formed? | Real FHIR `$validate` at every gateway crossing, egress and ingress, always observed, refused at `strict`; terminology validated against curated value sets. |
-| Is patient identity protected? | Member IDs and demographics cross only inside sealed payloads; routing and audit use the derived PCI. |
+| Is the data well-formed? | Real FHIR `$validate` at every gateway crossing, egress and ingress, at `observe` and `strict` (not at `none`), refused at `strict`; terminology validated against curated value sets. |
+| Is patient identity protected? | Member IDs and demographics cross only inside sealed payloads; routing and audit use the opaque network identifier. |
 
 ---
 
@@ -405,9 +408,11 @@ and the implemented domain is **prior authorization**, end to end:
 
 ## FHIR conformance
 
-- **Runtime gate.** Every message is validated per-leg via FHIR `$validate` against a real,
-  IG-enabled validation service (FHIR R4 + US Core; key resources pin their `meta.profile`).
-  Fail-closed, in both directions, in the message path — not as an offline afterthought.
+- **Runtime gate.** At `observe` (the default) and `strict`, every message is validated
+  per-leg via FHIR `$validate` against a real, IG-enabled validation service (FHIR R4 + US
+  Core; key resources pin their `meta.profile`). A defect is recorded at `observe` and
+  refused at `strict`, in both directions, in the message path — not as an offline
+  afterthought.
 - **Profile conformance.** Separately from the runtime gate, the prior-auth surface (PAS
   request/update Bundles, Claim, ClaimResponse, DTR QuestionnaireResponses, the PDex
   ExplanationOfBenefit, and the Da Vinci CDex data-request Tasks that carry federated queries)

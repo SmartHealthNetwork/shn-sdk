@@ -458,6 +458,10 @@ cat > dtr-00301.json <<'EOF'
       }
     },
     {
+      "name": "referenced",
+      "resource": {"resourceType": "Patient", "id": "MBR-COVERED", "name": [{"family": "Johansson", "given": ["Linda"]}], "birthDate": "1975-04-02"}
+    },
+    {
       "name": "questionnaire",
       "valueCanonical": "http://example.org/fhir/Questionnaire/HomeHealthAssessment"
     }
@@ -664,6 +668,10 @@ cat > dtr-00300.json <<'EOF'
       }
     },
     {
+      "name": "referenced",
+      "resource": {"resourceType": "Patient", "id": "MBR-COVERED", "name": [{"family": "Johansson", "given": ["Linda"]}], "birthDate": "1975-04-02"}
+    },
+    {
       "name": "questionnaire",
       "valueCanonical": "http://example.org/fhir/Questionnaire/PriorAuthRequired"
     }
@@ -759,13 +767,14 @@ and this payer's decision for that order.
 | `MBR-COVERED` | Linda Johansson | `00301` (2.2 line) | `urn:oid:2.16.840.1.113883.6.300\|00301` | CRD coverage answer, questionnaire package, and a PAS pend with a `102089-0` `CommunicationRequest` you can relaunch DTR from (§5) |
 | `MBR-COVERED` | Linda Johansson | `00300` (2.0 line) | `urn:oid:2.16.840.1.113883.6.300\|00300` | CRD coverage answer, questionnaire package and a PAS approval, plus a PAS pend with a `Task` for `E1390` (§6.4); the DTR package names an unresolved member, and `doc-needed` is off-value-set (§6) |
 
-These are the published test members, and the only ones the endpoint holds records for. In
-a PAS request both payers match the member on `Patient.identifier`
+These are the published test members, and the only ones the endpoint holds records for. In a
+PAS request both payers match the member on `Patient.identifier`
 (`http://example.org/MIN|12345678901` for `MBR-COVERED`, §5.3), not on the Patient id. A
-member id the endpoint does not hold — a patient from your own test environment, for example — is still
-carried, bound by the id you send (§8.1), but you must then supply `patient` and `coverage`
-yourself, and what the payer answers for a member it does not hold is the payer's own
-answer. On route `00300` the DTR limitation in §6.2 applies even to the published member.
+member id the endpoint does not hold — a patient from your own test environment, for example
+— is still carried, bound by the id you send (§8.1), but you must then supply `coverage`
+yourself (and `patient`, for the payer to receive one), and what the payer answers for a
+member it does not hold is the payer's own answer. On route `00300` the DTR limitation in
+§6.2 applies even to the published member.
 
 ---
 
@@ -779,25 +788,27 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
   payer registered on the network, the request is rejected with `422 Unprocessable Entity`
   (`no registered payer for identifier …`) rather than silently going nowhere. The routes
   in §1.5 are the ones documented here with test members.
-- **Unknown member → carried, bound by the id you send.** The endpoint first resolves the
-  member against its own synthetic roster. A CRD request whose `context.patientId`, a PAS
-  bundle whose `Claim.patient`, or a DTR request whose Coverage beneficiary (or, if the
-  Coverage names none, the order's subject) names a member it does not hold is bound by
-  that member id together with the birth date and family name of the Patient your request
-  carries for it (by the id alone when the request carries no such Patient) and carried, so
-  you can drive the hook from a patient in your own test environment. Three consequences:
-  the endpoint holds no records for such a member, so leave out `patient` or `coverage`
-  prefetch and the request is refused (`422`, next bullet), and a history key you leave out
-  is left out of what the payer receives rather than supplied; the payer binds the member
-  the same way from the same request, so send the Patient with the same `birthDate` and
-  `name[0].family` on every leg that carries it — a Patient that disagrees with a record
-  either side does hold is rejected with `403 Forbidden`; and the payer resolves the member
-  on its own, so its answer for a member it does not hold is the payer's own — the DTR
-  prepopulation warning in §5.2 is the visible case. A request that mixes members is still
-  rejected with `403 Forbidden`.
-- **A prefetch key the endpoint cannot supply → `422`.** If you leave out an advertised
-  prefetch key and the endpoint's own records hold no matching patient or coverage, the
-  request is refused rather than sent with a blank or invented value.
+- **Unknown member → carried with the id you send.** The endpoint first resolves the member
+  against its own synthetic roster. A CRD request whose `context.patientId`, a PAS bundle
+  whose `Claim.patient`, or a DTR request whose Coverage beneficiary (or, if the Coverage
+  names none, the order's subject) names a member it does not hold is carried with the
+  member id and the Patient your request carries for it, so you can drive the hook from a
+  patient in your own test environment. Send the same Patient, unchanged, on every leg of
+  one exchange. Three consequences: the endpoint holds no records for such a member, so
+  leave out `coverage` prefetch and the request is refused (`422`, next bullet), while a
+  `patient` key you leave out is left out of what the payer receives and, because this
+  endpoint runs `observe`, recorded as a finding, and a history key you leave out is left
+  out with the reason recorded; the payer handles the member as it would directly; and the
+  payer resolves the member on its own, so its answer for a member it does not hold is the
+  payer's own — the DTR prepopulation warning in §5.2 is the visible case. A request whose
+  payload names a second patient is refused (`403 Forbidden`) only when the gateway runs
+  `strict`; this endpoint runs below strict, so such a request is carried under the patient
+  it is bound to.
+- **A coverage the endpoint cannot supply → `422`.** If you leave out `coverage` prefetch
+  and the endpoint's own records hold no matching coverage, the request is refused rather
+  than sent with a blank or invented value. This endpoint runs `observe`, so a `patient` it
+  cannot supply is left out and recorded as a finding, and a history key is left out with the
+  reason recorded.
 
 ### 8.2 Hooks and services
 
