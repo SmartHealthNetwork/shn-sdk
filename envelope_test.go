@@ -66,3 +66,43 @@ func TestEnvelopeWireRoundTrip(t *testing.T) {
 		t.Errorf("payload mismatch after wire round-trip: %q", got)
 	}
 }
+
+// Involved is omitted from the wire when empty, so an envelope without it is
+// byte-identical to one built before the field existed; when present it
+// round-trips.
+func TestEnvelopeInvolvedWireForm(t *testing.T) {
+	bare, err := EncodeEnvelope(Envelope{Metadata: Metadata{Sender: "a", Recipient: "b", AuthzToken: "{}"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(bare, []byte(`"involved"`)) {
+		t.Fatalf("an envelope without involved patients must not carry the key: %s", bare)
+	}
+	want := []InvolvedToken{{Token: `{"subject":"pci:b"}`, Involvement: InvolvementRequestNamed}}
+	enc, err := EncodeInvolved(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{Metadata: Metadata{Sender: "a", Recipient: "b", AuthzToken: "{}", Involved: enc}}
+	b, err := EncodeEnvelope(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := DecodeEnvelope(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeInvolved(dec.Metadata.Involved)
+	if err != nil || len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("involved did not round-trip: %+v %v", got, err)
+	}
+	if none, err := EncodeInvolved(nil); none != "" || err != nil {
+		t.Fatalf("no involved patients must encode as empty: %q %v", none, err)
+	}
+	if none, err := DecodeInvolved(""); none != nil || err != nil {
+		t.Fatalf("empty must decode as none: %v %v", none, err)
+	}
+	if _, err := DecodeInvolved("{not json"); err == nil {
+		t.Fatal("a malformed list must not decode")
+	}
+}

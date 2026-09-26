@@ -208,3 +208,41 @@ func TestAuthorizeCanceledContext(t *testing.T) {
 		t.Fatal("expected error for canceled context")
 	}
 }
+
+// A token minted for another patient a leg involves (Involvement set) is not a
+// leg's token: both leg verifiers refuse it, though it is validly signed and
+// bound in every other respect. The same token without the field verifies.
+func TestVerifyBoundRefusesAnInvolvedToken(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	involved := baseToken(now)
+	involved.Involvement = InvolvementPayerHeld
+	tok := signTestToken(involved, priv)
+	err := VerifyBound(tok, pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash)
+	if err == nil || !strings.Contains(err.Error(), "involved patient") {
+		t.Fatalf("VerifyBound must refuse an involved token: %v", err)
+	}
+	read := baseToken(now)
+	read.PayloadHash, read.Involvement = "", InvolvementRequestNamed
+	if err := VerifyBoundNoPayload(signTestToken(read, priv), pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123"); err == nil || !strings.Contains(err.Error(), "involved patient") {
+		t.Fatalf("VerifyBoundNoPayload must refuse an involved token: %v", err)
+	}
+	// Refused after the signature check: an involvement changed after signing
+	// fails on the signature, not as an involved token.
+	signed := signTestToken(read, priv)
+	signed.Involvement = InvolvementPayerHeld
+	if err := VerifyBoundNoPayload(signed, pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123"); err == nil || strings.Contains(err.Error(), "involved patient") {
+		t.Fatalf("a tampered involvement must fail on the signature: %v", err)
+	}
+	// Any non-empty involvement is refused, including one this SDK does not
+	// know: it is still not a leg's token.
+	future := baseToken(now)
+	future.Involvement = "future-kind"
+	if err := VerifyBound(signTestToken(future, priv), pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash); err == nil || !strings.Contains(err.Error(), "involved patient") {
+		t.Fatalf("an unknown involvement must be refused too: %v", err)
+	}
+	read.Involvement = ""
+	if err := VerifyBoundNoPayload(signTestToken(read, priv), pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123"); err != nil {
+		t.Fatalf("the same token without an involvement must verify: %v", err)
+	}
+}

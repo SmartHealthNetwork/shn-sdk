@@ -23,10 +23,19 @@ type AuditRecord struct {
 	PayloadBundleHash string `json:"payloadBundleHash"`
 
 	// RecordID is the emitter-minted unique id (ULID; minted by the emitter, never by the chain).
-	// APPENDED LAST with omitempty: records without one produce byte-identical
-	// canonical content to the pre-recordId format, so all existing signatures
-	// keep verifying. Do NOT move this field.
+	// APPENDED with omitempty after the original fields: records without one produce
+	// byte-identical canonical content to the pre-recordId format, so all existing
+	// signatures keep verifying. Do NOT move this field.
 	RecordID string `json:"recordId,omitempty"`
+
+	// Involvement says how SubjectPCI is involved in the exchange when it is not
+	// the patient the leg's token names: one of the Involvement* values. Empty on
+	// the record of the token's own patient. APPENDED LAST with omitempty, after
+	// RecordID, the same way: records without it keep their canonical bytes. A
+	// verifier that predates it rebuilds the content without it, so it rejects a
+	// record that carries it (the signature does not match) rather than accepting
+	// it with the field dropped. Do NOT move this field.
+	Involvement string `json:"involvement,omitempty"`
 }
 
 // signableContent is the internal canonical type whose json tags and field
@@ -51,10 +60,19 @@ type signableAuditContent struct {
 	PayloadBundleHash string `json:"payloadBundleHash"`
 
 	// RecordID is the emitter-minted unique id (ULID; minted by the emitter, never by the chain).
-	// APPENDED LAST with omitempty: records without one produce byte-identical
-	// canonical content to the pre-recordId format, so all existing signatures
-	// keep verifying. Do NOT move this field.
+	// APPENDED with omitempty after the original fields: records without one produce
+	// byte-identical canonical content to the pre-recordId format, so all existing
+	// signatures keep verifying. Do NOT move this field.
 	RecordID string `json:"recordId,omitempty"`
+
+	// Involvement says how SubjectPCI is involved in the exchange when it is not
+	// the patient the leg's token names: one of the Involvement* values. Empty on
+	// the record of the token's own patient. APPENDED LAST with omitempty, after
+	// RecordID, the same way: records without it keep their canonical bytes. A
+	// verifier that predates it rebuilds the content without it, so it rejects a
+	// record that carries it (the signature does not match) rather than accepting
+	// it with the field dropped. Do NOT move this field.
+	Involvement string `json:"involvement,omitempty"`
 }
 
 // AuditAppendRequest is the POST /append body a gateway sends to the Audit Plane:
@@ -88,6 +106,32 @@ func SignableContent(r AuditRecord) []byte {
 		SubjectPCI:        r.SubjectPCI,
 		PayloadBundleHash: r.PayloadBundleHash,
 		RecordID:          r.RecordID,
+		Involvement:       r.Involvement,
 	})
 	return b
+}
+
+// The ways a patient other than the leg token's own is involved in an exchange,
+// recorded as AuditRecord.Involvement on that patient's paired record.
+const (
+	// InvolvementRequestNamed: another patient the request names, declared by
+	// the requester.
+	InvolvementRequestNamed = "request-named"
+	// InvolvementPayerHeld: the payer's own binding of the member the request
+	// names, from a member its system of record holds, when it differs from the
+	// token's patient.
+	InvolvementPayerHeld = "payer-held"
+	// InvolvementPayerDerived: the payer's own binding of a member its system of
+	// record does not hold (a derived identifier), when it differs from the
+	// token's patient.
+	InvolvementPayerDerived = "payer-derived"
+)
+
+// ValidInvolvement reports whether v is one of the Involvement* values.
+func ValidInvolvement(v string) bool {
+	switch v {
+	case InvolvementRequestNamed, InvolvementPayerHeld, InvolvementPayerDerived:
+		return true
+	}
+	return false
 }

@@ -59,6 +59,24 @@ type Discovery struct {
 	// build or bridge (NativeContractVersions) — the network's contract capability
 	// surface (ContractVersions above is legacy and unpopulated). Additive.
 	BridgedContractVersions []string `json:"bridgedContractVersions,omitempty"`
+	// HubAccepts lists the optional envelope fields the network's Hub reads
+	// (HubAcceptsInvolved). A gateway sends such a field only to a Hub that
+	// lists it: an older Hub would drop it without an error. Additive.
+	HubAccepts []string `json:"hubAccepts,omitempty"`
+}
+
+// HubAcceptsInvolved is the Discovery.HubAccepts entry for Metadata.Involved:
+// the Hub records a leg under every patient it names.
+const HubAcceptsInvolved = "involved"
+
+// HubAcceptsField reports whether the Hub lists field in HubAccepts.
+func (d Discovery) HubAcceptsField(field string) bool {
+	for _, f := range d.HubAccepts {
+		if f == field {
+			return true
+		}
+	}
+	return false
 }
 
 // PublishedVersions is the discovery descriptor's live-pin block.

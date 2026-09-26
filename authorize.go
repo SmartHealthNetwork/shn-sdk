@@ -32,7 +32,12 @@ type Token struct {
 	// for non-envelope tokens (patient-access-read).
 	PayloadHash string    `json:"payloadHash"`
 	Expiry      time.Time `json:"expiry"`
-	Signature   []byte    `json:"signature"`
+	// Involvement marks a token minted for another patient a leg involves
+	// (Involvement*): it rides only in Metadata.Involved to the Hub. Empty on
+	// a leg's own token, and omitempty, so every other token keeps its signed
+	// bytes.
+	Involvement string `json:"involvement,omitempty"`
+	Signature   []byte `json:"signature"`
 }
 
 // AuthorizeRequest is the JSON body for POST {authzURL}/authorize, matching the
@@ -46,6 +51,11 @@ type AuthorizeRequest struct {
 	// payload FIRST, then authorizes against that ciphertext so the minted token
 	// binds THIS payload (AI-2). Empty for non-envelope ops (patient-access-read).
 	PayloadHash string `json:"payloadHash,omitempty"`
+	// Involvement, when set, asks for a token for another patient this leg
+	// involves (an Involvement* value), carried in Metadata.Involved; the token
+	// carries it, signed. The decision is recorded with it, so a refused one
+	// still appears in that patient's record. Empty for the leg's own token.
+	Involvement string `json:"involvement,omitempty"`
 }
 
 // authorizeResp is the success body returned by POST {authzURL}/authorize:
@@ -157,9 +167,15 @@ func sdkVerifyBindings(t Token, wantFrame, wantOp, wantCorr, wantHolder, wantSub
 // stops a validly-signed token from being lifted into a DIFFERENT envelope,
 // operation, correlation, holder, patient, or PAYLOAD and replayed (H1/AI-2).
 // Ported from internal/authz.VerifyBound; the SDK verifies what the substrate
-// signs (test/sdkparity/token_parity_test.go).
+// signs (test/sdkparity/token_parity_test.go). Unlike the network's own
+// verifier, it refuses a token that carries an Involvement: such a token is
+// minted for another patient a leg involves and rides only to the network's
+// Hub in Metadata.Involved, so it is never a leg's own token.
 func VerifyBound(t Token, authzPub ed25519.PublicKey, now time.Time, wantFrame, wantOp, wantCorr, wantHolder, wantSubject, wantPayloadHash string) error {
 	if err := verifyToken(t, authzPub, now); err != nil {
+		return err
+	}
+	if err := refuseInvolvedToken(t); err != nil {
 		return err
 	}
 	if err := sdkVerifyBindings(t, wantFrame, wantOp, wantCorr, wantHolder, wantSubject); err != nil {
@@ -189,8 +205,21 @@ func VerifyBoundNoPayload(t Token, pub ed25519.PublicKey, now time.Time, wantFra
 	if err := verifyToken(t, pub, now); err != nil {
 		return err
 	}
+	if err := refuseInvolvedToken(t); err != nil {
+		return err
+	}
 	if err := sdkVerifyBindings(t, wantFrame, wantOp, wantCorr, wantHolder, wantSubject); err != nil {
 		return err
+	}
+	return nil
+}
+
+// refuseInvolvedToken refuses a token minted for another patient a leg
+// involves (Involvement set): it rides only to the network's Hub, never as the
+// token of a leg a participant receives.
+func refuseInvolvedToken(t Token) error {
+	if t.Involvement != "" {
+		return errors.New("shnsdk: token minted for an involved patient, not for a leg")
 	}
 	return nil
 }

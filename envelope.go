@@ -2,14 +2,18 @@ package shnsdk
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"errors"
+	"fmt"
 
 	"golang.org/x/crypto/nacl/box"
 )
 
-// Metadata is the cleartext, Hub-readable routing header of an Envelope. It
-// carries holder IDs only — NEVER a patient identifier (AI-5). PORTED standalone
-// from internal/envelope.Metadata with the SAME json tags so the wire form is
+// Metadata is the cleartext, Hub-readable routing header of an Envelope. Its
+// routing fields carry holder IDs only — NEVER a patient identifier (AI-5); a
+// patient appears only as the subject of an Authorization-Framework-signed token
+// (AuthzToken, and each Involved token). PORTED standalone from
+// internal/envelope.Metadata with the SAME json tags so the wire form is
 // identical (test/sdkparity/envelope_parity_test.go).
 type Metadata struct {
 	Sender          string `json:"sender"`
@@ -20,6 +24,21 @@ type Metadata struct {
 	AuthzToken      string `json:"authzToken"`
 	Timestamp       string `json:"timestamp"`
 	CorrelationID   string `json:"correlationId"`
+	// Involved names the other patients this leg involves: a JSON-encoded list
+	// of InvolvedToken (EncodeInvolved), a string like AuthzToken so Metadata
+	// stays comparable. Each token is minted for this leg (same frame,
+	// operation, correlation, holder and payload hash as AuthzToken) with that
+	// patient as subject. The Hub records the exchange under each of them as
+	// well. A recipient ignores it.
+	Involved string `json:"involved,omitempty"`
+}
+
+// InvolvedToken is one other patient a leg involves: a JSON-encoded Token
+// with that patient as subject, and how the patient is involved (an
+// Involvement* value).
+type InvolvedToken struct {
+	Token       string `json:"token"`
+	Involvement string `json:"involvement"`
 }
 
 // Envelope is one substrate hop: plaintext metadata + opaque ciphertext. The
@@ -50,4 +69,26 @@ func Open(env Envelope, encPub, encPriv *[32]byte) ([]byte, error) {
 		return nil, errors.New("shnsdk: envelope decryption failed")
 	}
 	return pt, nil
+}
+
+// EncodeInvolved encodes the other patients a leg involves for
+// Metadata.Involved; none encodes as "" (the field is then omitted).
+func EncodeInvolved(involved []InvolvedToken) (string, error) {
+	if len(involved) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(involved)
+	return string(b), err
+}
+
+// DecodeInvolved decodes Metadata.Involved; "" decodes as none.
+func DecodeInvolved(s string) ([]InvolvedToken, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var out []InvolvedToken
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil, fmt.Errorf("shnsdk: decode involved: %w", err)
+	}
+	return out, nil
 }

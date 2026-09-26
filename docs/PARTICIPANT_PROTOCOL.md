@@ -68,6 +68,7 @@ Returns (the Accounts service, `accounts.<apex>`):
   "igVersions": { "uscore": "6.1.0", "crd": "2.0.1", "dtr": "2.0.1", "pas": "2.0.1", "pdex": "2.1.0" },
   "igVersionsByLine": { "2.0": { "uscore": "6.1.0", "crd": "2.0.1", "dtr": "2.0.1", "pas": "2.0.1", "pdex": "2.1.0" }, "2.1": { "uscore": "7.0.0", "crd": "2.1.0", "dtr": "2.1.0", "pas": "2.1.0", "pdex": "2.1.0" }, "2.2": { "uscore": "7.0.0", "crd": "2.2.1", "dtr": "2.2.0", "pas": "2.2.1", "pdex": "2.1.0" } },
   "bridgedContractVersions": ["pa.crd@2.0", "pa.crd@2.1", "pa.crd@2.2", "pa.dtr@2.0", "pa.dtr@2.1", "pa.dtr@2.2", "pa.pas@2.0", "pa.pas@2.1", "pa.pas@2.2", "pa.pdex@2.1"],
+  "hubAccepts": ["involved"],
   "endpoints": {
     "hub": "https://hub.<apex>",
     "authz": "https://authz.<apex>",
@@ -101,6 +102,7 @@ Two of the four advertised personas (`MBR-D-UC04`, `MBR-D-UC08`) also carry
 | `contractVersions` | Legacy — no longer populated in the network descriptor: participant declarations are participant truth, carried per-participant in the registrar feed (§2.3) and the directory (§3). Field retained for wire compatibility. |
 | `igVersionsByLine` | Per-line IG pin sets: each contract line (`"2.0"`, `"2.1"`, `"2.2"`) maps to the IG versions that line validates against — same keys and composition as `igVersions`, which remains the 2.0-line snapshot. Additive field. |
 | `bridgedContractVersions` | Contract lines the network's gateways can build or bridge (version-matched routing and translation, §8.6) — the network's contract capability surface. Additive field. |
+| `hubAccepts` | Optional envelope fields the network's Hub reads. `involved` means the Hub records a leg under every patient its `involved` list names (§5.1): send `involved` only when it is listed. Additive field. |
 | `endpoints.{hub,authz,registrar,patientAccess}` | The live participant-facing base URLs. `hub` is where you originate a leg (`POST /route`); `authz` mints/serves tokens; `registrar` serves the holder feed; `patientAccess` is the FHIR/Patient-Access surface (`GET /metadata`). |
 | `authzPublicKeyURL` | Where to fetch the Authorization Framework Ed25519 verifying key (`{authz}/pubkey`). |
 | `hubTransportKeyURL` | Where to fetch the Hub's Ed25519 transport verifying key (`{hub}/transport-key` → `{"pubkey": "<base64 ed25519>"}`). Responders use this key to verify `X-Hub-Assertion` on every inbound forward (§6.2a). |
@@ -873,11 +875,13 @@ in one direction for one correlation.
 | `correlationId` | Yes | Must be non-empty; binds the minted token to one leg |
 | `custodian` | For `federated-query-submit` only | The facility holder ID; used to resolve patient consent at the Global Person Consent service |
 | `payloadHash` | For every **envelope** op | `sha256hex` (64 lowercase hex) of the envelope **ciphertext**. **Seal the payload FIRST, then authorize** against the ciphertext (seal-then-authorize) so the minted token binds THIS payload. Absent for the one non-envelope op, `patient-access-read` (a REST bearer read) |
+| `involvement` | Only for an involved patient's token | Asks for a token for **another patient this leg involves**, carried in the envelope's `involved` (§5.1): `request-named` (another patient your request names), or, on a payer's answer, `payer-held` / `payer-derived` (your own binding of the member the request names, when it differs from the leg token's patient, from a member your records hold or one they do not). Every other field is the leg's own, with `subjectPCI` that patient. The decision is recorded with it, so a refused one still appears in that patient's record. Absent for the leg's own token |
 
 **Rejection cases:**
 
 - `subjectPCI` absent or not prefixed `"pci:"` → 400
 - `correlationId` absent → 400
+- `involvement` present and not one of the three values above → 400
 - `payloadHash` absent/malformed on an envelope op, or PRESENT on `patient-access-read` → policy denies → 403
 - Policy denies (wrong role, no consent for `federated-query-submit`) → 403
   `{"error":"forbidden"}`
@@ -914,9 +918,15 @@ type Token struct {
     ConsentRef    string    `json:"consentRef,omitempty"`
     PayloadHash   string    `json:"payloadHash"` // sha256hex(ciphertext); empty only for patient-access-read
     Expiry        time.Time `json:"expiry"`
+    Involvement   string    `json:"involvement,omitempty"` // only on a token for another patient the leg involves (§5.1)
     Signature     []byte    `json:"signature"`
 }
 ```
+
+`Involvement` is set only on a token minted for another patient a leg involves
+(§5.1); such a token travels only to the Hub, never as a leg's own token, and
+`VerifyBound` and `VerifyBoundNoPayload` refuse it when a recipient verifies a
+leg. The Hub refuses a leg whose own token carries one (§5.1).
 
 `Holder` is stamped by the Authorization Framework from the verified assertion —
 never a client-supplied field. The Hub asserts `token.Holder == envelope.Sender`
@@ -973,7 +983,9 @@ makes the network payload-blind AND payload-AUTHENTICATED: a payload
 swapped in flight is cryptographically detected at the authorization check. On the
 **response leg**, also pass the **request** token's `subject` as `wantSubject`. A
 validly-signed token cannot be lifted into a different envelope, operation,
-correlation, patient, **or payload**.
+correlation, patient, **or payload**. Both verifiers also refuse a token carrying
+`involvement`: it is minted for another patient a leg involves and is never a
+leg's own token (§4.2).
 
 The ONE non-envelope op, `patient-access-read` (a REST bearer read that carries no
 sealed payload), is verified with `VerifyBoundNoPayload` instead — it asserts the
@@ -1009,6 +1021,7 @@ type Metadata struct {
     AuthzToken      string `json:"authzToken"`
     Timestamp       string `json:"timestamp"`
     CorrelationID   string `json:"correlationId"`
+    Involved        string `json:"involved,omitempty"`
 }
 ```
 
@@ -1022,17 +1035,72 @@ type Metadata struct {
 | `authzToken` | JSON-marshalled `authz.Token` as a **string** (not a nested object) |
 | `timestamp` | RFC 3339 UTC — must be within ±5 minutes of the Hub clock |
 | `correlationId` | Must be non-empty; must match the token's `correlationId` |
+| `involved` | Optional. The other patients this leg involves, as a JSON-marshalled list (a **string**, like `authzToken`) of `{"token": <JSON-marshalled token>, "involvement": <value>}`, one per patient, each token minted for this leg with that patient as subject and carrying, signed, the `involvement` it was requested with (§4.1); the entry's `involvement` must match it. The Hub records the exchange under each of these patients as well as the leg token's. Omit it when the leg involves no other patient. Recipients ignore it |
 
 **Patient identifiers never appear in Metadata**. The subject PCI lives
 only inside the token (and therefore only in the sealed ciphertext from the
 sender's perspective; the Hub reads `authzToken` from the metadata as a string but
-verifies `token.Subject` via `VerifyBound`).
+verifies `token.Subject` via `VerifyBound`). An involved patient likewise appears
+only as the subject of its own token in `involved`.
+
+**When to send `involved`.** Only to a network whose discovery descriptor lists
+`involved` in `hubAccepts` (§1a); otherwise send none. A requester names each
+other patient its request names (`request-named`). A payer, on its answer, names its own binding of the
+member the request names when it differs from the leg token's patient
+(`payer-held`, or `payer-derived` for a member its records do not hold). This is
+recording only: an involved patient whose token `/authorize` refuses or fails to
+mint, or whose minted token does not carry the `involvement` requested, is left
+out of `involved` (a refused decision is itself recorded), and the leg is sent as
+usual.
+
+**What is recorded, and who sees it.** The Hub records the leg under the leg
+token's patient and again under each involved patient, marked with how that
+patient is involved. On a request that is each `routed`, `unreachable` or
+`failed` record; on the answer, the `answered` record, under the patients the
+request named and the payer's own binding (a patient named on both is recorded
+once). A request refused before the Hub can read `involved` (a payload that does
+not match its token) is recorded under the leg token's patient only. The Hub
+removes `involved` from the envelope before forwarding the request and before
+returning the answer, so neither gateway receives the other patients' identifiers
+from it. Each holder's own view of its audit records includes the records
+addressed to it, so the recipient of a request, or of an answer, sees the paired
+records of that leg.
 
 The Hub enforces:
 
 - `authorityFrame` must be non-empty (400 otherwise).
 - `correlationId` must be non-empty (400 otherwise).
 - `timestamp` must parse as RFC 3339 and be within ±5 minutes of Hub clock (400 otherwise).
+- `involved`, when present, must decode as a list of at most 16 entries, each with
+  one of the involvement values its leg allows (`request-named` on a request;
+  `payer-held` or `payer-derived` on an answer) and a token that verifies exactly
+  as `authzToken` does — signature, expiry, frame, operation, `correlationId`,
+  holder (the sender) and payload hash — minted with that same `involvement`,
+  whose subject is a `pci:` identifier different from the leg token's and from
+  every other entry's.
+  - On a request, a list that fails this is refused (400) before anything is
+    recorded or forwarded.
+  - On an answer, an entry that fails it (or every entry, if the list itself
+    cannot be read, including an `involved` that is not a JSON string, or is too
+    long) is dropped and nothing is recorded from it; the answer is still
+    delivered and recorded, since `involved` is recording input only. The Hub
+    counts the drops: each entry, or one for a list it cannot read.
+  - A request whose `involved` is not a JSON string is refused (400) like any
+    list that cannot be read.
+  - If the Hub cannot write a paired record for a request, it answers 502 and
+    does not forward the request; the records already written for a request it
+    was about to forward are closed `failed`. An answer is still delivered,
+    with its own `answered` record, and the missing paired record is counted.
+  - These are rules on the envelope's shape and authority, the same at every
+    conformance level.
+- The leg's own `authzToken` must carry no `involvement` (§4.2): a token minted
+  for another patient never stands in for the leg's. This is an authorization
+  failure, checked before `involved` is read and whether or not a list is
+  present. On a request it is refused (403 `authz token verification failed`,
+  marked `X-SHN-Delivered: no`) and nothing is recorded or forwarded; on an
+  answer the Hub answers 502 (`response leg authorization failed`, marked
+  `X-SHN-Delivered: yes`: the recipient answered), the answer is not
+  delivered, and no `answered` record is written.
 - The envelope must not have been routed in the last 2 hours (409 replay rejection).
   The Hub keys this on the pair the token binds — the `correlationId` and the
   ciphertext's hash — so exactly a byte-identical envelope is refused. It is
@@ -1703,7 +1771,13 @@ Obtain the patient's network identifier (the `subjectPCI` of Step 4) from
 record holds them; the Smart Gateway does this through its system-of-record connector. Treat
 the result as an opaque string: carry it as the SDK returns it and as tokens name it, and do
 not parse it, reimplement how it is produced, or depend on its format beyond the `pci:`
-prefix. How it is produced is internal to the network and may change.
+prefix. How it is produced is internal to the network and may change. For a member its
+system of record does not hold, the Smart Gateway identifies the patient from the member
+id and the Patient the request carries; that derivation is internal to the gateway, and a
+participant building its own gateway has no SDK call for it. From shn-gateway v0.55.0 the
+derived identifier is in a namespace of its own that never equals a held member's
+identifier; earlier releases derive it the way a held member's identifier is made, so it
+can equal one.
 
 **Step 2 — Generate a correlation ID**
 
@@ -2503,7 +2577,38 @@ applicable IG profiles. The network enforces a **two-gate** posture:
      and the network rules below apply to it. A PAS submit or update a gateway
      builds from its participant's records is validated: the Bundle for base R4
      shape, and its QuestionnaireResponse attachments against the DTR profile.
-   - A payer's DTR questionnaire package is not validated.
+   - From shn-gateway v0.55.0, a payer's answer to a leg a provider's gateway sends — the DTR
+     `$questionnaire-package` and `$next-question` answers and the PAS
+     ClaimResponse answers — is validated by the provider's gateway on ingress,
+     at that gateway's level, against the IG lines the gateway supports: first
+     the line the leg was sent at (the payer's declared line, or the gateway's
+     own line when the payer declared none), then the lines the answer's
+     versioned `meta.profile` names, then the lines its structural markers
+     point to, then 2.2, 2.1 and 2.0. The answer is valid if it conforms to any
+     of them and is refused only when it conforms to none; the finding records
+     the line the leg was sent at and each line tried with its verdict, and a
+     finding that the answer was valid only on another line is not a defect. If
+     no line is valid and the line the leg was sent at, or a line the answer
+     itself names, could not be checked (its validator was unavailable, or the
+     gateway has none for it), the check is unavailable rather than a refusal
+     for structure: recorded at `observe` and `structural`, refused at `strict`.
+     Each line beyond the one the leg was sent at gets at most 2 seconds; one
+     that does not answer in time is recorded as unavailable for that line. An
+     answer that names a supported line the gateway has no validator for is
+     recorded rather than refused at `structural`, because that line could not
+     be checked. When the gateway has no validator for the line the leg was sent
+     at, the first line it actually checks gets the same 2-second bound. At `strict`, an answer whose check cannot run (the validator
+     is unavailable) is refused like any other such check. The exception is
+     SHN's reference payers, identified by the payer identity the member's
+     Coverage names (`urn:oid:2.16.840.1.113883.6.300` `00001`, `00300` and
+     `00301`, and SHN's two bridging-demo payers under `urn:shn:demo-payer`,
+     which front `00001`), answering a provider gateway that relays their bytes
+     (`ORIGINATION_PROFILE` `provider-data` or `demo`): their answers are not
+     validated, because their packages do not yet conform (the 2.0 reference
+     payer's DTR package fails DTR 2.0.1). Judging a payer's confirmed line
+     alone, more strictly, may be introduced later. Before shn-gateway v0.55.0,
+     a provider gateway on the `provider-data` or `demo` lane validates no
+     payer's answers.
    - Of coverage eligibility, both gateways validate the request and the answer:
      the answer the payer's gateway builds from its participant's records or,
      when the payer declares its own endpoint (`PAYER_ELIGIBILITY_URL`), the
@@ -2855,6 +2960,29 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-09-25 — An exchange is recorded under every patient it involves (§4.1, §5.1).**
+  An envelope may carry `involved`: the other patients the leg involves, each as
+  its own token for the leg, requested from `/authorize` with an `involvement`.
+  The Hub records the exchange under each of them as well as the leg token's
+  patient, so an exchange about several patients reaches each patient's record.
+  It is recording only; a leg without `involved` is routed and recorded as
+  before, and recipients ignore it. The Hub refuses a request whose `involved`
+  it cannot read or verify (400); on an answer it drops such entries and
+  delivers the answer. Send `involved` only when the discovery descriptor's new
+  `hubAccepts` lists it.
+
+- **2026-09-25 — From shn-gateway v0.55.0, a provider's gateway validates a payer's answers (§8.1).**
+  The DTR `$questionnaire-package` and `$next-question` answers and the PAS
+  ClaimResponse answers a provider's gateway receives are validated at its
+  conformance level for every payer, on every origination lane; before, a
+  gateway on the `provider-data` or `demo` lane validated no payer's answers.
+  Each answer is judged against the IG lines the gateway supports, starting at
+  the line the leg was sent at, and refused only when it conforms to none; the
+  conformance finding records that line (`declaredLine`) and each line tried
+  (`lines`). At `strict` a check that cannot run refuses a partner payer's
+  answer. Only the answers of SHN's reference payers (payer identities `00001`,
+  `00300` and `00301`, and the two bridging-demo payers that front `00001`) on
+  those two lanes are left unvalidated.
 - **2026-09-25 — Conformance enforcement adds `structural` (§8.1).**
   `CONFORMANCE_ENFORCEMENT` is `none`, `observe`, `structural` or `strict`. `structural`
   runs every check, refuses a message whose structure is broken, with the status
