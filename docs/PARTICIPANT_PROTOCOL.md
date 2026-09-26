@@ -1053,6 +1053,16 @@ mint, or whose minted token does not carry the `involvement` requested, is left
 out of `involved` (a refused decision is itself recorded), and the leg is sent as
 usual.
 
+The Smart Gateway does this from shn-gateway v0.55.0, on the prior-authorization
+legs. Whenever the network's Hub advertises `involved`, at every conformance
+level, it reads its own system of record to identify each other member a request
+carries (each Patient in it and each Patient reference, read as it reads the
+request's own patient), so the exchange is recorded under each of them. This is for the audit record only: it
+never refuses a request or records a finding, and the conformance checks decide
+as they do without it. It names at most 16 patients within 2 seconds per leg,
+and leaves out, with an observer event, any it cannot identify or obtain a token
+for in that time.
+
 **What is recorded, and who sees it.** The Hub records the leg under the leg
 token's patient and again under each involved patient, marked with how that
 patient is involved. On a request that is each `routed`, `unreachable` or
@@ -1772,12 +1782,11 @@ record holds them; the Smart Gateway does this through its system-of-record conn
 the result as an opaque string: carry it as the SDK returns it and as tokens name it, and do
 not parse it, reimplement how it is produced, or depend on its format beyond the `pci:`
 prefix. How it is produced is internal to the network and may change. For a member its
-system of record does not hold, the Smart Gateway identifies the patient from the member
-id and the Patient the request carries; that derivation is internal to the gateway, and a
-participant building its own gateway has no SDK call for it. From shn-gateway v0.55.0 the
-derived identifier is in a namespace of its own that never equals a held member's
-identifier; earlier releases derive it the way a held member's identifier is made, so it
-can equal one.
+system of record does not hold, the Smart Gateway gives the patient an identifier of its
+own; that is internal to the gateway, and a participant building its own gateway has no
+SDK call for it. From shn-gateway v0.55.0 that identifier never equals the identifier of a
+member the system of record holds; earlier releases could give such a member a held
+member's identifier.
 
 **Step 2 — Generate a correlation ID**
 
@@ -2122,9 +2131,17 @@ read from the provider's system of record either way, only to choose the payer.
   offer is refused before anything is sent, with `422` and the hooks it does offer:
   `{"error":"payer offers no CDS service for hook order-select","offered":[…]}`.
 - **Answers.** The payer's gateway checks a CDS Hooks answer against the CDS Hooks response
-  rules; at `strict` it refuses (`502`) one that breaks them, and below `strict` it relays it
-  as sent (recorded as a finding at `observe`). It never repairs one. The provider's gateway
-  returns the answer body exactly. The success media type is still the gateway's own:
+  rules at its own level (at `none` it does not check, §8.1). At `strict` it refuses (`502`) one
+  that breaks a required rule. At `structural` it refuses one whose structure is broken: it
+  cannot be read; it lacks a member CDS Hooks requires or leaves that member empty; it has a
+  member of the wrong type or outside its allowed values; or it gives app context to a link that
+  is not a SMART app link. A card's summary length, CRD topic and selection behavior (whether it
+  is given, its value, and at most one recommended suggestion), and an action's resource, are
+  recorded rather than refused there. Otherwise it relays the answer as sent, recording what it
+  breaks as a finding at `observe` and `structural`. An answer that repeats a member name is
+  refused (`502`) at every level (§8.1). A gateway never repairs an answer. A provider's gateway
+  relaying the answer to its EHR checks it again the same way at its own level; an answer it
+  does not refuse is returned exactly. The success media type is still the gateway's own:
   `application/json` for CDS Hooks, `application/fhir+json` for a questionnaire package.
 - **Member id limitation.** `context.patientId`, and the patient references a request binds
   (each order's subject, each Coverage's beneficiary), must use the patient's network member
@@ -2570,17 +2587,29 @@ applicable IG profiles. The network enforces a **two-gate** posture:
      QuestionnaireResponse; and a PAS inquiry it builds, against the PAS inquiry
      request-bundle profile of the line.
    - Of a CDS Hooks request, the draft order is validated, and on `order-select`
-     and `order-sign` the Coverage too; a CDS Hooks answer is checked against
-     the CDS Hooks response rules.
+     and `order-sign` the Coverage too. A successful (2xx) CDS Hooks answer is
+     checked against the CDS Hooks response rules by each gateway at its own
+     level: by the payer's gateway, for its own system's answer, and again by a
+     provider's gateway that relays it in answer to a request its participant's
+     system sent through its Da Vinci ingress. The payer's gateway also
+     validates each resource the answer embeds (in a system action or a card
+     suggestion's action); the result is recorded, never refused. A provider's
+     gateway that originated the leg itself does not apply these rules: it
+     reads the payer's coverage information from the answer, and an answer it
+     cannot read, or one without coverage information, stops the exchange
+     (`502`) at every level.
    - A PAS request carried from the participant's own system (the `$submit`
      ingress) is not `$validate`d, by either gateway; only the content checks
      and the network rules below apply to it. A PAS submit or update a gateway
      builds from its participant's records is validated: the Bundle for base R4
      shape, and its QuestionnaireResponse attachments against the DTR profile.
-   - From shn-gateway v0.55.0, a payer's answer to a leg a provider's gateway sends — the DTR
-     `$questionnaire-package` and `$next-question` answers and the PAS
-     ClaimResponse answers — is validated by the provider's gateway on ingress,
-     at that gateway's level, against the IG lines the gateway supports: first
+   - From shn-gateway v0.55.0, a payer's answer to a leg a provider's gateway
+     originates itself on its `ORIGINATION_PROFILE` lane (every provider gateway
+     has one; unset means `demo`), not to a request relayed through its Da Vinci
+     ingress — the DTR `$questionnaire-package` and `$next-question` answers and
+     the PAS ClaimResponse answer to a submit or update — is validated by the
+     provider's gateway on ingress, at that gateway's level, against the IG
+     lines the gateway supports: first
      the line the leg was sent at (the payer's declared line, or the gateway's
      own line when the payer declared none), then the lines the answer's
      versioned `meta.profile` names, then the lines its structural markers
@@ -2607,8 +2636,18 @@ applicable IG profiles. The network enforces a **two-gate** posture:
      validated, because their packages do not yet conform (the 2.0 reference
      payer's DTR package fails DTR 2.0.1). Judging a payer's confirmed line
      alone, more strictly, may be introduced later. Before shn-gateway v0.55.0,
-     a provider gateway on the `provider-data` or `demo` lane validates no
-     payer's answers.
+     a provider gateway on the `provider-data` or `demo` lane validates none of
+     these answers.
+   - No release of a provider's gateway validates, at its level, an `$inquire`
+     answer (originated or relayed; it is checked for its shape, not against a
+     profile) or a payer's answer it relays to a PAS or questionnaire request
+     its participant's own system sent through its Da Vinci ingress: a relayed
+     PAS answer is checked by the content rules, and a questionnaire package is
+     relayed as received. At `observe` and above, a relayed PAS or inquiry
+     answer may still be sent to the validator as certification evidence (the
+     gateway's `certify:` log lines); nothing is decided from it. A CDS Hooks
+     answer relayed through the ingress is checked against the CDS Hooks
+     response rules, as above.
    - Of coverage eligibility, both gateways validate the request and the answer:
      the answer the payer's gateway builds from its participant's records or,
      when the payer declares its own endpoint (`PAYER_ELIGIBILITY_URL`), the
@@ -2631,8 +2670,10 @@ applicable IG profiles. The network enforces a **two-gate** posture:
    At `structural`, broken structure is: a missing required element, an element the
    resource does not define, a value of the wrong JSON type, a value that cannot
    be read (a malformed date, or a code outside a core FHIR code list such as
-   `Claim.status`), a CDS Hooks answer that cannot be read or lacks a required
-   member or has one of the wrong type, and a request or answer the gateway
+   `Claim.status`), a CDS Hooks answer that cannot be read, lacks a member CDS
+   Hooks requires or leaves it empty, has a member of the wrong type or outside
+   its allowed values, or gives app context to a link that is not a SMART app
+   link, and a request or answer the gateway
    cannot read. A FHIR validation issue is read by the validator's own message id,
    and only two kinds of FHIR issue are recorded rather than refused: invariants,
    and a code outside its code list (a code the bound value set or code system
@@ -2641,8 +2682,9 @@ applicable IG profiles. The network enforces a **two-gate** posture:
    other FHIR profile issue — cardinality, fixed and pattern values, slicing,
    extensions, lengths, any other terminology issue, or an issue the gateway
    cannot classify — and every fatal issue refuses at `structural`. Outside FHIR validation
-   these are recorded, not refused: CDS Hooks summary length, topic and selection
-   behavior, another patient in one message, and the content business rules
+   these are recorded, not refused: CDS Hooks summary length, topic, selection
+   behavior (whether it is given, its value, and at most one recommended
+   suggestion) and an action's resource, another patient in one message, and the content business rules
    (QuestionnaireResponse attestation, amendment provenance, the EOB decision rules,
    an unresolvable `Claim.insurer`, prefetch the participant's system cannot
    supply). A validator that cannot run is
@@ -2960,6 +3002,17 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-09-25 — Which payer answers a provider's gateway validates (§8.1).**
+  The validation that arrives in shn-gateway v0.55.0 covers the payer's answers
+  on the legs the gateway originates itself: the DTR `$questionnaire-package`
+  and `$next-question` answers and the PAS ClaimResponse answer to a submit or
+  update. No release validates `$inquire` answers at the gateway's level, or
+  the answers it relays to PAS and questionnaire requests its participant's own
+  system sent through its Da Vinci ingress. A CDS Hooks answer is still checked
+  against the CDS Hooks response rules, by the payer's gateway and by a
+  provider's gateway that relays it, but not by a provider's gateway on a leg it
+  originated, which reads the payer's coverage information from it. The earlier
+  wording could be read more widely; the behavior is unchanged.
 - **2026-09-25 — An exchange is recorded under every patient it involves (§4.1, §5.1).**
   An envelope may carry `involved`: the other patients the leg involves, each as
   its own token for the leg, requested from `/authorize` with an `involvement`.
