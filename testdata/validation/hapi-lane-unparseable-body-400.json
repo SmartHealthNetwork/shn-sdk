@@ -1,0 +1,8 @@
+{
+  "resourceType": "OperationOutcome",
+  "issue": [ {
+    "severity": "error",
+    "code": "processing",
+    "diagnostics": "HAPI-0450: Failed to parse request body as JSON resource. Error was: HAPI-1861: Failed to parse JSON encoded FHIR content: Unexpected end-of-input within/between Object entries\n at [line: 1, column: 27]"
+  } ]
+}

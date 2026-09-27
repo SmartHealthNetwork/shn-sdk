@@ -2141,8 +2141,10 @@ read from the provider's system of record either way, only to choose the payer.
   breaks as a finding at `observe` and `structural`. An answer that repeats a member name is
   refused (`502`) at every level (§8.1). A gateway never repairs an answer. A provider's gateway
   relaying the answer to its EHR checks it again the same way at its own level; an answer it
-  does not refuse is returned exactly. The success media type is still the gateway's own:
-  `application/json` for CDS Hooks, `application/fhir+json` for a questionnaire package.
+  does not refuse is returned exactly. From shn-gateway v0.56.0 a provider's gateway applies the
+  same rules, at its own level, to the answer on a CRD leg it originates itself (§8.1). The
+  success media type is still the gateway's own: `application/json` for CDS Hooks,
+  `application/fhir+json` for a questionnaire package.
 - **Member id limitation.** `context.patientId`, and the patient references a request binds
   (each order's subject, each Coverage's beneficiary), must use the patient's network member
   id. A provider's gateway that has opted in obtains prefetch only when its system of record
@@ -2296,7 +2298,14 @@ anything else is relayed and not recorded. A record the gateway cannot write aft
 payer answered does not withhold the answer: it is relayed, and the gateway reports the
 failure to its operator. The payer's own `409` (for example a version conflict while
 it resolves the same claim) is relayed as its answer; whether to resend is the
-requester's decision.
+requester's decision. From shn-gateway v0.56.0, a provider's Smart Gateway that
+builds the amendment for its participant (the scenario flows, and resuming a pended
+request with a clinician's or the patient's answers) is that requester: on a `409` it
+builds and sends the amendment once more under a new correlation identifier, and
+relays the payer's answer to that one, a second `409` included. Each attempt is its own leg with its own audit records;
+the gateway's `leg.resent` observer event and log line name the refused attempt's
+correlation identifier. A gateway relaying its participant's own amendment (the Da
+Vinci ingress) relays the `409` and never resends it on the participant's behalf.
 
 The update Bundle payload carries :
 
@@ -2434,7 +2443,9 @@ and later.)
   embedded as your exact bytes. The payer matches on the member identifier plus the
   provider identifier, so the Patient must carry the member id as an identifier with
   a system (typed `MB` at PAS 2.1.0, the one line that slices it). The inquiry `Claim.identifier` is the inquiry's own trace number (required
-  from 2.1.0). Authorization and administration reference numbers are item
+  from 2.1.0; optional in PAS 2.0.1, but send it whenever your system has one:
+  a payer may require it, and the Da Vinci 2.0 reference payer refuses an inquiry
+  without it). Authorization and administration reference numbers are item
   extensions at every line: PAS 2.2.1 also declares `Claim`-level slices for them,
   but both extension definitions allow only item contexts, which validators
   enforce.
@@ -2593,11 +2604,12 @@ applicable IG profiles. The network enforces a **two-gate** posture:
      provider's gateway that relays it in answer to a request its participant's
      system sent through its Da Vinci ingress. The payer's gateway also
      validates each resource the answer embeds (in a system action or a card
-     suggestion's action); the result is recorded, never refused. A provider's
-     gateway that originated the leg itself does not apply these rules: it
-     reads the payer's coverage information from the answer, and an answer it
-     cannot read, or one without coverage information, stops the exchange
-     (`502`) at every level.
+     suggestion's action); the result is recorded, never refused. From
+     shn-gateway v0.56.0, a provider's gateway that originated the leg itself
+     checks the answer against the same rules at its own level before it reads
+     the payer's coverage information from it; earlier releases do not apply
+     these rules there. Either way, an answer it cannot read, or one without
+     coverage information, stops the exchange (`502`) at every level.
    - A PAS request carried from the participant's own system (the `$submit`
      ingress) is not `$validate`d, by either gateway; only the content checks
      and the network rules below apply to it. A PAS submit or update a gateway
@@ -2678,10 +2690,12 @@ applicable IG profiles. The network enforces a **two-gate** posture:
    and only two kinds of FHIR issue are recorded rather than refused: invariants,
    and a code outside its code list (a code the bound value set or code system
    does not contain, or a code system the validator cannot check, licensed ones
-   included), as the validator's recognized code-list issues report it. Every
-   other FHIR profile issue — cardinality, fixed and pattern values, slicing,
-   extensions, lengths, any other terminology issue, or an issue the gateway
-   cannot classify — and every fatal issue refuses at `structural`. Outside FHIR validation
+   included), as the validator's recognized code-list issues report it. From
+   shn-gateway v0.55.0 that includes a code system the validator does not know
+   (`Terminology_TX_System_Unknown`). Every other FHIR profile issue —
+   cardinality, fixed and pattern values, slicing, extensions, lengths, any
+   other terminology issue, or an issue the gateway cannot classify — and every
+   fatal issue refuses at `structural`. Outside FHIR validation
    these are recorded, not refused: CDS Hooks summary length, topic, selection
    behavior (whether it is given, its value, and at most one recommended
    suggestion) and an action's resource, another patient in one message, and the content business rules
@@ -3001,6 +3015,27 @@ property. Until then, build to the rule: preserve what you do not recognise.
 ## 9. Status and roadmap
 
 ### Changelog
+
+- **2026-09-27 — From shn-gateway v0.56.0, a provider's gateway resends an amendment it builds once after a payer's `409` (§7b.2).**
+  When a provider's gateway builds a PAS amendment for its participant and the
+  payer answers `409` (a version conflict: its store refused the amendment
+  because it was resolving the same claim, and kept nothing), the gateway builds
+  and sends the amendment once more under a new correlation identifier and
+  relays the payer's answer to that one; a second `409` is relayed as it came.
+  Both attempts are separate legs with their own audit records, linked by the
+  gateway's `leg.resent` observer event. An amendment the participant sends
+  through its gateway's Da Vinci ingress is relayed as before: its `409`
+  reaches the participant, who decides whether to resend.
+
+- **2026-09-26 — From shn-gateway v0.56.0, a provider's gateway checks a CDS Hooks answer on a leg it originates (§8.1).**
+  A provider's gateway now checks the payer's CDS Hooks answer on a CRD leg it
+  originates itself against the CDS Hooks response rules, at its own
+  conformance level, as it already did for an answer it relays and as the
+  payer's gateway does for its own system's answer: `none` does not check,
+  `observe` records, `structural` refuses a broken structure and records the
+  rest, `strict` refuses any broken required rule (`502`). A provider at
+  `structural` or `strict` paired with a payer whose answers break a required
+  rule now sees that refusal on its own originated legs too.
 
 - **2026-09-25 — Which payer answers a provider's gateway validates (§8.1).**
   The validation that arrives in shn-gateway v0.55.0 covers the payer's answers

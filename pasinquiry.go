@@ -81,7 +81,10 @@ type PASInquiryInputs struct {
 	// (Bundle.identifier). Required.
 	Identifier PASIdentifier
 	// ClaimIdentifier is the inquiry Claim's identifier, the inquiry's own
-	// trace number. Required at PAS 2.1 and 2.2, optional at 2.0.
+	// trace number. Required at PAS 2.1 and 2.2, optional at 2.0 (PAS 2.0.1's
+	// inquiry profile allows it to be absent). Send it at 2.0 too whenever your
+	// system has one: a payer may require it, and the Da Vinci 2.0 reference
+	// payer refuses an inquiry without it.
 	ClaimIdentifier PASIdentifier
 	// Timestamp is the Bundle timestamp and Claim.created. Required.
 	Timestamp time.Time

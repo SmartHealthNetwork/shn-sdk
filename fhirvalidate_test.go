@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -316,72 +317,44 @@ func TestHTTPValidator_ServerErrorPropagates(t *testing.T) {
 // OperationValidator tests (ported from internal/fhirvalidate/operationvalidator_test.go)
 // ---------------------------------------------------------------------------
 
+// A lane's answer for a resource with no error carries warnings only.
 func TestOperationValidator_ValidWithWarnings(t *testing.T) {
-	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/fhir+json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"resourceType": "OperationOutcome",
-			"issue": []any{
-				map[string]any{"severity": "warning", "diagnostics": "dom-6 narrative"},
-				map[string]any{"severity": "information", "diagnostics": "All OK"},
-			},
-		})
-	}))
-	defer stub.Close()
-
-	v := shnsdk.NewOperationValidator(stub.URL)
-	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+	res, err := laneStub(t, lanePositive).Validate(context.Background(), []byte(`{"resourceType":"Claim"}`), "http://hl7.org/fhir/StructureDefinition/Claim")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if !res.Valid {
-		t.Fatalf("warnings/info only must be Valid, got issues %v", res.Issues)
+		t.Fatalf("warnings only must be Valid, got issues %v", res.Issues)
 	}
 }
 
+// A lane's refusal (an error issue, with 200) is a verdict, not a transport
+// error, and the error's diagnostics are in Issues.
 func TestOperationValidator_InvalidOnError(t *testing.T) {
-	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/fhir+json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"resourceType": "OperationOutcome",
-			"issue": []any{
-				map[string]any{"severity": "error", "diagnostics": "Object must have some content"},
-			},
-		})
-	}))
-	defer stub.Close()
-
-	v := shnsdk.NewOperationValidator(stub.URL)
-	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+	res, err := laneStub(t, laneProfileUnknown).Validate(context.Background(), []byte(`{"resourceType":"ClaimResponse"}`), "https://example.org/fhir/StructureDefinition/unavailable-profile")
 	if err != nil {
 		t.Fatalf("error issue is a valid outcome, expected no transport error, got %v", err)
 	}
 	if res.Valid {
 		t.Fatal("expected Valid=false for an error-severity issue")
 	}
-	found := false
-	for _, iss := range res.Issues {
-		if iss == "Object must have some content" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected Issues to contain the error diagnostics, got %v", res.Issues)
+	want := laneProfileUnknown.issues(t)[3]["diagnostics"].(string)
+	if !reflect.DeepEqual(res.Issues, []string{want}) {
+		t.Fatalf("Issues = %v, want the refusal's one error %q", res.Issues, want)
 	}
 }
 
 func TestOperationValidator_PostsToTypeValidatePathWithProfile(t *testing.T) {
 	const profile = "http://example.org/StructureDefinition/foo"
 	var gotPath, gotProfile, gotContentType string
+	refusal := laneProfileUnknown.body(t)
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotProfile = r.URL.Query().Get("profile")
 		gotContentType = r.Header.Get("Content-Type")
-		w.Header().Set("Content-Type", "application/fhir+json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"resourceType": "OperationOutcome",
-			"issue":        []any{},
-		})
+		// A lane asked for a profile it does not have refuses it.
+		w.Header().Set("Content-Type", "application/fhir+json;charset=UTF-8")
+		_, _ = w.Write(refusal)
 	}))
 	defer stub.Close()
 
@@ -401,6 +374,8 @@ func TestOperationValidator_PostsToTypeValidatePathWithProfile(t *testing.T) {
 	}
 }
 
+// A 500 whose body is not an OperationOutcome is an outage in front of the
+// validator, not a lane answer.
 func TestOperationValidator_ErrorOnNon2xxUnparseableBody(t *testing.T) {
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -415,23 +390,11 @@ func TestOperationValidator_ErrorOnNon2xxUnparseableBody(t *testing.T) {
 	}
 }
 
+// A non-2xx answer that is an OperationOutcome with an error is a verdict: the
+// outcome's issues win over the status. The lane's 400 for a body it could not
+// parse is served for its shape (see laneUnparseable).
 func TestOperationValidator_UsesOperationOutcomeDespiteNon2xx(t *testing.T) {
-	// A request-body parse failure returns an OperationOutcome with an error
-	// issue, possibly with a non-2xx status. The OO issues must win.
-	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/fhir+json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]any{
-			"resourceType": "OperationOutcome",
-			"issue": []any{
-				map[string]any{"severity": "error", "diagnostics": "parse failure"},
-			},
-		})
-	}))
-	defer stub.Close()
-
-	v := shnsdk.NewOperationValidator(stub.URL)
-	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+	res, err := laneStub(t, laneUnparseable).Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
 	if err != nil {
 		t.Fatalf("a parseable OperationOutcome must not surface as a transport error, got %v", err)
 	}

@@ -2,75 +2,189 @@ package shnsdk_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// operationOutcomeStub serves body as a $validate response.
-func operationOutcomeStub(t *testing.T, body []byte) *shnsdk.OperationValidator {
+// laneAnswer is what a real HAPI validator lane answered to one $validate
+// request, as the lane sent it: testdata/validation/README.md names the
+// request, the lane and the status.
+type laneAnswer struct {
+	file   string
+	status int
+}
+
+var (
+	// A resource with no error: two warnings, each with its message id,
+	// expression and location.
+	lanePositive = laneAnswer{"hapi-lane-positive-warnings.json", http.StatusOK}
+	// An explicitly requested profile the lane does not have: three warnings
+	// and the Validation_VAL_Profile_Unknown error.
+	laneProfileUnknown = laneAnswer{"hapi-lane-profile-unknown.json", http.StatusOK}
+	// A body the lane could not parse: 400 and one HAPI-0450 error with no
+	// message id. The SDK refuses a body that is not JSON before sending it, so
+	// tests serve this answer for its shape: a non-2xx OperationOutcome.
+	laneUnparseable = laneAnswer{"hapi-lane-unparseable-body-400.json", http.StatusBadRequest}
+)
+
+func (a laneAnswer) body(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "validation", a.file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// issues decodes a recorded answer's issues, to state what a test expects
+// from the answer's own members.
+func (a laneAnswer) issues(t *testing.T) []map[string]any {
+	t.Helper()
+	var oo struct{ Issue []map[string]any }
+	if err := json.Unmarshal(a.body(t), &oo); err != nil || len(oo.Issue) == 0 {
+		t.Fatalf("%s: %v", a.file, err)
+	}
+	return oo.Issue
+}
+
+// outcomeStub is a $validate endpoint that answers with status and body, the
+// way a lane does (Content-Type included). It refuses what the SDK must not
+// send: a method other than POST, or a path that is not /<type>/$validate.
+func outcomeStub(t *testing.T, status int, body []byte) *shnsdk.OperationValidator {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/fhir+json")
+		if r.Method != http.MethodPost || !typeValidatePath.MatchString(r.URL.Path) {
+			t.Errorf("the validator was sent %s %s, want POST /<type>/$validate", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/fhir+json;charset=UTF-8")
+		w.WriteHeader(status)
 		_, _ = w.Write(body)
 	}))
 	t.Cleanup(srv.Close)
 	return shnsdk.NewOperationValidator(srv.URL)
 }
 
-func TestOperationValidator_DetailsCarryEveryIssueInOrder(t *testing.T) {
-	v := operationOutcomeStub(t, []byte(`{"resourceType":"OperationOutcome","issue":[
-		{"severity":"error","code":"processing","diagnostics":"Coverage.status: minimum required = 1, but only found 0",
-		 "details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"Validation_VAL_Profile_Minimum"}]},
-		 "expression":["Coverage"]},
-		{"severity":"warning","code":"processing","diagnostics":"dom-6",
-		 "extension":[{"url":"http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id","valueString":"http://hl7.org/fhir/StructureDefinition/DomainResource#dom-6"}],
-		 "location":["Coverage","Line[1] Col[2]"]},
-		{"severity":"fatal","code":{"not":"a string"},"diagnostics":"bad json"},
-		{"severity":"information","diagnostics":"no code member"}]}`))
-	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Coverage"}`), "")
+var typeValidatePath = regexp.MustCompile(`^/[A-Z][A-Za-z]+/\$validate$`)
+
+// laneStub serves a recorded lane answer.
+func laneStub(t *testing.T, a laneAnswer) *shnsdk.OperationValidator {
+	t.Helper()
+	return outcomeStub(t, a.status, a.body(t))
+}
+
+// operationOutcomeStub serves body with 200. Its callers test the decoder
+// against deliberate shapes no lane sends (malformed members, key spellings,
+// message-id precedence); an answer a lane does send comes from laneStub.
+func operationOutcomeStub(t *testing.T, body []byte) *shnsdk.OperationValidator {
+	t.Helper()
+	return outcomeStub(t, http.StatusOK, body)
+}
+
+// withIssues returns a recorded answer with extra issues appended after the
+// lane's own.
+func withIssues(t *testing.T, a laneAnswer, extra ...string) []byte {
+	t.Helper()
+	var oo map[string]any
+	if err := json.Unmarshal(a.body(t), &oo); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range extra {
+		var issue any
+		if err := json.Unmarshal([]byte(e), &issue); err != nil {
+			t.Fatal(err)
+		}
+		oo["issue"] = append(oo["issue"].([]any), issue)
+	}
+	b, err := json.Marshal(oo)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return b
+}
+
+// strs converts a decoded JSON array of strings.
+func strs(v any) []string {
+	arr, _ := v.([]any)
+	var out []string
+	for _, x := range arr {
+		out = append(out, x.(string))
+	}
+	return out
+}
+
+// The lane's real refusal of an unknown profile (three warnings, then the
+// error), with two deliberately malformed issues appended after it.
+func TestOperationValidator_DetailsCarryEveryIssueInOrder(t *testing.T) {
+	v := outcomeStub(t, http.StatusOK, withIssues(t, laneProfileUnknown,
+		`{"severity":"fatal","code":{"not":"a string"},"diagnostics":"bad json"}`,
+		`{"severity":"information","diagnostics":"no code member"}`))
+	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"ClaimResponse"}`), "https://example.org/fhir/StructureDefinition/unavailable-profile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane := laneProfileUnknown.issues(t)
+	if len(lane) != 4 || lane[3]["severity"] != "error" {
+		t.Fatalf("the recorded refusal changed: %v", lane)
+	}
 	// Valid and Issues are computed exactly as before: error and fatal
 	// diagnostics only, in order.
-	if res.Valid || !reflect.DeepEqual(res.Issues, []string{"Coverage.status: minimum required = 1, but only found 0", "bad json"}) {
+	if res.Valid || !reflect.DeepEqual(res.Issues, []string{lane[3]["diagnostics"].(string), "bad json"}) {
 		t.Fatalf("Valid/Issues changed: %+v", res)
 	}
-	want := []shnsdk.Issue{
-		{Severity: "error", Code: "processing", MessageID: "Validation_VAL_Profile_Minimum",
-			Expression: []string{"Coverage"}, Diagnostics: "Coverage.status: minimum required = 1, but only found 0"},
-		// location is not FHIRPath, so it never fills Expression.
-		{Severity: "warning", Code: "processing", MessageID: "http://hl7.org/fhir/StructureDefinition/DomainResource#dom-6",
-			Diagnostics: "dom-6"},
+	var want []shnsdk.Issue
+	for i, id := range []string{"Terminology_TX_ValueSet_NotFound", "Terminology_PassThrough_TX_Message",
+		"http://hl7.org/fhir/StructureDefinition/DomainResource#dom-6", "Validation_VAL_Profile_Unknown"} {
+		// location ("Line[1] Col[1126]" and the like) is not FHIRPath, so it
+		// never fills Expression: the refusal's error has a location and no
+		// expression.
+		want = append(want, shnsdk.Issue{Severity: lane[i]["severity"].(string), Code: "processing", MessageID: id,
+			Expression: strs(lane[i]["expression"]), Diagnostics: lane[i]["diagnostics"].(string)})
+	}
+	want = append(want,
 		// A non-string code is recorded as "" rather than making the outcome
 		// unreadable, so the verdict stands.
-		{Severity: "fatal", Code: "", Diagnostics: "bad json"},
-		{Severity: "information", Code: "", Diagnostics: "no code member"},
-	}
+		shnsdk.Issue{Severity: "fatal", Code: "", Diagnostics: "bad json"},
+		shnsdk.Issue{Severity: "information", Code: "", Diagnostics: "no code member"})
 	if !reflect.DeepEqual(res.Details, want) {
 		t.Fatalf("Details = %+v, want %+v", res.Details, want)
 	}
+	if !reflect.DeepEqual(want[2].Expression, []string{"ClaimResponse"}) || want[3].Expression != nil || len(strs(lane[3]["location"])) == 0 {
+		t.Fatal("the refusal's error must carry a location and no expression for this row to prove anything")
+	}
 }
 
+// The lane's answer for a resource with no error: warnings only.
 func TestOperationValidator_ValidResultStillCarriesWarningsInDetails(t *testing.T) {
-	v := operationOutcomeStub(t, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"warning","code":"processing","diagnostics":"dom-6"}]}`))
-	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
+	res, err := laneStub(t, lanePositive).Validate(context.Background(), []byte(`{"resourceType":"Claim"}`), "http://hl7.org/fhir/StructureDefinition/Claim")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !res.Valid || res.Issues != nil {
 		t.Fatalf("a warning-only outcome is valid with no Issues, got %+v", res)
 	}
-	if want := []shnsdk.Issue{{Severity: "warning", Code: "processing", Diagnostics: "dom-6"}}; !reflect.DeepEqual(res.Details, want) {
+	lane := lanePositive.issues(t)
+	var want []shnsdk.Issue
+	for i, id := range []string{"Reference_REF_MultipleMatches", "http://hl7.org/fhir/StructureDefinition/DomainResource#dom-6"} {
+		want = append(want, shnsdk.Issue{Severity: "warning", Code: "processing", MessageID: id,
+			Expression: strs(lane[i]["expression"]), Diagnostics: lane[i]["diagnostics"].(string)})
+	}
+	if !reflect.DeepEqual(res.Details, want) || !reflect.DeepEqual(want[1].Expression, []string{"Claim"}) {
 		t.Fatalf("Details = %+v, want %+v", res.Details, want)
 	}
 }
 
+// An OperationOutcome with no issue member at all. No lane sends one (issue is
+// required; a clean lane answer still carries issues), so this is a decoder
+// row for a deliberate shape.
 func TestOperationValidator_NoIssuesLeavesDetailsNil(t *testing.T) {
 	v := operationOutcomeStub(t, []byte(`{"resourceType":"OperationOutcome"}`))
 	res, err := v.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), "")
@@ -113,24 +227,23 @@ func TestOperationValidator_RealHAPIOutcomeCarriesMessageIDs(t *testing.T) {
 }
 
 // A non-2xx response that still carries a parseable OperationOutcome is a
-// verdict, and its issues are in Details.
+// verdict, and its issues are in Details: the lane's 400 for a body it could
+// not parse (served for its shape; see laneUnparseable), whose one error
+// carries no message id.
 func TestOperationValidator_Non2xxOutcomeCarriesDetails(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/fhir+json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","diagnostics":"unparseable",` +
-			`"details":{"coding":[{"system":"http://hl7.org/fhir/java-core-messageId","code":"Error_parsing_JSON_"}]}}]}`))
-	}))
-	defer srv.Close()
-	res, err := shnsdk.NewOperationValidator(srv.URL).Validate(context.Background(), []byte(`{"resourceType":"Patient","birthDate":7}`), "")
+	res, err := laneStub(t, laneUnparseable).Validate(context.Background(), []byte(`{"resourceType":"Patient","birthDate":7}`), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Valid || len(res.Details) != 1 || res.Details[0].MessageID != "Error_parsing_JSON_" {
-		t.Fatalf("got %+v", res)
+	lane := laneUnparseable.issues(t)
+	want := []shnsdk.Issue{{Severity: "error", Code: "processing", Diagnostics: lane[0]["diagnostics"].(string)}}
+	if res.Valid || !reflect.DeepEqual(res.Details, want) || !strings.HasPrefix(want[0].Diagnostics, "HAPI-0450: ") {
+		t.Fatalf("got %+v, want invalid with Details %+v", res, want)
 	}
 }
 
+// A 502 with a body that is not an OperationOutcome is an outage in front of
+// the validator (a proxy's own answer), not a lane answer.
 func TestOperationValidator_OutageCarriesNoDetails(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

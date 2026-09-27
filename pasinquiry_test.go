@@ -299,3 +299,29 @@ func TestBuildPASInquiryBundle_Refusals(t *testing.T) {
 		}
 	}
 }
+
+// The inquiry Claim's identifier follows each line's profile-claim-inquiry:
+// PAS 2.0.1 has Claim.identifier 0..1 (mustSupport), and 2.1.0 and 2.2.1 have
+// it 1..1 (read from the published packages' snapshots; 2.0.1 checked against
+// the package hash pinned in tools/contracts/manifest.json). So the builder
+// builds a 2.0 inquiry without one, supplying none of its own, and refuses a
+// 2.1 or 2.2 inquiry without one. The 2.0 Da Vinci reference payer is stricter
+// than PAS 2.0.1 and refuses an inquiry without it, so ClaimIdentifier's doc
+// tells a caller to send it whenever it has one.
+func TestBuildPASInquiryBundle_ClaimIdentifierFollowsEachLinesProfile(t *testing.T) {
+	for line, required := range map[string]bool{"2.0": false, "2.1": true, "2.2": true} {
+		in := testInquiryInputs(line)
+		in.ClaimIdentifier = PASIdentifier{}
+		out, err := BuildPASInquiryBundle(line, in)
+		switch {
+		case required && (err == nil || !strings.Contains(err.Error(), "Claim identifier")):
+			t.Errorf("PAS %s: an inquiry without a Claim identifier must be refused by name, got %v", line, err)
+		case !required && err != nil:
+			t.Errorf("PAS %s: an inquiry without a Claim identifier is valid PAS 2.0.1 and must build, got %v", line, err)
+		case !required:
+			if _, c := decodeInquiry(t, out.Body); len(c.Identifier) != 0 {
+				t.Errorf("PAS %s: the builder supplied a Claim identifier the caller did not have: %v", line, c.Identifier)
+			}
+		}
+	}
+}
