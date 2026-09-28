@@ -1,6 +1,7 @@
 package shnsdk
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -204,8 +205,8 @@ func pasInjectResourceType(raw []byte, rt string) ([]byte, error) {
 // coverageRef is stamped as insurance[0].coverage.reference here, but
 // BuildConformantClaimBundle OVERWRITES that element bundle-side with a reference to
 // the Coverage ENTRY the request carries (see setInsuranceCoverageEntryRef), exactly
-// as it overwrites insurer via repointInsurerToEntry. Nothing conformant reaches the
-// wire carrying this value.
+// as it names the insurer, which this Claim leaves unset, via repointInsurerToEntry.
+// Nothing conformant reaches the wire carrying this coverage value.
 func buildPASClaim(patientRef, coverageRef, providerRef, correlationID string, created time.Time) ([]byte, error) {
 	claim := fhir.Claim{
 		Id:     strPtr("claim-" + correlationID),
@@ -220,7 +221,6 @@ func buildPASClaim(patientRef, coverageRef, providerRef, correlationID string, c
 		Patient:  fhir.Reference{Reference: strPtr(patientRef)},
 		Created:  created.UTC().Format(time.RFC3339),
 		Provider: fhir.Reference{Reference: strPtr(providerRef)},
-		Insurer:  &fhir.Reference{Reference: strPtr("Organization/payer")},
 		Priority: fhir.CodeableConcept{
 			Coding: []fhir.Coding{{
 				Code: strPtr("normal"),
@@ -438,15 +438,15 @@ func addPASLineRelatedRelationship(claimJSON []byte, def PASDef) ([]byte, error)
 // ConformantClaimInputs are the inputs the conformant $submit builder needs from the
 // Originator: the answered DTR QuestionnaireResponse + the order ServiceRequest (both
 // already demo-persona-bound), the patient/coverage references, the correlation id, and
-// the injected clock. The lean bundle uses a contained payor Org (no referenced
-// Practitioner). Created drives the deterministic Bundle timestamp/Claim.created.
+// the injected clock, and the participant's own records for the provider, the coverage
+// and the payer. Created drives the deterministic Bundle timestamp/Claim.created.
 //
-// ContainedInsurer: when true the Claim's insurer is rewritten to reference a CONTAINED
-// #cms-payer Organization (mirroring BuildCoverageWithPayer), making the reference
-// resolvable by real payers that validate bundle-internal refs (e.g. real br-payer 400s
-// "Organization/payer not found"). When false (the default) the insurer stays the generic
-// "Organization/payer" — byte-identical to the SHN-native path. Set true ONLY for the
-// reference-payer origination lane (targetsBrPayer: ORIGINATION_PROFILE=provider-data, and the Kit's conformant rows).
+// From shn-sdk v0.59.0 the request names only the payer the caller supplies: Insurer
+// is required on every call and rides the bundle as the Organization entry that
+// Claim.insurer and Coverage.payor both name. Earlier releases, unless PayerOrgEntry
+// was set, named a payer Organization this package made up instead (a contained
+// "cms-payer" Organization, or a Claim.insurer reference to an "Organization/payer"
+// the request did not carry); a caller that set neither must now pass Insurer.
 //
 // AbsoluteRefs: when true every internal reference whose value matches a bundle-entry
 // relative form ("<resourceType>/<id>") is rewritten to its absolute fullUrl
@@ -454,7 +454,7 @@ func addPASLineRelatedRelationship(claimJSON []byte, def PASDef) ([]byte, error)
 // for real payers (e.g. real br-payer HAPI-1094 "not found") that do not resolve relative
 // refs against absolute entry fullUrls in a $submit collection bundle. Contained #fragment
 // refs and refs that do not match any bundle entry are left untouched. When false (the
-// default) the bundle is byte-identical to the SHN-native path. Set true ONLY for the
+// default) the bundle keeps relative references. Set true ONLY for the
 // reference-payer origination lane (targetsBrPayer: ORIGINATION_PROFILE=provider-data, and the Kit's conformant rows).
 type ConformantClaimInputs struct {
 	QR []byte
@@ -493,8 +493,10 @@ type ConformantClaimInputs struct {
 	// Patient and payer Organization entries.
 	// Insurer is the participant's own Organization record for the payer — the one
 	// its member's Coverage names as payor, read from its own system. REQUIRED
-	// whenever PayerOrgEntry is set (the lane that carries the payer as a resolvable
-	// entry); ignored on the lanes that contain it.
+	// (from shn-sdk v0.59.0 on every call, whatever PayerOrgEntry says): it must be
+	// one Organization with an id, carrying the Payer identifier the leg is routed
+	// on, and it rides the request as its own entry, exactly as supplied (less any
+	// meta.profile), which Claim.insurer and Coverage.payor both name.
 	//
 	// It is the third element of the same rule Provider and Coverage follow. The
 	// reference payer scopes its inquiry search by the insurer and resolves an
@@ -502,22 +504,24 @@ type ConformantClaimInputs struct {
 	// does not carry — so whatever this request names is what a later inquiry must
 	// name. A request naming a payer Organization this package minted, while the
 	// inquiry named the one the participant's records hold, matched nothing.
-	Insurer          []byte
-	Coverage         []byte
-	PatientRef       string
-	CoverageRef      string
-	Corr             string
-	Created          time.Time
-	ContainedInsurer bool // reference-payer lane only; false = byte-identical SHN-native path
-	AbsoluteRefs     bool // reference-payer lane only; false = byte-identical SHN-native path
-	// PayerOrgEntry (reference-payer lane): emit the cms-payer Organization as a resolvable bundle
-	// ENTRY (not contained) and repoint Coverage.payor + Claim.insurer at it. REQUIRED for a
-	// real Da Vinci PAS payer (br-payer): its PAS payor resolution (PayorIdentifierUtil →
-	// ResourceResolver.findInBundle) reads bundle ENTRIES only, so a contained #cms-payer
-	// yields 0 payor identifiers → empty PlanDefinition search → A3 "Not Certified" (br-payer's
-	// no-match fallback) for every code (the verdict CQL never fires). CRD is unaffected (it
-	// resolves contained fragments).
-	// Takes precedence over ContainedInsurer when both set. Default false = SHN-native byte-identical.
+	Insurer     []byte
+	Coverage    []byte
+	PatientRef  string
+	CoverageRef string
+	Corr        string
+	Created     time.Time
+	// ContainedInsurer has no effect.
+	//
+	// Deprecated: from shn-sdk v0.59.0 the payer always rides as the Insurer entry
+	// (see Insurer); no request names a contained payer Organization.
+	ContainedInsurer bool
+	AbsoluteRefs     bool // reference-payer lane only; false = relative references
+	// PayerOrgEntry has no effect: the payer always rides as the resolvable Insurer
+	// entry that Coverage.payor and Claim.insurer name, which is what a real Da Vinci
+	// PAS payer (br-payer) reads (its payor resolution, PayorIdentifierUtil →
+	// ResourceResolver.findInBundle, reads bundle ENTRIES only).
+	//
+	// Deprecated: from shn-sdk v0.59.0 every request carries the payer this way.
 	PayerOrgEntry bool
 	// InfoChanged (single-shot resolve discriminator): when true the submit Claim's item[*]
 	// carries the Da Vinci PAS infoChanged item extension ({"url": pasInfoChangedExtensionURL,
@@ -531,10 +535,9 @@ type ConformantClaimInputs struct {
 	// byte-identical to every existing caller. NO prior-claim ref is added (this is a submit, not an
 	// update).
 	InfoChanged bool
-	// Payer is the payer Organization identifier (system|value) emitted on the payer
-	// Organization (contained or bundle-entry, depending on PayerOrgEntry/ContainedInsurer)
-	// and on the Coverage built via BuildCoverageWithPayer. Pass the identity read from the
-	// patient's Coverage, or shnsdk.CMSPayerIdentity for the conformance payer.
+	// Payer is the payer identity (system|value) the leg is routed on — the identity
+	// read from the patient's Coverage. Insurer must carry it as an identifier; a
+	// record for another payer is refused.
 	Payer PayerIdentifier
 	// MemberID is the bare member id this request is for — the value the Patient
 	// carries as its member identifier, and the one a payer matches an inquiry on.
@@ -558,17 +561,21 @@ type ConformantClaimInputs struct {
 //
 //	Claim (use preauthorization; item[].productOrService = the passed order's own code (CPT
 //	      72148 for this doc's example demo persona) + extension-requestedService → the
-//	      ServiceRequest; insurer = generic Organization/payer),
+//	      ServiceRequest; insurer → the payer Organization entry),
 //	Patient (minimal, id = the bound member),
-//	Coverage (contained cms-payer Org, payor → #cms-payer, beneficiary → member),
+//	Coverage (the caller's own record, payor → the payer Organization entry,
+//	      beneficiary → member),
 //	ServiceRequest (the passed SR — CPT 72148, ICD-10 M51.16, for this doc's example),
+//	Organization (the requesting provider, the caller's own record),
+//	Organization (the payer, the caller's own Insurer record),
 //	QuestionnaireResponse (the passed answered QR — id convergence-qr).
 //
 // meta.profile: the PAS $submit bundle + EVERY entry carry NO meta.profile (a Da
 // Vinci profile is an ERROR-severity $validate fail against the US-Core-only validator;
 // even the US Core meta.profile on the Coverage/SR is stripped in the PAS context). This
-// DIFFERS from the CRD builder, which KEEPS US Core meta.profile. The Claim's insurer stays
-// the generic Organization/payer (NOT a named br-payer insurer). Deterministic (no
+// DIFFERS from the CRD builder, which KEEPS US Core meta.profile. From shn-sdk v0.59.0
+// the Claim's insurer is always the caller's own payer record (see
+// ConformantClaimInputs.Insurer); without one the builder refuses. Deterministic (no
 // time.Now/random); the QR/SR/refs are demo-persona-derived by the caller.
 //
 // BuildConformantClaimBundle speaks PAS line 2.0 — it is BuildConformantClaimBundleAtLine("2.0", in),
@@ -624,39 +631,24 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	}
 	// Every caller: set item[0].productOrService from the order's actual code (the order
 	// governs correctness, not just the reference-payer lane's HCPCS keying — every payer
-	// on this network decides on productOrService, so a caller with no PayerOrgEntry must
-	// still get the real requested service, not the X12 1365 placeholder buildPASClaim
+	// on this network decides on productOrService, so every caller must get the real
+	// requested service, not the X12 1365 placeholder buildPASClaim
 	// left there). Fails loud (not a silent placeholder) when the order carries no code.
 	claimJSON, err = setClaimItemProductFromSR(claimJSON, in.SR)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: set claim product from SR: %w", err)
 	}
-	// Reference-payer lane: make the Claim insurer ref resolvable. PayerOrgEntry is the
-	// br-payer-correct form — point insurer at the cms-payer Organization ENTRY added below
-	// (br-payer's PAS payor resolution reads bundle entries, not contained), and it takes
-	// precedence over the legacy ContainedInsurer (contained #cms-payer) approach. Both default
-	// false → the SHN-native path stays byte-identical.
-	// The payer this request names, on the lane that carries it as a resolvable
-	// entry: the participant's OWN Organization record for the payer its member's
-	// Coverage names. A caller that cannot supply one is refused — see
-	// pasPayerOrgEntry for what naming a minted one cost.
-	var payerOrg pasPayerOrgRecord
-	if in.PayerOrgEntry {
-		if payerOrg, err = pasPayerOrgEntry(in.Insurer, in.Payer); err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
-		}
+	// The payer this request names: the participant's OWN Organization record for
+	// the payer its member's Coverage names, carried as a resolvable entry that the
+	// Claim's insurer and the Coverage's payor both name. A caller that cannot supply
+	// one is refused — see pasPayerOrgEntry for what naming a minted one cost.
+	payerOrg, err := pasPayerOrgEntry(in.Insurer, in.Payer)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
-	switch {
-	case in.PayerOrgEntry:
-		claimJSON, err = repointInsurerToEntry(claimJSON, payerOrg.id)
-		if err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant submit: repoint insurer to entry: %w", err)
-		}
-	case in.ContainedInsurer:
-		claimJSON, err = containInsurer(claimJSON, in.Payer)
-		if err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant submit: contain insurer: %w", err)
-		}
+	claimJSON, err = repointInsurerToEntry(claimJSON, payerOrg.id)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: repoint insurer to entry: %w", err)
 	}
 	// Single-shot resolve discriminator (poll discriminator, NOT a verdict input): append the PAS
 	// infoChanged item extension when requested. NO prior-claim ref is added (fresh submit) — so it
@@ -684,7 +676,7 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if in.MemberID == "" {
 		return nil, fmt.Errorf("shnsdk: MemberID is required (bare member id; see the v0.42.0 identifier-semantics release note)")
 	}
-	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, in.Payer, payerOrg)
+	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
@@ -755,22 +747,14 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 		}
 		return fhir.BundleEntry{FullUrl: strPtr(u), Resource: json.RawMessage(resourceJSON)}, nil
 	}
-	// Reference-payer lane: the cms-payer Organization is a first-class bundle ENTRY (the
-	// payor refs above resolve to it). Build it here so entryFor stamps its absolute fullUrl,
-	// which absolutizeBundleRefs (when AbsoluteRefs) makes Coverage.payor/Claim.insurer match.
-	var payerOrgJSON []byte
-	if in.PayerOrgEntry {
-		payerOrgJSON = payerOrg.raw
-	}
 	// The requesting provider rides as its own entry, so Claim.provider resolves
-	// inside the Bundle the payer adjudicates.
-	resources := [][]byte{claimJSON, patientJSON, coverageJSON, srJSON, in.Provider}
-	if payerOrgJSON != nil {
-		if providerURL == pasBundleBaseURL+"/Organization/"+payerOrg.id {
-			return nil, fmt.Errorf("shnsdk: conformant submit: the requesting provider and the payer organization are the same bundle entry (%s)", providerRef)
-		}
-		resources = append(resources, payerOrgJSON)
+	// inside the Bundle the payer adjudicates; the payer's own Organization rides as
+	// the entry Coverage.payor and Claim.insurer name (entryFor stamps its absolute
+	// fullUrl, which absolutizeBundleRefs, when AbsoluteRefs, makes both match).
+	if providerURL == pasBundleBaseURL+"/Organization/"+payerOrg.id {
+		return nil, fmt.Errorf("shnsdk: conformant submit: the requesting provider and the payer organization are the same bundle entry (%s)", providerRef)
 	}
+	resources := [][]byte{claimJSON, patientJSON, coverageJSON, srJSON, in.Provider, payerOrg.raw}
 	if qrJSON != nil {
 		resources = append(resources, qrJSON)
 	}
@@ -799,7 +783,7 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	}
 	// Reference-payer lane only: rewrite internal refs to their absolute fullUrl form so real
 	// payers that do not resolve relative refs against absolute entry fullUrls accept the
-	// bundle (HAPI-1094). Default false keeps the SHN-native path byte-identical.
+	// bundle (HAPI-1094). Default false keeps relative references.
 	if in.AbsoluteRefs {
 		bundleOut, err = absolutizeBundleRefs(bundleOut)
 		if err != nil {
@@ -821,10 +805,8 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if err := checkPASContainedReferenced(bundleOut); err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
-	if in.PayerOrgEntry || in.ContainedInsurer {
-		if err := checkPASInsurerResolves(bundleOut); err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
-		}
+	if err := checkPASInsurerResolves(bundleOut); err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
 	return bundleOut, nil
 }
@@ -837,8 +819,8 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 // productOrService from the order and stamps it via setClaimItemProductFromSR
 // immediately afterward, unconditionally — there is no placeholder service code that
 // survives to a payer; an order with no code fails loud there instead. The Claim's
-// category (X12 1365), insurer (generic Organization/payer), and all other fields stay
-// buildPASClaim's. Deterministic.
+// category (X12 1365) and all other fields stay buildPASClaim's; the insurer is set
+// afterwards to the caller's own payer entry (repointInsurerToEntry). Deterministic.
 func conformantizePASClaim(claimJSON []byte, serviceRequestRef string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(claimJSON, &m); err != nil {
@@ -997,70 +979,6 @@ func rewriteProvenanceTarget(provJSON []byte, wantTarget string) ([]byte, error)
 	return json.Marshal(m)
 }
 
-// containInsurer rewrites a conformant Claim JSON so the Claim's insurer references a
-// CONTAINED #cms-payer Organization — making the reference resolvable by real payers that
-// validate bundle-internal refs (e.g. real br-payer 400s "Organization/payer not found").
-// Mirrors BuildCoverageWithPayer's contained-org splice: the identifier system|value come
-// from payer (the cosmetic id/name stay conformantPayerOrgID/conformantPayerOrgName),
-// ensuring the Claim's contained payer and the Coverage's contained payer are consistent.
-//
-// If the Claim already has a "contained" array (not typical) the new org is appended.
-// Every other field is left verbatim. Deterministic.
-func containInsurer(claimJSON []byte, payer PayerIdentifier) ([]byte, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(claimJSON, &m); err != nil {
-		return nil, fmt.Errorf("containInsurer: parse claim: %w", err)
-	}
-
-	// Build the contained Organization (identical shape to BuildCoverageWithPayer's org).
-	org := fhir.Organization{
-		Id:   strPtr(conformantPayerOrgID),
-		Name: strPtr(conformantPayerOrgName),
-		Identifier: []fhir.Identifier{{
-			System: strPtr(payer.System),
-			Value:  strPtr(payer.Value),
-		}},
-	}
-	orgJSON, err := json.Marshal(org)
-	if err != nil {
-		return nil, fmt.Errorf("containInsurer: marshal org: %w", err)
-	}
-	// Inject resourceType (fhir.Organization has none in output).
-	var orgMap map[string]json.RawMessage
-	if err := json.Unmarshal(orgJSON, &orgMap); err != nil {
-		return nil, fmt.Errorf("containInsurer: parse org: %w", err)
-	}
-	rtJSON, _ := json.Marshal("Organization")
-	orgMap["resourceType"] = rtJSON
-	orgJSON, err = json.Marshal(orgMap)
-	if err != nil {
-		return nil, fmt.Errorf("containInsurer: re-marshal org: %w", err)
-	}
-
-	// Append (or create) the contained array.
-	var contained []json.RawMessage
-	if raw, ok := m["contained"]; ok && len(raw) > 0 {
-		if err := json.Unmarshal(raw, &contained); err != nil {
-			return nil, fmt.Errorf("containInsurer: parse existing contained: %w", err)
-		}
-	}
-	contained = append(contained, json.RawMessage(orgJSON))
-	containedJSON, err := json.Marshal(contained)
-	if err != nil {
-		return nil, fmt.Errorf("containInsurer: marshal contained: %w", err)
-	}
-	m["contained"] = containedJSON
-
-	// Rewrite insurer to reference the contained org.
-	insurerJSON, err := json.Marshal(map[string]string{"reference": "#" + conformantPayerOrgID})
-	if err != nil {
-		return nil, fmt.Errorf("containInsurer: marshal insurer: %w", err)
-	}
-	m["insurer"] = insurerJSON
-
-	return json.Marshal(m)
-}
-
 // orderEntryRef picks the conformant bundle-local id and typed reference for the order
 // resource, selecting on its resourceType. A DeviceRequest (DME/home-oxygen) uses
 // conformantPASDeviceRequestID ("convergence-dr"); any other type (ServiceRequest, the
@@ -1088,9 +1006,8 @@ func orderEntryRef(order []byte) (id, ref string) {
 // Order-type-aware: for a DeviceRequest the code lives in codeCodeableConcept; for a
 // ServiceRequest (and any unrecognised type) it lives in code. The extension-requestedService
 // (added by conformantizePASClaim) is preserved. Called UNCONDITIONALLY by both
-// buildConformantClaimBundle and buildConformantClaimUpdateBundle — not gated on PayerOrgEntry.
-// PayerOrgEntry gates only the payer-Organization bundle-entry shape (contained vs. resolvable
-// entry); it must never again gate the correctness of the requested service. Fails loud
+// buildConformantClaimBundle and buildConformantClaimUpdateBundle — no lane flag gates the
+// correctness of the requested service. Fails loud
 // (rather than silently carrying forward the placeholder) when the order has no code.
 func setClaimItemProductFromSR(claimJSON, orderJSON []byte) ([]byte, error) {
 	var probe struct {
@@ -1203,8 +1120,9 @@ func repointInsurerToEntry(claimJSON []byte, payerOrgID string) ([]byte, error) 
 // so every cms-payer persona passed and the bridging one did not.
 //
 // Nothing is lost by the drop: the very same Organization rides the request as
-// the entry both references now name. conformantPayerOrgID stays in the set for
-// the minted org the non-entry lanes splice in under that fixed id.
+// the entry both references now name. A contained Organization under any other
+// id is not that record, so it stays (and the dom-3 guard refuses it if nothing
+// names it).
 func dropContainedPayerOrg(m map[string]json.RawMessage, entryOrgID string) error {
 	raw, ok := m["contained"]
 	if !ok || len(raw) == 0 {
@@ -1237,8 +1155,7 @@ func dropContainedPayerOrg(m map[string]json.RawMessage, entryOrgID string) erro
 			ID           string `json:"id"`
 		}
 		if err := json.Unmarshal(c, &probe); err == nil && probe.ResourceType == "Organization" &&
-			!stillNamed[probe.ID] &&
-			(probe.ID == conformantPayerOrgID || (entryOrgID != "" && probe.ID == entryOrgID)) {
+			!stillNamed[probe.ID] && entryOrgID != "" && probe.ID == entryOrgID {
 			continue // drop the payer org — it lives as a bundle entry now
 		}
 		kept = append(kept, c)
@@ -1268,37 +1185,39 @@ func dropContainedPayerOrg(m map[string]json.RawMessage, entryOrgID string) erro
 //   - All "reference" string fields anywhere in the JSON tree (nested objects + arrays)
 //     are visited recursively.
 //
-// Pure function — input is not mutated. Re-marshal determinism is fine (reference-payer bundles
-// have no byte-parity golden). Called ONLY when AbsoluteRefs == true.
+// Pure function — input is not mutated. Called ONLY when AbsoluteRefs == true.
+//
+// Each entry's resource is re-encoded only when one of its references is
+// rewritten; a resource with none (the caller's own payer Organization, for
+// one) keeps its JSON content, key order and number spelling as they were
+// (the entries are already compact). Numbers are carried as written either way.
 func absolutizeBundleRefs(bundleJSON []byte) ([]byte, error) {
-	// Unmarshal the bundle into a generic map so we can walk the full tree.
-	var root interface{}
+	var root map[string]json.RawMessage
 	if err := json.Unmarshal(bundleJSON, &root); err != nil {
 		return nil, fmt.Errorf("absolutizeBundleRefs: unmarshal: %w", err)
 	}
-	rootMap, ok := root.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("absolutizeBundleRefs: bundle is not a JSON object")
+	var entries []map[string]json.RawMessage
+	if raw, ok := root["entry"]; ok {
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			return nil, fmt.Errorf("absolutizeBundleRefs: unmarshal entries: %w", err)
+		}
 	}
 
 	// Build the set of bundle-entry relative ids: "<resourceType>/<id>" for each entry.
 	entrySet := make(map[string]struct{})
-	entriesRaw, _ := rootMap["entry"].([]interface{})
-	for _, e := range entriesRaw {
-		em, ok := e.(map[string]interface{})
-		if !ok {
+	for _, em := range entries {
+		var head struct {
+			ResourceType string `json:"resourceType"`
+			ID           string `json:"id"`
+		}
+		if json.Unmarshal(em["resource"], &head) != nil {
 			continue
 		}
-		res, ok := em["resource"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		rt, _ := res["resourceType"].(string)
-		id, _ := res["id"].(string)
-		if rt != "" && id != "" {
-			entrySet[rt+"/"+id] = struct{}{}
+		if head.ResourceType != "" && head.ID != "" {
+			entrySet[head.ResourceType+"/"+head.ID] = struct{}{}
 		}
 	}
+	changed := false
 
 	// Walk the entire tree, rewriting matching "reference" values. `protect` carries
 	// down a "leave references in this subtree RELATIVE" flag — set for the patient-compartment
@@ -1337,6 +1256,7 @@ func absolutizeBundleRefs(bundleJSON []byte) ([]byte, error) {
 					if s, ok := child.(string); ok && s != "" && !strings.HasPrefix(s, "#") && !protect {
 						if _, inSet := entrySet[s]; inSet {
 							val[k] = pasBundleBaseURL + "/" + s
+							changed = true
 						}
 					}
 				} else {
@@ -1353,9 +1273,36 @@ func absolutizeBundleRefs(bundleJSON []byte) ([]byte, error) {
 			return v
 		}
 	}
-	walk(rootMap, false)
-
-	out, err := json.Marshal(rootMap)
+	for _, em := range entries {
+		raw, ok := em["resource"]
+		if !ok {
+			continue
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var res interface{}
+		if err := dec.Decode(&res); err != nil {
+			return nil, fmt.Errorf("absolutizeBundleRefs: unmarshal resource: %w", err)
+		}
+		changed = false
+		walk(res, false)
+		if !changed {
+			continue
+		}
+		out, err := json.Marshal(res)
+		if err != nil {
+			return nil, fmt.Errorf("absolutizeBundleRefs: re-marshal resource: %w", err)
+		}
+		em["resource"] = out
+	}
+	if entries != nil {
+		entriesJSON, err := json.Marshal(entries)
+		if err != nil {
+			return nil, fmt.Errorf("absolutizeBundleRefs: re-marshal entries: %w", err)
+		}
+		root["entry"] = entriesJSON
+	}
+	out, err := json.Marshal(root)
 	if err != nil {
 		return nil, fmt.Errorf("absolutizeBundleRefs: re-marshal: %w", err)
 	}
@@ -1453,7 +1400,6 @@ func buildPASUpdateClaim(patientRef, coverageRef, providerRef, correlationID, or
 		Patient:  fhir.Reference{Reference: strPtr(patientRef)},
 		Created:  created.UTC().Format(time.RFC3339),
 		Provider: fhir.Reference{Reference: strPtr(providerRef)},
-		Insurer:  &fhir.Reference{Reference: strPtr("Organization/payer")},
 		Priority: fhir.CodeableConcept{
 			Coding: []fhir.Coding{{
 				Code: strPtr("normal"),
@@ -1502,17 +1448,15 @@ func buildPASUpdateClaim(patientRef, coverageRef, providerRef, correlationID, or
 }
 
 // setPriorClaimReference repoints Claim.related[0].claim.reference at the prior Claim BUNDLE
-// ENTRY (reference-payer lane only — the non-PayerOrgEntry lane never adds that entry, so calling
-// this there would dangle; see the call site in buildConformantClaimUpdateBundle). br-payer's
+// ENTRY every amendment carries (see the call site in buildConformantClaimUpdateBundle). br-payer's
 // resolvePriorClaim (PasSubmitService.java:379-403) reads .reference, NOT .identifier, and 400s
 // "The prior Claim referenced in Claim.related.claim must be included in the Bundle" without it.
 // The existing .identifier is preserved. infoChanged is a SEPARATE, unconditional concern (every
 // lane) — see appendInfoChangedToClaimItems; this function used to fold both together as
-// setPriorClaimReferenceAndInfoChanged, which forced infoChanged to share the reference's
-// PayerOrgEntry gate even though only the reference is lane-shape-dependent.
+// setPriorClaimReferenceAndInfoChanged, which forced infoChanged to share a lane gate the
+// reference no longer has.
 //
-// Generic-map round-trip (the reference-payer lane has no byte-parity golden), mirroring containInsurer/
-// repointInsurerToEntry.
+// Generic-map round-trip, mirroring repointInsurerToEntry.
 func setPriorClaimReference(claimJSON []byte, priorClaimRef string) ([]byte, error) {
 	var claim map[string]interface{}
 	if err := json.Unmarshal(claimJSON, &claim); err != nil {
@@ -1633,8 +1577,8 @@ func appendInfoChangedToClaimItemsMap(claim map[string]interface{}) error {
 	return nil
 }
 
-// buildPriorClaimEntry synthesizes the prior Claim included as a resolvable bundle ENTRY on the
-// reference-payer lane (see setPriorClaimReference). It is the original submit's claim:
+// buildPriorClaimEntry synthesizes the prior Claim every amendment carries as a resolvable bundle
+// ENTRY (see setPriorClaimReference). It stands for the original submit's claim:
 // br-payer's resolvePriorClaim finds it via related[0].claim.reference, then searches the stored
 // authorization by its FIRST identifier — so it carries urn:shn:correlation|OriginalCorr (the
 // initial submit's stored Claim identifier). br-payer reads only the identifier, but the bundle is
@@ -1642,6 +1586,13 @@ func appendInfoChangedToClaimItemsMap(claim map[string]interface{}) error {
 // every required Claim element (status/type/use/patient/created/provider/priority/insurance),
 // mirroring the conformant submit/update Claim shape. NOT first in the bundle, so PasBundleValidator's
 // first-entry profile checks do not apply.
+//
+// KNOWN SEAM, kept visible rather than hidden: this is a restatement this package synthesizes, not
+// the requester's original Claim. Its created is the AMENDMENT's time (the created argument), not
+// the time the original was created, and its type and priority restate this builder's own
+// constants rather than anything read from the original request. Only the correlation identifier
+// is the original's. Until it is replaced by the requester's own prior Claim (or omitted where no
+// payer needs it), a reader must not treat this entry's other values as the original's.
 func buildPriorClaimEntry(patientRef, coverageRef, providerRef, payerOrgID, originalCorr string, created time.Time) ([]byte, error) {
 	claim := fhir.Claim{
 		Id:     strPtr(conformantPASClaimID),
@@ -1683,8 +1634,10 @@ func buildPriorClaimEntry(patientRef, coverageRef, providerRef, payerOrgID, orig
 // drives the deterministic Bundle timestamp/Claim.created. Demo-persona only — no br-payer
 // foreign seed.
 //
-// ContainedInsurer: same semantics as ConformantClaimInputs.ContainedInsurer — set true for
-// the reference-payer lane so the update Claim's insurer is also resolvable.
+// From shn-sdk v0.59.0, as for ConformantClaimInputs, Insurer is required on every call and
+// the amendment names only that payer, and every amendment carries a synthesized restatement
+// of the prior Claim as a resolvable entry (earlier releases did so only when PayerOrgEntry
+// was set). That restatement is not the requester's original Claim: see buildPriorClaimEntry.
 //
 // AbsoluteRefs: same semantics as ConformantClaimInputs.AbsoluteRefs — set true for the
 // reference-payer lane so update bundle internal refs are absolute. Out-of-bundle refs (e.g.
@@ -1712,12 +1665,15 @@ type ConformantClaimUpdateInputs struct {
 	Corr             string // this amendment's correlation
 	OriginalCorr     string // → Claim.related[0].claim.identifier.value
 	Created          time.Time
-	ContainedInsurer bool // reference-payer lane only; false = byte-identical SHN-native path
-	AbsoluteRefs     bool // reference-payer lane only; false = byte-identical SHN-native path
-	// PayerOrgEntry: same semantics as ConformantClaimInputs.PayerOrgEntry — the cms-payer
-	// Organization is a resolvable bundle ENTRY (not contained) so br-payer's PAS re-evaluation
-	// of the update resolves the payor (findInBundle, entries only). Reference-payer-lane-only; precedence
-	// over ContainedInsurer.
+	// ContainedInsurer has no effect.
+	//
+	// Deprecated: as ConformantClaimInputs.ContainedInsurer.
+	ContainedInsurer bool
+	AbsoluteRefs     bool // reference-payer lane only; false = relative references
+	// PayerOrgEntry has no effect: the payer always rides as the Insurer entry and the
+	// synthesized prior-Claim restatement as the entry the update Claim's related claim names.
+	//
+	// Deprecated: as ConformantClaimInputs.PayerOrgEntry.
 	PayerOrgEntry bool
 	// Payer is the payer Organization identifier (system|value) — same semantics as
 	// ConformantClaimInputs.Payer. Pass the identity read from the patient's Coverage,
@@ -1810,31 +1766,19 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: set claim product from SR: %w", err)
 	}
-	// Reference-payer lane: PayerOrgEntry — insurer references the payer org ENTRY; takes
-	// precedence over the legacy contained-insurer splice. Same as BuildConformantClaimBundle.
 	// The payer this amendment names — the participant's own record, the same one
-	// the submission named. See pasPayerOrgEntry.
-	var payerOrg pasPayerOrgRecord
-	if in.PayerOrgEntry {
-		if payerOrg, err = pasPayerOrgEntry(in.Insurer, in.Payer); err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
-		}
+	// the submission named, carried as the entry the insurer names. Same as
+	// BuildConformantClaimBundle; see pasPayerOrgEntry.
+	payerOrg, err := pasPayerOrgEntry(in.Insurer, in.Payer)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
-	switch {
-	case in.PayerOrgEntry:
-		claimJSON, err = repointInsurerToEntry(claimJSON, payerOrg.id)
-		if err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant update: repoint insurer to entry: %w", err)
-		}
-	case in.ContainedInsurer:
-		claimJSON, err = containInsurer(claimJSON, in.Payer)
-		if err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant update: contain insurer: %w", err)
-		}
+	claimJSON, err = repointInsurerToEntry(claimJSON, payerOrg.id)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: repoint insurer to entry: %w", err)
 	}
-	// infoChanged is UNCONDITIONAL — every lane (register R5/Task-A finding, 2026-08-25):
-	// PayerOrgEntry may gate only the payer-Organization bundle-entry SHAPE (contained vs
-	// resolvable), never correctness/conformance content — the same ruling as the §13
+	// infoChanged is UNCONDITIONAL (register R5/Task-A finding, 2026-08-25): no lane flag
+	// gates correctness/conformance content — the same ruling as the §13
 	// productOrService fix above (setClaimItemProductFromSR runs unconditionally too). br-payer's
 	// hasInfoChanged (PasSubmitService.java:316/449) gates re-evaluation on this marker; a demo/
 	// hermetic amendment that never carried it was previously resolved ONLY by the mirror's own
@@ -1863,21 +1807,15 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
-	// Reference-payer lane ONLY: repoint Claim.related[0].claim.reference at the prior Claim
-	// ENTRY (added to the bundle below, also PayerOrgEntry-gated). br-payer's resolvePriorClaim
-	// (PasSubmitService.java:379-403) reads .reference (NOT .identifier) and requires the prior
-	// Claim in-bundle (else HTTP 400 "The prior Claim referenced in Claim.related.claim must be
-	// included in the Bundle"). The relative ref is absolutized to the entry's fullUrl by
-	// absolutizeBundleRefs (AbsoluteRefs) — what findInBundle keys on. This part stays lane-gated
-	// (unlike infoChanged above) because it is NOT correctness content — it is a bundle-shape
-	// fact: the non-PayerOrgEntry (SHN-native/demo) lane never adds the prior Claim as a bundle
-	// entry (see below), so rewriting the reference there would DANGLE. That lane keeps the lean
-	// identifier-only related[0] buildPASUpdateClaim already set (byte-identical to golden).
-	if in.PayerOrgEntry {
-		claimJSON, err = setPriorClaimReference(claimJSON, "Claim/"+conformantPASClaimID)
-		if err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant update: prior-claim ref: %w", err)
-		}
+	// Repoint Claim.related[0].claim.reference at the prior Claim ENTRY added to the bundle
+	// below. br-payer's resolvePriorClaim (PasSubmitService.java:379-403) reads .reference (NOT
+	// .identifier) and requires the prior Claim in-bundle (else HTTP 400 "The prior Claim
+	// referenced in Claim.related.claim must be included in the Bundle"). The relative ref is
+	// absolutized to the entry's fullUrl by absolutizeBundleRefs (AbsoluteRefs) — what
+	// findInBundle keys on. The existing .identifier is kept.
+	claimJSON, err = setPriorClaimReference(claimJSON, "Claim/"+conformantPASClaimID)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: prior-claim ref: %w", err)
 	}
 
 	// --- Coverage: identical to the submit builder — the member's OWN Coverage
@@ -1886,7 +1824,7 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if in.MemberID == "" {
 		return nil, fmt.Errorf("shnsdk: MemberID is required (bare member id; see the v0.42.0 identifier-semantics release note)")
 	}
-	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, in.Payer, payerOrg)
+	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
@@ -1962,22 +1900,20 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	// The requesting provider rides as its own entry, exactly as on the submit:
 	// an amendment names the same party, and it resolves in the Bundle.
 	baseResources := [][]byte{claimJSON, patientJSON, coverageJSON, srJSON, qrJSON, in.Provider}
-	// Reference-payer lane: add the cms-payer Organization as a resolvable bundle ENTRY so the
-	// repointed Coverage.payor/Claim.insurer resolve (br-payer findInBundle, entries only).
-	if in.PayerOrgEntry {
-		if providerURL == pasBundleBaseURL+"/Organization/"+payerOrg.id {
-			return nil, fmt.Errorf("shnsdk: conformant update: the requesting provider and the payer organization are the same bundle entry (%s)", providerRef)
-		}
-		baseResources = append(baseResources, payerOrg.raw)
-		// The prior Claim as a resolvable bundle ENTRY (NOT first → not profile-validated by
-		// PasBundleValidator; carries urn:shn:correlation|OriginalCorr, what br-payer searches the
-		// stored authorization on). The operative update Claim's related.reference resolves to it.
-		priorClaimJSON, err := buildPriorClaimEntry(in.PatientRef, coverageRef, providerRef, payerOrg.id, in.OriginalCorr, in.Created)
-		if err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant update: build prior claim entry: %w", err)
-		}
-		baseResources = append(baseResources, priorClaimJSON)
+	// The payer's own Organization as the resolvable bundle ENTRY the repointed
+	// Coverage.payor/Claim.insurer name (br-payer findInBundle, entries only).
+	if providerURL == pasBundleBaseURL+"/Organization/"+payerOrg.id {
+		return nil, fmt.Errorf("shnsdk: conformant update: the requesting provider and the payer organization are the same bundle entry (%s)", providerRef)
 	}
+	baseResources = append(baseResources, payerOrg.raw)
+	// The prior Claim as a resolvable bundle ENTRY (NOT first → not profile-validated by
+	// PasBundleValidator; carries urn:shn:correlation|OriginalCorr, what br-payer searches the
+	// stored authorization on). The operative update Claim's related.reference resolves to it.
+	priorClaimJSON, err := buildPriorClaimEntry(in.PatientRef, coverageRef, providerRef, payerOrg.id, in.OriginalCorr, in.Created)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: build prior claim entry: %w", err)
+	}
+	baseResources = append(baseResources, priorClaimJSON)
 	for _, rj := range baseResources {
 		e, err := entryFor(rj)
 		if err != nil {
@@ -2046,10 +1982,8 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if err := checkPASContainedReferenced(bundleOut); err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
-	if in.PayerOrgEntry || in.ContainedInsurer {
-		if err := checkPASInsurerResolves(bundleOut); err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
-		}
+	if err := checkPASInsurerResolves(bundleOut); err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
 	return bundleOut, nil
 }

@@ -206,7 +206,7 @@ func TestSDKResponderDTR_FramedOperationRefusals(t *testing.T) {
 	}
 
 	// The operation header belongs to the DTR leg only.
-	req, _ := BuildConformantOrderSelectRequest([]byte(`{"resourceType":"ServiceRequest","id":"sr","subject":{"reference":"Patient/p1"}}`), cov, "Patient/p1")
+	req := orderSelectFromRecords(t, []byte(`{"resourceType":"ServiceRequest","id":"sr","subject":{"reference":"Patient/p1"}}`), "p1")
 	envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-op-1", frameDTROp(t, FrameOperationQuestionnairePackage, req))
 	resp := postInbound(t, plainSrv, envBytes, hubHdr)
 	body := readBody(t, resp)

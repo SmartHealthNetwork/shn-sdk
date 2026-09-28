@@ -118,3 +118,85 @@ func TestParseCards_CardExtensionOfAnotherShapeIsNotCoverage(t *testing.T) {
 		t.Fatalf("legacy object observation: %+v %v", obs, err)
 	}
 }
+
+// TestDeprecatedCRDRequestBuilders_RefuseWithoutPatient: a CRD request's
+// patient prefetch is the participant's own Patient record. Neither deprecated
+// request builder takes one (a patient id is not a Patient), so neither
+// builds anything: no request, no id-only Patient, no placeholder fhirServer,
+// no user, no payer Organization and no rewritten Coverage. Each names
+// BuildCRDRequest, which takes the participant's own Patient and carries it
+// exactly. Every row is refused whatever else it holds.
+func TestDeprecatedCRDRequestBuilders_RefuseWithoutPatient(t *testing.T) {
+	sr, err := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", "Patient/MBR-COVERED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", CMSPayerIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dr := []byte(`{"resourceType":"DeviceRequest","id":"dr1","status":"draft","intent":"order","subject":{"reference":"Patient/MBR-OX"}}`)
+	check := func(t *testing.T, name string, out []byte, err error) {
+		t.Helper()
+		if out != nil || !errors.Is(err, errCRDRequestNeedsPatient) ||
+			!strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "BuildCRDRequest") {
+			t.Fatalf("out=%s err=%v; want no output and the refusal naming %s and BuildCRDRequest", out, err, name)
+		}
+	}
+	for row, in := range map[string]struct {
+		sr, cov []byte
+		patient string
+	}{
+		"the earlier happy path":  {sr, cov, "Patient/MBR-COVERED"},
+		"a bare patient id":       {sr, cov, "MBR-COVERED"},
+		"no patient id":           {sr, cov, ""},
+		"a DeviceRequest order":   {dr, cov, "Patient/MBR-OX"},
+		"inputs that do not read": {[]byte(`not json`), nil, "MBR-COVERED"},
+		"no inputs":               {nil, nil, ""},
+	} {
+		t.Run("order-select/"+row, func(t *testing.T) {
+			out, err := BuildConformantOrderSelectRequest(in.sr, in.cov, in.patient)
+			check(t, "BuildConformantOrderSelectRequest", out, err)
+		})
+	}
+	full := OrderDispatchInputs{
+		PatientID: "MBR-OX", PatientRef: "Patient/MBR-OX", OrderRef: "DeviceRequest/dr1", PerformerRef: "Organization/sup1",
+		DeviceRequest: dr, Supplier: []byte(`{"resourceType":"Organization","id":"sup1"}`), Coverage: cov, Payer: CMSPayerIdentity,
+	}
+	noPatientID := full
+	noPatientID.PatientID, noPatientID.PatientRef = "", ""
+	prefixed := full
+	prefixed.PatientID = "Patient/MBR-OX"
+	for row, in := range map[string]OrderDispatchInputs{
+		"the earlier happy path":  full,
+		"a prefixed patient id":   prefixed,
+		"no patient id":           noPatientID,
+		"only a patient id":       {PatientID: "MBR-OX"},
+		"inputs that do not read": {PatientID: "MBR-OX", DeviceRequest: []byte(`not json`), Coverage: []byte(`[`)},
+		"no inputs":               {},
+	} {
+		t.Run("order-dispatch/"+row, func(t *testing.T) {
+			out, err := BuildConformantOrderDispatchRequest(in)
+			check(t, "BuildConformantOrderDispatchRequest", out, err)
+		})
+	}
+}
+
+// TestBuildCRDRequest_ReplacesDeprecatedBuildersWithCallersPatient: the
+// replacement the refusal names carries the caller's own Patient byte for
+// byte at every hook the deprecated builders served, and never an id-only
+// Patient in its place.
+func TestBuildCRDRequest_ReplacesDeprecatedBuildersWithCallersPatient(t *testing.T) {
+	for _, in := range []CRDRequestInputs{orderSelectInputs(), dispatchInputs()} {
+		out, err := BuildCRDRequest(in)
+		if err != nil {
+			t.Fatalf("%s: %v", in.Hook, err)
+		}
+		if !strings.Contains(string(out), `"prefetch":{"patient":`+crdReqPatient+`,`) {
+			t.Fatalf("%s: the caller's Patient is not carried exactly: %s", in.Hook, out)
+		}
+		if strings.Contains(string(out), `{"id":"pat-1","resourceType":"Patient"}`) || strings.Contains(string(out), `"fhirServer"`) {
+			t.Fatalf("%s: a made-up Patient or FHIR server: %s", in.Hook, out)
+		}
+	}
+}

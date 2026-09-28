@@ -60,61 +60,12 @@ func (c CardCoverage) PARequired() bool {
 // NeedsDTR reports whether the card advertises at least one DTR questionnaire to gather.
 func (c CardCoverage) NeedsDTR() bool { return len(c.Questionnaires) > 0 }
 
-// conformantCDSBundle is a FHIR collection Bundle carrying the draft orders inline
-// (one entry per draft order). The conformant CRD order-select request models
-// context.draftOrders as a FHIR Bundle (vs the minimized request's bare resource
-// array), exactly as the payer-side conformant bind (gateway conformantCRDBind) and
-// a real br-payer expect.
-type conformantCDSBundle struct {
-	ResourceType string                  `json:"resourceType"`
-	Type         string                  `json:"type"`
-	Entry        []conformantBundleEntry `json:"entry"`
-}
-
-type conformantBundleEntry struct {
-	FullURL  string          `json:"fullUrl"`
-	Resource json.RawMessage `json:"resource"`
-}
-
-// conformantOrderSelectContext is the conformant CDS Hooks order-select context: a
-// FHIR Bundle of draft orders plus the userId/patientId/selections a real CDS client
-// sends. Distinct from the minimized OrderSelectContext (bare draftOrders array).
-type conformantOrderSelectContext struct {
-	UserID      string              `json:"userId"`
-	PatientID   string              `json:"patientId"`
-	DraftOrders conformantCDSBundle `json:"draftOrders"`
-	Selections  []string            `json:"selections"`
-}
-
-// conformantOrderSelectRequest is the full conformant CDS Hooks order-select request
-// (the shape gateway conformantCRDBind accepts and a real br-payer adjudicates):
-// hook/hookInstance/fhirServer + the conformant context + the Coverage prefetch.
-type conformantOrderSelectRequest struct {
-	Hook         string                       `json:"hook"`
-	HookInstance string                       `json:"hookInstance"`
-	FHIRServer   string                       `json:"fhirServer"`
-	Context      conformantOrderSelectContext `json:"context"`
-	Prefetch     struct {
-		Patient  json.RawMessage `json:"patient,omitempty"`
-		Coverage json.RawMessage `json:"coverage"`
-	} `json:"prefetch"`
-}
-
-// Deterministic conformant-CRD demo-context constants. These are fixed (no time/random)
-// so the builder reproduces the conformant golden byte-for-byte. The order ids are local to
-// the request (the SR is wrapped fullUrl urn:uuid:<id> and selected by ServiceRequest/<id>).
+// Conformant Coverage + contained cms-payer Organization (CMS-0057). The system is the
+// NAIC Company Code OID (urn:oid:2.16.840.1.113883.6.300), HL7's registered namespace for
+// US insurance-company identifiers; value "00001" is the Da Vinci br-payer RI's first plan
+// id — a synthetic demo value, not an official NAIC-assigned code. These are fixed
+// (deterministic) and match the existing conformant goldens.
 const (
-	conformantCRDHookInstance = "convergence-crd-hi-1"
-	conformantCRDFHIRServer   = "https://provider.example/fhir"
-	conformantCRDUserID       = "Practitioner/p1"
-	conformantCRDOrderID      = "sr1"
-
-	// Conformant Coverage + contained cms-payer Organization (CMS-0057). The system is the
-	// NAIC Company Code OID (urn:oid:2.16.840.1.113883.6.300), HL7's registered namespace
-	// for US insurance-company identifiers; value "00001" is the Da Vinci br-payer RI's
-	// first plan id — a synthetic demo value, not an official NAIC-assigned code. These
-	// are fixed (deterministic) and match the conformant golden + the existing conformant
-	// goldens.
 	conformantCoverageID    = "c1"
 	conformantPayerOrgID    = "cms-payer"
 	conformantPayerOrgName  = "Centers for Medicare and Medicaid Services"
@@ -122,74 +73,28 @@ const (
 	systemNAICCompanyCode   = "urn:oid:2.16.840.1.113883.6.300"
 )
 
-// BuildConformantOrderSelectRequest builds the CONFORMANT CRD order-select request bytes
-// (the conformant target): hook "order-select", context.draftOrders a FHIR collection
-// Bundle whose single entry is the ServiceRequest (id sr1, fullUrl urn:uuid:sr1),
-// context.patientId the bare member, context.selections referencing the SR, and
-// prefetch.coverage the (payer-bearing) Coverage. This is the converged CRD order-select
-// request shape (the minimized BuildOrderSelectRequest has been removed — this is the sole CRD request shape);
-// the gateway's conformantCRDBind accepts this shape and a real br-payer adjudicates it. Deterministic
-// (no time/random). The SR keeps its US Core meta.profile (US Core resolves clean
-// against the US-Core-only validator).
+// errCRDRequestNeedsPatient is the refusal of both deprecated CRD request
+// builders: a CRD request's patient prefetch is the participant's own Patient
+// record, and neither builder takes one.
+var errCRDRequestNeedsPatient = errors.New("refused: a CRD request carries your own Patient record, " +
+	"and this deprecated builder takes none and will not make one up; build the request with BuildCRDRequest from your own Patient")
+
+// BuildConformantOrderSelectRequest builds nothing and returns an error.
 //
-// Deprecated: use BuildCRDRequest, which takes the participant's real Patient,
-// the hook the workflow fires, and the Coverage prefetch as the caller holds it,
-// and sends no fhirServer. This builder still sends an id-only Patient and a
-// placeholder fhirServer; its output is unchanged until it is removed.
+// A CRD order-select request carries the participant's own Patient record as
+// its patient prefetch. This builder takes a patient id, not a Patient, so
+// the only request it could build would carry a Patient it made up (an
+// id-only stub) beside a FHIR server, a user and an order id it also made up.
+// From shn-sdk v0.59.0 it refuses instead, whatever its inputs. Earlier
+// releases sent that request.
+//
+// Deprecated: use BuildCRDRequest, which takes the participant's own Patient,
+// the hook the workflow fires, and the Coverage prefetch as the caller holds
+// it, carries each exactly, and sends no fhirServer. From shn-sdk v0.59.0
+// this builder returns an error naming BuildCRDRequest; a later release
+// removes it.
 func BuildConformantOrderSelectRequest(serviceRequestJSON, coverageJSON []byte, patientID string) ([]byte, error) {
-	// Inject the local order id into the order (the minimized BuildServiceRequest emits no
-	// id; the conformant Bundle entry needs a stable id to wrap+select).
-	srWithID, err := withResourceID(serviceRequestJSON, conformantCRDOrderID)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant CRD: %w", err)
-	}
-	// context.selections must reference the order by its ACTUAL resourceType: br-payer's
-	// order-select service matches selections[] against the draftOrders entries
-	// type-sensitively (HAPI IdType.equalsIgnoreBase — "ServiceRequest/x" does NOT match a
-	// DeviceRequest/x order, yielding 0 cards). A ServiceRequest order stays
-	// "ServiceRequest/<id>"; a DeviceRequest order (UC-02 hospital-bed E0250) selects
-	// "DeviceRequest/<id>". Fall back to "ServiceRequest" if the order has no parseable
-	// resourceType so existing callers never regress. Deterministic. (UC-02)
-	orderResourceType, _ := extractResourceTypeAndID(serviceRequestJSON)
-	if orderResourceType == "" {
-		orderResourceType = "ServiceRequest"
-	}
-	req := conformantOrderSelectRequest{
-		Hook:         "order-select",
-		HookInstance: conformantCRDHookInstance,
-		FHIRServer:   conformantCRDFHIRServer,
-		Context: conformantOrderSelectContext{
-			UserID: conformantCRDUserID,
-			// CDS Hooks context.patientId is the BARE patient id (not a Patient/ ref);
-			// the gateway bind trims the prefix either way, but the conformant shape +
-			// a real CDS client send it bare.
-			PatientID: strings.TrimPrefix(patientID, "Patient/"),
-			DraftOrders: conformantCDSBundle{
-				ResourceType: "Bundle",
-				Type:         "collection",
-				Entry: []conformantBundleEntry{{
-					FullURL:  "urn:uuid:" + conformantCRDOrderID,
-					Resource: json.RawMessage(srWithID),
-				}},
-			},
-			Selections: []string{orderResourceType + "/" + conformantCRDOrderID},
-		},
-	}
-	// A real CDS client supplies the patient it holds; SHN is config-only with no
-	// queryable fhirServer, so the patient MUST be inline (else a real Da Vinci payer
-	// like br-payer tries to fetch Patient/{id} from fhirServer and 412s). br-payer
-	// accepts an id-only Patient (captured). The id is the BARE member (no Patient/).
-	// The fake fhirServer (conformantCRDFHIRServer) is INTENTIONALLY left as-is: the
-	// inline patient makes that URL dead, and SHN has nothing real to fetch from. Do
-	// NOT "fix" it into a resolvable endpoint — that re-introduces the 412.
-	bareID := strings.TrimPrefix(patientID, "Patient/")
-	patientJSON, err := json.Marshal(map[string]string{"resourceType": "Patient", "id": bareID})
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant CRD patient prefetch: %w", err)
-	}
-	req.Prefetch.Patient = json.RawMessage(patientJSON)
-	req.Prefetch.Coverage = json.RawMessage(coverageJSON)
-	return json.Marshal(req)
+	return nil, fmt.Errorf("shnsdk: BuildConformantOrderSelectRequest: %w", errCRDRequestNeedsPatient)
 }
 
 // withResourceID returns the FHIR resource JSON with its top-level "id" set to id,

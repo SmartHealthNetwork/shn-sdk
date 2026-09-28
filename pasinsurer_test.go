@@ -144,6 +144,10 @@ func TestCheckPASInsurerResolvesRefusesAnUnresolvableInsurer(t *testing.T) {
 			`{"fullUrl":"http://x/Patient/p","resource":{"resourceType":"Patient","id":"p"}}]}`},
 		{"no Claim", `{"resourceType":"Bundle","entry":[` +
 			`{"fullUrl":"http://x/Organization/org-cms-payer","resource":` + org + `}]}`},
+		// From shn-sdk v0.59.0 the payer rides only as an entry: a Claim naming an
+		// Organization inside itself names one the request does not carry.
+		{"names a contained Organization", `{"resourceType":"Bundle","entry":[{"fullUrl":"http://x/Claim/c","resource":{"resourceType":"Claim","id":"c",` +
+			`"insurer":{"reference":"#cms-payer"},"contained":[{"resourceType":"Organization","id":"cms-payer"}]}}]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -156,9 +160,6 @@ func TestCheckPASInsurerResolvesRefusesAnUnresolvableInsurer(t *testing.T) {
 		`{"resourceType":"Bundle","entry":[` +
 			`{"fullUrl":"http://x/Claim/c","resource":{"resourceType":"Claim","id":"c","insurer":{"reference":"Organization/org-cms-payer"}}},` +
 			`{"fullUrl":"http://x/Organization/org-cms-payer","resource":` + org + `}]}`,
-		// The contained shape the non-entry lanes put on the wire resolves too.
-		`{"resourceType":"Bundle","entry":[{"fullUrl":"http://x/Claim/c","resource":{"resourceType":"Claim","id":"c",` +
-			`"insurer":{"reference":"#cms-payer"},"contained":[{"resourceType":"Organization","id":"cms-payer"}]}}]}`,
 	} {
 		if err := checkPASInsurerResolves([]byte(ok)); err != nil {
 			t.Fatalf("checkPASInsurerResolves refused a resolvable insurer: %v", err)

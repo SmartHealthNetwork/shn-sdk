@@ -42,29 +42,6 @@ func jsonEqual(t *testing.T, got, want []byte) bool {
 	return reflect.DeepEqual(g, w)
 }
 
-// TestBuildConformantOrderSelectRequest_MatchesGolden: the SDK builder reproduces the
-// demo-persona conformant CRD request
-// (testdata/golden/conformant/crd-order-select-request.json) byte-for-byte (canonical
-// JSON). This is the byte-match oracle for the conformant CRD originator.
-func TestBuildConformantOrderSelectRequest_MatchesGolden(t *testing.T) {
-	want := readConformantGolden(t, "crd-order-select-request.json")
-	srJSON, err := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", "Patient/MBR-COVERED")
-	if err != nil {
-		t.Fatalf("BuildServiceRequest: %v", err)
-	}
-	covJSON, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", CMSPayerIdentity)
-	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
-	}
-	got, err := BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-COVERED")
-	if err != nil {
-		t.Fatalf("BuildConformantOrderSelectRequest: %v", err)
-	}
-	if !jsonEqual(t, got, want) {
-		t.Fatalf("conformant CRD request drift:\n got: %s\nwant: %s", got, want)
-	}
-}
-
 // TestParseOrderSelectRequest_Rejects verifies the two invalid inputs are rejected.
 func TestParseOrderSelectRequest_Rejects(t *testing.T) {
 	// Empty draft orders.
@@ -240,39 +217,6 @@ func TestParseCoverageBeneficiary(t *testing.T) {
 	}
 }
 
-func TestBuildConformantOrderSelectRequest_PatientPrefetch(t *testing.T) {
-	sr, err := BuildServiceRequest("72100", "X-ray lumbar spine", "M51.16", "Patient/MBR-COVERED")
-	if err != nil {
-		t.Fatalf("BuildServiceRequest: %v", err)
-	}
-	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", CMSPayerIdentity)
-	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
-	}
-	reqJSON, err := BuildConformantOrderSelectRequest(sr, cov, "Patient/MBR-COVERED")
-	if err != nil {
-		t.Fatalf("BuildConformantOrderSelectRequest: %v", err)
-	}
-	var req struct {
-		Prefetch struct {
-			Patient json.RawMessage `json:"patient"`
-		} `json:"prefetch"`
-	}
-	if err := json.Unmarshal(reqJSON, &req); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	var p struct {
-		ResourceType string `json:"resourceType"`
-		ID           string `json:"id"`
-	}
-	if err := json.Unmarshal(req.Prefetch.Patient, &p); err != nil {
-		t.Fatalf("prefetch.patient missing/invalid: %v (%s)", err, req.Prefetch.Patient)
-	}
-	if p.ResourceType != "Patient" || p.ID != "MBR-COVERED" {
-		t.Fatalf("prefetch.patient = %+v, want Patient/MBR-COVERED (id bare, no Patient/ prefix)", p)
-	}
-}
-
 // TestBuildCoverageWithPayerRejectsCoveragePrefixedMember is the conformant builder's half of
 // the producer-side rejection row (sibling: TestBuildCoverageRejectsCoveragePrefixedMember in
 // order_test.go). Same identifier-semantics rule, same rationale: the urn:shn:coverage value is
@@ -286,74 +230,6 @@ func TestBuildCoverageWithPayerRejectsCoveragePrefixedMember(t *testing.T) {
 	}
 	if _, err := BuildCoverageWithPayer("Patient/p1", "MBR-X", CMSPayerIdentity); err != nil {
 		t.Fatalf("bare member id must build: %v", err)
-	}
-}
-
-// TestBuildConformantOrderSelectRequest_SelectionResourceTypeAware verifies that
-// context.selections references the order by its ACTUAL resourceType (br-payer's
-// order-select service matches selections[] against draftOrders type-sensitively via
-// IdType.equalsIgnoreBase: ServiceRequest/x does NOT match DeviceRequest/x). A
-// ServiceRequest order stays "ServiceRequest/sr1" (regression guard); a DeviceRequest
-// order (UC-02 hospital-bed E0250) must yield "DeviceRequest/sr1" so br-payer matches
-// it and returns cards. (UC-02)
-func TestBuildConformantOrderSelectRequest_SelectionResourceTypeAware(t *testing.T) {
-	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", CMSPayerIdentity)
-	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
-	}
-	// decode pulls context.selections + the (single) draftOrders entry resourceType.
-	decode := func(t *testing.T, reqJSON []byte) (selections []string, entryType string) {
-		t.Helper()
-		var req struct {
-			Context struct {
-				Selections  []string `json:"selections"`
-				DraftOrders struct {
-					Entry []struct {
-						Resource struct {
-							ResourceType string `json:"resourceType"`
-						} `json:"resource"`
-					} `json:"entry"`
-				} `json:"draftOrders"`
-			} `json:"context"`
-		}
-		if err := json.Unmarshal(reqJSON, &req); err != nil {
-			t.Fatalf("unmarshal request: %v (%s)", err, reqJSON)
-		}
-		if len(req.Context.DraftOrders.Entry) != 1 {
-			t.Fatalf("draftOrders.entry = %d, want 1", len(req.Context.DraftOrders.Entry))
-		}
-		return req.Context.Selections, req.Context.DraftOrders.Entry[0].Resource.ResourceType
-	}
-
-	// ServiceRequest order — selection stays ServiceRequest/<id> (regression guard).
-	srJSON, err := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", "Patient/MBR-COVERED")
-	if err != nil {
-		t.Fatalf("BuildServiceRequest: %v", err)
-	}
-	srReq, err := BuildConformantOrderSelectRequest(srJSON, cov, "Patient/MBR-COVERED")
-	if err != nil {
-		t.Fatalf("BuildConformantOrderSelectRequest(ServiceRequest): %v", err)
-	}
-	srSel, srEntryType := decode(t, srReq)
-	if want := []string{"ServiceRequest/" + conformantCRDOrderID}; !reflect.DeepEqual(srSel, want) {
-		t.Errorf("ServiceRequest selections = %v, want %v", srSel, want)
-	}
-	if srEntryType != "ServiceRequest" {
-		t.Errorf("ServiceRequest draftOrders entry resourceType = %q, want ServiceRequest", srEntryType)
-	}
-
-	// DeviceRequest order (UC-02 hospital-bed E0250) — selection must be DeviceRequest/<id>.
-	drJSON := []byte(`{"resourceType":"DeviceRequest","status":"draft","intent":"order","codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0250"}]},"subject":{"reference":"Patient/x"}}`)
-	drReq, err := BuildConformantOrderSelectRequest(drJSON, cov, "Patient/MBR-COVERED")
-	if err != nil {
-		t.Fatalf("BuildConformantOrderSelectRequest(DeviceRequest): %v", err)
-	}
-	drSel, drEntryType := decode(t, drReq)
-	if want := []string{"DeviceRequest/" + conformantCRDOrderID}; !reflect.DeepEqual(drSel, want) {
-		t.Errorf("DeviceRequest selections = %v, want %v", drSel, want)
-	}
-	if drEntryType != "DeviceRequest" {
-		t.Errorf("DeviceRequest draftOrders entry resourceType = %q, want DeviceRequest", drEntryType)
 	}
 }
 

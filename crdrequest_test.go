@@ -2,8 +2,6 @@ package shnsdk
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -231,49 +229,6 @@ func TestBuildCRDRequest_Refusals(t *testing.T) {
 		if _, err := BuildCRDRequest(base); err != nil {
 			t.Fatalf("%s base: %v", base.Hook, err)
 		}
-	}
-}
-
-// TestDeprecatedBuildConformantOrderSelect_OutputUnchanged pins both
-// deprecated CRD request builders' output byte for byte. They keep their
-// earlier behavior (an id-only Patient; a placeholder fhirServer on
-// order-select) until they are removed; BuildCRDRequest is the replacement.
-func TestDeprecatedBuildConformantOrderSelect_OutputUnchanged(t *testing.T) {
-	sr, err := BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", "Patient/MBR-COVERED")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", CMSPayerIdentity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel, err := BuildConformantOrderSelectRequest(sr, cov, "Patient/MBR-COVERED")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dis, err := BuildConformantOrderDispatchRequest(OrderDispatchInputs{
-		PatientID: "MBR-OX", PatientRef: "Patient/MBR-OX", OrderRef: "DeviceRequest/dr1", PerformerRef: "Organization/sup1",
-		DeviceRequest: []byte(`{"resourceType":"DeviceRequest","id":"dr1","status":"draft","intent":"order","subject":{"reference":"Patient/MBR-OX"}}`),
-		Supplier:      []byte(`{"resourceType":"Organization","id":"sup1"}`),
-		Coverage:      cov, Payer: CMSPayerIdentity,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, row := range map[string]struct {
-		out  []byte
-		want string
-	}{
-		"order-select":   {sel, "bfc6666747ba64222c6083c35aafbf43991e838926a0bea6f5bc659789f0d244"},
-		"order-dispatch": {dis, "a6dddcaead8b56784c68661debc94673a70145c934e9651d5d28e4070bfa6192"},
-	} {
-		sum := sha256.Sum256(row.out)
-		if got := hex.EncodeToString(sum[:]); got != row.want {
-			t.Errorf("%s output changed (sha256 %s): %s", name, got, row.out)
-		}
-	}
-	if !bytes.Contains(sel, []byte(`"fhirServer"`)) || !bytes.Contains(sel, []byte(`"patient":{"id":"MBR-COVERED","resourceType":"Patient"}`)) {
-		t.Fatalf("order-select output: %s", sel)
 	}
 }
 

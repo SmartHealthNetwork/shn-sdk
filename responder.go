@@ -291,8 +291,9 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// handleInbound is the EXACT inbound pipeline, matching internal/gateway
-// handleInbound's error contract and check order (pinned by sdkparity vectors):
+// handleInbound is the inbound pipeline, matching the Smart Gateway's
+// handleInbound check order and its error contract for every refusal before
+// the payload is open (pinned by sdkparity vectors):
 //
 //  1. hop auth (header only, before body read)
 //  2. body read + decode envelope
@@ -304,6 +305,15 @@ func sha256Hex(b []byte) string {
 //  8. per-TransactionType handler
 //  9. resolve sender enc key + seal
 //  10. AI-2 authorize response leg + stamp token + encode + 200
+//
+// A refusal at steps 1-7 is exchange machinery and is written bare: the leg is
+// not yet authenticated or its payload not yet open. Every refusal after step
+// 7 (a request frame that does not decode, an operation header on a leg other
+// than DTR, the attestation fence, a handler's refusal) is this Responder's
+// answer: sealed as a v1 frame into an authorized response leg, 200 to the
+// Hub, to a frame-capable requester, and bare to any other. Two exceptions
+// stay bare: the unreachable unknown-transaction-type default, and a failure
+// building the response leg (frame encode failed, and steps 9-10).
 func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	// Single clock read for hop-auth / VerifyBound / response building (mirrors
 	// sampleparticipant's single-instant comment).
@@ -398,21 +408,20 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	// documents the same "unread plumbing until a real consumer exists" precedent
 	// for its own per-leg Content-Type field) rather than acted on. A corrupt
 	// frame is the one rejection: a magic byte with a body that fails
-	// DecodeHTTPFrame is 400, exactly like a corrupt envelope at step 2.
+	// DecodeHTTPFrame is refused 400 — as this Responder's answer (below), since
+	// the leg is already authenticated, not bare like a corrupt envelope at step 2.
 	//
 	// A frame may also name a DTR operation (FrameHeaderOperation); that
 	// header is defined for the DTR leg only.
-	var claimedContract, claimedOperation string
-	if IsFramed(plaintext) {
-		hdr, body, ferr := DecodeHTTPFrame(plaintext)
-		if ferr != nil {
-			respondErr(w, http.StatusBadRequest, "request frame decode failed")
-			return
-		}
-		claimedContract = hdr.Headers[FrameHeaderContractVersion]
-		claimedOperation = hdr.Headers[FrameHeaderOperation]
-		plaintext = body
-	}
+	//
+	// From here on the leg is authenticated and its payload open, so every
+	// refusal below — a request frame that does not decode, an operation header
+	// on another leg, the attestation fence, a handler's own refusal — is this
+	// Responder's answer, not exchange machinery: it goes through the relay
+	// decision (framed to a capable requester, bare to a legacy one), the
+	// PARTICIPANT_PROTOCOL §6.3 rule for post-authentication refusals. The
+	// attestation fence's refusal is byte for byte the one a payer gateway
+	// frames. Only a failure building the response leg itself stays bare.
 
 	// Frame negotiation (message-frame contract): frame the response leg iff the requester
 	// advertises v1 — capability is two-sided (the responder only frames to a peer
@@ -424,10 +433,24 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	//    non-2xx + errMsg). commit/rollback manage ledger state transitions that must
 	//    not happen until the response leg succeeds.
 	var res handlerResult
+	var claimedContract, claimedOperation string
+	if IsFramed(plaintext) {
+		hdr, body, ferr := DecodeHTTPFrame(plaintext)
+		if ferr != nil {
+			res = handlerResult{appStatus: http.StatusBadRequest, errMsg: "request frame decode failed"}
+		} else {
+			claimedContract = hdr.Headers[FrameHeaderContractVersion]
+			claimedOperation = hdr.Headers[FrameHeaderOperation]
+			plaintext = body
+		}
+	}
 
-	if claimedOperation != "" && env.Metadata.TransactionType != "dtr-questionnaire-fetch" {
+	switch {
+	case res.appStatus != 0:
+		// The request frame did not decode: refused above.
+	case claimedOperation != "" && env.Metadata.TransactionType != "dtr-questionnaire-fetch":
 		res = handlerResult{appStatus: http.StatusBadRequest, errMsg: "operation header is not defined for this transaction type"}
-	} else {
+	default:
 		switch env.Metadata.TransactionType {
 		case "coverage-eligibility":
 			res = r.handleEligibility(plaintext, corr, now)
@@ -441,23 +464,24 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 			// patient QR item is nonconformant regardless of which handler would
 			// otherwise run.
 			if reason, ok := fenceAttestedItems(plaintext); !ok {
-				respondErr(w, http.StatusForbidden, reason)
-				return
+				res = handlerResult{appStatus: http.StatusForbidden, errMsg: reason}
+				break
 			}
 			res = r.handlePASSubmit(plaintext, tok, corr, now, claimedContract)
 		case "pas-claim-update":
 			// R8 re-home (FR-16/FR-27): same fence as pas-claim above — the
 			// property belongs to any QR item, not only to amends.
 			if reason, ok := fenceAttestedItems(plaintext); !ok {
-				respondErr(w, http.StatusForbidden, reason)
-				return
+				res = handlerResult{appStatus: http.StatusForbidden, errMsg: reason}
+				break
 			}
 			res = r.handlePASUpdate(plaintext, tok, corr, now, claimedContract)
 		case "pas-claim-inquire":
 			res = r.handlePASInquire(plaintext, corr, now)
 		default:
-			// Defensive: step 5 already rejects unknowns via responderReqOp, but
-			// this hardens against a future responderReqOp edit.
+			// Defensive and unreachable: step 5 already rejects unknowns via
+			// responderReqOp. An unknown transaction type is exchange machinery
+			// (it names no response leg to seal to), so it stays bare.
 			respondErr(w, http.StatusBadRequest, "unknown transaction type")
 			return
 		}

@@ -92,14 +92,10 @@ func pasPayerOrgEntry(record []byte, payer PayerIdentifier) (pasPayerOrgRecord, 
 // passes every structural check and is then stored under a payer identity the
 // requester cannot name again.
 //
-// KNOWN HOLE, older than this guard and deliberately not hidden by it: the
-// SHN-native lane (neither PayerOrgEntry nor ContainedInsurer) carries NO payer
-// organization at all and leaves Claim.insurer at buildPASClaim's generic
-// `Organization/payer`, which nothing resolves. That is the same defect this
-// guard exists for, one lane over, and closing it moves the byte-frozen 2.0
-// golden and every parity fence pinned to it — so the builders run this guard on
-// the lanes that DO carry a payer organization, and the native lane's dangling
-// insurer is written down rather than quietly passed.
+// From shn-sdk v0.59.0 every request carries the participant's own payer
+// Organization as an entry, so the insurer resolves only to an Organization
+// ENTRY: a Claim naming a contained one names a payer the request does not
+// carry as a record of its own.
 func checkPASInsurerResolves(bundle []byte) error {
 	var b struct {
 		Entry []struct {
@@ -116,11 +112,7 @@ func checkPASInsurerResolves(bundle []byte) error {
 		var r struct {
 			ResourceType string `json:"resourceType"`
 			ID           string `json:"id"`
-			Contained    []struct {
-				ResourceType string `json:"resourceType"`
-				ID           string `json:"id"`
-			} `json:"contained"`
-			Insurer struct {
+			Insurer      struct {
 				Reference string `json:"reference"`
 			} `json:"insurer"`
 		}
@@ -138,13 +130,6 @@ func checkPASInsurerResolves(bundle []byte) error {
 		if r.ResourceType == "Claim" && !stated {
 			stated = true
 			named = r.Insurer.Reference
-			// A contained payer organization is resolvable inside the Claim that
-			// contains it — that is the shape the non-entry lanes put on the wire.
-			for _, c := range r.Contained {
-				if c.ResourceType == "Organization" && c.ID != "" {
-					organizations["#"+c.ID] = true
-				}
-			}
 		}
 	}
 	if !stated {

@@ -28,20 +28,51 @@ var errAdjudicationUnavailable = errors.New("adjudication unavailable")
 // the SR subject / Coverage beneficiary / context.patientId all bound to member (the happy path).
 func buildConformantCRD(t *testing.T, member, cpt string) []byte {
 	t.Helper()
-	patientRef := "Patient/" + member
-	srJSON, err := BuildServiceRequest(cpt, "MRI lumbar spine without contrast", "M54.16", patientRef)
+	srJSON, err := BuildServiceRequest(cpt, "MRI lumbar spine without contrast", "M54.16", "Patient/"+member)
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	covJSON, err := BuildCoverageWithPayer(patientRef, member, CMSPayerIdentity)
+	return orderSelectFromRecords(t, srJSON, member)
+}
+
+// orderSelectFromRecords builds the order-select request a requester sends for member from
+// its own records with BuildCRDRequest: the member's Patient, its Coverage (id c1, the
+// payer-bearing Coverage) as a search result, and the order under the request id sr1.
+func orderSelectFromRecords(t *testing.T, srJSON []byte, member string) []byte {
+	t.Helper()
+	order, err := withResourceID(srJSON, "sr1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	orderType, _ := extractResourceTypeAndID(order)
+	req, err := BuildCRDRequest(CRDRequestInputs{
+		Hook: "order-select", HookInstance: "5f0c3a8e-2b4d-4c6e-8a1f-3d9b7e5c1a20", UserID: "Practitioner/p1",
+		DraftOrders: []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"urn:uuid:sr1","resource":` + string(order) + `}]}`),
+		Selections:  []string{orderType + "/sr1"},
+		Patient:     testMemberPatient(member),
+		Coverage:    orderSelectCoverageSearch(t, member),
+	})
+	if err != nil {
+		t.Fatalf("BuildCRDRequest: %v", err)
+	}
+	return req
+}
+
+// orderSelectCoverage is member's payer-bearing Coverage (id c1) as
+// orderSelectFromRecords carries it, and orderSelectCoverageSearch that Coverage
+// as the search result the request's coverage prefetch holds.
+func orderSelectCoverage(t *testing.T, member string) []byte {
+	t.Helper()
+	covJSON, err := BuildCoverageWithPayer("Patient/"+member, member, CMSPayerIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
 	}
-	req, err := BuildConformantOrderSelectRequest(srJSON, covJSON, patientRef)
-	if err != nil {
-		t.Fatalf("BuildConformantOrderSelectRequest: %v", err)
-	}
-	return req
+	return covJSON
+}
+
+func orderSelectCoverageSearch(t *testing.T, member string) []byte {
+	t.Helper()
+	return []byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + string(orderSelectCoverage(t, member)) + `}]}`)
 }
 
 // answeredQR builds an answered demo lumbar QR for the demo persona with the given clinical
@@ -176,14 +207,7 @@ func TestResponder_CRD(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildServiceRequestCoded: %v", err)
 		}
-		covJSON, err := BuildCoverageWithPayer(patientRef, member, CMSPayerIdentity)
-		if err != nil {
-			t.Fatalf("BuildCoverageWithPayer: %v", err)
-		}
-		req, err := BuildConformantOrderSelectRequest(srJSON, covJSON, patientRef)
-		if err != nil {
-			t.Fatalf("BuildConformantOrderSelectRequest: %v", err)
-		}
+		req := orderSelectFromRecords(t, srJSON, member)
 		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-hcpcs-1", req)
 		resp := postInbound(t, srv, envBytes, hubHdr)
 		body := readBody(t, resp)
@@ -213,22 +237,33 @@ func TestResponder_CRD(t *testing.T) {
 		// A code.coding present but on neither allowlisted system (CPT/HCPCS) is an honest
 		// no-coding, not a wrong adjudication (FR-36 allowlist) — legible 400 naming the cause.
 		srJSON, _ := BuildServiceRequestCoded("http://loinc.org", "12345-6", "not a procedure system", "M54.16", "Patient/MBR-001")
-		covJSON, _ := BuildCoverageWithPayer("Patient/MBR-001", "MBR-001", CMSPayerIdentity)
-		req, _ := BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-001")
+		req := orderSelectFromRecords(t, srJSON, "MBR-001")
 		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-badsystem-1", req)
 		resp := postInbound(t, srv, envBytes, hubHdr)
 		assertError(t, resp, readBody(t, resp), http.StatusBadRequest, "parse order procedure coding failed: shnsdk: ServiceRequest has no {CPT,HCPCS} procedure coding")
 	})
 
-	t.Run("inconsistent-patient", func(t *testing.T) {
-		// SR subject MBR-001, Coverage beneficiary MBR-OTHER → three-way fence rejects.
-		srJSON, _ := BuildServiceRequest("72148", "MRI lumbar spine without contrast", "M54.16", "Patient/MBR-001")
-		covJSON, _ := BuildCoverageWithPayer("Patient/MBR-OTHER", "MBR-OTHER", CMSPayerIdentity)
-		req, _ := BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-001")
-		envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-inconsist-1", req)
-		resp := postInbound(t, srv, envBytes, hubHdr)
-		assertError(t, resp, readBody(t, resp), http.StatusBadRequest, "inconsistent patient in order-select")
-	})
+	// SR subject MBR-001, Coverage beneficiary MBR-OTHER → three-way fence rejects. A
+	// requester's own builder refuses that request, so each row is the valid request
+	// with its Coverage prefetch replaced, and nothing else changed: first by the
+	// other member's Coverage search result (the shape the valid request carries),
+	// then by that Coverage bare.
+	for name, other := range map[string][]byte{
+		"inconsistent-patient":          orderSelectCoverageSearch(t, "MBR-OTHER"),
+		"inconsistent-patient-bare-cov": orderSelectCoverage(t, "MBR-OTHER"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			valid := buildConformantCRD(t, "MBR-001", "72148")
+			own := []byte(`"coverage":` + string(orderSelectCoverageSearch(t, "MBR-001")))
+			if bytes.Count(valid, own) != 1 {
+				t.Fatalf("the valid request does not carry the member's Coverage search result once: %s", valid)
+			}
+			body := bytes.Replace(valid, own, []byte(`"coverage":`+string(other)), 1)
+			envBytes, hubHdr := h.buildForwardEnv(t, "crd-order-select", "crd-order-select", "crd-"+name, body)
+			resp := postInbound(t, srv, envBytes, hubHdr)
+			assertError(t, resp, readBody(t, resp), http.StatusBadRequest, "inconsistent patient in order-select")
+		})
+	}
 }
 
 // ---- TestResponder_PASSubmit ----

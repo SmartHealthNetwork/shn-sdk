@@ -5,9 +5,10 @@ import (
 	"time"
 )
 
-// demoConformantOrderSelect builds the conformant CRD order-select request the Originator
-// (RunPriorAuth) sends for the demo persona (MBR-COVERED, CPT 72148), so the builder↔parser
-// contract is exercised against the EXACT bytes the Responder receives.
+// demoConformantOrderSelect builds the CRD order-select request the Originator (RunPriorAuth)
+// sends for the demo persona (MBR-COVERED, CPT 72148) when asked for the order-select hook,
+// from the persona's own Patient and Coverage search result, so the builder↔parser contract is
+// exercised against the EXACT bytes the Responder receives.
 func demoConformantOrderSelect(t *testing.T) []byte {
 	t.Helper()
 	patientRef := "Patient/MBR-COVERED"
@@ -15,13 +16,10 @@ func demoConformantOrderSelect(t *testing.T) []byte {
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	covJSON, err := BuildCoverageWithPayer(patientRef, "MBR-COVERED", CMSPayerIdentity)
+	req, err := priorAuthCRDRequest(PriorAuthRequest{Member: "MBR-COVERED", NPI: "1234567890", Hook: "order-select",
+		Patient: testMemberPatient("MBR-COVERED"), Coverage: testMemberCoverageSearch("MBR-COVERED")}, srJSON, patientRef)
 	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
-	}
-	req, err := BuildConformantOrderSelectRequest(srJSON, covJSON, patientRef)
-	if err != nil {
-		t.Fatalf("BuildConformantOrderSelectRequest: %v", err)
+		t.Fatalf("priorAuthCRDRequest: %v", err)
 	}
 	return req
 }
@@ -48,6 +46,7 @@ func demoConformantClaim(t *testing.T) []byte {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
 	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{Coverage: testMemberCoverage("MBR-COVERED"),
+		Insurer:        testPayerOrganization(CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: MemberSystem,
 		QR:             qrJSON,

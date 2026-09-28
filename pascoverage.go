@@ -120,7 +120,7 @@ var (
 // unchanged, meta.profile is dropped (the PAS context declares none), the two
 // references this package owns are pointed at this Bundle's own entries, and a
 // record making any OTHER reference is refused.
-func pasCoverageEntry(record []byte, patientRef string, payer PayerIdentifier, payerOrg pasPayerOrgRecord) (pasCoverageRecord, error) {
+func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgRecord) (pasCoverageRecord, error) {
 	cov, err := readPASCoverage(record)
 	if err != nil {
 		return pasCoverageRecord{}, err
@@ -159,17 +159,10 @@ func pasCoverageEntry(record []byte, patientRef string, payer PayerIdentifier, p
 	if err != nil {
 		return pasCoverageRecord{}, fmt.Errorf("strip coverage meta: %w", err)
 	}
-	if payerOrg.id != "" {
-		// The payer Organization rides as a resolvable bundle ENTRY on this lane —
-		// the participant's own record — and the reference payer's payor lookup
-		// reads entries only.
-		out, err = repointPayorToEntry(out, payerOrg.id)
-		if err != nil {
-			return pasCoverageRecord{}, err
-		}
-		return pasCoverageRecord{id: cov.id, raw: out}, nil
-	}
-	out, err = containCoveragePayor(out, payer)
+	// The payer Organization rides as a resolvable bundle ENTRY — the
+	// participant's own record — and the reference payer's payor lookup reads
+	// entries only.
+	out, err = repointPayorToEntry(out, payerOrg.id)
 	if err != nil {
 		return pasCoverageRecord{}, err
 	}
@@ -224,58 +217,6 @@ func checkCoverageReferencesOwned(coverageJSON []byte) error {
 	slices.Sort(found)
 	return fmt.Errorf("your Coverage record references records this request does not carry (%s): a prior authorization carries the member, the coverage, the provider and the payer, and a payer refuses a request whose graph names anything it cannot resolve — this package will not quietly drop what your record asserts",
 		strings.Join(found, "; "))
-}
-
-// containCoveragePayor points a Coverage's payor at a contained payer
-// Organization carrying the payer identity the flow read from the member's own
-// coverage — the shape every non-reference-payer lane has always put on the
-// wire. Any payor the record stated is replaced: it named the participant's own
-// server, which the receiver cannot read.
-func containCoveragePayor(coverageJSON []byte, payer PayerIdentifier) ([]byte, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(coverageJSON, &m); err != nil {
-		return nil, fmt.Errorf("parse coverage: %w", err)
-	}
-	payorJSON, err := json.Marshal([]map[string]string{{"reference": "#" + conformantPayerOrgID}})
-	if err != nil {
-		return nil, err
-	}
-	m["payor"] = payorJSON
-	org, err := json.Marshal(map[string]any{
-		"resourceType": "Organization",
-		"id":           conformantPayerOrgID,
-		"name":         conformantPayerOrgName,
-		"identifier":   []any{map[string]string{"system": payer.System, "value": payer.Value}},
-	})
-	if err != nil {
-		return nil, err
-	}
-	// Whatever else the record contained travels with it; only a previous payer
-	// organization under this id is displaced.
-	kept := []json.RawMessage{json.RawMessage(org)}
-	if raw, ok := m["contained"]; ok && len(raw) > 0 {
-		var existing []json.RawMessage
-		if err := json.Unmarshal(raw, &existing); err != nil {
-			return nil, fmt.Errorf("parse coverage contained: %w", err)
-		}
-		for _, c := range existing {
-			var probe struct {
-				ResourceType string `json:"resourceType"`
-				ID           string `json:"id"`
-			}
-			if json.Unmarshal(c, &probe) == nil &&
-				probe.ResourceType == "Organization" && probe.ID == conformantPayerOrgID {
-				continue
-			}
-			kept = append(kept, c)
-		}
-	}
-	contained, err := json.Marshal(kept)
-	if err != nil {
-		return nil, err
-	}
-	m["contained"] = contained
-	return json.Marshal(m)
 }
 
 // setInsuranceCoverageEntryRef points a built Claim's insurance[0].coverage at

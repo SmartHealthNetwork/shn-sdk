@@ -1504,6 +1504,15 @@ rest          body        raw bytes — no additional encoding
 
 - `status` — the application's real HTTP status, `100`–`599`. Both 2xx and
   non-2xx answers are framed identically; there is no separate error shape.
+  From shn-gateway v0.57.0 a participant's non-2xx answer is carried exactly as
+  its system gave it: an empty body stays empty, with the media type the system
+  stated, or none. Earlier releases wrote `{"error":"<leg>: recipient answered
+  <status> with no error detail"}` in place of an empty body. From shn-gateway
+  v0.57.0 a success frame likewise states the media type of the participant's
+  answer it carries, on every leg (a payer's CDS Hooks answer may be
+  `text/json`, a PAS answer `application/json`); an answer the gateway built
+  itself, or one that states none, is `application/fhir+json`, the type every
+  success frame stated before.
 - `headers` — an **allowlist**, widened 2026-08-11 (multi-version-contracts
   design §4, routing) to `Content-Type` and `contractVersion`, and widened
   again for framed DTR operations to `operation` (request frames only, below).
@@ -1586,6 +1595,15 @@ submit or update, any refusal the gateway makes after its payer's system answere
 system received and answered this request: check its outcome before resending`. Only the pre-handler checks
 above and a failure building the response leg itself stay bare, and the Hub
 reports those as a failed forward that names the recipient's status (§6.1).
+From shn-sdk v0.59.0, `shnsdk.Responder` applies this rule to its own
+refusals: once it has verified the leg and decrypted its payload, a request
+frame it cannot decode (`400 request frame decode failed`) and a PAS submit or
+update carrying a clinician-sourced or patient-reported answer without its
+attestation (`403`, naming the item) are its answer, framed like its
+`Adjudicator`'s errors, where earlier releases wrote them bare. The attestation
+refusal is byte for byte the one a payer gateway frames. The Responder's
+refusals before that point (the Hub assertion, the envelope and its metadata,
+the token, decryption) and a response leg it cannot build stay bare.
 
 **Legacy peers see no change.** An exchange where either side is not
 frame-capable is byte-identical to the protocol's original, pre-message-frame
@@ -1737,12 +1755,20 @@ naming what it does speak. Three distinct refusals, each a `422`:
 - **Native but unlaned.** The receiver *can* build the line but has no
   `$validate` lane configured for it, so it cannot certify its own answer —
   it refuses rather than answer unvalidated (FR-36):
-  `request declares contract version pa.pas@2.2 but this gateway has no FHIR validator lane for line 2.2 — refusing to answer at an unvalidatable line (FR-36/FR-G29)`.
+  `request declares contract version pa.pas@2.2 but this gateway has no FHIR validator lane for line 2.2 — refusing to answer at an unvalidatable line`.
+  From shn-gateway v0.57.0 the reason no longer ends `(FR-36/FR-G29)`.
   One `$validate` server hosts exactly one version of a given IG, so a line
   without its own lane genuinely cannot be validated on another line's.
 - **Claim on a version-neutral leg.** `coverage-eligibility` carries no
   contract-version token (§8.6); a frame that claims one on that leg is
   malformed, not tolerated.
+
+From shn-gateway v0.57.0 each of these refusals, like a request frame that
+does not decode (`400 request frame decode failed`) or that names an operation
+on a leg defining none (`400 operation header is not defined for this
+transaction type`), is framed as the gateway's answer, with `200` to the Hub,
+as a leg handler's refusal is (§6.2). Earlier releases wrote them bare, and the
+Hub reported its failed forward.
 
 A **bare** request (or a framed one carrying no claim) is never refused: the
 receiver symmetrically recomputes the line the originator would have selected —
@@ -2007,19 +2033,23 @@ res, err := id.RunPriorAuth(ctx, httpClient, endpoints, payer, shnsdk.PriorAuthR
     ProcedureCPT:     "G0151",
     ProcedureDisplay: "Services of a qualified physical therapist in the home health setting, each 15 minutes",
     DiagnosisICD10:   "I63.9",
+    NPI:      orderingNPI,  // the ordering practitioner
+    Patient:  patientJSON,  // your Patient resource for the member (its id is the member id)
+    Coverage: coverageJSON, // your Coverage search result: the member's Coverage and its payor Organization
+    Provider: providerJSON, // your Organization or PractitionerRole record for the requester, with its NPI
     ProceedOnNotCovered: true,
 })
 // res.Outcome == "pended", res.Resume != nil (resume via ResumePriorAuth, §7b, to reach "approved")
 ```
 
-To have the coverage check carry your own records, set `Patient` (your Patient resource for the
-member, whose id is the member id) and `Coverage` (your Coverage search result: a searchset
-Bundle with the member's Coverage and the payor Organization it names) together, and `NPI` (the
-ordering practitioner, sent as `userId` `Practitioner/<NPI>`; required with records). The check is
-then built with `BuildCRDRequest` and names no FHIR server. `Hook` chooses its hook:
-`order-sign` (the default: the order is signed and goes on to prior authorization) or
-`order-select` (the order is still being chosen; the request selects it). Without `Patient` and
-`Coverage` the older order-select request is sent, and `Hook` must be empty.
+Four fields are required, and without any of them `RunPriorAuth` refuses before it sends
+anything: `Patient` (your Patient resource for the member, whose id is the member id),
+`Coverage` (your Coverage search result: a searchset Bundle with the member's Coverage and the
+payor Organization it names), `NPI` (the ordering practitioner, sent as `userId`
+`Practitioner/<NPI>`) and `Provider` (your record for the party requesting the authorization).
+The coverage check is built from these records with `BuildCRDRequest` and names no FHIR server.
+`Hook` chooses its hook: `order-sign` (the default: the order is signed and goes on to prior
+authorization) or `order-select` (the order is still being chosen; the request selects it).
 
 Note there is no `Clinical` field set. The reference payer's verdict for this family is
 a function of the order's HCPCS code, not of the DTR answers, and `RunPriorAuth` only
@@ -2047,7 +2077,10 @@ covJSON = BuildCoverage("Patient/MBR-D-UC04", "MBR-D-UC04")   # 2nd arg = the BA
                                                                 #  refused
 
 # LEG 1 — CRD
-crdReq            = BuildConformantOrderSelectRequest(srJSON, covJSON, "Patient/MBR-D-UC04")   # deprecated: see BuildCRDRequest below
+crdReq            = BuildCRDRequest({Hook: "order-select", HookInstance: <a UUID>, UserID: <the ordering user>,
+                                     DraftOrders: <a Bundle holding srJSON, given an id (it has none)>,
+                                     Selections: [<that order's Type/id>],
+                                     Patient: <your own Patient>, Coverage: <your Coverage search result, or null>})
 crdResp           ← route(crd-order-select / crd-order-select → crd-cards, crdReq)
 obs               = ParseCRDResponse(crdResp)    # every order the payer returned, every coverage-information value, exactly as sent
 cov, ok           = obs.Primary()                # cov: CardCoverage. !ok ⇒ no coverage information; !cov.PARequired() ⇒ no-pa STOP; cov.Covered=="not-covered" ⇒ STOP
@@ -2068,7 +2101,10 @@ qrJSON   = FillQuestionnaire(qJSON, clinical, qrContext)     # ONLY valid when u
                                                               # — an honest zero-answer shell, never invented content
 
 # LEG 3 — PAS
-bundle   = BuildConformantClaimBundle(ConformantClaimInputs{QR: qrJSON, SR: srJSON, PatientRef: "Patient/MBR-D-UC04", CoverageRef: "Coverage/MBR-D-UC04", MemberID: "MBR-D-UC04", Corr: corrID, Created: now})
+bundle   = BuildConformantClaimBundle(ConformantClaimInputs{QR: qrJSON, SR: srJSON, Provider: providerJSON, Coverage: coverageJSON,
+                                          Insurer: payerOrgJSON,   # your own payer Organization record (required from shn-sdk v0.59.0)
+                                          PatientRef: "Patient/MBR-D-UC04", CoverageRef: "Coverage/MBR-D-UC04", MemberID: "MBR-D-UC04",
+                                          Corr: corrID, Created: now, Payer: payer})
 pasResp  ← route(pas-claim / pas-submit → pas-response, bundle)
 result   = ParseClaimResponse(pasResp)           # → {Outcome, PreAuthRef, ValidUntil}
 ```
@@ -2088,8 +2124,9 @@ the network omits them by design: the payer answers from the context and prefetc
 the network never hands a payer a route into the provider's system. For an order type
 whose patient element is `patient` (`NutritionOrder`, `VisionPrescription`) that element
 names your `Patient`. It replaces the deprecated
-`BuildConformantOrderSelectRequest` / `BuildConformantOrderDispatchRequest`, which still
-send an id-only Patient. A payer participant answers with `BuildCRDResponse(line, …)`:
+`BuildConformantOrderSelectRequest` / `BuildConformantOrderDispatchRequest`, which take
+no `Patient`: from shn-sdk v0.59.0 they build nothing and return an error naming
+`BuildCRDRequest` (earlier releases sent an id-only Patient). A payer participant answers with `BuildCRDResponse(line, …)`:
 the order returned in an `update` system action carrying the coverage-information
 extension (with the payer's own `coverage-assertion-id`), and `cards: []` unless it
 supplies cards for a person to read, each with a `source.label` and `source.topic`.
@@ -2097,8 +2134,8 @@ supplies cards for a person to read, each with a `source.label` and `source.topi
 Hooks 2.0 response rules and the CRD card rules for the line, and lists every
 violation; `CDSHooksRules()` is its rule table with the specification text each rule
 enforces. Payer gateways relay the requested hook and a Coverage search result as sent
-from gateway v0.44.0; until your payer's gateway runs it, keep the deprecated request
-builder.
+from gateway v0.44.0, so a payer reached with a request `BuildCRDRequest` builds needs its
+gateway at v0.44.0 or later.
 
 ### 7a.4 What the network changes in a CRD or DTR message
 
@@ -2315,7 +2352,23 @@ The update Bundle payload carries :
   payer refuses one whose prior it never stored).
 - The **unchanged** `QuestionnaireResponse` and `ServiceRequest` from exchange-1.
 - An operative **`DiagnosticReport`** (US Core Note profile) — the new clinical
-  evidence.
+  evidence. From shn-gateway v0.57.0, when a provider's gateway builds this
+  amendment itself, it reads the report from the provider's system of record
+  exactly as held, and the only change it makes to the report's content is
+  registered edit E-06: when that system holds the member's Patient under its own id, it
+  re-points the report's `subject.reference` from that Patient to
+  `Patient/<member id>`, and only when the report names that Patient. The SDK's
+  PAS update builder then gives the report its bundle-local id, drops its
+  `meta.profile` and re-encodes it as it places it in the bundle, as it always
+  has. The gateway refuses to build the amendment, and sends none, when the
+  report has no `subject.reference` (`422 supplemental report names no
+  subject.reference`), names any other subject (`422 supplemental report's
+  subject is not the member's patient in the system of record`), carries a
+  signature that covers the report (a `Signature` in the report itself,
+  outside any resource it contains, or a signed `Provenance` it contains that
+  targets it: `422 signed content cannot be edited (E-06, <carrier>)`), or
+  cannot be read as a resource (`502 supplemental report is not a resource`). An amendment the provider's own client sends is carried as
+  sent, never edited this way.
 - A **`Provenance`** attributing the DiagnosticReport to its source (the
   payer **rejects** supplemental data without Provenance; `ResumePriorAuth` validates
   that `supp.ProvenanceAgent` has a recognized holder/NPI system and nonblank value before calling any builder, so you meet
@@ -2404,8 +2457,9 @@ provJSON = BuildProvenanceWithIdentifier("DiagnosticReport/"+reportID, provenanc
 # Build the update bundle (Claim.related[] → originalCorrelationID):
 updateBundle = BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
     QR: qrJSON, SR: srJSON, DiagnosticReport: drJSON, Provenance: provJSON,
+    Provider: providerJSON, Coverage: coverageJSON, Insurer: payerOrgJSON,   # the records the submission named
     PatientRef: patientRef, CoverageRef: coverageRef, MemberID: memberID,
-    Corr: updateCorrID, OriginalCorr: originalCorrID, Created: now})
+    Corr: updateCorrID, OriginalCorr: originalCorrID, Created: now, Payer: payer})
 
 # Route as pas-claim-update (single originate round-trip, §7):
 updResp ← route(pas-claim-update / pas-update-submit → pas-update-response, updateBundle)
@@ -2657,7 +2711,15 @@ applicable IG profiles. The network enforces a **two-gate** posture:
      PAS answer is checked by the content rules, and a questionnaire package is
      relayed as received. At `observe` and above, a relayed PAS or inquiry
      answer may still be sent to the validator as certification evidence (the
-     gateway's `certify:` log lines); nothing is decided from it. A CDS Hooks
+     gateway's `certify:` log lines); nothing is decided from it. Each line's
+     verdict there is `valid`, `invalid`, `unavailable` or `expired`, and only a
+     `valid` line is certified. From shn-gateway v0.57.0 a line whose validator
+     could not check the message's terminology (a code system it does not hold,
+     such as X12's), with nothing else wrong, is `unavailable` and names that
+     code system, never `invalid`; so is a 2.1 or 2.2 line whose validator has
+     not yet passed its readiness qualification, or stopped answering after
+     passing it (a lost connection, or no answer within the certification's
+     time) and is being qualified again ("lane not qualified"). A CDS Hooks
      answer relayed through the ingress is checked against the CDS Hooks
      response rules, as above.
    - Of coverage eligibility, both gateways validate the request and the answer:
@@ -3015,6 +3077,89 @@ property. Until then, build to the rule: preserve what you do not recognise.
 ## 9. Status and roadmap
 
 ### Changelog
+
+- **2026-09-27 — From shn-gateway v0.57.0, the supplemental report on an amendment a provider's gateway builds keeps the system of record's bytes (§7b.2).**
+  The report is read exactly as the provider's system holds it, and the only
+  change to its content is registered edit E-06: its `subject.reference` is
+  re-pointed to the member's network patient when it names the Patient that
+  system holds the member under. Earlier releases replaced the whole
+  `subject`, whatever patient it named. The SDK's update builder still gives
+  the report its bundle-local id, drops its `meta.profile` and re-encodes it in
+  the bundle. A report with no `subject.reference`, naming another subject, or
+  carrying a signature that covers it is now refused (`422`), and an unreadable one (`502`),
+  before the amendment is sent.
+
+- **2026-09-27 — From shn-gateway v0.57.0, a gateway's refusal of a request frame is framed (§6.2, §8.6).**
+  A refusal a recipient gateway writes about a request frame after the leg is
+  authenticated (a contract line it cannot build or validate, a contract-line
+  claim on a version-neutral leg, a frame that does not decode, an operation
+  header on a leg that defines none) is framed as its answer with `200` to the
+  Hub, like a leg handler's refusal. The requester now reads the gateway's
+  status and reason. Earlier releases wrote these refusals bare, and the
+  requester saw the Hub's failed forward. The no-validator-lane reason no
+  longer ends in `(FR-36/FR-G29)`.
+
+- **2026-09-27 — From shn-gateway v0.57.0, a payer's CDS Hooks answer reaches the EHR with the payer's media type (§6.2).**
+  A payer's gateway frames every success answer it relays (CDS Hooks,
+  questionnaire package, PAS) with the media type the payer's system stated,
+  and the provider's CRD ingress writes that type to the EHR, for example the
+  reference payer's `text/json;charset=UTF-8`. Earlier releases framed every
+  success as `application/fhir+json`, and the CRD ingress always wrote
+  `application/json`. The provider's DTR and PAS ingress still write
+  `application/fhir+json`. A CDS Hooks answer framed
+  `application/fhir+json` (as every earlier payer gateway frames it), stating
+  no type, or stating one that does not parse as a media type is still written
+  as `application/json`.
+
+- **2026-09-27 — From shn-gateway v0.57.0, an empty application error body reaches the requester empty (§6.2).**
+  When a participant's system answers a leg non-2xx with an empty body, the
+  requester now receives that status with an empty body and the media type the
+  system stated, or none, where earlier releases substituted
+  `{"error":"<leg>: recipient answered <status> with no error detail"}`. A
+  requester that negotiated no frame still sees the Hub's failed forward, as
+  before; the gateway's own refusals keep their `{"error": …}` body.
+
+- **2026-09-27 — From shn-sdk v0.59.0, `shnsdk.Responder` frames its refusals once a leg is open (§6.3).**
+  A payer that answers with this SDK's `Responder` now follows the §6.3 rule
+  for its own refusals of a request it has authenticated and decrypted: each
+  is its answer, sealed into the response leg with `200` to the Hub, its status
+  and reason inside, to a requester that decodes frames. That covers a request
+  frame it cannot decode (`400`) and the attestation check on a PAS submit or
+  update (`403`, naming the item); the attestation refusal is byte for byte the
+  one a payer gateway frames. Earlier releases wrote both bare, so the
+  requester saw the Hub's failed forward and never the reason. Its refusals
+  before the leg is authenticated and decrypted, and a response leg it cannot
+  build, stay bare; a requester that does not decode frames receives the same
+  bare answer as before.
+
+- **2026-09-27 — From shn-sdk v0.59.0, the PAS claim builders name only the payer you supply (§7a, §7b).**
+  `BuildConformantClaimBundle` and `BuildConformantClaimUpdateBundle` (and their `AtLine`
+  forms) require `Insurer`, your own Organization record for the payer your member's
+  Coverage names, on every call. It rides the Bundle as its own entry, as you supplied
+  it (less any `meta.profile`), and `Claim.insurer` and `Coverage.payor` both name it; a
+  call without it, or with a record that does not carry the `Payer` identity the leg is
+  routed on, is refused. This is a breaking change: earlier releases, unless
+  `PayerOrgEntry` was set, named a payer Organization the SDK made up (a contained
+  `cms-payer` Organization, or a `Claim.insurer` reference to an `Organization/payer` the
+  request did not carry). A Coverage that contains an Organization under an id other than
+  the payer entry's, which nothing in it references, is now refused; earlier releases
+  dropped such a record silently when its id was `cms-payer`. `PayerOrgEntry` and
+  `ContainedInsurer` are deprecated and have no effect, and every amendment now carries,
+  as it did with `PayerOrgEntry` set, a prior Claim entry the SDK synthesizes: a
+  restatement carrying the original submission's correlation identifier, not your original
+  Claim (its `created` is the amendment's time, and its type and priority are the
+  SDK's own). With `AbsoluteRefs`, an entry none of whose references changes keeps its
+  JSON content, key order and number spelling.
+
+- **2026-09-27 — From shn-sdk v0.59.0, the deprecated CRD request builders refuse (§7a).**
+  `BuildConformantOrderSelectRequest` and `BuildConformantOrderDispatchRequest` take
+  a patient id and no `Patient` record, so the only request they could build carried a
+  Patient they made up (an id-only `Patient`), with a placeholder `fhirServer` and user on
+  `order-select`, and a Coverage with its payor rewritten beside a payer `Organization` of
+  their own on `order-dispatch`. They now build nothing and return an error naming
+  `BuildCRDRequest`, whatever their inputs; their signatures are unchanged, and a later
+  release removes them. Build a CRD request with `BuildCRDRequest` from your own
+  `Patient` and Coverage search result: it carries each exactly and names no FHIR server.
 
 - **2026-09-27 — From shn-gateway v0.56.0, a provider's gateway resends an amendment it builds once after a payer's `409` (§7b.2).**
   When a provider's gateway builds a PAS amendment for its participant and the

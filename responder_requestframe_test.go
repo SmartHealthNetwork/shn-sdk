@@ -100,9 +100,10 @@ func TestResponderUnframesInboundFramedPASRequest(t *testing.T) {
 
 // TestResponderRejectsCorruptInboundFrame is the request-frame receiver's rejection row
 // (every guard ships its rejection test): a payload beginning with the
-// frame magic byte but failing DecodeHTTPFrame (unsupported version) is a 400,
-// exactly like a corrupt envelope at step 2 — never silently passed through to a
-// handler as opaque bytes.
+// frame magic byte but failing DecodeHTTPFrame (unsupported version) is a 400 —
+// never silently passed through to a handler as opaque bytes. This harness has
+// no frame resolver, so the requester is a legacy one and the 400 is bare; a
+// frame-capable requester gets it framed (TestSDKResponder_PostDecryptionRefusalsFramed).
 func TestResponderRejectsCorruptInboundFrame(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
 	_, srv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})

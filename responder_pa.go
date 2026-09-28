@@ -597,3 +597,15 @@ func parsePASInquiry(body []byte) (PASInquiry, int, string) {
 	}
 	return inq, 0, ""
 }
+
+// extractResourceTypeAndID reads resourceType + id from a FHIR resource JSON.
+func extractResourceTypeAndID(resourceJSON []byte) (resourceType, id string) {
+	var m struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+	}
+	if err := json.Unmarshal(resourceJSON, &m); err != nil {
+		return "", ""
+	}
+	return m.ResourceType, m.ID
+}

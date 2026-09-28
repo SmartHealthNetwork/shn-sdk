@@ -18,6 +18,7 @@ func infoChangedTestSR() []byte {
 
 func infoChangedTestInputs(infoChanged bool) ConformantClaimInputs {
 	return ConformantClaimInputs{Coverage: testMemberCoverage("MBR-PD-UC04"),
+		Insurer:        testPayerOrganization(CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: MemberSystem,
 		SR:             infoChangedTestSR(),

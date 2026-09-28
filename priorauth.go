@@ -63,14 +63,9 @@ type PriorAuthRequest struct {
 	// that request now fails before its first leg. It is a breaking change, and
 	// deliberately not a silent one.)
 	//
-	// With both set, the coverage
-	// check is a CDS Hooks order-sign request (the order is signed and goes on to
-	// prior authorization) built from these records with BuildCRDRequest, and it
-	// names no FHIR server. With neither set, the check keeps the older request
-	// (BuildConformantOrderSelectRequest: the order-select hook, an id-only Patient
-	// and a Coverage this package builds), which a payer that answers order-select
-	// only for some orders, or not at all, cannot adjudicate; that request is
-	// removed in a later release. Setting only one of them is an error.
+	// The coverage check is a CDS Hooks order-sign request (the order is signed
+	// and goes on to prior authorization) built from these records with
+	// BuildCRDRequest, and it names no FHIR server.
 	Patient  []byte
 	Coverage []byte
 	// Provider is your own record for the party requesting the authorization: an
@@ -84,14 +79,10 @@ type PriorAuthRequest struct {
 	// nothing here invents one.
 	Provider []byte
 	// MemberIDSystem is the namespace your own records name this member under.
-	// It is REQUIRED for the prior-authorization leg: a payer matches a claim,
-	// and any later inquiry about it, on the member id, so a claim whose Patient
-	// identifies nobody is stored under a member you cannot ask about again.
-	//
-	// With Patient set it is read from that record and this field is optional;
-	// stating a different namespace than your own record does is an error. With
-	// no Patient (the older coverage check, removed in a later release) there is
-	// no record to read, so this field is the only way to say it.
+	// It is optional: it is read from your Patient record, whose member
+	// identifier the claim carries, because a payer matches a claim, and any
+	// later inquiry about it, on the member id. Stating a different namespace
+	// than your own record does is an error.
 	MemberIDSystem string
 	// Hook is the CDS Hooks hook of a coverage check built from your own
 	// records: "order-sign" (the default: the order is signed and goes on to
@@ -248,8 +239,7 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	}
 
 	// LEG 1 — CRD on the crd-order-select leg (which carries order-sign and
-	// order-select): order-sign from the caller's own records, or the older
-	// order-select request when the caller supplied none.
+	// order-select), built from the caller's own records.
 	crdReq, err := priorAuthCRDRequest(req, srJSON, patientRef)
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("crd-order-select: %w", err)
@@ -510,17 +500,12 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 		MemberIDSystem: memberSystem,
 		Corr:           pasCorr,
 		Created:        id.now(),
-		// The same reason ResumePriorAuth carries these: a real payer resolves
-		// Claim.insurer and Coverage.payor against the bundle it was handed and refuses
-		// a reference it cannot find, so the generic unresolvable payer Organization
-		// this leg used to send is rejected before adjudication. These make the bundle
-		// this builder's reference-payer-conformant form — payer Organization as a
-		// resolvable entry, absolute references, and the Claim item stamped with the
-		// ORDER's own procedure code rather than the builder's placeholder, which is
-		// what a code-keyed payer decides on.
-		PayerOrgEntry: true,
-		AbsoluteRefs:  true,
-		Payer:         payerIdentity,
+		// The same reason ResumePriorAuth sets it: a real payer resolves references
+		// against the absolute entry fullUrls of the bundle it was handed, and refuses
+		// a relative one it cannot find (the payer Organization rides as a resolvable
+		// entry on every call).
+		AbsoluteRefs: true,
+		Payer:        payerIdentity,
 	})
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: build claim bundle: %w", err)
@@ -881,13 +866,10 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 		// payer either refuses the update outright (the prior Claim is unresolvable) or
 		// carries the prior decision forward unchanged, so a genuinely-answered
 		// amendment comes back still pended — the documented resume flow would never
-		// reach a determination. Setting these makes the bundle this builder's
-		// reference-payer-conformant form, which also resolves the payor and the insurer
-		// against real bundle entries and stamps the Claim item with the ORDER's own
-		// procedure code instead of the builder's placeholder.
-		PayerOrgEntry: true,
-		AbsoluteRefs:  true,
-		Payer:         payerIdentity,
+		// reach a determination. The builder carries both on every call; absolute
+		// references make them resolve against the entries the payer was handed.
+		AbsoluteRefs: true,
+		Payer:        payerIdentity,
 	})
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: build claim update bundle: %w", err)

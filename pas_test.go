@@ -38,6 +38,7 @@ func conformantSubmitInputs(t *testing.T) ConformantClaimInputs {
 	return ConformantClaimInputs{
 		Provider:       testRequestingProvider(),
 		Coverage:       testMemberCoverage(member),
+		Insurer:        testPayerOrganization(CMSPayerIdentity),
 		MemberIDSystem: MemberSystem,
 		QR:             qrJSON,
 		SR:             srJSON,
@@ -826,7 +827,7 @@ func TestBuildConformantClaimUpdateBundleAtLine_DeltasByLine(t *testing.T) {
 		if err := json.Unmarshal(got, &bundle); err != nil {
 			t.Fatalf("unmarshal bundle: %v", err)
 		}
-		hasRelationship := false
+		hasRelationship, seenClaim := false, false
 		for _, e := range bundle.Entry {
 			var probe struct {
 				ResourceType string `json:"resourceType"`
@@ -845,6 +846,12 @@ func TestBuildConformantClaimUpdateBundleAtLine_DeltasByLine(t *testing.T) {
 			if probe.ResourceType != "Claim" {
 				continue
 			}
+			// The operative Claim is the first; a later Claim entry is the prior
+			// Claim it amends, which relates to nothing.
+			if seenClaim {
+				continue
+			}
+			seenClaim = true
 			if len(probe.Related) == 0 {
 				t.Fatalf("line %s: Claim has no related[]", tc.line)
 			}
@@ -1235,6 +1242,7 @@ func conformantUpdateInputsFromGolden(t *testing.T) ConformantClaimUpdateInputs 
 	return ConformantClaimUpdateInputs{
 		Provider:         testRequestingProvider(),
 		Coverage:         testMemberCoverage(member),
+		Insurer:          testPayerOrganization(CMSPayerIdentity),
 		MemberIDSystem:   MemberSystem,
 		QR:               qrJSON,
 		SR:               srJSON,
@@ -1498,6 +1506,7 @@ func TestBuildConformantClaimBundle_DeviceRequestOrder_NoPayerOrgEntry(t *testin
 		`"subject":{"reference":"Patient/MBR-OX"},"codeCodeableConcept":{"coding":[{"system":` +
 		`"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E1390","display":"Oxygen concentrator"}]}}`)
 	out, err := BuildConformantClaimBundle(ConformantClaimInputs{Coverage: testMemberCoverage("MBR-OX"),
+		Insurer:        testPayerOrganization(CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: MemberSystem,
 		SR:             dr, PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/MBR-OX", MemberID: "MBR-OX",
@@ -1524,74 +1533,6 @@ func TestBuildConformantClaimBundle_OrderWithNoCode_Errors(t *testing.T) {
 	in.SR = []byte(`{"resourceType":"ServiceRequest","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"}}`)
 	if _, err := BuildConformantClaimBundle(in); err == nil {
 		t.Fatal("BuildConformantClaimBundle with an order carrying no code = nil error, want a loud failure (never a silent 72148 fallback)")
-	}
-}
-
-// TestBuildConformantClaimBundle_ContainedInsurer_True proves the reference-payer lane
-// (ContainedInsurer:true): the Claim contains a #cms-payer Organization with the expected
-// identifier and the insurer references it, making the ref resolvable.
-// Also checks the contained org's identifier matches the Coverage's payer (consistency).
-func TestBuildConformantClaimBundle_ContainedInsurer_True(t *testing.T) {
-	in := conformantSubmitInputs(t)
-	in.ContainedInsurer = true
-
-	got, err := BuildConformantClaimBundle(in)
-	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle(ContainedInsurer:true): %v", err)
-	}
-
-	claim := claimFromBundle(t, got)
-
-	// insurer must reference #cms-payer (the contained org).
-	var insurer struct {
-		Reference string `json:"reference"`
-	}
-	if err := json.Unmarshal(claim["insurer"], &insurer); err != nil {
-		t.Fatalf("parse insurer: %v", err)
-	}
-	wantRef := "#" + conformantPayerOrgID
-	if insurer.Reference != wantRef {
-		t.Errorf("Claim.insurer.reference = %q, want %q", insurer.Reference, wantRef)
-	}
-
-	// contained must carry an Organization with the expected identifier.
-	if _, ok := claim["contained"]; !ok {
-		t.Fatal("Claim has no 'contained' array")
-	}
-	var contained []json.RawMessage
-	if err := json.Unmarshal(claim["contained"], &contained); err != nil {
-		t.Fatalf("parse contained: %v", err)
-	}
-	var foundPayer bool
-	for _, c := range contained {
-		var org struct {
-			ResourceType string `json:"resourceType"`
-			ID           string `json:"id"`
-			Identifier   []struct {
-				System string `json:"system"`
-				Value  string `json:"value"`
-			} `json:"identifier"`
-		}
-		if err := json.Unmarshal(c, &org); err != nil {
-			continue
-		}
-		if org.ResourceType != "Organization" || org.ID != conformantPayerOrgID {
-			continue
-		}
-		foundPayer = true
-		// Identifier must match the Coverage's contained payer (consistency).
-		if len(org.Identifier) == 0 {
-			t.Fatal("contained #cms-payer Organization has no identifier")
-		}
-		if got, want := org.Identifier[0].System, systemNAICCompanyCode; got != want {
-			t.Errorf("contained payer identifier.system = %q, want %q", got, want)
-		}
-		if got, want := org.Identifier[0].Value, conformantPayerOrgValue; got != want {
-			t.Errorf("contained payer identifier.value = %q, want %q", got, want)
-		}
-	}
-	if !foundPayer {
-		t.Errorf("Claim.contained has no Organization with id=%q", conformantPayerOrgID)
 	}
 }
 
@@ -1689,83 +1630,6 @@ func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 	if claimItemCode != "L8000" {
 		t.Fatalf("Claim.item[0].productOrService code = %q, want L8000 (the SR's HCPCS code) — "+
 			"br-payer keys PAS on Claim.item.productOrService, not the SR (still hardcoded 72148?)", claimItemCode)
-	}
-}
-
-// TestBuildConformantClaimBundle_ContainedInsurer_False proves the SHN-native path
-// (ContainedInsurer:false, the default): the Claim insurer stays the generic
-// "Organization/payer" and there is no contained payer organization — byte-identical to
-// the current output.
-func TestBuildConformantClaimBundle_ContainedInsurer_False(t *testing.T) {
-	in := conformantSubmitInputs(t)
-	// ContainedInsurer defaults to false — explicitly check both zero-value and explicit false.
-	for _, explicit := range []bool{false, false} {
-		in.ContainedInsurer = explicit
-
-		got, err := BuildConformantClaimBundle(in)
-		if err != nil {
-			t.Fatalf("BuildConformantClaimBundle(ContainedInsurer:false): %v", err)
-		}
-
-		claim := claimFromBundle(t, got)
-
-		// insurer must stay the generic Organization/payer.
-		var insurer struct {
-			Reference string `json:"reference"`
-		}
-		if err := json.Unmarshal(claim["insurer"], &insurer); err != nil {
-			t.Fatalf("parse insurer: %v", err)
-		}
-		if insurer.Reference != "Organization/payer" {
-			t.Errorf("ContainedInsurer:false: Claim.insurer.reference = %q, want Organization/payer", insurer.Reference)
-		}
-
-		// No contained payer org must be present.
-		if _, ok := claim["contained"]; ok {
-			var contained []json.RawMessage
-			if err := json.Unmarshal(claim["contained"], &contained); err == nil {
-				for _, c := range contained {
-					var probe struct {
-						ResourceType string `json:"resourceType"`
-						ID           string `json:"id"`
-					}
-					if err := json.Unmarshal(c, &probe); err == nil {
-						if probe.ResourceType == "Organization" && probe.ID == conformantPayerOrgID {
-							t.Errorf("ContainedInsurer:false: unexpected contained payer org (#%s) in Claim", conformantPayerOrgID)
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-// TestBuildConformantClaimUpdateBundle_ContainedInsurer_True proves the same for the update
-// builder: ContainedInsurer:true → update Claim also has a contained #cms-payer org and
-// insurer.reference == "#cms-payer".
-func TestBuildConformantClaimUpdateBundle_ContainedInsurer_True(t *testing.T) {
-	base := conformantUpdateInputsFromGolden(t)
-	base.ContainedInsurer = true
-
-	got, err := BuildConformantClaimUpdateBundle(base)
-	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle(ContainedInsurer:true): %v", err)
-	}
-
-	claim := claimFromBundle(t, got)
-
-	var insurer struct {
-		Reference string `json:"reference"`
-	}
-	if err := json.Unmarshal(claim["insurer"], &insurer); err != nil {
-		t.Fatalf("parse insurer: %v", err)
-	}
-	wantRef := "#" + conformantPayerOrgID
-	if insurer.Reference != wantRef {
-		t.Errorf("update Claim.insurer.reference = %q, want %q", insurer.Reference, wantRef)
-	}
-	if _, ok := claim["contained"]; !ok {
-		t.Fatal("update Claim has no 'contained' array")
 	}
 }
 
@@ -1896,38 +1760,6 @@ func TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable(t *
 	}
 }
 
-// TestBuildConformantClaimUpdateBundle_NoPayerOrgEntry_NoPriorClaimEntry is the rejection arm of
-// the prior-Claim-inclusion guard: the SHN-native path (PayerOrgEntry:false) must NOT carry the
-// reference-payer-lane-only prior Claim entry / related.reference / infoChanged (those are the real-br-payer
-// shape; the SHN-native lane accepts the lean identifier-only related). Byte-identity is locked by
-// MatchesGolden; this asserts the structural absence directly.
-func TestBuildConformantClaimUpdateBundle_NoPayerOrgEntry_NoPriorClaimEntry(t *testing.T) {
-	got, err := BuildConformantClaimUpdateBundle(conformantUpdateInputsFromGolden(t)) // PayerOrgEntry:false
-	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
-	}
-	var bundle struct {
-		Entry []struct {
-			Resource json.RawMessage `json:"resource"`
-		} `json:"entry"`
-	}
-	if err := json.Unmarshal(got, &bundle); err != nil {
-		t.Fatalf("unmarshal bundle: %v", err)
-	}
-	claimCount := 0
-	for _, e := range bundle.Entry {
-		var probe struct {
-			ResourceType string `json:"resourceType"`
-		}
-		if err := json.Unmarshal(e.Resource, &probe); err == nil && probe.ResourceType == "Claim" {
-			claimCount++
-		}
-	}
-	if claimCount != 1 {
-		t.Errorf("SHN-native update bundle has %d Claim entries, want exactly 1 (no prior Claim entry)", claimCount)
-	}
-}
-
 // TestBuildConformantClaimBundle_AbsoluteRefs_True proves the reference-payer lane
 // (AbsoluteRefs:true): every internal reference pointing to a bundle entry is rewritten
 // to its absolute fullUrl (pasBundleBaseURL + "/" + "<resourceType>/<id>"). Specifically:
@@ -1936,7 +1768,8 @@ func TestBuildConformantClaimUpdateBundle_NoPayerOrgEntry_NoPriorClaimEntry(t *t
 //     therefore left UNTOUCHED — there is no literal to absolutize (the
 //     logical-reference shape; see TestConformantClaimBundleInsuranceCoverageIsLogicalRef).
 //   - Coverage.beneficiary.reference is absolute and equals the Patient fullUrl.
-//   - Claim.insurer.reference "#cms-payer" (contained) is UNCHANGED.
+//   - Claim.insurer.reference is absolute and equals the payer Organization entry's
+//     fullUrl (the participant's own payer record).
 //
 // Also proves that golden tests still pass (default false = byte-identical): see
 // TestBuildConformantClaimBundle_MatchesGolden (separate test, unchanged).
@@ -2082,16 +1915,16 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_True(t *testing.T) {
 		t.Errorf("ServiceRequest.subject.reference = %q: expected RELATIVE (Patient/<id>) for the [ServiceRequest] patient-compartment retrieve; got absolute → would yield A3 for G0151", sr.Subject.Reference)
 	}
 
-	// Claim.insurer.reference "#cms-payer" (contained fragment) must be UNCHANGED.
+	// Claim.insurer.reference names the participant's own payer entry, by its absolute fullUrl.
 	var insurer struct {
 		Reference string `json:"reference"`
 	}
 	if err := json.Unmarshal(claim["insurer"], &insurer); err != nil {
 		t.Fatalf("parse Claim.insurer: %v", err)
 	}
-	wantInsurer := "#" + conformantPayerOrgID
-	if insurer.Reference != wantInsurer {
-		t.Errorf("Claim.insurer.reference = %q (contained), want unchanged %q", insurer.Reference, wantInsurer)
+	wantInsurer := fullURLByRelID["Organization/"+testPayerOrgID]
+	if wantInsurer == "" || insurer.Reference != wantInsurer {
+		t.Errorf("Claim.insurer.reference = %q, want the payer entry's fullUrl %q", insurer.Reference, wantInsurer)
 	}
 }
 
