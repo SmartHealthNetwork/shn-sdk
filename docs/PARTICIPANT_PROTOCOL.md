@@ -390,6 +390,23 @@ Accounts service is an additive convenience layer over it.
 > revoke) is interactive (browser Cognito login) and is verified operator-side
 > after each deploy.
 
+**Payer identities on an access request.** A payer applicant declares the payer
+identities it operates on its access request (the portal's request-access form, or
+`POST /access-requests` on the Accounts service) as `payerIds`, an array of
+`{ "system", "value" }`. Each is an identifier-system URI and a value, both present,
+neither containing whitespace or `|`, with no identity twice and at most 16. For
+example:
+
+```
+{ "payerIds": [ { "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00001" } ] }
+```
+
+A request that breaks this is refused `400 invalid payerIds: …`, and the message
+names the expected form. A declared identity is a claim, not authority: the
+operator vouches it (correcting it with you if needed) when approving the request,
+or later for an approved organization, and only a vouched identity passes the checks
+below.
+
 **Payer identities acquired after onboarding.** A payer client re-declares the
 identities it is routed for with `PUT /clients/{id}/payer-ids` on the Accounts
 service, authenticated as the client's owner:

@@ -27,16 +27,19 @@ without deploying anything of your own.
   ever. The published test members below are the ones the endpoint holds records for; a
   member it does not hold is carried under the id you send (§8), so any patient you use
   must be synthetic too.
-- **Application traffic evidence.** After owner activation, default capture includes raw
-  request and response bodies, headers, and authentication material, including synthetic
-  client secrets, bearer tokens and assertions. Evidence is accessible to ordinary staff
-  in the operator console, with indefinite retention. Use synthetic credentials only.
-  Collection is nonblocking and best effort: outages, capacity suspension, partial bodies
-  and gaps are possible; traffic rejected before the application edge is not captured.
-  This evidence is stored separately from routine stdout logs; raw bodies and tokens
-  are not added to stdout. As of 2026-09-19, cloud capture remains OFF pending measured
-  capacity acceptance and owner activation. Local two-reference-participant acceptance
-  enables the same collectors with synthetic data.
+- **Application traffic evidence.** From 00:00 on 2026-10-07 until 03:00 on 2026-10-15,
+  US Eastern time, the endpoint records the application traffic it handles: raw request
+  and response bodies, headers, and authentication material, including synthetic client
+  secrets, bearer tokens and assertions. Nothing is redacted. SHN staff use it to
+  troubleshoot integrations and report on testing; it is accessible to ordinary staff in
+  the operator console. Everything recorded is deleted on 2026-12-13, and the
+  database backups that held it expire within a day after.
+  The window may open earlier for a short dry run; anything recorded then has the same
+  access and deletion date. Outside the window no bodies or headers are recorded. Use
+  synthetic credentials only. Collection is nonblocking and best effort: outages,
+  capacity suspension, partial bodies and gaps are possible; traffic rejected before the
+  application edge is not captured. This evidence is stored separately from routine
+  stdout logs; raw bodies and tokens are not added to stdout.
 - **Availability.** This endpoint remains available for integration testing, with no
   scheduled teardown date. It is a test service, not a production endpoint.
 - **No verification, no SLA.** Registration is self-service and unauthenticated beyond
@@ -204,6 +207,25 @@ line should read the Bundle out of the `Parameters` until that answer is carried
 
 ## 2. Register a client
 
+Every registration names who is testing, so SHN staff can tell whose calls they are
+looking at, help when something fails, and report how the testing went. These fields are
+required:
+
+| Field | What to send |
+|---|---|
+| `client_name` | A name for this client, e.g. `"Acme EHR test"` |
+| `organization` | Your organization |
+| `contact_name` | The person SHN staff should contact about this client |
+| `contact_email` | That person's email address, as a plain address (`name@example.org`) |
+| `system_under_test` | The product or system you are testing, e.g. `"Acme EHR 24.1"` |
+| `participant_type` | One of `ehr_vendor`, `provider_organization`, `intermediary`, `other` |
+
+Each is at most 256 characters (320 for the email). A registration missing any of them is
+refused with `400`, and the answer names every missing field, for example
+`missing required registration fields: contact_email, system_under_test`. SHN staff can
+correct the details you registered, and can group several of your clients under one
+organization; you don't need to register again to fix a typo.
+
 Two authentication methods are supported. Pick whichever fits your stack.
 
 ### Option A — `private_key_jwt` (recommended: SMART Backend Services style)
@@ -218,9 +240,13 @@ openssl ec -in client-key.pem -pubout -out client-pub.pem
 Register the **public** key (never send the private key anywhere):
 
 ```bash
-jq -n --arg pem "$(cat client-pub.pem)" \
-  '{client_name: "Acme EHR test", auth_method: "private_key_jwt", alg: "ES384", public_key_pem: $pem}' \
-  | curl -s https://pa-test.shn-preview.org/register \
+jq -n --arg pem "$(cat client-pub.pem)" '{
+    client_name: "Acme EHR test", auth_method: "private_key_jwt",
+    alg: "ES384", public_key_pem: $pem,
+    organization: "Acme Health IT", contact_name: "Pat Example",
+    contact_email: "pat@example.org", system_under_test: "Acme EHR 24.1",
+    participant_type: "ehr_vendor"
+  }' | curl -s https://pa-test.shn-preview.org/register \
       -H 'Content-Type: application/json' -d @-
 ```
 
@@ -237,7 +263,10 @@ Response:
 ```bash
 curl -s https://pa-test.shn-preview.org/register \
   -H 'Content-Type: application/json' \
-  -d '{"client_name": "Acme EHR test", "auth_method": "client_secret"}'
+  -d '{"client_name": "Acme EHR test", "auth_method": "client_secret",
+       "organization": "Acme Health IT", "contact_name": "Pat Example",
+       "contact_email": "pat@example.org", "system_under_test": "Acme EHR 24.1",
+       "participant_type": "ehr_vendor"}'
 ```
 
 Response — **the `client_secret` is returned exactly once, at registration.** It is never
@@ -894,13 +923,16 @@ could not reach the Hub.
 
 | Limit | Value | On exceeding |
 |---|---|---|
-| Registration, per source IP | 5 per hour | `429` |
+| Registration, per source IP | 50 per hour | `429` |
 | Requests per client | 60 per minute | `429` |
 | Concurrent requests in flight | 8 | `503` |
 | Request body | 5 MiB | `400` |
 
 A body over the cap is refused before any of it is forwarded, with
 `{"error":"request body exceeds 5 MiB"}`.
+
+The per-IP registration limit allows a room of testers sharing one network address. SHN
+may raise these limits for an event; the values above are the standing ones.
 
 If you are scripting repeated registration/token/CRD/DTR/PAS runs in a loop, register once
 and reuse the client — a normal integration test needs a handful of registrations at most.
