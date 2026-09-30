@@ -26,20 +26,7 @@ without deploying anything of your own.
 - **Synthetic data only.** Send only synthetic test data — no real patient information,
   ever. The published test members below are the ones the endpoint holds records for; a
   member it does not hold is carried under the id you send (§8), so any patient you use
-  must be synthetic too.
-- **Application traffic evidence.** From 00:00 on 2026-10-07 until 03:00 on 2026-10-15,
-  US Eastern time, the endpoint records the application traffic it handles: raw request
-  and response bodies, headers, and authentication material, including synthetic client
-  secrets, bearer tokens and assertions. Nothing is redacted. SHN staff use it to
-  troubleshoot integrations and report on testing; it is accessible to ordinary staff in
-  the operator console. Everything recorded is deleted on 2026-12-13, and the
-  database backups that held it expire within a day after.
-  The window may open earlier for a short dry run; anything recorded then has the same
-  access and deletion date. Outside the window no bodies or headers are recorded. Use
-  synthetic credentials only. Collection is nonblocking and best effort: outages,
-  capacity suspension, partial bodies and gaps are possible; traffic rejected before the
-  application edge is not captured. This evidence is stored separately from routine
-  stdout logs; raw bodies and tokens are not added to stdout.
+  must be synthetic too. Use credentials made only for this endpoint.
 - **Availability.** This endpoint remains available for integration testing, with no
   scheduled teardown date. It is a test service, not a production endpoint.
 - **No verification, no SLA.** Registration is self-service and unauthenticated beyond
@@ -220,8 +207,9 @@ required:
 | `system_under_test` | The product or system you are testing, e.g. `"Acme EHR 24.1"` |
 | `participant_type` | One of `ehr_vendor`, `provider_organization`, `intermediary`, `other` |
 
-Each is at most 256 characters (320 for the email). A registration missing any of them is
-refused with `400`, and the answer names every missing field, for example
+Each is plain text of at most 256 characters (320 for the email), with surrounding whitespace
+removed and no control characters such as line breaks. A registration missing any of them
+is refused with `400`, and the answer names every missing field, for example
 `missing required registration fields: contact_email, system_under_test`. SHN staff can
 correct the details you registered, and can group several of your clients under one
 organization; you don't need to register again to fix a typo.
@@ -892,20 +880,31 @@ payer's gateway was reached but its answer was lost on the way back, the `502` s
 recipient may have received this request …` — because the payer may have acted on it:
 check the outcome (for PAS, `$inquire`) before resending.
 
-A `504` is the one exchange failure the endpoint names rather than leaving generic: the
+A `504` is an exchange failure the endpoint names rather than leaving generic. When the
 leg to the payer produced no answer within the endpoint's gateway's wait (30 seconds; the
-Hub, the payer's gateway and the payer's own system share that budget). The body is
+Hub, the payer's gateway and the payer's own system share that budget), the body is
 `{"error":"no answer on the hub leg within 30s (hub leg timeout)"}` — the number is the
 gateway's own leg deadline — carried as an `OperationOutcome` with issue code `timeout` on
-the FHIR operation routes. The endpoint relays its gateway's `504` and body as they are.
+the FHIR operation routes. From shn-gateway v0.59.0, the `504` may instead carry the
+payer's gateway's own body, as JSON on every route. When the payer's own system did not
+answer within its gateway's deadline for it (25 seconds unless the payer set another), the
+body is `{"error":"the payer's system received this request but did not answer in time; it
+may have acted on it: check its outcome before resending"}`, or `{"error":"the payer's
+system could not be reached in time"}` when the request was not sent. When the payer's
+gateway spent its deadline on its own work before it could ask its system, the body is
+`{"error":"the payer's gateway ran out of time before it could send this request to the
+payer's system; the payer's system did not receive it"}`. The endpoint relays its
+gateway's `504` and body as they are.
 
 A `502` is a failed exchange, not a payer verdict. Its message says whether the payer
 may have received the request: when it says so, check the outcome (for PAS, `$inquire`)
 before resending; when it does not (`hub routing failed`, `the payer's system could not be
 reached`), nothing reached the payer, and a retry may succeed once the far side is
 reachable again. A `504` is a failure with its cause named, and says so too when the
-request had already been sent. You may retry under the same `X-Correlation-Id`: it is your
-trace value, and reusing it is never refused (§8.5).
+request had already been sent; from shn-gateway v0.59.0, one saying the payer's system did
+not receive it, or could not be reached in time, means nothing reached the payer, and a
+retry is safe. You may retry under the same `X-Correlation-Id`: it is your trace value, and
+reusing it is never refused (§8.5).
 
 **A refusal the payer's gateway itself produces is not a `502`.** A member the payer does
 not hold, a request with no order to decide on, a validation failure: these come back with
@@ -914,9 +913,11 @@ the payer's own status and error text — for example
 `order-sign` request whose `draftOrders` is empty. So do the payer gateway's own
 failures: `502 {"error":"the payer's system could not be reached"}` when the payer's
 own system never got the request, a `502` saying the payer's system may have acted on it
-when it got the request and gave no usable answer, `502` or `503` when it could not read
-the payer's records. On a PAS submission, any refusal the payer gateway makes after the
-payer's system answered says so too: check the outcome with `$inquire` before resending. `502 hub routing failed` means only that the endpoint's gateway
+when it got the request and gave no usable answer, from shn-gateway v0.59.0 a `504` when
+the payer's system did not answer within its gateway's deadline for it (saying the same
+when it got the request), `502` or `503` when it could not read the payer's records. On a
+PAS submission, any refusal the payer gateway makes after the payer's system answered says
+so too: check the outcome with `$inquire` before resending. `502 hub routing failed` means only that the endpoint's gateway
 could not reach the Hub.
 
 ### 8.4 Rate and size limits
@@ -939,18 +940,24 @@ and reuse the client — a normal integration test needs a handful of registrati
 
 ### 8.5 When something fails, quote `X-Correlation-Id`
 
-Every answer from this endpoint carries an `X-Correlation-Id` header: the id the exchange
-is recorded under on our side. If a call does not do what you expect, send us that value
-and the time of the call, and we can find the request, the legs it ran and the answer the
-payer gave without you sending the body again. It is on refusals as much as on successes,
-including the endpoint's own `4xx` and `5xx` answers.
+Every answer to a CRD, DTR or PAS call carries an `X-Correlation-Id` header: the id the
+exchange is recorded under on our side. If a call does not do what you expect, send us
+that value and the time of the call, and we can find the call and the legs it ran. It is
+on refusals as much as on successes, including the endpoint's own `4xx` and `5xx` answers.
+Registration, token and SMART discovery (`/.well-known/smart-configuration`) answers carry
+none, and neither does the redirect a path with a doubled or dotted segment gets
+(`//Claim/$submit`) or an error the load balancer answers when the endpoint itself is
+unavailable: for those, send us the time and your client id. Whichever you send, send it
+to your SHN contact.
 
 You can also send your own. An `X-Correlation-Id` request header of up to 64 characters
 (letters, digits, `.`, `_` and `-`) is your call's trace value: it comes back on the answer,
 and our log records it beside the exchange, so the id your integration test already tracks
-is the one we find. A header outside that shape is ignored and an id is assigned instead.
+is the one we find. A header outside that shape, or sent more than once, is ignored and
+an id is assigned instead.
 Reusing a trace value, or retrying under it, is never refused: each call's exchange runs
-under its own id, which every answer also carries as `X-SHN-Leg-Id`.
+under its own id, which the answer to every exchange that ran also carries as
+`X-SHN-Leg-Id`.
 
 A PAS submission is different in one way. If its Claim names its own correlation
 (`Claim.identifier` with system `urn:shn:correlation`), that value is the payer's key for

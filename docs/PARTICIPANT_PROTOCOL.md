@@ -1293,6 +1293,24 @@ the Claim's correlation when it names one, else the leg's id) and
 `X-SHN-Leg-Id` (the id the leg was sent under, which the gateways' leg log lines
 carry).
 
+**One id end to end.** From shn-gateway v0.58.0, the leg's id finds every
+record of the exchange. Each SHN gateway writes one access line for every
+exchange it answers, a Da Vinci call from its own participant's system or a
+leg from the network, on the provider's side and the payer's, naming the leg's id beside
+the caller's own trace value (gateway `CONFIGURATION.md`, "Access lines"). The
+Hub's audit records for the leg are found through the hashes those lines carry
+(`requestCiphertextHash`, `responseCiphertextHash`), which equal each record's
+`payloadBundleHash`; the Hub's record itself is unchanged. A payer's gateway
+sends `X-Correlation-Id` with the leg's id on each operation it forwards to the
+payer's own system (CRD, DTR, PAS submit, update and inquiry, coverage
+eligibility; not the CDS service listing or connectivity probes) when
+the id is one token of letters, digits, `.`, `_` or `-`, up to 64 characters.
+It is metadata about the request, like the payer's own routing headers: the
+message bytes are unchanged, a system that ignores it receives exactly what it
+did before, and `PAYER_DAVINCI_BACKEND_HEADERS` may not set it. A payer whose
+system validates that header its own way sets
+`PAYER_DAVINCI_BACKEND_CORRELATION=off`, and it is not sent.
+
 ### 6.1b Leg outcomes — what an originator sees
 
 Every origination leg your gateway attempts ends in exactly one of five
@@ -1604,9 +1622,14 @@ is authenticated (`5xx`): its participant's system that could not be reached
 gave no answer it could carry (`502 the payer's system received this request but
 gave no answer this gateway could carry; it may have acted on it: check its
 outcome before resending`), a system-of-record read that failed (`502`, or `503`
-while that system is unavailable), a validator it cannot reach. (A record it
-cannot write after its payer answered withholds nothing: the answer is relayed,
-§7b.2.) The requester reads that gateway's status and message. On a PAS
+while that system is unavailable), a validator it cannot reach, and, from
+shn-gateway v0.59.0, a system that did not answer within that gateway's deadline
+for it (`504`, with the same advice when the request was sent, or `504 the payer's
+system could not be reached in time`) or a deadline that gateway's own work used
+up before it could ask its system (`504 the payer's gateway ran out of time before
+it could send this request to the payer's system; the payer's system did not
+receive it`). (A record it cannot write after its payer answered withholds
+nothing: the answer is relayed, §7b.2.) The requester reads that gateway's status and message. On a PAS
 submit or update, any refusal the gateway makes after its payer's system answered
 (a failure of its own, or its refusal of the payer's answer) adds `the payer's
 system received and answered this request: check its outcome before resending`. Only the pre-handler checks
@@ -3095,6 +3118,23 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-09-30 — From shn-gateway v0.59.0, a payer's gateway answers for a system slower than its deadline (§6.2).**
+  A payer's gateway waits for its payer's own system at most its deadline
+  (`PAYER_DAVINCI_BACKEND_TIMEOUT`, 25 s by default, counted from the leg's arrival),
+  under the requester's 30 s leg budget. A system slower than that is answered to the
+  requester as the gateway's own framed `504`, saying whether the payer's system
+  received the request and may have acted on it, while the requester is still waiting;
+  before, the requester's own leg timeout ran out first. A payer system that answered
+  between that deadline and the requester's budget got through before and now gets the
+  `504`; its gateway can raise the deadline to at most 28 s. If the gateway's own work
+  before the call used the whole deadline, it does not ask its system and answers a
+  `504` saying the payer's system did not receive the request.
+- **2026-09-29 — From shn-gateway v0.58.0, one id finds every record of an exchange (§6.1a).**
+  Each SHN gateway writes one access line per exchange it answers, with the leg's id,
+  the caller's trace value, the outcome and who refused on which network rule, and,
+  on the payer's side, how the payer's own system answered. A payer's gateway sends
+  the leg's id to the payer's own system in `X-Correlation-Id`. The Hub's audit
+  record is unchanged: the lines carry the hashes it records.
 - **2026-09-27 — From shn-gateway v0.57.0, the supplemental report on an amendment a provider's gateway builds keeps the system of record's bytes (§7b.2).**
   The report is read exactly as the provider's system holds it, and the only
   change to its content is registered edit E-06: its `subject.reference` is
