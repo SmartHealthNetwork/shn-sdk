@@ -108,7 +108,7 @@ func TestVerify_AcceptsWithinSkewIssuedAt(t *testing.T) {
 	}
 }
 
-// TestVerify_RejectsBackwardsExpiry (T2): an assertion whose Expiry is not after
+// TestVerify_RejectsBackwardsExpiry: an assertion whose Expiry is not after
 // its IssuedAt is malformed and must be rejected, even if it happens to fall
 // inside the future-issuance and lifetime bounds.
 func TestVerify_RejectsBackwardsExpiry(t *testing.T) {

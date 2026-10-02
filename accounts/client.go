@@ -130,9 +130,10 @@ func (c *Client) SubmitPoP(ctx context.Context, id string, reg shnsdk.Registrati
 	// like the keys do — outside the operator-vouched create-time fields.
 	// Additive: empty omits the key, so the wire body is byte-identical to the
 	// pre-messageFrames/pre-contractVersions pop (same contract as
-	// CreateWithPayerIDs). This is the ONLY self-serve registration path (cloudctl
-	// identity, kit bootstrap, shn CLI all call it) — dropping either key here
-	// silently strips the capability from every hosted tenant.
+	// CreateWithPayerIDs). This is the ONLY self-serve registration path (the
+	// hosted control plane's identity step, kit bootstrap, shn CLI all call it) —
+	// dropping either key here silently strips the capability from every hosted
+	// tenant.
 	if len(reg.MessageFrames) > 0 {
 		body["messageFrames"] = reg.MessageFrames
 	}

@@ -1,12 +1,14 @@
 package shnsdk
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-sdk/internal/splice"
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
 
@@ -103,13 +105,30 @@ func readPASCoverage(record []byte) (pasCoverageRecord, error) {
 //   - beneficiary and payor are OWNED: they become the Patient entry and the
 //     payer Organization entry this request carries.
 //   - subscriber and policyHolder are re-homed to that same Patient entry WHEN
-//     they name the same person the beneficiary does — the usual "subscriber is
-//     the patient" record, re-pointed with nothing lost. When they name anyone
-//     else (a RelatedPerson, an employer Organization) the request is refused:
-//     that party does not ride the request, and dropping the element would
-//     change what the participant's record asserts.
-//   - every OTHER reference — a contract, one inside an extension — is refused,
-//     naming the element.
+//     they name the same Patient the beneficiary does, both by a literal
+//     reference — the usual "subscriber is the patient" record, re-pointed with
+//     nothing lost. A beneficiary naming no literal Patient (an identifier
+//     only, or none) re-homes nothing. When they name the
+//     Coverage's party (CoverageParty: a dependent's parent, a Patient contained
+//     in the Coverage that only these slots name, by their own reference
+//     member) they are carried with the record's JSON values, and so is the
+//     contained parent, which resolves inside the Coverage wherever it goes.
+//     When they name anyone else (a RelatedPerson, an employer Organization,
+//     another Patient record) the request is refused: that party does not
+//     ride the request, and dropping the element would change what the
+//     participant's record asserts.
+//   - every OTHER reference the Coverage itself makes — a contract, one
+//     inside an extension, one the party makes, one in a slot naming the party
+//     beside the slot's own reference — is refused, naming the element.
+//
+// A record that repeats a member name in any object, exactly or in another
+// case, is refused before any of this is read (checkCoverageRepeatedNames).
+// Each of these four is read by its exact "reference" member: one whose
+// reference member is spelled only in another case is refused
+// (checkCoverageReferenceMembers), and elsewhere a member named "reference" in
+// another case is read as a reference. A contained resource other than the party
+// is carried as the record has it: the references it makes are not checked
+// here.
 var (
 	pasCoverageOwnedReferences   = []string{"beneficiary", "payor"}
 	pasCoverageSubjectReferences = []string{"subscriber", "policyHolder"}
@@ -125,6 +144,12 @@ func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgReco
 	if err != nil {
 		return pasCoverageRecord{}, err
 	}
+	if err := checkCoverageRepeatedNames(cov.raw); err != nil {
+		return pasCoverageRecord{}, err
+	}
+	if err := checkCoverageReferenceMembers(cov.raw); err != nil {
+		return pasCoverageRecord{}, err
+	}
 	if err := checkCoverageReferencesOwned(cov.raw); err != nil {
 		return pasCoverageRecord{}, err
 	}
@@ -132,19 +157,37 @@ func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgReco
 	if err := json.Unmarshal(cov.raw, &m); err != nil {
 		return pasCoverageRecord{}, fmt.Errorf("your Coverage record: %w", err)
 	}
+	decoded, parties, _, err := coverageParties(cov.raw)
+	if err != nil {
+		return pasCoverageRecord{}, err
+	}
 	beneficiary, err := json.Marshal(map[string]string{"reference": patientRef})
 	if err != nil {
 		return pasCoverageRecord{}, err
 	}
 	// The member this coverage is for, and — where the record says they are the
-	// same person — the subscriber and policy holder with them.
+	// same person — the subscriber and policy holder with them. A slot naming
+	// the Coverage's party stays as the record has it.
 	beneficiaryKey := patientKey(coverageReferenceOf(m["beneficiary"]))
 	for _, field := range pasCoverageSubjectReferences {
 		raw, ok := m[field]
 		if !ok || len(raw) == 0 {
 			continue
 		}
-		if patientKey(coverageReferenceOf(raw)) != beneficiaryKey {
+		if _, ok := coveragePartyNamed(raw, parties); ok {
+			// The party rides as part of the Coverage.
+			continue
+		}
+		// A contained Patient that would be the party but does not hold as a
+		// contained resource is refused saying so.
+		if why := containedPatientFault(decoded, coverageReferenceOf(raw)); why != "" {
+			return pasCoverageRecord{}, fmt.Errorf("your Coverage record's %s names a contained Patient that %s, and a contained resource carried on a prior authorization contains nothing, lists its identifiers and spells its members exactly", field, why)
+		}
+		// Re-pointed only when the slot and the beneficiary name the same
+		// Patient by a literal reference: a slot naming no Patient (an
+		// Organization, a RelatedPerson, "#x", an identifier) never matches,
+		// even when the beneficiary names none either.
+		if slotKey := patientKey(coverageReferenceOf(raw)); slotKey == "" || slotKey != beneficiaryKey {
 			return pasCoverageRecord{}, fmt.Errorf("your Coverage record's %s names someone other than the member it covers, and this request carries only the member: a payer refuses a request whose graph names a party it cannot resolve, and this package will not drop what your record asserts",
 				field)
 		}
@@ -187,10 +230,16 @@ func checkCoverageReferencesOwned(coverageJSON []byte) error {
 		var obj map[string]json.RawMessage
 		if json.Unmarshal(raw, &obj) == nil {
 			for k, v := range obj {
-				if k == "reference" {
+				// A member named "reference" in another case is read as one
+				// too: a reader that ignores case resolves it.
+				if strings.EqualFold(k, "reference") {
+					at := path
+					if k != "reference" {
+						at += "." + k
+					}
 					var ref string
 					if json.Unmarshal(v, &ref) == nil && ref != "" && !strings.HasPrefix(ref, "#") {
-						found = append(found, path+" -> "+ref)
+						found = append(found, at+" -> "+ref)
 					}
 					continue
 				}
@@ -210,6 +259,36 @@ func checkCoverageReferencesOwned(coverageJSON []byte) error {
 			continue
 		}
 		walk("Coverage."+k, v)
+	}
+	// The Coverage's party rides inside it, and a slot naming it is carried as
+	// written, so every other reference either makes is one this request
+	// carries, or is refused.
+	_, parties, partyAt, err := coverageParties(coverageJSON)
+	if err != nil {
+		return err
+	}
+	for _, k := range pasCoverageSubjectReferences {
+		if _, ok := coveragePartyNamed(m[k], parties); !ok {
+			continue
+		}
+		var slot map[string]json.RawMessage
+		_ = json.Unmarshal(m[k], &slot)
+		for member, v := range slot {
+			if member != "reference" {
+				walk("Coverage."+k+"."+member, v)
+			}
+		}
+	}
+	// Each party is walked at its own index in the contained list, the
+	// element CoverageParty decided on.
+	if len(partyAt) > 0 {
+		var contained []json.RawMessage
+		_ = json.Unmarshal(m["contained"], &contained)
+		for _, i := range partyAt {
+			if i < len(contained) {
+				walk(fmt.Sprintf("Coverage.contained[%d]", i), contained[i])
+			}
+		}
 	}
 	if len(found) == 0 {
 		return nil
@@ -328,14 +407,204 @@ func checkPASCoverageResolves(bundle []byte) error {
 	return nil
 }
 
-// coverageReferenceOf reads the reference a Coverage element states, or "" when
-// it states none.
-func coverageReferenceOf(raw json.RawMessage) string {
-	var ref struct {
-		Reference string `json:"reference"`
+// coverageParties returns the decoded Coverage and its parties
+// (CoverageParty), each under the local reference that names it ("#<id>"),
+// with the index of each in the Coverage's contained list.
+func coverageParties(coverageJSON []byte) (map[string]any, map[string]map[string]any, []int, error) {
+	var cov map[string]any
+	if err := json.Unmarshal(coverageJSON, &cov); err != nil {
+		return nil, nil, nil, fmt.Errorf("your Coverage record: %w", err)
 	}
-	if len(raw) == 0 || json.Unmarshal(raw, &ref) != nil {
+	list, _ := cov["contained"].([]any)
+	var parties map[string]map[string]any
+	var at []int
+	for i, c := range list {
+		if cr, ok := c.(map[string]any); ok && CoverageParty(cov, cr) {
+			if parties == nil {
+				parties = map[string]map[string]any{}
+			}
+			parties["#"+cr["id"].(string)] = cr
+			at = append(at, i)
+		}
+	}
+	return cov, parties, at, nil
+}
+
+// containedPatientFault reports why the contained Patient a local reference
+// ("#<id>") names cannot be a party as a contained resource
+// (coveragePartyFault), or "" when ref names no such Patient or it has no
+// fault.
+func containedPatientFault(cov map[string]any, ref string) string {
+	id, ok := strings.CutPrefix(ref, "#")
+	if !ok || id == "" {
 		return ""
 	}
-	return ref.Reference
+	list, _ := cov["contained"].([]any)
+	for _, c := range list {
+		if cr, ok := c.(map[string]any); ok && cr["resourceType"] == "Patient" && cr["id"] == id {
+			if why := coveragePartyFault(cr); why != "" {
+				return why
+			}
+		}
+	}
+	return ""
+}
+
+// checkCoverageRepeatedNames refuses a Coverage record that is not one strict
+// JSON document, or that repeats a member name in any object, exactly or in
+// another case, naming the element and the name. Decoding keeps one of the
+// two, and which one depends on the reader: the network refuses such a
+// request, and this package will not choose what the record asserts.
+func checkCoverageRepeatedNames(coverageJSON []byte) error {
+	_, err := splice.Scan(coverageJSON, splice.DefaultLimits())
+	if err == nil {
+		return nil
+	}
+	var dk *splice.DuplicateKeyError
+	if errors.As(err, &dk) {
+		return fmt.Errorf("your Coverage record repeats the member name %q in %s (a name appears once in an object, whatever its case): readers that keep the first, the last, or match names ignoring case read different records, and the network refuses a request that carries one",
+			dk.Key, jsonObjectPathAt(coverageJSON, dk.Offset, "Coverage"))
+	}
+	return fmt.Errorf("your Coverage record is not one strict JSON document: %w", err)
+}
+
+// jsonObjectPathAt returns the path, from root, of the object whose member
+// name starts at byte offset at in src ("Coverage.contained[0]"), or root
+// when it cannot say.
+func jsonObjectPathAt(src []byte, at int, root string) string {
+	type frame struct {
+		array   bool
+		index   int // elements started, for an array
+		key     string
+		wantKey bool
+	}
+	var stack []frame
+	path := func() string {
+		p := root
+		for _, f := range stack[:len(stack)-1] {
+			switch {
+			case f.array:
+				p += fmt.Sprintf("[%d]", f.index-1)
+			case !f.wantKey:
+				p += "." + f.key
+			}
+		}
+		return p
+	}
+	valueDone := func() {
+		if n := len(stack); n > 0 && !stack[n-1].array {
+			stack[n-1].wantKey = true
+		}
+	}
+	d := json.NewDecoder(bytes.NewReader(src))
+	for {
+		start := int(d.InputOffset())
+		tok, err := d.Token()
+		if err != nil {
+			return root
+		}
+		if n := len(stack); n > 0 && !stack[n-1].array && stack[n-1].wantKey {
+			if tok == json.Delim('}') {
+				stack = stack[:n-1]
+				valueDone()
+				continue
+			}
+			key, _ := tok.(string)
+			if start <= at && at < int(d.InputOffset()) {
+				return path()
+			}
+			stack[n-1].key, stack[n-1].wantKey = key, false
+			continue
+		}
+		if n := len(stack); n > 0 && stack[n-1].array {
+			if tok == json.Delim(']') {
+				stack = stack[:n-1]
+				valueDone()
+				continue
+			}
+			stack[n-1].index++
+		}
+		switch tok {
+		case json.Delim('{'):
+			stack = append(stack, frame{wantKey: true})
+		case json.Delim('['):
+			stack = append(stack, frame{array: true})
+		default:
+			valueDone()
+		}
+	}
+}
+
+// coveragePartyNamed returns the party a subscriber or policyHolder slot
+// names, if any: the one of parties whose local reference is the slot's own
+// reference member, read by its exact name as CoverageParty reads it. A slot
+// with no exact reference string names no party.
+func coveragePartyNamed(raw json.RawMessage, parties map[string]map[string]any) (map[string]any, bool) {
+	var slot map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &slot) != nil {
+		return nil, false
+	}
+	ref, ok := slot["reference"].(string)
+	if !ok {
+		return nil, false
+	}
+	party, ok := parties[ref]
+	return party, ok
+}
+
+// coverageReferenceOf reads the reference a Coverage element states by its
+// exact member name, or "" when it states none: a member named "reference" in
+// another case is not a reference.
+func coverageReferenceOf(raw json.RawMessage) string {
+	var elem map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &elem) != nil {
+		return ""
+	}
+	ref, _ := elem["reference"].(string)
+	return ref
+}
+
+// checkCoverageReferenceMembers refuses a Coverage record whose beneficiary,
+// payor, subscriber or policyHolder (the elements this package re-points or
+// carries by their reference) holds a member named "reference" in another case
+// ("Reference"), beside the reference or instead of it. This package reads a
+// reference by its exact name; a reader that ignores case reads another, so
+// the record does not say which it means, and this package will not choose.
+func checkCoverageReferenceMembers(coverageJSON []byte) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(coverageJSON, &m); err != nil {
+		return fmt.Errorf("your Coverage record: %w", err)
+	}
+	check := func(path string, raw json.RawMessage) error {
+		var elem map[string]json.RawMessage
+		if json.Unmarshal(raw, &elem) != nil {
+			return nil
+		}
+		var variants []string
+		for k := range elem {
+			if k != "reference" && strings.EqualFold(k, "reference") {
+				variants = append(variants, k)
+			}
+		}
+		if len(variants) == 0 {
+			return nil
+		}
+		slices.Sort(variants)
+		return fmt.Errorf("your Coverage record's %s carries a member named %q beside or instead of \"reference\": this package reads a reference by its exact name, and a reader that ignores case would read another, so it will not choose which one your record asserts",
+			path, variants[0])
+	}
+	for _, k := range []string{"beneficiary", "subscriber", "policyHolder"} {
+		if err := check(k, m[k]); err != nil {
+			return err
+		}
+	}
+	var payor []json.RawMessage
+	if json.Unmarshal(m["payor"], &payor) == nil {
+		for i, p := range payor {
+			if err := check(fmt.Sprintf("payor[%d]", i), p); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

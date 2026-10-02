@@ -216,13 +216,13 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 
 	// B3. Prior-authorization — runs AFTER the eligibility loop (eligibility-first).
 	// For each persona advertising an expected PA outcome, run the CRD→DTR→PAS round-trip
-	// and assert the outcome. T14 fix round 9 (ruling 2026-08-24): the order comes from
-	// the PERSONA'S OWN descriptor entry, not a single generic fill — "a payer verdict
-	// is a function of the ORDER CODE... a descriptor that advertises a per-persona
-	// VERDICT while leaving the ORDER generic is incomplete by construction." A pended
-	// persona additionally resumes with a named supplemental report and asserts the
-	// post-amend outcome. ProceedOnNotCovered so a persona advertising a denial is
-	// carried to the payer's FORMAL determination, not stopped at the card.
+	// and assert the outcome. The order comes from the PERSONA'S OWN descriptor entry,
+	// not a single generic fill — "a payer verdict is a function of the ORDER CODE... a
+	// descriptor that advertises a per-persona VERDICT while leaving the ORDER generic is
+	// incomplete by construction." A pended persona additionally resumes with a named
+	// supplemental report and asserts the post-amend outcome. ProceedOnNotCovered so a
+	// persona advertising a denial is carried to the payer's FORMAL determination, not
+	// stopped at the card.
 	for _, p := range personas {
 		if p.ExpectedPriorAuth == "" {
 			continue

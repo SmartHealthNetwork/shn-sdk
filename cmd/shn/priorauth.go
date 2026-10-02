@@ -124,10 +124,9 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 		devID.Clock = doctorClock
 	}
 
-	// The persona's OWN advertised order (T14 fix round 9, ruling 2026-08-24): "a payer
-	// verdict is a function of the ORDER CODE... a descriptor that advertises a
-	// per-persona VERDICT while leaving the ORDER generic is incomplete by
-	// construction." No fallback order — a persona advertising expectedPriorAuth with
+	// The persona's OWN advertised order: "a payer verdict is a function of the
+	// ORDER CODE... a descriptor that advertises a per-persona VERDICT while leaving
+	// the ORDER generic is incomplete by construction." No fallback order — a persona advertising expectedPriorAuth with
 	// no Order is a descriptor bug, surfaced rather than papered over. Clinical is left
 	// zero-value: every mirrored family decides its verdict off the order code alone,
 	// never off the QR's answered content. ProceedOnNotCovered so a persona whose plan

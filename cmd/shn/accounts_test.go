@@ -215,6 +215,10 @@ func TestRotate_AgainstStubRegistrar(t *testing.T) {
 	var gotAssertion string
 	var gotBody shnsdk.RegistrationRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/holders" {
+			_ = json.NewEncoder(w).Encode([]shnsdk.Holder{{ID: "acme-7f3a", ContractVersions: shnsdk.SupportedContractVersions()}})
+			return
+		}
 		if r.Method != http.MethodPut || r.URL.Path != "/register/acme-7f3a" {
 			w.WriteHeader(http.StatusNotFound)
 			return

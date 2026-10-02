@@ -24,9 +24,9 @@ import (
 // snapshot.
 //
 // The pattern is IDENTICAL to the gateway module's sweep (gateway/sweep_test.go
-// in the monorepo): the two published modules are held to one vocabulary
-// contract, and every arm here has a form that actually leaked into a release
-// candidate of one module or the other. Three notes on arms that look odd:
+// in the monorepo), arm for arm. The two published modules are held to one
+// vocabulary contract, and every arm here has a form that actually leaked into a
+// release candidate of one module or the other. Three notes on arms that look odd:
 //
 //   - `#[0-9]{2,}\b` catches monorepo issue/PR references. Two reached this
 //     module's tree between consecutive cuts — one in shipped code, one as a
@@ -55,7 +55,22 @@ import (
 const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|Material-|infra/|goldengen|shn-platform|\bE[0-9][a-z][0-9]?\b|\bD[0-9]\b` +
 	`|\bK1\b|PR #[0-9]+|#[0-9]{2,}\b|docs/superpowers|(?i:\bslice[ -][0-9][a-z]?\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
 	`|ledger[ -][0-9]|(?i:ledger[ -]item[ -][0-9])|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b|\b[SM]F[0-9]+\b` +
-	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})`
+	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})` +
+	// Un-hyphenated review and ruling citations: "fix round N" (the hyphenated
+	// \bround-[0-9]\b above misses it) and "ruling YYYY-MM-DD" as its own citation
+	// form. Both reached this module's CLI sources in one comment pair. And a bare task
+	// id ("T14", "T14:", "(T2)", or one ending the line), which stops short of the ISO-8601
+	// times this module builds ("T00:00:00Z"): a colon followed by a digit ends it. A letter
+	// or underscore after the digits ends it too, as \b did, so a term such as "T2DM" is not
+	// a task id.
+	`|\bT[0-9]{1,2}(?:[^:0-9A-Za-z_]|:[^0-9]|:?$)|(?i:fix round [0-9])|(?i:ruling [0-9]{4}-[0-9]{2}-[0-9]{2})` +
+	// A bare ruling number that leaked on its own, with no task id or date beside it.
+	// Narrow on purpose: "R4" is the published FHIR release's name.
+	`|\bR9\b` +
+	// Review-round shorthand without the hyphen, in file names ("review_round1_test.go")
+	// and content ("round3 finding"). No word boundary in front, since an underscore is
+	// a word character; a digit must follow, so RoundTrip and "round trip" do not match.
+	`|(?i:round[0-9])`
 
 // sweepSkipFiles are the module-root test files excluded from the sweep.
 //
@@ -137,6 +152,22 @@ func TestInternalTokenPattern_Forms(t *testing.T) {
 		`// the option-C ruling keeps the urn:shn:coverage id as a member number`,
 		// Review-finding shorthand.
 		`// SF5: the pended ledger must not be consulted on a fresh submit`,
+		// Un-hyphenated review and ruling citations: the form this module's CLI
+		// carried in two comments ("fix round 9, ruling 2026-08-24").
+		`// The persona's advertised order (fix round 9, ruling 2026-08-24): a payer`,
+		`// caught the ingress-$validate skip missing it in fix round 3, then the UC-08`,
+		// A bare task id, before a parenthesis, a colon or a space.
+		`// TestVerify_RejectsBackwardsExpiry (T2): an assertion whose Expiry is not after`,
+		`// T14: normalize the lane identity ONCE, here`,
+		`// the T5 fix keeps the order code`,
+		// A bare task id ending the line, with or without a colon.
+		`// the lane identity is normalized once here, per T14`,
+		`// see T1:`,
+		// The bare ruling number.
+		`// R9 retires the in-process payer identity; every holder converges on one`,
+		// Review-round shorthand without the hyphen, in a file name and in content.
+		`accounts/review_round1_test.go`,
+		`// folded here from round3 of the diagnostics review`,
 	}
 	for _, line := range mustMatch {
 		if m := re.FindString(line); m == "" {
@@ -186,6 +217,16 @@ func TestInternalTokenPattern_Forms(t *testing.T) {
 		`// FR-G53 carry contract: the reviewer extension survives the round trip`,
 		// A bare `#` + single digit is a list marker, not an issue reference.
 		`// step #3 of the handshake sends the assertion`,
+		// "round" followed later by a digit, with no "fix" right before it, and the
+		// transport vocabulary: no digit follows "round".
+		`// the pend-resolution timer runs one round trip per amendment, 2 legs total`,
+		`func (a asyncBodyTransport) RoundTrip(r *http.Request) (*http.Response, error) {`,
+		// "R4" is the published FHIR release's name.
+		`// Validate call passes an EMPTY profile = base-R4 validation via $validate`,
+		// The bare task-id arm stops short of an ISO-8601 time, and of a term such as T2DM.
+		`When: when + "T00:00:00Z",`,
+		`// the window opens at T12:30 local time`,
+		`// a member with T2DM on the problem list`,
 	}
 	for _, line := range mustNotMatch {
 		if m := re.FindString(line); m != "" {

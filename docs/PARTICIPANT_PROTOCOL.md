@@ -534,7 +534,12 @@ carries it automatically — hand-built rotate bodies must not drop it.
 `messageFrames`: it is a self-declared property of the *current* build, not an
 operator-attested field, so the registrar re-reads it from every rotate rather than
 carrying the prior value forward. **Include `contractVersions` on every rotate**
-you submit by hand, or your advertised set silently clears. The registrar
+you submit by hand, or your advertised set silently clears. `shn rotate` re-declares
+the set the registrar holds for you now, read from `/holders`, unless you pass
+`--contract-versions`, and it refuses to rotate when it cannot read that set;
+`shn register` declares its build's default unless you pass `--contract-versions`.
+After you change your gateway's declared set, rotate with `--contract-versions` and
+the new set: a rotate without it re-declares the old one. The registrar
 admission-validates shape only (grammar `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`,
 ≤16 tokens, each 3–48 bytes) — same as at registration (§2.3) — and the tokens
 remain outside the PoP signing payload, so rotating them never changes your `pop`.
@@ -1325,8 +1330,8 @@ caller gets back from the console route that started the exchange. A leg is
 | `routed` | The leg was attempted: recipient resolved, contract line selected, seal → authorize (§4.1) → `POST {hub}/route` under way. Always followed by exactly one terminal outcome. | — |
 | `answered` | The counterpart answered and the response envelope verified end-to-end (§6.1 steps 6–8, `VerifyBound` §4.4). A frame-carried **non-2xx answer** is `answered`, not a failure: an application answer (§6.3 — an adjudication denial, a `422` validation reject, a partner payer's real `400`), and since shn-gateway v0.54.0 the counterpart gateway's own failure (§8, "Mechanical vs. application status" — its system unreachable, a record it could not read). The counterpart reports it, so it is not counted in your `LegError`; the counterpart's operators see it, and to the Hub, which cannot see inside the frame, the leg was answered. | The application response; a non-2xx answer is relayed **verbatim** with the recipient's own status, `Content-Type` and body. |
 | `denied` | The **Authorization Framework refused the request leg** — `403` from `POST {authz}/authorize` (§4.1: wrong role for the frame, or no consent on `federated-query-submit`). A policy decision, not an error; excluded from the operators' `LegError` alarm. | A `403` whose `error` carries `authorization denied` (a `502` before shn-gateway v0.54.0), from a route with no legitimate denied branch; a flow that has one treats it as a business outcome instead (the UC-05 federated query leaves the prior authorization pended with `consentDenied: true` rather than failing). |
-| `unreachable` | The **Hub leg did not complete**: the recipient was not reached, or, for a leg that timed out after your gateway sent it, may have been (the `504` says so): your gateway could not reach `POST {hub}/route`; or the Hub refused the leg — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), or the `502` it returns when the recipient is unknown, cannot be reached, or refuses the forward at its edge, on a payload-hash mismatch, or on an audit-append failure before the forward (each marked `X-SHN-Delivered: no`). A recipient that does not frame its answers is refused at its edge in the Hub's eyes, so its `4xx` application answer reads this way too. Also the leg that produced **no answer within your gateway's wait** (the HTTP client timeout it posts to `POST {hub}/route` with — 30 seconds in the published Smart Gateway; the whole Hub → counterpart gateway → counterpart system path shares that budget). | The Hub not reached: a `502` whose `error` is `hub routing failed`. The Hub's refusal, with `error` reading `hub refused the exchange: <the Hub's reason>`: a `409 … replay detected` keeps the Hub's status; every other Hub `4xx` concerns your gateway's standing with the Hub (its registration, its token, its clock), not the caller's request, and is a `502` — e.g. `502 … stale or future timestamp`, `502 … unknown sender`; a Hub `5xx` keeps its status, e.g. `502 … unknown recipient`. A recipient gateway that refused the forward at its edge: `502 the recipient's gateway refused the exchange (403)`. Before shn-gateway v0.54.0, every one of these was `502 hub routing failed`. The timed-out leg: a `504` whose `error` reads `no answer on the hub leg within 30s (hub leg timeout)` (the number is the client's own timeout, which your gateway applies as its own deadline on the leg; `hub leg timed out` with no number when your own request deadline ended the wait first; either adds `the recipient may have received this request: check its outcome before resending` when the request had already been sent to the Hub; a connection or TLS handshake that gives up before the Hub is reached is not called a timeout and stays the `502`). Retry with a freshly sealed envelope (§6.1a). |
-| `failed` | Anything else, on **your gateway's** side of the leg: the Authorization Framework unreachable or erroring (non-403), a seal/encode failure. Also a leg **the recipient's gateway was reached for** whose answer was lost: the Hub marks its `502` with `X-SHN-Delivered` (`yes`: the recipient answered and the Hub could not read, decode, verify or audit the answer; `unknown`: the recipient answered `5xx`, the connection failed after the request was sent, or it did not answer before the forward gave up), a `5xx` with no marker (not from the Hub), a connection to the Hub that failed after your gateway sent the request, or the Hub returned `200` and the answer could not be read or fails your gateway's own verification (not an envelope, `VerifyBound`, correlation match, decrypt, frame decode). Counted in `LegError` with `unreachable`. | A `502` whose `error` names the reason — `authorization failed`, …. A leg the recipient was reached for reads `the recipient received this request and answered, but its answer was lost on the way back (…)` or `… its answer could not be accepted (…)`, or `the recipient may have received this request (…)`: the recipient may have acted on it, so check the request's outcome (for PAS, `$inquire`) before resending. |
+| `unreachable` | The **Hub leg did not complete**: the recipient was not reached, or, for a leg that timed out after your gateway sent it, may have been (the `504` says so): your gateway could not reach `POST {hub}/route`; or the Hub refused the leg — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), or the `502` it returns when the recipient is unknown, cannot be reached, or refuses the forward at its edge, on a payload-hash mismatch, or on an audit-append failure before the forward (each marked `X-SHN-Delivered: no`). A recipient that does not frame its answers is refused at its edge in the Hub's eyes, so its `4xx` application answer reads this way too. Also the leg that produced **no answer within your gateway's wait** (the HTTP client timeout it posts to `POST {hub}/route` with — 30 seconds in the published Smart Gateway; the whole Hub → counterpart gateway → counterpart system path shares that budget). From shn-gateway v0.60.0, also a request leg whose **Authorization Framework did not answer**: `POST {authz}/authorize` was refused, reset or closed, or failed some other way, before any response, got no answer within your gateway's HTTP client timeout, or was answered `503` or `504` (the Framework never answers those itself: they come from a proxy or load balancer in front of it). Your gateway tries that call once more, with a fresh holder assertion, only when the first attempt failed with a refused, reset or closed connection before the request was written; after the write the Framework may have decided and recorded its decision, so it is not repeated. The leg is not sent to the Hub. | The Hub not reached: a `502` whose `error` is `hub routing failed`. The Hub's refusal, with `error` reading `hub refused the exchange: <the Hub's reason>`: a `409 … replay detected` keeps the Hub's status; every other Hub `4xx` concerns your gateway's standing with the Hub (its registration, its token, its clock), not the caller's request, and is a `502` — e.g. `502 … stale or future timestamp`, `502 … unknown sender`; a Hub `5xx` keeps its status, e.g. `502 … unknown recipient`. A recipient gateway that refused the forward at its edge: `502 the recipient's gateway refused the exchange (403)`. Before shn-gateway v0.54.0, every one of these was `502 hub routing failed`. The timed-out leg: a `504` whose `error` reads `no answer on the hub leg within 30s (hub leg timeout)` (the number is the client's own timeout, which your gateway applies as its own deadline on the leg; `hub leg timed out` with no number when your own request deadline ended the wait first; either adds `the recipient may have received this request: check its outcome before resending` when the request had already been sent to the Hub; a connection or TLS handshake that gives up before the Hub is reached is not called a timeout and stays the `502`). Retry with a freshly sealed envelope (§6.1a). The Authorization Framework not answering (from shn-gateway v0.60.0): your gateway's own `503`, uncacheable, whose `error` reads `the authorization service could not be reached, so this leg was not sent to the payer` (an OperationOutcome with code `transient` on a FHIR operation route). A Da Vinci ingress call is one leg, so nothing reached the payer and resending it is safe; on a route that sends several legs, the earlier ones may have been sent. Before v0.60.0 it was a `502 authorization failed`, counted `failed`. |
+| `failed` | Anything else, on **your gateway's** side of the leg: the Authorization Framework erroring (a non-403 answer, or an answer your gateway cannot read; before shn-gateway v0.60.0 also no answer at all), a seal/encode failure. Also a leg **the recipient's gateway was reached for** whose answer was lost: the Hub marks its `502` with `X-SHN-Delivered` (`yes`: the recipient answered and the Hub could not read, decode, verify or audit the answer; `unknown`: the recipient answered `5xx`, the connection failed after the request was sent, or it did not answer before the forward gave up), a `5xx` with no marker (not from the Hub), a connection to the Hub that failed after your gateway sent the request, or the Hub returned `200` and the answer could not be read or fails your gateway's own verification (not an envelope, `VerifyBound`, correlation match, decrypt, frame decode). Counted in `LegError` with `unreachable`. | A `502` whose `error` names the reason — `authorization failed`, …. A leg the recipient was reached for reads `the recipient received this request and answered, but its answer was lost on the way back (…)` or `… its answer could not be accepted (…)`, or `the recipient may have received this request (…)`: the recipient may have acted on it, so check the request's outcome (for PAS, `$inquire`) before resending. |
 
 Two things are **not** leg outcomes:
 
@@ -2154,6 +2159,45 @@ request `operation` / response `operation`; the `payloadHash`-bound token is min
 leg. `PreAuthRef` on an approved outcome is the reference payer's own authorization
 number, shape `AUTH-NNNN`.
 
+**The Coverage a PAS request carries.** `BuildConformantClaimBundle` and
+`BuildConformantClaimUpdateBundle` (and their `AtLine` forms) carry your own Coverage record
+for the member. Its `beneficiary` and `payor` name the request's Patient and payer Organization
+entries. A `subscriber` or `policyHolder` naming the member is pointed at the same Patient
+entry when it and the `beneficiary` name that Patient by a literal reference. From shn-sdk
+v0.60.0, a `subscriber` or `policyHolder` naming the Coverage's
+party is carried, not re-pointed: a dependent's Coverage often names the parent there, as a
+contained `Patient` carrying only an MRN. The slot and the contained Patient travel inside the
+Coverage with the same JSON values your record has; the builder re-encodes the Coverage as it
+places it in the bundle (compacted, with `<`, `>` and `&` escaped), as it does every record it
+carries. A contained Patient is the Coverage's party when its `id` is that of no other resource
+in the Coverage's `contained` list, the Coverage's `subscriber` or `policyHolder` (or both)
+names it by the slot's own `reference` member (`#<id>`), nothing else in the Coverage
+references it (not the beneficiary, the payor, an extension, one inside the slot included,
+another contained resource, or the party itself), it holds as a contained resource (it
+contains nothing, and its `identifier`, if present, is a list), and every member the rule
+reads is spelled exactly (no member of the slot names `reference` in another case, `Reference`
+say; none of the party names `resourceType`, `id`, `contained` or `identifier` in another
+case; and none of the Coverage names `resourceType`, `contained`, `subscriber` or
+`policyHolder` in another case beside its own). `shnsdk.CoverageParty` is
+that rule. A reference the party makes to a record the request does not carry is refused. So
+is such a reference anywhere else in a slot naming the party (an extension, an
+`identifier.assigner`), and anywhere else in the Coverage outside its `contained` list; a
+member named `reference` in another case counts as a reference there. Any other `subscriber`
+or `policyHolder` (a `RelatedPerson`, an `Organization`, another Patient record) is refused. A
+contained resource other than the party is carried as your record has it: the references it
+makes are not checked. A Coverage record that repeats a member name in any object, exactly or
+in another case, is refused, as is one that is not strict JSON. A `beneficiary`, `payor` entry,
+`subscriber` or `policyHolder` whose only reference member is spelled in another case
+(`Reference`) is refused: a reference is read by its exact name. So is a contained resource
+whose `id` member is spelled in another case (`Id`). A request is refused before anything is
+sent, naming the element.
+A Smart Gateway reads the party as part of the Coverage, and carries and reads the answer to
+such a request, from shn-gateway v0.61.0 (the next gateway release, not yet published). An
+earlier gateway's check of a PAS answer reads the contained parent as a second patient: at
+`strict` it refuses an answer that retains the Coverage (as a `shnsdk.Responder`'s answer
+does), and below `strict` it relays the payer's answer as sent but records no pend or decision
+from it.
+
 **CRD request and response builders.** `BuildCRDRequest(CRDRequestInputs{…})` builds
 the CRD request from your own records: the hook your workflow fires (`order-select`,
 `order-sign` or `order-dispatch`) and that hook's context, your `Patient` (required),
@@ -2183,18 +2227,40 @@ From Smart Gateway v0.44.0, a CDS Hooks or `$questionnaire-package` message reac
 participant as its author sent it. The payer's answer comes back byte for byte, and the
 hook is never changed. The only changes are the edits below. Each is made on the
 message's own bytes; everything else in the message is unchanged. By default a provider's
-gateway makes only the first of them to a request its EHR sends: the prefetch, Coverage and
-Patient edits are the provider's opt-in (`ENRICH_NATIVE_REQUESTS=true` on its gateway), and
-without it the request is carried as the EHR sent it. A Coverage a request leaves out is
-read from the provider's system of record either way, only to choose the payer.
+gateway makes only the callback removal to a request its EHR sends (and, from shn-gateway
+v0.61.0, the coverage carry below, which only follows a removed `fhirServer` it read): the
+prefetch, Coverage and Patient edits are the provider's opt-in (`ENRICH_NATIVE_REQUESTS=true`
+on its gateway), and without it the request is carried as the EHR sent it. A Coverage a
+request leaves out is read from the provider's system of record either way, only to choose
+the payer. From shn-gateway v0.60.0, for a member that system does not hold, a provider's
+gateway by default reads the Coverage instead through the request's own `fhirServer`, the
+provider's own FHIR server, with its `fhirAuthorization` token (a Coverage search, and at most
+one read of the payor Organization a Coverage names only by reference), to choose the payer.
+Before shn-gateway v0.61.0 nothing it read was carried; from shn-gateway v0.61.0, once the
+request is routed, the records the payer was chosen by are carried as `prefetch.coverage`
+(Coverage carried, below), because the payer cannot read them itself once `fhirServer` is
+removed. Likewise, when a coverage the EHR itself sent names its payor Organization
+only by reference and the request does not resolve it (an EHR that fulfils the coverage
+template exactly sends none), the provider's gateway reads that Organization, only to choose
+the payer, on the server whose id the reference is. When the request names a `fhirServer` at
+another base than the provider's system of record, the Organization is read once through that
+`fhirServer` only, never from the system of record. When the request names no `fhirServer`,
+or one at the system of record's own FHIR base (compared with the scheme and host lowercased,
+the default port dropped and a trailing slash trimmed), it is read from the system of record
+when that system names the patient by `context.patientId`; otherwise, or when that system
+holds no such Organization, once through the request's own `fhirServer`, if it names one.
+Nothing that read returns is added, and the EHR's coverage is carried byte for byte. The
+provider turns the `fhirServer` reads off with `CDS_FHIR_SERVER_READ=off`, and then nothing
+is read or carried (from shn-gateway v0.60.0).
 
 | Edit | Made by | What changes |
 |---|---|---|
-| Callback removed | the provider's gateway, on a CDS Hooks request from the EHR | `fhirServer` and `fhirAuthorization` are removed. The payer never gets a route or a credential into the provider's systems. |
-| Prefetch obtained (opt-in) | the provider's gateway, on a CDS Hooks request from the EHR | An advertised prefetch key the EHR left out is added from the provider's own system of record: the Patient as read, a search as a `searchset` of the records exactly as returned (`urn:uuid:` entry addresses, no server links), `null` for no match. Nothing is made up. |
-| Coverage obtained (opt-in) | the provider's gateway, on a `$questionnaire-package` request from the EHR | One `coverage` parameter is appended from the provider's system of record, only when the request carries none. |
+| Callback removed | the provider's gateway, on a CDS Hooks request from the EHR | `fhirServer` and `fhirAuthorization` are removed. The payer never gets a route or a credential into the provider's systems. From shn-gateway v0.60.0 the provider's own gateway may first use them to read the Coverage (and at most one payor Organization it references), or the one payor Organization a coverage the EHR sent references by reference alone (always there when `fhirServer` is at another base than the provider's system of record; at the same base only when that system does not resolve it), only to route (on by default; `CDS_FHIR_SERVER_READ=off` turns it off); they are removed all the same. From shn-gateway v0.61.0 the Coverage read through them is then carried (Coverage carried, below); the payor Organization read for a coverage the EHR sent never is. |
+| Coverage carried | the provider's gateway, on a CDS Hooks request from the EHR | From shn-gateway v0.61.0, by default (not an opt-in), when the request carries no `prefetch.coverage` key, the provider's system of record names no patient for the member, and the gateway routed the request by the Coverage it read through the `fhirServer` it removed: `prefetch.coverage` is added (and `prefetch` created when the request has none). It is a `searchset` the gateway writes: one `match` entry for each Coverage the payer was chosen by (the active ones, else all of them) and one `include` entry for the payor Organization the payer was chosen by for each of them (the first payor, as routing reads it: one the server's search returned, or the one the gateway read), each resource exactly as the provider's server returned it (so any reference it holds, an absolute one on that server included, is carried as written), under `urn:uuid:` entry addresses, with `total` the number of Coverages and none of that server's links, entry addresses, Bundle id or meta, or `OperationOutcome` entries. The one exception: an included payor Organization that a carried Coverage names by an absolute reference on the request's `fhirServer` base (compared with the scheme and host lowercased, the default port dropped and a trailing slash trimmed) has that reference, exactly as the Coverage writes it, as its `fullUrl`, so the reference resolves in the `searchset`; the reference is already in the Coverage's own bytes. A payer recognises it by its `urn:uuid:` entries. A coverage key the EHR sends, even `null`, is never changed or replaced, and with `CDS_FHIR_SERVER_READ=off` or no `fhirServer` nothing is read or added. |
+| Prefetch obtained (opt-in) | the provider's gateway, on a CDS Hooks request from the EHR | An advertised prefetch key the EHR left out is added from the provider's own system of record, when that system names the patient by `context.patientId`: the Patient as read, a search as a `searchset` of the records exactly as returned (`urn:uuid:` entry addresses, no server links), `null` for no match. Nothing is made up. From shn-gateway v0.60.0 the search uses the status filter of the key's advertised template and keeps the payor Organization (`_include=Coverage:payor`) and device performer (`_include=DeviceRequest:performer`) the template does not ask the EHR for. The payer is chosen as without the opt-in (the active Coverages first): a member with no active coverage, or one whose system of record cannot answer the filtered search, is still routed to its payer, and the request carries `"coverage": null` or leaves the key out. |
+| Coverage obtained (opt-in) | the provider's gateway, on a `$questionnaire-package` request from the EHR | One `coverage` parameter is appended from the provider's system of record, only when the request carries none. From shn-gateway v0.60.0 it is read with the coverage template's status filter (`status=active`); when that finds none, or the provider's system of record cannot answer it, nothing is appended and the request is routed by the read that chooses the payer, as without the opt-in. From shn-gateway v0.61.0 the same holds when that system names the patient by another id: nothing is appended and the request is routed as without the opt-in (before, it was refused `422`). |
 | Patient obtained (opt-in) | the provider's gateway, on a `$questionnaire-package` request from the EHR | One `referenced` parameter holding the provider's own Patient record is appended, only when the request carries no Patient for the bound patient and the provider's system of record holds the patient under the id the request names. |
-| Payer identity mapping | the payer's gateway, on the request to its payer (only when configured) | Only the payer identifier strings of each Coverage, and of a PAS Claim's insurer when it names the payer. |
+| Payer identity mapping | the payer's gateway, on the request to its payer (only when configured) | Only the payer identifier strings of each Coverage, and of a PAS Claim's insurer when it names the payer. A CDS Hooks or `$questionnaire-package` request that carries no Coverage has nothing to map and is sent as it arrived; from shn-gateway v0.60.0 that includes a CDS Hooks request, which earlier releases refused with `400`. |
 
 - **Signatures.** A signature inside the message (`Bundle.signature`, `Provenance.signature`, a
   `Signature` element) travels untouched. An edit that would change signed content is refused
@@ -2222,14 +2288,27 @@ read from the provider's system of record either way, only to choose the payer.
   same rules, at its own level, to the answer on a CRD leg it originates itself (§8.1). The
   success media type is still the gateway's own: `application/json` for CDS Hooks,
   `application/fhir+json` for a questionnaire package.
+- **No coverage to route by.** From shn-gateway v0.60.0 a provider's gateway answers a CDS
+  Hooks request it cannot obtain a coverage to route by for with `412` (CDS Hooks: the service
+  could not obtain the data it needs), where earlier releases answered `422`: `no coverage in
+  request or system of record` (a `null` coverage prefetch, or none its system of record
+  holds); `no coverage to route by: send prefetch.coverage or fhirServer (…)` for a member its
+  system of record does not hold, when the request names no `fhirServer`; `no coverage to
+  route by: send prefetch.coverage (…, and it does not read fhirServer)` when the read is off;
+  and each refusal of the read through `fhirServer` (`no coverage to route by: <reason>`). A
+  Coverage the read returns about another patient, and an answer that is not the payor
+  Organization asked for, are `502`; routing ambiguity stays `422`. DTR and PAS are unchanged.
+  From shn-gateway v0.61.0 a request refused for any of these reasons carries nothing: the
+  coverage read through `fhirServer` is added only to a request that is routed.
 - **Member id limitation.** `context.patientId`, and the patient references a request binds
   (each order's subject, each Coverage's beneficiary), must use the patient's network member
   id. A provider's gateway that has opted in obtains prefetch only when its system of record
   names the patient by that id. When the system names the patient differently, a request
-  that leaves out `coverage` is refused (`422`); one that leaves out `patient` is refused the
-  same way at `strict` and sent without it below `strict`; history keys are left out. Without
-  the opt-in nothing is added, and the Coverage read to choose the payer is found under the
-  system's own Patient id.
+  that leaves out `patient` is refused (`422`) at `strict` and sent without it below
+  `strict`, and history keys are left out. From shn-gateway v0.61.0 a request that leaves
+  out `coverage` is routed as without the opt-in and nothing is added (before shn-gateway
+  v0.61.0 it was refused `422`). Without the opt-in nothing is added, and the Coverage read
+  to choose the payer is found under the system's own Patient id.
 - **Gateway-originated requests.** A request that a provider's gateway builds for its own
   workflow names the patient by the member id. It changes the system of record's `Patient.id`
   and the patient reference on each carried record's patient path, and nothing else; the
@@ -3117,6 +3196,267 @@ property. Until then, build to the rule: preserve what you do not recognise.
 ## 9. Status and roadmap
 
 ### Changelog
+
+- **2026-10-01 — From shn-sdk v0.60.0, the PAS builders and `shnsdk.Responder` carry a dependent's Coverage that names the parent as a contained Patient (§7a.3).**
+  From shn-sdk v0.60.0, `BuildConformantClaimBundle` and
+  `BuildConformantClaimUpdateBundle` (and their `AtLine` forms) accept a Coverage whose
+  `subscriber` or `policyHolder` (or both) names the Coverage's party: a contained `Patient`,
+  typically a dependent's parent carrying only an MRN, that those slots name by their own
+  `reference` (`#<id>`), whose `id` no other contained resource has, and that nothing else in
+  the Coverage references. The slots and the contained Patient are carried with the same JSON
+  values your record has (the Coverage is re-encoded, compacted and HTML-escaped, as every
+  carried record is), and the `beneficiary` still names the request's Patient. The party
+  contains nothing and its `identifier`, if present, is a list; a reference it makes, or one
+  elsewhere in a slot naming it, to a record the request does not carry is refused, naming the
+  element. Other contained resources are carried as your record has them, and the references
+  they make are not checked. A Coverage `beneficiary`, `payor` entry, `subscriber` or
+  `policyHolder` that carries a member named `reference` in another case (for example both
+  `reference` and `Reference`, or `Reference` alone) is now refused, naming the element and the
+  member, not resolved: earlier releases read such an element ignoring case, the last member
+  winning, and re-pointed it on that reading. A Coverage record that repeats a member name in
+  any object, exactly or in another case (for example two `reference` members, or
+  `resourceType` and `ResourceType`), or that is not strict JSON, is now refused before
+  anything is sent, naming the element and the member: earlier releases read such a record
+  keeping the last occurrence, and the network refuses a request that carries one. A member
+  named `reference` in another case elsewhere in the Coverage is now read as a reference, so
+  one naming a record the request does not carry is refused. A contained resource in the
+  Coverage or the Claim whose `id` member is spelled in another case (`Id`) is now refused:
+  earlier releases named it by that member. A payer Organization the Coverage or the Claim
+  contains is dropped only when its `resourceType` and `id` are spelled exactly and nothing
+  else in that resource names it, under a member named `reference` in any case. One spelled
+  `ResourceType`, which earlier releases dropped, is now kept and the request refused; one
+  another contained resource (the party, say) names is kept, carried in the resource; and one
+  named only under a member spelled `Reference`, which earlier releases dropped, is kept and
+  the request refused. `shnsdk.CoverageParty` itself requires that the
+  party holds as a contained resource and that every member the rule reads is spelled
+  exactly, and it answers only for an element of the Coverage's own `contained` list.
+  `shnsdk.Responder` answers such a submission or amendment: the PAS response it builds retains
+  the Coverage with its party and does not read the party as the patient. Earlier releases
+  refused the request (`names someone other than the member it covers`), and a Responder
+  refused to build the response. The new `shnsdk.CoverageParty` decides whether a contained
+  resource is a Coverage's party. Unchanged: a `subscriber` or `policyHolder` naming a
+  `RelatedPerson`, an `Organization` or another Patient record is refused, as is a contained
+  Patient that anything else in the Coverage references or whose `id` another contained
+  resource shares; a Responder still refuses a response whose Coverage beneficiary, or a
+  Patient entry, is not the request's patient.
+  A `subscriber` or `policyHolder` is re-pointed to the request's Patient only when it and the
+  `beneficiary` name the same Patient by a literal reference; when the `beneficiary` names no
+  literal Patient (an identifier only, or none), one naming no literal Patient either (an
+  `Organization`, a `RelatedPerson`, a contained `#id`, an identifier) was re-pointed by
+  earlier releases and is now refused, naming the element. A Smart Gateway reads the party as
+  part of the Coverage, and carries and reads the answer to such a request, from shn-gateway
+  v0.61.0 (the next gateway release, not yet published). An earlier gateway's check of a PAS
+  answer reads the contained parent as a second patient: at `strict` it refuses an answer that
+  retains the Coverage (as a `shnsdk.Responder`'s answer does), and below `strict` it relays
+  the payer's answer as sent but records no pend or decision from it.
+- **2026-10-01 — From shn-gateway v0.61.0, under the enrichment opt-in, a request whose patient the provider's system of record names by another id is routed as without the opt-in, where it was refused `422` (§7a.4).**
+  From shn-gateway v0.61.0, a provider's gateway that has opted in to enrichment
+  (`ENRICH_NATIVE_REQUESTS=true`), and whose system of record names the patient by an id
+  other than the request's member id, routes a CDS Hooks request that carries its `patient`
+  but no `prefetch.coverage`, and a `$questionnaire-package` request that carries no
+  `coverage` parameter, exactly as without the opt-in: by the Coverage read from its system
+  of record under that system's own Patient id, only to choose the payer, and checked against
+  that id alone (a Coverage naming `Patient/<member id>`, another patient there, is refused
+  `502`). Nothing is added to either request: a value from that system would name the
+  patient by an id the request does not use. Before, both were refused `422 system of record
+  names the patient differently from …`, although the same request without the opt-in was
+  routed; the opt-in now never leaves a member with less to route by than the default. A CDS Hooks
+  request that also leaves out `patient` is still refused `422` at `strict` and sent without
+  it below `strict`, now with the text `system of record names the patient differently from
+  context.patientId; supply the patient prefetch in the request` (before, `… supply patient
+  and coverage prefetch in the request`).
+- **2026-10-01 — From shn-gateway v0.61.0, a dependent's Coverage that names the parent as a contained Patient routes (§7a.4).**
+  From shn-gateway v0.61.0, the provider's gateway accepts a dependent's Coverage whose
+  `subscriber` or `policyHolder` (or both) references a contained `Patient`, the parent,
+  whatever identifiers it carries (for example only an MRN). The contained Patient is a party
+  to the coverage, carried byte for byte as part of the Coverage, and binds nothing: the
+  Coverage's `beneficiary` must still be the request's patient, and the contained Patient must
+  be referenced by those two slots' own references only, and contain nothing. It is never read
+  as the patient when a gateway derives the identity of a member it does not hold. It applies to a Coverage read through the
+  request's `fhirServer`, read from the provider's system of record, sent by the EHR in
+  `prefetch.coverage`, and to the `$questionnaire-package` coverage. Before, such a Coverage
+  was refused (`412` on the `fhirServer` read, `502` from the system of record, `403` at
+  `strict` for one the EHR sent). Unchanged: a Coverage whose beneficiary names another
+  patient, another Patient carried as a standalone entry, and a contained Patient referenced
+  from any other element are refused as before.
+- **2026-10-01 — From shn-gateway v0.61.0, a provider gateway carries the Coverage it read through a CRD request's own fhirServer as `prefetch.coverage` (§7a.4).**
+  From shn-gateway v0.61.0, when a CDS Hooks request carries no `prefetch.coverage` key, the
+  provider's system of record names no patient for the member, and the provider's gateway
+  routes the request by the Coverage it read through the request's `fhirServer`, the gateway
+  adds that coverage as `prefetch.coverage`: a `searchset` it writes, with one `match` entry
+  for each Coverage the payer was chosen by and one `include` entry for the payor
+  Organization the payer was chosen by for each (returned by the search, or read by the
+  gateway), each resource byte for byte as the provider's FHIR server returned it (any
+  reference it holds, an absolute one on that server included, carried as written), under `urn:uuid:` entry
+  addresses, `total` the number of Coverages, and none of that server's links, entry
+  addresses, Bundle id, meta or `OperationOutcome` entries. The one exception: an included
+  payor Organization that a carried Coverage names by an absolute reference on the
+  request's `fhirServer` base (the base compared normalised) has that reference, exactly as
+  the Coverage writes it, as its `fullUrl`, so the reference resolves; it is already in the
+  Coverage's own bytes. This is registered edit E-07
+  (`cds-callback-coverage-carry`), made by default: the callback removal (E-01) leaves the
+  payer no way to read that Coverage, and a payer that needs it (the Da Vinci reference
+  payer answers `400` without one) can now decide. Before, nothing that read returned was
+  carried. A payer may therefore receive a gateway-written coverage `searchset`, which it
+  recognises by its `urn:uuid:` entries. Unchanged: a coverage key the EHR sends, even `null`,
+  is never changed or replaced; with `CDS_FHIR_SERVER_READ=off`, or no `fhirServer`, nothing
+  is read or carried and the request is refused `412` as before; a member the system of
+  record names is routed by that system and nothing is added without the enrichment opt-in;
+  the payor Organization read for a coverage the EHR sent is never carried; a request refused
+  while routing carries nothing.
+- **2026-10-01 — From shn-gateway v0.60.0, a payer gateway that maps its payer identity carries a CRD request with no Coverage as sent, where it answered `400` (§7a.4).**
+  A CDS Hooks request that carries no Coverage at all has no payor for payer backend
+  identity mapping to map: its `prefetch`, or `prefetch.coverage`, is absent or `null`, or
+  `prefetch.coverage` is a Bundle whose `entry` is absent, `null`, or holds only entries
+  whose `resource` is an `OperationOutcome`; and no `"resourceType": "Coverage"` object
+  appears anywhere else in the request (another prefetch member, `context`, a nested Bundle,
+  a contained resource), the `resourceType` member matched without regard to case in its name
+  and its value, and a `prefetch`, `coverage` or `entry` member named in another case counting
+  as present. The payer's gateway sends it to the payer's own system as it
+  arrived, and that system answers it. Earlier releases refused it `400 payer backend
+  identity mapping: inbound Coverage carries no resolvable payor identifier`. A provider
+  gateway sends such a request when it chose the payer by a Coverage it read only to route,
+  from its system of record, or through `fhirServer` before shn-gateway v0.61.0 (which
+  carries that Coverage). A Coverage whose payor cannot be read,
+  or that names another payer, is still refused `400`, and so are a coverage Bundle with any
+  other entry and a request whose only Coverage is outside `prefetch.coverage`; a PAS Bundle
+  with no Coverage is unchanged. Send `prefetch.coverage`, with a payor that names the
+  payer, for the payer to decide on the member's coverage.
+- **2026-10-01 — From shn-gateway v0.60.0, the CRD discovery's prefetch templates are the Da Vinci reference payer's (§7a.4).**
+  Every service a provider's gateway lists at `/cds-services` advertises
+  `Coverage?patient={{context.patientId}}&status=active`,
+  `ServiceRequest?patient={{context.patientId}}&status=active,completed`,
+  `DeviceRequest?patient={{context.patientId}}&status=active,on-hold,completed`,
+  `MedicationRequest?patient={{context.patientId}}&status=active,completed` and
+  `QuestionnaireResponse?patient={{context.patientId}}&status=completed` (with
+  `Patient/{{context.patientId}}` unchanged): the patient by its bare id, a status filter,
+  and no `_include`, which CDS Hooks does not list among the query features a client
+  supports. Before, the templates named `Patient/{{context.patientId}}`, had no status
+  filter, and asked for `_include=Coverage:payor` and `_include=DeviceRequest:performer`. An
+  EHR that fulfils the templates sends only its active coverage and its current and
+  completed orders, and a coverage that names its payor Organization only by reference. The
+  provider's gateway resolves such a payor, only to route and with nothing added to or
+  changed in the request, on the server the reference's id belongs to: through its system of
+  record when that system names the patient by `context.patientId` and the request names no
+  `fhirServer` or one at the system of record's own FHIR base; otherwise, or when that
+  system holds no such Organization, by one read of the Organization through the request's
+  own `fhirServer` (with its `fhirAuthorization` token; not with `CDS_FHIR_SERVER_READ=off`,
+  nor for a request naming no `fhirServer`). A request whose `fhirServer` is at another base
+  is never resolved from the system of record. A refused `fhirServer` read keeps that read's
+  status (`412`, or `502` for an answer that is not the Organization asked for) and gives
+  its reason after `no payer identifier on member coverage: ` (for example `412 no payer
+  identifier on member coverage: fhirServer refused the fhirAuthorization token`). When
+  nothing can read the payor, the request is refused `422` with the remedy that resolves
+  that reference: for `Organization/<id>`, `no payer identifier on member coverage:
+  Coverage.payor is a reference to an Organization the gateway could not read; send the
+  payor Organization with the coverage, or a payor identifier`; for an absolute reference
+  that a Bundle entry's `fullUrl` can be (no `/_history/`, query, fragment or dot segment),
+  `no payer identifier on member coverage: Coverage.payor is a reference to an Organization
+  the gateway could not resolve; send the payor Organization as a Bundle entry whose fullUrl
+  is that reference, or a payor identifier`; for any other reference to an Organization
+  (versioned, with a fragment, a leading slash or a dot segment, never read), `no payer
+  identifier on member coverage: Coverage.payor is a reference to an Organization the
+  gateway does not read; send a payor identifier with the coverage`; and, from
+  shn-gateway v0.61.0, for a `urn:uuid:` or `urn:oid:` reference, `no payer identifier on
+  member coverage: Coverage.payor is a urn reference no Bundle entry's fullUrl matches; send
+  the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor
+  identifier`. A payor of another kind that nothing resolves (a `RelatedPerson`, a
+  `Patient`) keeps the bare `422 no payer identifier on member coverage`. From v0.61.0 a
+  payor reference that resolved to a resource
+  naming no payer identifier is refused with its reason (`the payor Organization carries no
+  identifier with both a system and a value, such as a NAIC code or payer id`, or
+  `Coverage.payor references a resource that is not an Organization`); v0.60.0 answers the
+  bare text. Two different Organizations named by
+  reference alone and left for the `fhirServer` read are `422 no payer identifier on member
+  coverage: the request's coverages name more than one payor Organization by reference
+  alone`. Under
+  the old templates `_include=Coverage:payor` brought the Organization with the coverage, so
+  such a request was routed with no read. Now it is routed only when the system of record
+  resolves the payor as above or the `fhirServer` read succeeds, and is otherwise refused
+  with the reason: for example a member the system of record does not hold, or holds without
+  the Organization, and no `fhirServer` (`422`); `CDS_FHIR_SERVER_READ=off` (`422`); or a
+  token that does not allow the Organization read (`412`). An EHR that sends a payor
+  identifier is routed as before and avoids all of these, and so is one that sends the payor
+  Organization with the coverage where its reference resolves: as another prefetch value
+  for `Organization/<id>`, or as an entry of a Bundle the request carries whose `fullUrl` is
+  the absolute reference. An Organization sent as another prefetch value does not resolve any
+  other form of reference. The gateway's own search of its participant's system of record for the same
+  values (the opt-in fill) uses the same status filter and keeps the two includes, since the
+  payer cannot fetch those records itself. The coverage it chooses the payer by, for a
+  request that carries none without the opt-in and for a CRD request the gateway originates
+  itself, comes from a search of every Coverage: the active ones, or, when none is active,
+  the others if they name one payer, so a cancelled coverage naming another payer no longer
+  makes routing ambiguous. With the opt-in, a request that carries none is routed on the
+  filled search when that finds a Coverage, chosen the same way, and otherwise (none found,
+  or a search the system of record cannot answer) on the search of every Coverage; either
+  way a member never has less to route by than without the opt-in (before shn-gateway v0.61.0,
+  except when the system of record names the patient by another id); a prefetch value the
+  opt-in cannot fill is decided by `strict`, and one with no active
+  coverage is routed as without it, carrying `null` coverage. An originated request carries
+  that coverage, and its
+  questionnaire and PAS legs, and the inquiry about a pended PAS submission, name the same
+  one. A `$questionnaire-package` request whose `coverage` parameter names its payor
+  Organization only by reference, with no such Organization in the request, has it read from
+  the provider's system of record when that system names the patient by the request's member
+  id, only to route; otherwise (a system that cannot name the patient counts as one that
+  does not hold it) it is refused with the same `422`. Only `Organization/<id>` is read
+  there; a reference written any other way is refused with the remedy that resolves it, as
+  on CDS Hooks: an absolute one naming the Organization as an entry of a Bundle parameter
+  whose `fullUrl` is that reference, or a payor identifier; a versioned one, or one with a
+  fragment, a leading slash or a dot segment, a payor identifier only. Before, a request the
+  gateway edited (under the enrichment opt-in, its Patient appended) had its payor
+  reference read from the system of record however it was written; a reference written any
+  way but `Organization/<id>` (versioned, with a fragment or a query, for example) is now
+  refused there too, as it already was without the opt-in.
+- **2026-09-30 — From shn-gateway v0.60.0, a PAS Bundle's payor reference resolves by `fullUrl`, and the `no payer identifier` refusal says why.**
+  On `Claim/$submit` and `Claim/$inquire`, your provider gateway reads the Coverage's
+  `payor` reference among the Bundle's entries: an absolute reference (a URL, or a
+  `urn:uuid`) names the entry whose `fullUrl` equals it, and a relative
+  `Organization/<id>` the entry with that type and id, whatever its `fullUrl`. Before,
+  only the relative form resolved. A reference several entries answer routes when they
+  all name the same payer identifier, as a repeated payor Organization did before; when
+  they name different payers, or one names none, it is refused, where before the first
+  was taken when it named a payer. One no entry answers is refused as before: the payor
+  Organization must be an entry of the Bundle.
+  The `422 no payer identifier on member coverage` now adds which part failed after a
+  colon, such as `Coverage.payor is an absolute reference that is no entry's fullUrl`, or
+  a payor Organization with no identifier carrying both a system and a value.
+- **2026-09-30 — From shn-gateway v0.60.0, a provider gateway reads a CRD request's Coverage through its own fhirServer by default, only to route; `CDS_FHIR_SERVER_READ=off` turns it off (§7a.4).**
+  A CDS Hooks request with no `prefetch.coverage`, for a member the provider's system of
+  record does not hold, has its Coverage searched through the `fhirServer` it names
+  (the provider's own FHIR server, with its `fhirAuthorization` token), and a payor
+  Organization the Coverage names only by reference read there once more, instead of being
+  refused. The reads only choose the payer: nothing they return is carried, and `fhirServer`
+  and `fhirAuthorization` are still removed. (From shn-gateway v0.61.0 the records the payer
+  was chosen by are carried; see that entry.) `CDS_FHIR_SERVER_READ` is `private` by default
+  (an `https` server in the provider's own network or on the internet, never a loopback,
+  link-local, metadata or reserved address), `public` (port 443 at a public address only; a
+  gateway SHN hosts runs this) or `off`.
+- **2026-09-30 — From shn-gateway v0.60.0, a CRD request with no coverage to route by is a `412`, not a `422` (§7a.4).**
+  A provider gateway that cannot obtain a coverage to route a CDS Hooks request by (none in
+  the request or its system of record, none read through `fhirServer`, or the read off)
+  answers CDS Hooks' `412`, the service could not obtain the data it needs, with a reason
+  that begins `no coverage in request or system of record` or `no coverage to route by:`. A
+  Coverage about another patient and an answer that is not the payor Organization stay `502`;
+  routing ambiguity stays `422`; DTR and PAS are unchanged.
+- **2026-09-30 — From shn-gateway v0.60.0, an Authorization Framework that does not answer is a `503`, not a `502 authorization failed` (§6.1b).**
+  When `POST {authz}/authorize` gets no response (refused, reset or closed, or none within
+  the client timeout), or a `503` or `504` from whatever is in front of the Framework, the
+  request leg is `unreachable` and your caller gets your gateway's own `503`: `the
+  authorization service could not be reached, so this leg was not sent to the payer`. On a
+  Da Vinci ingress call nothing reached the payer, so resending is safe. When the first
+  attempt failed before the request was written, the call is tried once more with a fresh
+  holder assertion. A `403` denial, and any other answer from the Framework or one that
+  cannot be read, are answered as before, and never retried.
+- **2026-09-30 — From shn-sdk v0.60.0, `shn register` and `shn rotate` declare your gateway's contract versions, and `shn rotate` keeps the set you declared (§2.4).**
+  Both commands take `--contract-versions` (for example `pa.crd@2.2,pa.dtr@2.2,pa.pas@2.2,pa.pdex@2.1`),
+  the set your Smart Gateway declares; a blank list, a token the CLI cannot build, a token
+  listed twice and a second use are refused. Without it, `shn register` declares its
+  build's default, as before, and `shn rotate` re-declares the set the registrar holds for
+  you now, read from its `/holders` feed, where it used to declare the build's default: a
+  set other than the default is kept, and an entry that declares none stays that way.
+  `shn rotate` refuses, sending nothing and keeping your keys, when it cannot read that
+  set. Every run prints the set it sends.
 
 - **2026-09-30 — From shn-gateway v0.59.0, a payer's gateway answers for a system slower than its deadline (§6.2).**
   A payer's gateway waits for its payer's own system at most its deadline

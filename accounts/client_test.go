@@ -131,7 +131,7 @@ func TestClient_SubmitPoP_MessageFrames(t *testing.T) {
 // contract-version tokens ride the pop body when the RegistrationRequest carries
 // them, driving the REAL producer (Identity.Registration) rather than a
 // hand-built RegistrationRequest — this is the path every self-serve lane
-// (cloudctl identity, kit bootstrap, shn CLI) actually calls. An empty
+// (the hosted control plane's identity step, kit bootstrap, shn CLI) actually calls. An empty
 // declaration omits the key entirely (same additive contract as MessageFrames).
 func TestClient_SubmitPoP_ContractVersions(t *testing.T) {
 	var got map[string]any

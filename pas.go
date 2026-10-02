@@ -1101,9 +1101,11 @@ func repointInsurerToEntry(claimJSON []byte, payerOrgID string) ([]byte, error) 
 	return json.Marshal(m)
 }
 
-// dropContainedPayerOrg removes the contained payer Organization the repointed
-// payor/insurer reference no longer names, deleting the "contained" array if it
-// becomes empty. No-op when there is no such contained resource.
+// dropContainedPayerOrg removes the contained payer Organization the re-point
+// displaced (the Organization, read by its exact resourceType and id, whose id
+// is entryOrgID), only when nothing else in the resource still names it,
+// deleting the "contained" array if it becomes empty. No-op when there is no
+// such contained resource.
 //
 // entryOrgID is the id of the payer Organization ENTRY the request now carries.
 // It is the id to drop, not just the minted conformantPayerOrgID, because the
@@ -1132,31 +1134,55 @@ func dropContainedPayerOrg(m map[string]json.RawMessage, entryOrgID string) erro
 	if err := json.Unmarshal(raw, &contained); err != nil {
 		return fmt.Errorf("parse contained: %w", err)
 	}
-	// What the resource still points at locally AFTER the re-point, read without
-	// descending into the records it contains. A candidate that is still named
-	// here is not the displaced copy and stays: dropping it would leave the
-	// reference that names it pointing at nothing.
-	stillNamed := map[string]bool{}
+	// What the resource still points at locally AFTER the re-point, read
+	// everywhere but its own contained list, as CoverageParty reads a
+	// reference: under a member named reference in any case. A candidate that
+	// is still named here is not the displaced copy and stays: dropping it
+	// would leave the reference that names it pointing at nothing.
 	outer := map[string]json.RawMessage{}
 	for k, v := range m {
 		if k != "contained" {
 			outer[k] = v
 		}
 	}
+	var outerDecoded any
 	if outerJSON, err := json.Marshal(outer); err == nil {
-		for _, ref := range localReferences(outerJSON, true) {
-			stillNamed[ref] = true
+		_ = json.Unmarshal(outerJSON, &outerDecoded)
+	}
+	namedOutside := func(id string) bool {
+		return coverageRefersTo(outerDecoded, "#"+id)
+	}
+	// A reference another contained resource makes (the Coverage's party,
+	// say) names a candidate too: dropping it would leave that reference
+	// pointing at nothing. It is read as CoverageParty reads one, under a
+	// member named reference in any case. A candidate's references to itself
+	// do not count, nor do those of another candidate under the same id.
+	decoded := make([]any, len(contained))
+	for i, c := range contained {
+		_ = json.Unmarshal(c, &decoded[i])
+	}
+	candidate := func(v any, id string) bool {
+		m, _ := v.(map[string]any)
+		return m["resourceType"] == "Organization" && m["id"] == id
+	}
+	namedByAnother := func(i int, id string) bool {
+		for j := range contained {
+			if j != i && !candidate(decoded[j], id) && coverageRefersTo(decoded[j], "#"+id) {
+				return true
+			}
 		}
+		return false
 	}
 	kept := make([]json.RawMessage, 0, len(contained))
-	for _, c := range contained {
-		var probe struct {
-			ResourceType string `json:"resourceType"`
-			ID           string `json:"id"`
-		}
-		if err := json.Unmarshal(c, &probe); err == nil && probe.ResourceType == "Organization" &&
-			!stillNamed[probe.ID] && entryOrgID != "" && probe.ID == entryOrgID {
-			continue // drop the payer org — it lives as a bundle entry now
+	for i, c := range contained {
+		// Read by the exact member names: a contained resource (a Coverage's
+		// party, say) carrying "ResourceType" or "Id" members in another case
+		// is not the payer Organization they spell.
+		var probe map[string]any
+		if err := json.Unmarshal(c, &probe); err == nil && probe["resourceType"] == "Organization" {
+			if id, ok := probe["id"].(string); ok && !namedOutside(id) && !namedByAnother(i, id) && entryOrgID != "" && id == entryOrgID {
+				continue // drop the payer org — it lives as a bundle entry now
+			}
 		}
 		kept = append(kept, c)
 	}

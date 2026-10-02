@@ -56,7 +56,7 @@ func checkPASContainedReferenced(bundle []byte) error {
 	if err := json.Unmarshal(bundle, &b); err != nil {
 		return fmt.Errorf("read the built request: %w", err)
 	}
-	var stranded []string
+	var stranded, variant []string
 	for _, e := range b.Entry {
 		var r struct {
 			ResourceType string            `json:"resourceType"`
@@ -79,25 +79,42 @@ func checkPASContainedReferenced(bundle []byte) error {
 			}
 		}
 		for i, c := range r.Contained {
-			var head struct {
-				ResourceType string `json:"resourceType"`
-				ID           string `json:"id"`
-			}
-			if json.Unmarshal(c, &head) != nil || head.ID == "" {
+			// Read by the exact member names, as a local reference names a
+			// contained resource: an "Id" member in another case is not its id.
+			var head map[string]any
+			if json.Unmarshal(c, &head) != nil {
 				continue
 			}
-			referenced := slices.Contains(outer, head.ID)
+			typ, _ := head["resourceType"].(string)
+			// An id member in another case ("Id") is refused, as a reference
+			// member in another case is: a reader that ignores case would
+			// name the resource by it.
+			if k := caseVariantMember(head, "id"); k != "" {
+				variant = append(variant, fmt.Sprintf("%s/%s contains %s with a member named %q",
+					blankAsUnnamed(r.ResourceType), blankAsUnnamed(r.ID), blankAsUnnamed(typ), k))
+				continue
+			}
+			id, _ := head["id"].(string)
+			if id == "" {
+				continue
+			}
+			referenced := slices.Contains(outer, id)
 			for j := range within {
-				if j != i && within[j][head.ID] {
+				if j != i && within[j][id] {
 					referenced = true
 				}
 			}
 			if !referenced {
 				stranded = append(stranded, fmt.Sprintf("%s/%s contains %s %q",
 					blankAsUnnamed(r.ResourceType), blankAsUnnamed(r.ID),
-					blankAsUnnamed(head.ResourceType), head.ID))
+					blankAsUnnamed(typ), id))
 			}
 		}
+	}
+	if len(variant) > 0 {
+		slices.Sort(variant)
+		return fmt.Errorf("the request carries a contained record whose id is spelled in another case (%s): a local reference names a contained resource by its exact id, and a reader that ignores case would name it by the other",
+			strings.Join(variant, "; "))
 	}
 	if len(stranded) == 0 {
 		return nil

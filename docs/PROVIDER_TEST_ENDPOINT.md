@@ -102,7 +102,23 @@ Three things worth knowing before you test:
 
 ### 1.3 Prefetch
 
-All three services advertise the same six prefetch keys:
+All three services advertise the same six prefetch keys. From shn-gateway v0.60.0 the
+templates are the Da Vinci reference payer's order-sign templates: the patient named by its
+bare id, a status filter on the coverage and each history, and no `_include`, which CDS
+Hooks does not list among the query features a client supports:
+
+```json
+"prefetch": {
+  "patient": "Patient/{{context.patientId}}",
+  "coverage": "Coverage?patient={{context.patientId}}&status=active",
+  "serviceHistory": "ServiceRequest?patient={{context.patientId}}&status=active,completed",
+  "deviceHistory": "DeviceRequest?patient={{context.patientId}}&status=active,on-hold,completed",
+  "medicationHistory": "MedicationRequest?patient={{context.patientId}}&status=active,completed",
+  "questionnaireResponses": "QuestionnaireResponse?patient={{context.patientId}}&status=completed"
+}
+```
+
+Before shn-gateway v0.60.0 they were:
 
 | Key | Template |
 |---|---|
@@ -116,13 +132,59 @@ All three services advertise the same six prefetch keys:
 What the endpoint does with your request:
 
 - It **removes `fhirServer` and `fhirAuthorization`** — the payer never gets a route into
-  your systems, and the endpoint never calls back into them.
-- It **adds nothing**. A prefetch key you leave out is left out of what the payer receives.
+  your systems. From shn-gateway v0.60.0 the endpoint may first use them to read your
+  Coverage (and at most one payor Organization) to choose the payer (next bullets and
+  §8.1); it never calls back into your systems otherwise. From shn-gateway v0.61.0 the
+  Coverage it read that way, with its payor Organization, is carried to the payer as
+  `prefetch.coverage`, since the payer cannot read it once `fhirServer` is removed.
+- It **adds nothing of its own**. A prefetch key you leave out is left out of what the payer
+  receives; from shn-gateway v0.61.0 the one exception is the coverage it read through your
+  `fhirServer` (§8.1), carried exactly as your server returned it.
+- From shn-gateway v0.60.0, a `coverage` you send that names its payor only as
+  `Organization/<id>` (what the template returns when your server does not add the
+  Organization) is routed by that Organization, read where that id is yours, only to choose
+  the payer; your `coverage` is sent to the payer byte for byte. When your request names a
+  `fhirServer`, the Organization is read once through it with your `fhirAuthorization` token,
+  never from the endpoint's own records (a different server, whose ids are not yours). When it
+  names none, the endpoint's own records are read, only when they name the patient by
+  `context.patientId` (a published test member) and hold that Organization. Otherwise the
+  request is refused `422 no payer identifier on member coverage: Coverage.payor is a
+  reference to an Organization the gateway could not read; send the payor Organization with
+  the coverage, or a payor identifier`. A payor reference written another way is not read: an
+  absolute one (other than on your `fhirServer`) is refused `422 no payer identifier on member
+  coverage: Coverage.payor is a reference to an Organization the gateway could not resolve;
+  send the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor
+  identifier` (an entry with that `fullUrl` of a Bundle your request carries, your `coverage`
+  Bundle or another prefetch value, routes it), and a
+  versioned one, or one with a fragment, a leading slash or a dot segment, `422 no payer
+  identifier on member coverage: Coverage.payor is a reference to an Organization the gateway
+  does not read; send a payor identifier with the coverage`. The read's requirements are §8.1's, and so are
+  its refusals, with the reason after `no payer identifier on member coverage: ` instead of
+  `no coverage to route by: ` (for example `412 no payer identifier on member coverage:
+  fhirServer refused the fhirAuthorization token`).
 - If you leave out `coverage`, the endpoint looks the member's coverage up in its own
-  synthetic records only to choose the payer; that coverage is not sent to the payer.
+  synthetic records only to choose the payer; that coverage is not sent to the payer. From
+  shn-gateway v0.60.0 the payer is chosen from the member's active coverage when it has one,
+  so a cancelled coverage naming another payer is ignored; a member with no active coverage
+  is still sent to the payer its coverage names (when its coverages name one payer), which
+  answers that it does not cover the member. For a member those records do not hold, it reads
+  the coverage instead through the `fhirServer` your request names (your own FHIR server),
+  with your `fhirAuthorization` token, to choose the payer, and chooses the same way (§8.1);
+  before shn-gateway v0.61.0 that coverage was never sent, and from shn-gateway v0.61.0 it is
+  carried as `prefetch.coverage` (§8.1). A request it finds no coverage to route by for is
+  refused `412` (§8.1).
+- A request routed by its own synthetic records (or, before shn-gateway v0.61.0, through your
+  `fhirServer`) reaches the payer **with no Coverage**, and gets whatever the
+  payer's own system answers for it. From shn-gateway v0.60.0 the payer's gateway carries it
+  as sent; earlier releases of a payer gateway that maps its payer identity refused it `400
+  payer backend identity mapping: inbound Coverage carries no resolvable payor identifier`.
+  A payer's system may not decide on a request without the member's Coverage, or may refuse
+  it.
 - Everything else in your request is carried to the payer as you sent it.
 
-So **send every prefetch value you want the payer to see**. The examples below carry all six
+So **send every prefetch value you want the payer to see**, and above all `coverage`: a
+Coverage whose payor names the payer (its identifier, inline or on a payor Organization in
+the same prefetch) is what the payer decides on. The examples below carry all six
 keys: the member's `patient` and `coverage`, and the four history keys as empty searchsets.
 
 ### 1.4 What comes back
@@ -159,6 +221,12 @@ Both routes are hosted participants, and a hosted participant takes gateway fixe
 published gateway releases: a fix announced for route `00301` or `00300` names the release
 that carries it, and the route answers the old way until that release is rolled.
 
+**Test data on these two routes is cleared on a schedule.** The shared reference payers
+behind routes `00300` and `00301` start again from their published test data weekly, on
+Sundays from 07:00 UTC, and nightly from 07:00 UTC (03:00 US Eastern) from 2026-10-07 through
+2026-10-14, the event week, and occasionally at other times: a submission made before a
+clearing is not found by an inquiry (§1.6) after it, so submit again before you inquire.
+
 **Route `00001` is still available.** `urn:oid:2.16.840.1.113883.6.300|00001` reaches the
 platform's own instance of the same 2.0-line reference payer. It answers every call in §6
 identically, takes gateway fixes at every deploy rather than at a release, and writes its
@@ -178,6 +246,12 @@ as in §1.5, whose Patient carries the member identifier you submitted with (typ
 and whose Claim names the requesting provider you submitted with: both reference payers
 match an inquiry on the member identifier and the provider's NPI, and a query for a
 submission they cannot match is answered with an empty result, not an error.
+
+On route `00301` an inquiry takes longer the more claims the payer holds, since its last
+clearing, for the same member and requesting provider. Submissions that name your own
+provider organization, with its own NPI, as the requester keep your inquiries independent
+of everyone else's claims; submissions that send the example provider of Appendix A share
+it with every participant who does the same.
 
 What comes back is the payer's own answer, relayed as sent. Measured on 2026-09-19 with the
 Inferno PAS test kits, both routes answer `HTTP 200` and a `Parameters` resource whose
@@ -814,6 +888,18 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
   payer registered on the network, the request is rejected with `422 Unprocessable Entity`
   (`no registered payer for identifier …`) rather than silently going nowhere. The routes
   in §1.5 are the ones documented here with test members.
+- **No payer identifier → `422`.** From shn-gateway v0.60.0, the endpoint routes a PAS
+  Bundle by its first Coverage's `payor`: an identifier on the payor itself, a contained
+  Organization, or an Organization that is an entry of the Bundle. An absolute reference
+  (a URL, or a `urn:uuid`) names the entry whose `fullUrl` equals it, and a relative
+  `Organization/<id>` the entry with that type and id, whatever its `fullUrl`; a
+  reference several entries answer is refused unless they all name the same payer
+  identifier. The endpoint never looks the Organization up on your server. When none
+  of that yields an identifier with both a system and a value (a NAIC code or payer id),
+  the request is refused with `422` (`no payer identifier on member coverage: …`), and the
+  text after the colon says which part failed: a reference that matches no entry, or
+  several that do not name one payer; a reference to something that is not an
+  Organization; or an Organization with no such identifier.
 - **Unknown member → carried with the id you send.** The endpoint first resolves the member
   against its own synthetic roster. A CRD request whose `context.patientId`, a PAS bundle
   whose `Claim.patient`, or a DTR request whose Coverage beneficiary (or, if the Coverage
@@ -821,7 +907,8 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
   member id and the Patient your request carries for it, so you can drive the hook from a
   patient in your own test environment. Send the same Patient, unchanged, on every leg of
   one exchange. Three consequences: the endpoint holds no records for such a member, so
-  leave out `coverage` prefetch and the request is refused (`422`, next bullet), while any
+  leave out `coverage` prefetch and the request is refused (next bullet) unless, from
+  shn-gateway v0.60.0, the endpoint can read it through your `fhirServer`, while any
   other key you leave out is left out of what the payer receives; the payer handles the
   member as it would directly; and the
   payer resolves the member on its own, so its answer for a member it does not hold is the
@@ -829,10 +916,60 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
   payload names a second patient is refused (`403 Forbidden`) only when the gateway runs
   `strict`; this endpoint runs below strict, so such a request is carried under the patient
   it is bound to.
-- **A coverage the endpoint cannot find → `422`.** If you leave out `coverage` prefetch
-  and the endpoint's own records hold no matching coverage, there is no payer to send the
-  request to, so it is refused rather than routed on a blank or invented value. The
-  endpoint adds nothing to your request, so any other key you leave out is simply left out.
+- **A coverage the endpoint cannot find → `412` (CDS Hooks) or `422` (DTR).** If you leave
+  out `coverage` prefetch and the endpoint's own records hold no matching coverage, there is
+  no payer to send the request to, so it is refused rather than routed on a blank or invented
+  value. From shn-gateway v0.60.0 a CDS Hooks request is answered CDS Hooks' `412` (the
+  service could not obtain the data it needs; `422` before): `412 no coverage in request or
+  system of record` for a member the endpoint holds, or a `null` coverage prefetch, and, for a
+  member it does not hold, `412 no coverage to route by: send prefetch.coverage or fhirServer
+  (this gateway's system of record names no patient for this member)` when your request names
+  no `fhirServer`. On `$questionnaire-package` the answer stays `422 no coverage to route by:
+  send the coverage parameter …`. The endpoint adds nothing to your request, so any other key
+  you leave out is simply left out.
+- **Coverage read through your `fhirServer`.** From shn-gateway v0.60.0, a CDS Hooks request
+  for a member the endpoint does not hold that carries no `coverage` prefetch but names
+  `fhirServer` has its coverage searched there, to choose the payer (and, from shn-gateway
+  v0.61.0, to carry it to the payer; below):
+  `GET {fhirServer}/Coverage?patient={context.patientId}` (one page, no status filter, no
+  `_include`), with `Authorization: Bearer <access_token>` when you send `fhirAuthorization`
+  (its `token_type` must be `Bearer`). It routes on the Coverages that are `active` when any
+  is, and otherwise on the others when they name one payer. When a Coverage names its payor only as
+  `Organization/<id>` on your server and the answer does not resolve it, the endpoint reads
+  `GET {fhirServer}/Organization/<id>` once more with the same token: at most two reads, within
+  4 seconds in all. Before shn-gateway v0.61.0 nothing either read returned was sent to the
+  payer, which received your request with no Coverage and answered whatever its own system
+  answers for one (§1.3). From shn-gateway v0.61.0 the endpoint adds what it routed by as
+  `prefetch.coverage`: a `searchset` it writes, with each Coverage it chose and the payor
+  Organization it chose the payer by (returned by your search, or read), exactly as your server
+  returned them (so any reference they hold, an absolute one on your server included, is
+  carried as written), under `urn:uuid:` entry addresses, and none of your server's links, entry
+  addresses or messages (from shn-gateway v0.61.0 too, a payor Organization your Coverage
+  names by an absolute reference on your `fhirServer` base has that reference, already in your
+  Coverage, as its `fullUrl`, so the payer resolves it); your request is otherwise carried as
+  you sent it. `fhirServer` and
+  `fhirAuthorization` are still removed. The endpoint is a gateway SHN runs, so it reads in the
+  gateway's `public` mode; for the reads to route your request, your FHIR server must be
+  `https` on port 443 at a public address, answer without redirecting and in at most 512 KiB
+  an answer, allow a Coverage search and an Organization read with the token, and return the
+  patient's Coverage whose payer is registered on the network: a `payor.identifier`,
+  or an Organization (in the answer, or read by its reference) carrying the payer's
+  identifier. Sending `coverage` in `prefetch`, with a `payor.identifier` or with the payor
+  Organization, is still preferred, and always works. (A Smart
+  Gateway you run yourself makes the same read by default, of a server in your own network or
+  on the internet, and `CDS_FHIR_SERVER_READ=off` turns it off.) A read that cannot route is
+  refused `412 no coverage to route by: <reason>`; the ones you are most likely to see are
+  `fhirServer must use port 443` and `fhirServer's address is not public` (a server not
+  reachable on the public internet on 443), `fhirServer refused the fhirAuthorization token`,
+  `fhirServer holds no Coverage for the patient`, `fhirServer holds no Organization for
+  the coverage's payor`, `fhirServer did not answer in time` and `fhirServer's TLS could not be
+  verified`. A Coverage about another patient (`fhirServer returned another patient's
+  coverage`) or an Organization other than the one asked for (`fhirServer's answer is not the
+  payor Organization`) is `502`. A payor reference to another server, or an Organization with
+  no payer identifier, is refused `422 no payer identifier on member coverage`. The read of
+  the payor of a `coverage` you sent (§1.3) gives the same reasons and statuses after `no
+  payer identifier on member coverage: ` instead of `no coverage to route by: `. The gateway's
+  CONFIGURATION.md ("Reading the coverage through `fhirServer`") lists every refusal.
 
 ### 8.2 Hooks and services
 
@@ -874,7 +1011,12 @@ A `502` whose body is `{"error":"hub routing failed"}` means the endpoint's gate
 could not reach the Hub at all. When the Hub refuses the exchange, the endpoint answers
 with the Hub's reason — for example `502 {"error":"hub refused the exchange: unknown
 recipient"}` (a Hub refusal is about the endpoint's gateway, not your request) — and
-an authorization or consent denial is a `403 {"error":"authorization denied"}`. When the
+an authorization or consent denial is a `403 {"error":"authorization denied"}`. From
+shn-gateway v0.60.0, when the network's authorization service does not answer the
+endpoint's gateway, the answer is a `503 {"error":"the authorization service could not be
+reached, so this leg was not sent to the payer"}` (an `OperationOutcome` with issue code
+`transient` on the FHIR operation routes): nothing reached the payer, and resending is
+safe. When the
 payer's gateway was reached but its answer was lost on the way back, the `502` says so —
 `the recipient received this request and answered, but its answer was lost …` or `the
 recipient may have received this request …` — because the payer may have acted on it:
@@ -926,8 +1068,9 @@ could not reach the Hub.
 |---|---|---|
 | Registration, per source IP | 50 per hour | `429` |
 | Requests per client | 60 per minute | `429` |
-| Concurrent requests in flight | 8 | `503` |
+| Concurrent requests in flight, across every caller of the endpoint | 8 | `503` |
 | Request body | 5 MiB | `400` |
+| Calls from one network address straight to a hosted payer gateway or a reference payer, not through this endpoint | 2,000 per 5 minutes (about 6.7 a second) | `403` |
 
 A body over the cap is refused before any of it is forwarded, with
 `{"error":"request body exceeds 5 MiB"}`.
@@ -937,6 +1080,19 @@ may raise these limits for an event; the values above are the standing ones.
 
 If you are scripting repeated registration/token/CRD/DTR/PAS runs in a loop, register once
 and reuse the client — a normal integration test needs a handful of registrations at most.
+A harness that needs more than 60 requests a minute registers a few more clients and spreads
+its calls across them: the request limit is per client, not per participant or per network
+address, and the per-IP registration limit leaves room for that. More clients raise only the
+per-minute ceiling: the 8 requests in flight are shared by every caller of the endpoint, and
+registered clients count against the endpoint's total of 500, which they keep, so register
+the few a harness needs and reuse them.
+
+Calls you make through this endpoint never count against the last limit in the table: the
+network's own traffic to the payers is exempt from it. It applies only to calls one network
+address sends straight to a hosted payer gateway or a reference payer, and lifts by itself
+once that address's rate falls back under it. Blocked calls still count toward that rate, so
+a harness that retries through the block keeps itself blocked: back off instead. Its `403` is
+the load balancer's plain response, not one of this endpoint's JSON errors.
 
 ### 8.5 When something fails, quote `X-Correlation-Id`
 

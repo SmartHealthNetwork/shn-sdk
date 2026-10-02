@@ -96,13 +96,15 @@ usage: shn <command> [flags]
 commands:
   keygen        generate signing+encryption keys and a public manifest snippet
   register      register a holder: --accounts (Accounts service) or --registrar (operator); -payer-id system=value (repeatable, role=payer) declares payer identities;
-                --request-frames v1 declares only v1 (use it when the Smart Gateway serving --base-url is older than v0.44.0)
+                --request-frames v1 declares only v1 (use it when the Smart Gateway serving --base-url is older than v0.44.0);
+                --contract-versions declares the contract versions your gateway declares (default: this build's)
   eligibility   run a coverage-eligibility round-trip through the Hub
   priorauth     run a prior-authorization (CRD→DTR→PAS) through the Hub
   login         authenticate the CLI to the Accounts service (browser PKCE; --no-browser for headless copy-paste)
   clients       list your registered clients (Accounts service)
   revoke        revoke a client by id (Accounts service)
   rotate        rotate a holder's keys against the registrar (holder-self); re-declares request frames (--request-frames, as for register)
+                and contract versions: --contract-versions, else the set the registrar holds now (it refuses if that cannot be read)
   doctor        self-validate against the network: discovery + eligibility (wire-correctness)
   send-test     drive a provider gateway's 8 /scenario UCs and tabulate pass/fail
 `)
@@ -237,6 +239,8 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	out := fs.String("out", ".", "key directory (loaded if present, else generated)")
 	var requestFrames requestFramesFlag
 	fs.Var(&requestFrames, "request-frames", requestFramesUsage)
+	var contractVersions contractVersionsFlag
+	fs.Var(&contractVersions, "contract-versions", contractVersionsUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -265,7 +269,9 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	}
 
 	requestFrames.warn(stderr, "shn register")
-	reg := id.Registration(*role, bu)
+	versions, source := contractVersions.forRegister()
+	printContractVersions(stdout, "shn register", versions, source)
+	reg := id.RegistrationWithDeclared(*role, bu, versions)
 	reg.RequestFrames = requestFrames.resolve()
 	body, err := json.Marshal(reg)
 	if err != nil {

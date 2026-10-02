@@ -78,6 +78,8 @@ func cmdRegisterAccounts(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&payerIDs, "payer-id", "declared payer identity as system=value (repeatable; role=payer only)")
 	var requestFrames requestFramesFlag
 	fs.Var(&requestFrames, "request-frames", requestFramesUsage)
+	var contractVersions contractVersionsFlag
+	fs.Var(&contractVersions, "contract-versions", contractVersionsUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -116,7 +118,9 @@ func cmdRegisterAccounts(args []string, stdout, stderr io.Writer) int {
 	// Set the server-assigned id BEFORE building the PoP so the proof signs it.
 	id.HolderID = assignedID
 	requestFrames.warn(stderr, "shn register")
-	reg := id.Registration(*role, *baseURL)
+	versions, source := contractVersions.forRegister()
+	printContractVersions(stdout, "shn register", versions, source)
+	reg := id.RegistrationWithDeclared(*role, *baseURL, versions)
 	reg.RequestFrames = requestFrames.resolve()
 	if err := c.SubmitPoP(context.Background(), assignedID, reg); err != nil {
 		fmt.Fprintf(stderr, "shn register: %v\n", err)
@@ -211,6 +215,8 @@ func cmdRotate(args []string, stdout, stderr io.Writer) int {
 	out := fs.String("out", ".", "key directory holding the CURRENT keys (overwritten with the new keys)")
 	var requestFrames requestFramesFlag
 	fs.Var(&requestFrames, "request-frames", requestFramesUsage)
+	var contractVersions contractVersionsFlag
+	fs.Var(&contractVersions, "contract-versions", contractVersionsUsage)
 	id, rest := splitPositional(args)
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -243,6 +249,15 @@ func cmdRotate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// The contract versions to re-declare: the flag's, or what the registrar
+	// holds for this holder now. Read before anything is generated or sent, so
+	// a failed read changes nothing.
+	versions, source, err := contractVersions.forRotate(context.Background(), http.DefaultClient, *registrar, id)
+	if err != nil {
+		fmt.Fprintf(stderr, "shn rotate: %v\n", err)
+		return 1
+	}
+
 	// Holder-self assertion signed by the CURRENT key (audience "registrar").
 	hdr, err := cur.Assertion("registrar", time.Now(), shnsdk.MaxAssertionTTL)
 	if err != nil {
@@ -257,7 +272,8 @@ func cmdRotate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	requestFrames.warn(stderr, "shn rotate")
-	reg := next.Registration(role, baseURL)
+	printContractVersions(stdout, "shn rotate", versions, source)
+	reg := next.RegistrationWithDeclared(role, baseURL, versions)
 	reg.RequestFrames = requestFrames.resolve()
 	body, err := json.Marshal(reg)
 	if err != nil {

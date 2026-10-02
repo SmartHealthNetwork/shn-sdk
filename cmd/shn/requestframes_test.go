@@ -53,13 +53,19 @@ func TestRequestFramesFlag(t *testing.T) {
 }
 
 // registrarCapture is a stub registrar that records the last registration
-// body for POST /register and PUT /register/{id}.
+// body for POST /register and PUT /register/{id}. Its /holders feed lists the
+// holder the rotate tests rotate, acme-7f3a, with this build's default contract
+// versions, which is what rotate re-declares without --contract-versions.
 func registrarCapture(t *testing.T) (*httptest.Server, *shnsdk.RegistrationRequest, *atomic.Int32) {
 	t.Helper()
 	var got shnsdk.RegistrationRequest
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
+		if r.Method == http.MethodGet && r.URL.Path == "/holders" {
+			_ = json.NewEncoder(w).Encode([]shnsdk.Holder{{ID: "acme-7f3a", ContractVersions: shnsdk.SupportedContractVersions()}})
+			return
+		}
 		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&got)
 		if r.Method == http.MethodPost {
 			w.WriteHeader(http.StatusCreated)
