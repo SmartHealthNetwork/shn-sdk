@@ -24,16 +24,26 @@ func idTokenWithEmail(email string) string {
 	return "hdr." + payload + ".sig"
 }
 
-// freePort allocates an ephemeral 127.0.0.1 port and releases it immediately, so
-// tests never bind the real registered loopback ports (8400-8404).
-func freePort(t *testing.T) int {
+// loopbackPorts reserves a pool of distinct 127.0.0.1 ports for StartPKCE, so
+// tests never bind the real registered loopback ports (8400-8404). Every
+// listener is held until the whole pool is chosen, so the ports are distinct,
+// and then released for StartPKCE to bind. A released port can be taken by any
+// other socket on the machine before StartPKCE binds it; StartPKCE binds the
+// first free port of its pool, so it fails only if every port in the pool is
+// taken in that window.
+func loopbackPorts(t *testing.T) []int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("freePort: %v", err)
+	const n = 5
+	ports := make([]int, 0, n)
+	for range n {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("loopbackPorts: %v", err)
+		}
+		defer l.Close()
+		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	return ports
 }
 
 // newOIDCStub starts an httptest server exposing /authorize and /token (token may be
@@ -91,7 +101,7 @@ func TestStartPKCE_HappyPath(t *testing.T) {
 	fixedNow := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	now := func() time.Time { return fixedNow }
 
-	flow, err := StartPKCE(nil, cfg, oidc, []int{freePort(t)}, now)
+	flow, err := StartPKCE(nil, cfg, oidc, loopbackPorts(t), now)
 	if err != nil {
 		t.Fatalf("StartPKCE: %v", err)
 	}
@@ -150,7 +160,7 @@ func TestStartPKCE_StateMismatch(t *testing.T) {
 	_, oidc := newOIDCStub(t, authorize, nil)
 	cfg := CLIConfig{ClientID: "cli-1", Scopes: []string{"openid"}}
 
-	flow, err := StartPKCE(nil, cfg, oidc, []int{freePort(t)}, time.Now)
+	flow, err := StartPKCE(nil, cfg, oidc, loopbackPorts(t), time.Now)
 	if err != nil {
 		t.Fatalf("StartPKCE: %v", err)
 	}
@@ -193,7 +203,7 @@ func TestStartPKCE_AuthorizeError(t *testing.T) {
 	_, oidc := newOIDCStub(t, authorize, nil)
 	cfg := CLIConfig{ClientID: "cli-1", Scopes: []string{"openid"}}
 
-	flow, err := StartPKCE(nil, cfg, oidc, []int{freePort(t)}, time.Now)
+	flow, err := StartPKCE(nil, cfg, oidc, loopbackPorts(t), time.Now)
 	if err != nil {
 		t.Fatalf("StartPKCE: %v", err)
 	}
@@ -234,7 +244,7 @@ func TestStartPKCE_CtxCancel(t *testing.T) {
 	_, oidc := newOIDCStub(t, authorize, nil)
 	cfg := CLIConfig{ClientID: "cli-1", Scopes: []string{"openid"}}
 
-	flow, err := StartPKCE(nil, cfg, oidc, []int{freePort(t)}, time.Now)
+	flow, err := StartPKCE(nil, cfg, oidc, loopbackPorts(t), time.Now)
 	if err != nil {
 		t.Fatalf("StartPKCE: %v", err)
 	}
@@ -254,25 +264,22 @@ func TestStartPKCE_CtxCancel(t *testing.T) {
 }
 
 // TestStartPKCE_PortExhaustion: every port in a small test port list is already
-// bound, so StartPKCE must fail, naming the port set.
+// bound, so StartPKCE must fail, naming the port set. The test holds its ports
+// from the start, so they are distinct and never released to another socket.
 func TestStartPKCE_PortExhaustion(t *testing.T) {
-	p1, p2 := freePort(t), freePort(t)
-	l1, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p1))
-	if err != nil {
-		t.Fatalf("bind p1: %v", err)
+	var ports []int
+	for range 2 {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		defer l.Close()
+		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
 	}
-	defer l1.Close()
-	l2, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p2))
-	if err != nil {
-		t.Fatalf("bind p2: %v", err)
-	}
-	defer l2.Close()
-
-	ports := []int{p1, p2}
 	cfg := CLIConfig{ClientID: "cli-1"}
 	oidc := OIDC{AuthorizationEndpoint: "http://127.0.0.1:1/authorize", TokenEndpoint: "http://127.0.0.1:1/token"}
 
-	_, err = StartPKCE(nil, cfg, oidc, ports, time.Now)
+	_, err := StartPKCE(nil, cfg, oidc, ports, time.Now)
 	if err == nil {
 		t.Fatal("expected a port-exhaustion error")
 	}
@@ -373,7 +380,7 @@ func TestPKCEFlow_CloseUnblocksWait(t *testing.T) {
 	_, oidc := newOIDCStub(t, authorize, nil)
 	cfg := CLIConfig{ClientID: "cli-1", Scopes: []string{"openid"}}
 
-	flow, err := StartPKCE(nil, cfg, oidc, []int{freePort(t)}, time.Now)
+	flow, err := StartPKCE(nil, cfg, oidc, loopbackPorts(t), time.Now)
 	if err != nil {
 		t.Fatalf("StartPKCE: %v", err)
 	}

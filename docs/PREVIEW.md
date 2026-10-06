@@ -15,7 +15,7 @@ per step. The preview environment's first end-to-end workflow is prior authoriza
 > Discover + manage surface.
 
 > **Just want to see it run first?** The **SHN Kit** desktop app (Mac/Windows,
-> [Releases](https://github.com/SmartHealthNetwork/shn-kit)) runs the full eight-scenario
+> [Releases](https://github.com/SmartHealthNetwork/shn-kit/releases)) runs the full eight-scenario
 > Prior Authorization suite locally with no Docker and no CLI — a zero-setup way to watch
 > the exchange end-to-end before you build against it here.
 
@@ -25,8 +25,8 @@ per step. The preview environment's first end-to-end workflow is prior authoriza
 > password — sign in at the portal, set your password, and continue below.
 
 > **Preview environment — synthetic data only.** The preview environment is seeded
-> with deterministic test personas (Linda Johansson et al.). **Never send production
-> PHI.** Every persona, member id, and DOB below is fabricated test data.
+> with deterministic test personas (Larsen, Okereke, Delacroix and others). **Never send
+> production PHI.** Every persona, member id, and DOB below is fabricated test data.
 
 The public preview environment is `shn-preview.org`. Substitute your own apex if you run
 a private deployment (the discovery descriptor is the source of truth for the live URLs).
@@ -99,27 +99,33 @@ curl https://accounts.shn-preview.org/discovery
 }
 ```
 
-Every persona also carries a `payerId` (the seeded member's Coverage payor identity),
-omitted above for brevity — see `docs/PARTICIPANT_PROTOCOL.md` §1a for the full field
-contract (how to resolve the payer's `encPub` from `/holders` by matching `payerId`,
-and the authz pub from `/pubkey`).
+Fields this walkthrough does not need are omitted above — among them each persona's
+`payerId` (the seeded member's Coverage payor identity), the descriptor's further
+endpoints, and its IG-version, operation, request-frame and published-version lists. See
+`docs/PARTICIPANT_PROTOCOL.md` §1a for the full field contract (how to resolve the
+payer's `encPub` from `/holders` by matching `payerId`, and the authz pub from
+`/pubkey`).
 
 **`conformance-payer` answers for every demo persona above (payer identifier `00001`).**
-Every adjudication these personas return — eligibility, CRD cards, DTR questionnaires,
-PAS verdicts — comes from the real Da Vinci reference payer, not a built-in stand-in;
-`conformance-payer` forwards natively to it. It is not the network's *only* payer
-holder — a second `role=payer` holder, `cambia-payer` (identifier `00200`), answers for
-a separate external-payer conformance lane with its own personas — but for every
-`MBR-D-*`/`MBR-*` demo persona this guide drives, `conformance-payer` is the one
-counterparty, and there is no built-in adjudication path behind it.
+It is a payer Smart Gateway that splits the work the way a real payer's gateway would.
+Eligibility it answers itself, from the Coverage records seeded in its own system: a
+covered persona has an active Coverage there, the not-covered twin a terminated one. The
+prior-authorization legs — CRD cards, DTR questionnaires, PAS verdicts — it forwards
+natively to the real Da Vinci reference payer, and those answers are the reference
+payer's own, not a built-in stand-in. It is not the network's *only* payer holder: other
+payer holders, including hosted payer holders, answer for their own personas. But for
+every `MBR-D-*`/`MBR-*` demo persona this guide drives, `conformance-payer` is the one
+counterparty.
 
 ---
 
 ## 2. Register
 
 Self-serve client registration goes through the **Accounts service** (Cognito-gated).
-Log in once (the token caches at `~/.shn/credentials`), then register. Keys are
-generated client-side — your private keys never leave your process.
+Log in (the token caches at `~/.shn/credentials`), then register. Keys are
+generated client-side — your private keys never leave your process. A cached login
+expires with its sign-in token and is not refreshed: once it has expired, the Accounts
+commands answer `not logged in` and you run `shn login` again.
 
 ```sh
 # Log in (opens a browser for Cognito sign-in; token cached at ~/.shn/credentials).
@@ -131,14 +137,17 @@ shn login --accounts https://accounts.shn-preview.org
 # keys are written to -out.
 shn register --accounts https://accounts.shn-preview.org \
   --role provider --name acme --base-url https://your-org.example.com -out ./keys
+# → shn register: declaring contract versions pa.crd@2.0,pa.dtr@2.0,pa.pas@2.0,pa.pdex@2.1 (this build's default; pass --contract-versions to declare your gateway's set)
 # → Registered acme-7f3a. Keys in ./keys.
 ```
 
 > If a Smart Gateway older than v0.44.0 serves your `--base-url`, add
 > `--request-frames v1`: by default the CLI declares every request-frame
 > capability it supports, including framed DTR operations (`v1op`), which older
-> gateways do not accept. Run `shn rotate` after you upgrade the gateway;
-> rotating issues new keys, so restart the gateway with the new key directory.
+> gateways do not accept. After you upgrade the gateway, run
+> `shn rotate acme-7f3a --registrar https://registrar.shn-preview.org -out ./keys`
+> to declare the full set; rotating issues new keys (written over the current ones in
+> `-out`), so restart the gateway with the new key directory.
 
 > `--base-url` must be an **https URL that publicly resolves** (the registrar
 > rejects private, loopback, link-local, and unresolvable addresses with
@@ -179,6 +188,7 @@ shn eligibility --name acme-7f3a \
   --hub https://hub.shn-preview.org --authz https://authz.shn-preview.org \
   --payer-id conformance-payer --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
 # → covered: false
+# → reason: …
 ```
 
 ---
@@ -199,12 +209,11 @@ shn priorauth --member MBR-D-UC04 --discovery https://accounts.shn-preview.org \
 ```
 
 **Why pended — how the reference payer actually decides.** The demo persona roster
-rides four HCPCS families — `E0250`, `L8000`, `G0151`, `J3490` — and the reference
+rides four HCPCS families — `E0250`, `E1390`, `G0151`, `J3490` — and the reference
 payer's verdict is a **per-family determination**, pinned against the live Da Vinci
-reference payer (`internal/brpayermirror`'s hermetic mirror reproduces the exact same
-shapes). It is **not** a function of what your DTR questionnaire answers say: `G0151`
+reference payer. It is **not** a function of what your DTR questionnaire answers say: `G0151`
 (home-health PT) is a PA-required family the payer pends on the initial submit and
-resolves on a ClaimUpdate amendment. The CRD and DTR legs are still genuine Da Vinci
+decides later on its own timer. The CRD and DTR legs are still genuine Da Vinci
 wire traffic — the CRD card really does say PA is required, and the DTR leg really
 does fetch the payer's own questionnaire — but because the SDK doesn't know how to
 auto-fill a real payer's questionnaire, it submits an honest **zero-answer
@@ -217,33 +226,33 @@ that fill step; the demo path proves the wire mechanics, not a canned answer set
 On this preview environment the payer gateway native-forwards and relays the reference
 payer's pended Bundle **verbatim**; its `Task.input` names what it actually wants, coded
 `payer-url` and `questionnaires-needed` (a re-query URL and the still-outstanding
-questionnaire canonical), which is what your run prints. The hermetic in-process mirror
-local and CI runs use (`internal/brpayermirror`) names the same kind of thing out of its
-own seeded adjudication — the questionnaire that family's pend asks for — so a hermetic
-run and a live one print a questionnaire either way.
+questionnaire canonical), which is what your run prints.
 
 > **Outcome vocabulary:** `approved` | `no-pa-required` | `pended` | `denied`.
 > See `docs/PARTICIPANT_PROTOCOL.md` §7a.2 and §7b.
 
-Resume with the SDK's shipped supplemental evidence (a `DiagnosticReport` +
-`Provenance`). The amendment `ResumePriorAuth` (what `shn priorauth resume` calls) builds
-is a conformant Da Vinci Claim Update: the prior Claim rides along in-bundle and
-`Claim.related[0].claim` resolves to it, and every Claim item carries the Da Vinci PAS
-`infoChanged` extension — the one marker a real PAS payer re-evaluates an amendment on.
-Both lanes behave identically here: the hermetic in-process mirror
-(`internal/brpayermirror`, the `make up`/local-dev lane) and the live reference payer
-(native-forward — what this preview environment's `conformance-payer` runs) re-evaluate
-ONLY an `infoChanged`-marked amendment of a prior authorization they actually stored, and
-both refuse an amendment whose prior they never saw submitted.
+Resume by amending the pended request with a supplemental report (a `DiagnosticReport`
+plus a `Provenance` naming its source). The amendment `ResumePriorAuth` (what
+`shn priorauth resume` calls) builds is a Da Vinci Claim Update that refers to the prior
+claim. The payer answers it, and that answer is what `shn priorauth resume` prints.
 
-Resolution is **not evidence-driven**: the payer re-pends the amendment (still A4) and
-its own pend-resolution **timer** is what later flips the claim to approved, independent
-of the supplemental report's specific content — the SDK client re-queries the pend until
-the timer resolves it. If the amendment reaches the payer at the instant its timer is
-writing that same claim, the payer's store refuses the amendment's write with a version
-conflict (HTTP 409) instead of persisting it. The payer gateway relays that 409 as the
-payer's answer; re-send the amendment (a new request) and the payer answers it. `Provenance` is required regardless because FR-32 (SHN's own rule)
-says supplemental data must carry attribution — it is not a payer verdict input:
+> **The supplemental report is synthetic until a later SDK release.** The
+> `DiagnosticReport` that `shn priorauth resume` and `ResumePriorAuth` send carries a
+> fixed effective date (`2026-05-15`) and a Radiology category that the SDK supplies.
+> Neither comes from your system, and the report carries no content beyond its code. Use
+> it only with the synthetic personas here, and never to send real evidence. A later
+> release takes the report from your own system and refuses when you supply none.
+
+**The amendment does not decide; the payer does, later.** The reference payer answers an
+amendment of a pended request with another pend, and its own timer decides that request
+later, whatever the report says. So `shn priorauth resume` prints `outcome=pended`. To read the
+decision, ask the payer with a prior-authorization inquiry: `Identity.Inquire` in the Go
+SDK, or `ResumePriorAuthWith` with `WithWait` and `WithInquiryRecords` to make a few
+bounded inquiries for you (see `docs/PARTICIPANT_PROTOCOL.md` §7b). The `shn` CLI has no
+inquiry command yet. If the amendment reaches the payer at the instant its timer is
+writing that same claim, the payer's store refuses the amendment with a version conflict
+(HTTP `409`), which the payer gateway relays as the payer's answer. Send the amendment
+again as a new request.
 
 ```sh
 shn priorauth resume --resume shn-resume.json \
@@ -252,19 +261,19 @@ shn priorauth resume --resume shn-resume.json \
   --provenance-agent-system "http://smarthealth.network/ids/holder" \
   --provenance-agent-value "acme-7f3a" \
   --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
-# → outcome=approved preAuthRef=AUTH-1234 validUntil=…
+# → outcome=pended preAuthRef= validUntil=
 ```
 
-**Proven scope.** The `outcome=approved` line above is proven on both lanes: hermetically
-against the in-process mirror, and live against the real Da Vinci reference payer — the
-release gate that pairs the SDK with the real reference implementations drives this same
-client path (`shnsdk.RunPriorAuth` → `PriorAuthResult.Resume` → `shnsdk.ResumePriorAuth`)
-as a registered participant and asserts the pend really resolves to approved.
+**Proven scope.** This client path (`shnsdk.RunPriorAuth` → `PriorAuthResult.Resume` →
+`shnsdk.ResumePriorAuth`, then `Identity.Inquire` on the handle the amendment's answer
+returns) is proven live
+against the real Da Vinci reference payer: the amendment is answered with a pend, and a
+later inquiry reads the approval. `preAuthRef` is the reference payer's own authorization
+number, `AUTH-` followed by four digits.
 
-`--provenance-agent-system` and `--provenance-agent-value` are **required** on every resume (supplemental data must carry
-provenance attribution; the SDK rejects it before sealing if the agent is absent —
-FR-32). `preAuthRef` is the reference payer's own authorization number,
-`AUTH-` followed by four digits — never the retired `PA-<hex>` shape.
+`--report-id`, `--provenance-agent-system` and `--provenance-agent-value` are
+**required** on every resume: the report needs an id, and supplemental data must name its
+source. The SDK refuses the resume before sending the amendment when either is missing.
 
 ---
 
@@ -280,18 +289,19 @@ persona's payer and order from the descriptor itself:
 |---|---|---|---|---|
 | `MBR-D-UC01` | 1972-03-14 / Larsen | covered | — | n/a (eligibility only) |
 | `MBR-D-UC01-NC` | 1972-03-14 / Larsen-Terminated | not-covered | — | n/a (eligibility only) |
-| `MBR-D-UC04` | 1958-12-19 / Okereke | covered | `G0151` | pended → **approved** on amend |
+| `MBR-D-UC04` | 1958-12-19 / Okereke | covered | `G0151` | pended; the payer's timer later **approves** it (read by inquiry) |
 | `MBR-D-UC08` | 1968-07-30 / Delacroix | covered | `J3490` | **denied** |
 
 The remaining **six** personas exercise the other two HCPCS families plus the CDex and
 patient-authored legs — **not** "the other two families" split evenly across them: only
-UC-02 rides `E0250` and only UC-03 rides `L8000`; UC-05, UC-05-NC, UC-06 and UC-07 all
-ride `G0151`, same as UC-04:
+UC-02 rides `E0250` and only UC-03 rides `E1390`; UC-05, UC-05-NC, UC-06 and UC-07 all
+ride `G0151`, same as UC-04. (No persona on this roster rides `L8000`; UC-07's HCPCS
+variant uses it on a persona outside the roster.)
 
 | Member | DOB / family | Order (family) | What it exercises |
 |---|---|---|---|
 | `MBR-D-UC02` | 1965-06-11 / Fontaine | `E0250` | no PA required (order-select terminal) |
-| `MBR-D-UC03` | 1979-09-02 / Whitfield | `L8000` | approved outright |
+| `MBR-D-UC03` | 1979-09-02 / Whitfield | `E1390` | oxygen concentrator (ICD-10-CM `J44.9`), order-dispatch CRD: pended; the payer's timer later **approves** it |
 | `MBR-D-UC05` | 1963-02-27 / Marchetti | `G0151` | CDex federated query (consent granted) |
 | `MBR-D-UC05-NC` | 1963-02-27 / Marchetti-Noconsent | `G0151` | CDex federated query (no consent → denied) |
 | `MBR-D-UC06` | 1970-05-08 / Adeyemi | `G0151` | clinician manual-entry + amendment |
@@ -299,11 +309,17 @@ ride `G0151`, same as UC-04:
 
 None of these six are reachable through `shn priorauth --member` today because they
 aren't in `demoPersonas`. The **SHN Kit** desktop app (see the callout at the top)
-drives all eight scenarios against the same reference payer with no CLI needed — though
-its rows drive a separate, older persona set (`MBR-COVERED` et al., still live and
-seeded), not these `MBR-D-*` ids. A Go participant can still reach any `MBR-D-*` persona
+drives all eight scenarios against the same reference payer with no CLI needed, but its
+two lanes use their own persona sets and their own order families, not this roster: the
+Plain EHR lane runs its own seeded patients, and the Da Vinci lane's prior-authorization
+rows run `MBR-COVERED` and related members, where UC-03 is `L8000` (approved) and UC-04
+to UC-06 are `E0424` (held). A Go participant can still reach any `MBR-D-*` persona
 directly with `Identity.RunPriorAuth`, supplying the member/DOB/family/order by hand
-instead of resolving them from the descriptor.
+instead of resolving them from the descriptor — together with its own records for the
+member and the requesting provider: the member's `Patient`, a `Coverage` search Bundle
+that includes the payor `Organization` the Coverage names, and the requesting provider's
+`Organization` or `PractitionerRole` carrying its NPI. `RunPriorAuth` refuses before it
+sends the first leg when any of them is missing.
 
 ### 3b-i. UC-08 denied flow (CLI)
 
@@ -320,14 +336,12 @@ shn priorauth --member MBR-D-UC08 --discovery https://accounts.shn-preview.org \
 so (with `ProceedOnNotCovered` set, which the CLI always does) the flow submits the PAS
 claim straight through for the payer's **formal** determination — there is no DTR leg
 here at all. `reasonCode` is the PAS X12 review-action code for the denial. X12 306
-defines `A3` as "Not Certified" — the conformant denial code, which is what a
-locally-run stack (`make up`, holder `conformance-payer` served by the in-process
-`cmd/payermirror`) returns on this leg. **This cloud environment's** behavior differs:
-since UC-08 is a PA-spine leg native-forwarded to the real reference payer, and that RI
-denies with reviewActionCode `A2` (display "Not Certified" — a code/display
-self-contradiction in that RI, not a different conformant code), this preview
-environment returns `A2` on this leg. The SDK's parser accepts both `A3` and this
-observed `A2` shape as a denial — it never emits `A2` itself. The rationale is the
+defines `A3` as "Not Certified" — the conformant denial code. This preview environment
+returns `A2` on this leg instead: UC-08's prior-authorization legs are forwarded natively
+to the real reference payer, which denies with reviewActionCode `A2` (display "Not
+Certified" — a code/display self-contradiction in that reference implementation, not a
+different conformant code), and its answer is relayed as sent. The SDK's parser accepts
+both `A3` and this observed `A2` shape as a denial — it never emits `A2` itself. The rationale is the
 payer's own `ClaimResponse.disposition`; the appeal lines, if present, are the payer's
 own `processNote` entries. There is no `preAuthRef` on a denied response.
 
@@ -349,7 +363,7 @@ shn register --accounts https://accounts.shn-preview.org \
 > `400 "invalid baseURL: …"`). The Hub will POST `{baseURL}/substrate/inbound` — the
 > endpoint **must not redirect** on that path.
 
-**Go example (~50 lines). Every symbol references a real public SDK export:**
+**Go example. Every symbol references a real public SDK export:**
 
 ```go
 package main
@@ -362,12 +376,9 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
-	"golang.org/x/crypto/curve25519"
 )
 
 type myAdjudicator struct{}
@@ -389,7 +400,7 @@ func (myAdjudicator) Eligibility(memberID string) (bool, string) {
 // code is opaque here — CPT or HCPCS, whichever system the draft order's ServiceRequest
 // used.
 func (myAdjudicator) OrderSelect(code string) (bool, string) {
-	if code == "L8000" { // breast prosthesis, mastectomy bra — an ADVERTISED HCPCS family
+	if code == "L8000" { // breast prosthesis, mastectomy bra — an example code your policy covers with PA
 		return true, myQuestionnaireCanonical
 	}
 	return false, ""
@@ -442,33 +453,11 @@ func main() {
 	if err != nil { log.Fatal(err) }
 	authzPub := ed25519.PublicKey(authzPubRaw)
 
-	// 4. Load identity from keys written by `shn register -out ./keys`.
-	//    Files: sign.key (base64 ed25519 private key), enc.key (base64 X25519 private key),
-	//    manifest.json ({"id": "<holderID>", ...}).
-	//    (No public LoadIdentity helper; read the files directly.)
-	keysDir := "./keys"
-	signB64, _ := os.ReadFile(filepath.Join(keysDir, "sign.key"))
-	signPrivRaw, err := base64.StdEncoding.DecodeString(string(signB64))
+	// 4. Load your identity from the key directory `shn register -out ./keys` wrote.
+	//    LoadBundle is a public SDK function; Bundle.Identity is the identity it holds.
+	bundle, err := shnsdk.LoadBundle("./keys")
 	if err != nil { log.Fatal(err) }
-	encB64, _ := os.ReadFile(filepath.Join(keysDir, "enc.key"))
-	encPrivRaw, err := base64.StdEncoding.DecodeString(string(encB64))
-	if err != nil { log.Fatal(err) }
-	manifestB, _ := os.ReadFile(filepath.Join(keysDir, "manifest.json"))
-	var man struct { ID string `json:"id"` }
-	_ = json.Unmarshal(manifestB, &man)
-
-	signPriv := ed25519.PrivateKey(signPrivRaw)
-	var encPriv, encPub [32]byte
-	copy(encPriv[:], encPrivRaw)
-	curve25519.ScalarBaseMult(&encPub, &encPriv)
-	// Derive the public key from the private scalar — must match what shn register stored.
-	id := shnsdk.Identity{
-		HolderID: man.ID,
-		SignPub:  signPriv.Public().(ed25519.PublicKey),
-		SignPriv: signPriv,
-		EncPub:   &encPub,
-		EncPriv:  &encPriv,
-	}
+	id := bundle.Identity
 
 	// 5. Wire up the responder. NewFeedEncResolver and NewResponder are public SDK exports.
 	responder, err := shnsdk.NewResponder(shnsdk.ResponderConfig{
@@ -489,19 +478,27 @@ func main() {
 
 The example listens on plain HTTP — in deployment, terminate TLS in front of it (reverse proxy or load balancer): your registered `--base-url` must be **https**, and the Hub connects to that https endpoint.
 
-> **Note on key loading.** There is no public `LoadIdentity` helper in the SDK today —
-> the `loadIdentity` function lives in the `shn` CLI (package-private). The example
-> above shows the exact file layout `shn register -out ./keys` produces: `sign.key`
-> (std-base64 ed25519 private key, 64 bytes), `enc.key` (std-base64 X25519 private key,
-> 32 bytes), and `manifest.json` (`{"id":"<holderID>","role":"payer","encPub":"...","signPub":"...","baseURL":"..."}`).
-> You derive `encPub` from `encPriv` via `curve25519.ScalarBaseMult`, or read it directly
-> from `manifest.json "encPub"`. A public `LoadIdentity` is on the tracked list.
+> **Note on key loading.** `shnsdk.LoadBundle(dir)` reads the key directory
+> `shn register -out ./keys` produces: `sign.key` (std-base64 ed25519 private key,
+> 64 bytes), `enc.key` (std-base64 X25519 private key, 32 bytes), and `manifest.json`
+> (`{"id":"<holderID>","role":"payer","encPub":"...","signPub":"...","baseURL":"..."}`).
+> It returns a `Bundle` holding the parsed `Manifest` and the `Identity` to sign and
+> decrypt with; the identity's encryption public key is the `encPub` the manifest
+> records, and the signing public key is derived from `sign.key`.
 
-**Supported operations today:** all five transaction types — `coverage-eligibility`,
-`crd-order-select`, `dtr-questionnaire-fetch`, `pas-claim`, `pas-claim-update` — handled
-by the four-method `Adjudicator` interface above. The pended-claim ledger is per-process:
-if your deployment needs durable pends across restarts or replicas, front the responder
-with your own store keyed on the `preAuthRef` the adjudicator returns.
+**Supported operations today:** six transaction types — `coverage-eligibility`,
+`crd-order-select`, `dtr-questionnaire-fetch`, `pas-claim` and `pas-claim-update`, handled
+by the four-method `Adjudicator` interface above, and `pas-claim-inquire`, which the
+Responder answers only when your adjudicator also implements `shnsdk.InquiryAdjudicator`
+(`Inquire(PASInquiry) (PASDecision, error)`); without it an inquiry is refused with
+`501`. The Responder does not serve the CRD order-dispatch leg (`crd-order-dispatch`).
+
+The Responder keeps its pended-claim ledger to itself: in memory, per process, keyed by
+the patient subject and the correlation id of the original submit, with no hook for a
+store of your own. A restart or a second replica therefore loses every pend it recorded,
+and a later amendment of one of those claims is refused with `409` (`ClaimUpdate
+references no pending claim available for this patient`). The Responder offers no
+durable pends across restarts or replicas today.
 
 The Hub verifies that your baseURL endpoint serves `POST /substrate/inbound` and sends
 an `X-Hub-Assertion` header on every forward (see `PARTICIPANT_PROTOCOL.md` §6.2a).
@@ -512,13 +509,25 @@ expiry, and jti-once — before the body is read.
 
 ## 4. Validate
 
-`shn doctor` is the one-command self-validate: it fetches the discovery descriptor and
-runs eligibility against **every** seeded persona using your own registered identity,
-asserting the expected coverage outcome — **and** runs prior-authorization for every
-persona that advertises an expected PA outcome (resuming a pend where one is
-advertised), asserting each. A green `doctor` means **both** eligibility AND
-prior-auth conform, against the real reference payer. It needs no FHIR validator — the
-network validates server-side.
+`shn doctor` is the one-command self-validate. It fetches the discovery descriptor and
+runs eligibility for **every** persona the descriptor advertises, using your own
+registered identity, and asserts the expected coverage outcome. It then runs a
+prior authorization for every persona that advertises an expected outcome, asserts it,
+and, where a persona also advertises an outcome after an amendment, amends the pend and
+asserts that too. It needs no FHIR validator: the network validates server-side.
+
+> **Known issue: the amend step fails on this environment.** `MBR-D-UC04` advertises
+> `approved` after its amendment, but the reference payer answers an amendment with
+> another pend and decides later (§3a), and `shn doctor` does not yet inquire for that
+> decision. So a full `shn doctor` run stops at the amend step with exit code `40`
+> (`after amend got pended want approved`), and every check before it has already passed.
+> To check the rest, run the other personas one at a time (`--persona MBR-D-UC01`,
+> `--persona MBR-D-UC01-NC`, `--persona MBR-D-UC08`): none of them has an amend step. A
+> later SDK release makes the amend step inquire for the decision.
+>
+> The amend step's supplemental report is synthetic. `shn doctor` builds it from the
+> persona's own order code, with the fixed effective date and Radiology category the SDK
+> supplies (§3a), and sends it to the reference payer.
 
 ```sh
 shn doctor --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
@@ -533,20 +542,21 @@ shn doctor --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./k
 # ✓ MBR-D-UC04: covered=true (expected "covered")
 # ✓ MBR-D-UC08: covered=true (expected "covered")
 # ✓ priorauth MBR-D-UC04: pended
-# ✓ priorauth MBR-D-UC04: after amend approved
-# ✓ priorauth MBR-D-UC08: denied
-# PASS
+# ✓ priorauth MBR-D-UC04: pended, and the answer carries a continuation the network advertises a prior-authorization inquiry for
+# ✗ priorauth MBR-D-UC04: after amend got pended want approved
+# FAIL
 ```
 
-Checks are **attribution-ordered** with a **stable exit code per phase**, so a script
-can tell whose problem a failure is:
+Each check has a **stable exit code per phase**, so a script can tell whose problem a
+failure is:
 
 | Code | Phase | Meaning |
 |---|---|---|
 | 0 | — | all checks passed |
-| 10 | network health | discovery/authz/registrar/payer unreachable or missing (not your fault) |
+| 2 | usage | a required flag is missing, or `--persona` names no advertised persona |
+| 10 | network health | discovery, authz, the registrar or the payer is unreachable or missing, or an eligibility or prior-authorization exchange failed |
 | 20 | wire version | the network speaks a wire version this CLI doesn't — upgrade your SDK/CLI |
-| 30 | your registration | your client isn't in `/holders` (run `shn register`, or it was revoked) |
+| 30 | your registration | your client isn't in `/holders` (run `shn register`, or it was revoked), or your keys could not be loaded |
 | 40 | outcome | an eligibility run returned the wrong coverage, or a prior-auth run returned the wrong outcome |
 
 Run a single persona with `--persona MBR-D-UC01`.
@@ -555,14 +565,15 @@ Run a single persona with `--persona MBR-D-UC01`.
 
 ## Next steps
 
-- **Wire spec:** `docs/PARTICIPANT_PROTOCOL.md` — the language-neutral Option-B
-  contract (identity, assertions, authorize, envelopes, the full UC-01 worked example,
-  and §discovery).
+- **Wire spec:** `docs/PARTICIPANT_PROTOCOL.md` — the language-neutral integration
+  path B contract (identity, assertions, authorize, envelopes, the full UC-01 worked
+  example, and discovery in §1a).
 - **Go SDK:** [github.com/SmartHealthNetwork/shn-sdk](https://github.com/SmartHealthNetwork/shn-sdk)
   (public, Apache-2.0) — the importable participant surface
   (`shnsdk.Identity.RunEligibility`, envelope crypto, FHIR helpers). See its README.
 - **Integration options:** run the SHN Smart Gateway binary, or implement the wire
-  contract natively — `docs/PARTICIPANT_PROTOCOL.md` §6 covers both surfaces.
+  contract natively — `docs/PARTICIPANT_PROTOCOL.md` §1 describes both integration
+  paths.
 - **Payer responder:** if you receive eligibility queries or prior-authorization requests,
-  see §3c above for the `shnsdk.Responder` quickstart (full PA chain available:
-  eligibility + CRD/DTR/PAS prior-auth).
+  see §3c above for the `shnsdk.Responder` quickstart (eligibility, CRD `order-select`,
+  DTR and PAS prior-auth, and inquiry with an `InquiryAdjudicator`).

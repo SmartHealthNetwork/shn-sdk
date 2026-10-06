@@ -132,15 +132,15 @@ as a phishing attempt.
 shn register --accounts https://accounts.shn-preview.org \
   --role provider --name acme --base-url https://acme.example -out ./keys
 
-# 3. Validate your setup end-to-end (eligibility + prior-auth round-trips).
+# 3. Validate your setup (eligibility + prior-auth round-trips; see the known issue
+#    under "Self-validate" below).
 shn doctor --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
 
-# 4. Run a prior-authorization (CRD→DTR→PAS) yourself. Payer + endpoints are resolved
-#    from the discovery descriptor; the order + clinical context are the fixed
-#    test values.
-shn priorauth --member MBR-COVERED \
+# 4. Run a prior-authorization (CRD→DTR→PAS) yourself. The payer, the endpoints and
+#    the persona's order are resolved from the discovery descriptor.
+shn priorauth --member MBR-D-UC04 \
   --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
-# → outcome=approved preAuthRef=PA-… validUntil=…
+# → outcome=pended needed=… resume=shn-resume.json
 ```
 
 Manage your clients with `shn clients --accounts <url>` (list) and
@@ -197,12 +197,11 @@ Most developers should use the self-serve Accounts path above. The direct
 ## Self-validate (`shn doctor`)
 
 One command answers "am I wired up + do my eligibility AND prior-auth round-trips
-conform". It fetches the discovery descriptor and runs eligibility against the
-seeded covered/not-covered personas, then — once eligibility passes — runs a
-prior-authorization (CRD→DTR→PAS) for the persona that advertises an expected PA outcome, all using
-your OWN registered identity — no FHIR validator needed (the network validates
-server-side). Eligibility is checked first; the PA leg only runs once eligibility
-conforms.
+conform". It fetches the discovery descriptor and runs eligibility for every persona it
+advertises, then — once eligibility passes — runs a prior authorization
+(CRD→DTR→PAS) for each persona that advertises an expected outcome, amending the pend
+where a persona also advertises an outcome after an amendment. It uses your OWN
+registered identity and needs no FHIR validator (the network validates server-side).
 
 ```sh
 shn doctor --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
@@ -210,23 +209,31 @@ shn doctor --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./k
 # ✓ wire protocol "1.1.0" supported
 # ✓ test counterparties resolve in the directory (1 payer(s))
 # ✓ your client "acme-7f3a" is registered
-# ✓ MBR-COVERED: covered=true (expected "covered")
-# ✓ MBR-NOTCOVERED: covered=false (expected "not-covered")
-# ✓ priorauth MBR-COVERED: approved
-# PASS
+# ✓ MBR-D-UC01: covered=true (expected "covered")
+# ✓ MBR-D-UC01-NC: covered=false (expected "not-covered")
+# …
+# ✓ priorauth MBR-D-UC04: pended
 ```
 
-Checks run **attribution-ordered** — network-health first (not your fault), then
-the wire-version check (before any eligibility leg), then your registration and
-outcomes — with a **stable exit code per phase** so a script can tell whose problem
-a failure is:
+> **Known issue: the amend step.** On the preview environment the reference payer
+> answers an amendment with another pend and decides later, and `shn doctor` does not
+> yet inquire for that decision, so a full run fails at the amend step with exit code
+> `40`. Run the other personas one at a time with `--persona`. The amend step's
+> supplemental report is synthetic: it carries a fixed effective date and a Radiology
+> category that the SDK supplies, not values from your system. See
+> [docs/PREVIEW.md](docs/PREVIEW.md) §4 for both.
+
+Checks run in order — the network first, then the wire-version check (before any
+eligibility leg), then your registration and outcomes — with a **stable exit code per
+phase** so a script can tell whose problem a failure is:
 
 | Code | Phase | Meaning |
 |---|---|---|
 | 0 | — | all checks passed |
-| 10 | network health | discovery/authz/registrar/payer unreachable or missing |
+| 2 | usage | a required flag is missing, or `--persona` names no advertised persona |
+| 10 | network health | discovery/authz/registrar/payer unreachable or missing, or an eligibility or prior-authorization exchange failed |
 | 20 | wire version | the network speaks a wire version this CLI doesn't — upgrade |
-| 30 | your registration | your client isn't in `/holders` (run `shn register`, or it was revoked) |
+| 30 | your registration | your client isn't in `/holders` (run `shn register`, or it was revoked), or your keys could not be loaded |
 | 40 | outcome | an eligibility run returned the wrong coverage, or a prior-auth run returned the wrong outcome |
 
 Use `--persona <memberId>` to run a single seeded persona.
@@ -275,7 +282,7 @@ directly if you are building a native integration or test harness.
 | `FillQuestionnaire(questionnaireJSON, cc, qc)` | Fill the built-in prior-auth DTR questionnaire into a conformant `QuestionnaireResponse` (LOCAL answers + information-origin attribution). Targets only the built-in questionnaire: FAILS LOUDLY on an unrecognized questionnaire (never a half-filled QR). |
 | `FillQuestionnaireFromAnswers(questionnaireJSON, answers, author, qc)` | Fill ANY DTR questionnaire into a conformant `QuestionnaireResponse` from a caller-supplied `map[string]Answer` (keyed by `linkId`; an `Answer` carries a typed value or an `AnswerCoding{System,Code,Display}`), with information-origin attribution — for manually/attestation-sourced answers when the questionnaire isn't the built-in one. |
 | `BuildConformantClaimBundle(ConformantClaimInputs{QR, SR, Provider, Coverage, Insurer, PatientRef, CoverageRef, MemberID, Corr, Created, Payer})` / `ParseClaimResponse` | PAS preauthorization submit Bundle (the conformant Da Vinci lean shape — Claim + Patient + Coverage + requesting provider + payer Organization + ServiceRequest + QuestionnaireResponse; `Created` drives the deterministic bundle id/timestamp). From v0.59.0 `Insurer`, your own Organization record for the payer your member's Coverage names, is required on every call: it rides the Bundle as the entry `Claim.insurer` and `Coverage.payor` name, and the builder refuses without it or when it does not carry the `Payer` identity (earlier releases, unless `PayerOrgEntry` was set, named a payer Organization the SDK made up; `PayerOrgEntry` and `ContainedInsurer` are now deprecated and have no effect) + the `ClaimResponse` parser → `PriorAuthResult` (`Outcome:"approved"` + `PreAuthRef`/`ValidUntil`; on approvals and denials also the payer's `ProcessNotes` with their types, the deciding `ReviewAction` with its X12 886 reasons, and any CARC/RARC `DenialReasons`, all as sent). Denied (the X12 review-action code `A3` "Not Certified" — this network's own conformant denial code; the reference payer's observed `A2` denial shape is also accepted) and pended responses parse to their own outcomes; a X12 `A2` that carries an authorization number parses as `Outcome:"approved"` + `Partial:true` instead (X12 306's actual meaning for `A2` is "Certified – partial") — an ambiguous response returns an error, never a wrong `Outcome`. The amended re-POST sibling is `BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{…})`. **`MemberID` is required** and is the *bare* member id (`"MBR-COVERED"`). It is stamped in two places: the bundle's Coverage carries it as the `urn:shn:coverage` Member-Number identifier, and the Claim's `insurance[0].coverage` is a **logical reference** to that same business identifier — `{"identifier": {"system": "urn:shn:coverage", "value": "MBR-COVERED"}}`, with **no literal `reference`**, so the bundle is self-consistent and does not ask a receiving payer to resolve an SHN-local resource id. `CoverageRef` stays the FHIR *reference* (`"Coverage/MBR-COVERED"`) for the caller's other roles. The two are deliberately different spellings of different things — `BuildCoverage`/`BuildCoverageWithPayer` take the bare member id too, and refuse a `Coverage/`-prefixed value rather than stamp it. |
-| `CoverageParty(coverage, contained)` | Whether a resource in a Coverage's `contained` list is the Coverage's party: a contained `Patient` (typically a dependent's parent carrying only an MRN) whose `id` no other contained resource has, that the Coverage's `subscriber` or `policyHolder` names by the slot's own `reference` (`#<id>`), that nothing else in the Coverage references, that contains nothing and lists its `identifier` (if present), and whose rule members are spelled exactly (no `Reference`, `Id`, `Contained` or `Identifier` variants). From shn-sdk v0.60.0 the PAS builders carry such a `subscriber` or `policyHolder`, and the contained Patient, with the same JSON values your record has (re-encoded, as every carried record is; any other `subscriber` or `policyHolder` naming someone other than the member is still refused, as is a reference in a party's slot, or in the party, to a record the request does not carry), and a `Responder`'s PAS response does not read the party as the patient. A Smart Gateway reads it from shn-gateway v0.61.0 (the next gateway release, not yet published); an earlier gateway refuses that answer at `strict` (`docs/PARTICIPANT_PROTOCOL.md` §7a.3). |
+| `CoverageParty(coverage, contained)` | Whether a resource in a Coverage's `contained` list is the Coverage's party: a contained `Patient` (typically a dependent's parent carrying only an MRN) whose `id` no other contained resource has, that the Coverage's `subscriber` or `policyHolder` names by the slot's own `reference` (`#<id>`), that nothing else in the Coverage references, that contains nothing and lists its `identifier` (if present), and whose rule members are spelled exactly (no `Reference`, `Id`, `Contained` or `Identifier` variants). From shn-sdk v0.60.0 the PAS builders carry such a `subscriber` or `policyHolder`, and the contained Patient, with the same JSON values your record has (re-encoded, as every carried record is; any other `subscriber` or `policyHolder` naming someone other than the member is still refused, as is a reference in a party's slot, or in the party, to a record the request does not carry), and a `Responder`'s PAS response does not read the party as the patient. A Smart Gateway reads it from shn-gateway v0.61.0; an earlier gateway refuses that answer at `strict` (`docs/PARTICIPANT_PROTOCOL.md` §7a.3). |
 | `VerifyBound(tok, authzPub, now, frame, op, corr, holder, subject, payloadHash)` | Verify a token is bound to exactly this leg, INCLUDING `payloadHash = sha256hex(ciphertext)` (STRICT, AI-2) — the SDK verifies, never mints. Seal-then-authorize: seal the payload first, then authorize against its ciphertext. Refuses a token carrying `Involvement` (minted for another patient a leg involves, never a leg's own), as `VerifyBoundNoPayload` does. |
 
 **Also exported** (responder + participation helpers; see godoc and `docs/PREVIEW.md` §3c):

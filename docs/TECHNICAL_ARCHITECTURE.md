@@ -5,15 +5,19 @@
 
 The Smart Health Network (SHN) is a **federated health-data exchange network**. It lets
 independent healthcare organizations — providers, payers, and facilities — exchange FHIR
-clinical and administrative data **without any central party ever holding, reading, or
-accumulating that data**.
+clinical and administrative data **without any central party ever reading or pooling that
+data**. The only copy the architecture keeps centrally is one a patient elects to keep,
+encrypted under the patient's own keys (from v1; see the PHG below).
 
 The system is built around five architectural commitments, each enforced **structurally** —
 by what components can and cannot hold — rather than by policy promises:
 
-1. **Non-aggregation.** No component persists a cross-organization clinical record, and no
-   component maintains a patient→organization index. Data stays with the organization that
-   holds it and moves only for a specific, authorized operation.
+1. **Non-aggregation.** No network service persists a cross-organization clinical record, and
+   none maintains a patient→organization index. Data stays with the organization that holds it
+   and moves only for a specific, authorized operation. The one collection across holders the
+   architecture commits to is the patient's own: from v1, a patient may elect to gather their
+   records into storage encrypted under keys the patient holds, at the PHG (below). The preview
+   environment does not offer it.
 2. **Payload-blind routing.** Messages cross the network as encrypted envelopes. The router
    (the Hub) verifies *who* is sending *what kind* of operation to *whom*, but structurally
    cannot read the contents — it is constructed without a decryption key.
@@ -25,9 +29,10 @@ by what components can and cannot hold — rather than by policy promises:
    an append-only, hash-chained, signature-verified audit log, with a signed checkpoint
    anchored externally so even tail truncation is detectable.
 5. **A patient-fiduciary surface.** Patients see what happened with their data and interact
-   with decisions about their care through an SHN-operated gateway — governed by the fiduciary
-   and patient-access standards of the Smart Health Data Trust (SHDT) — that holds nothing
-   itself and reads through to canonical sources.
+   with decisions about their care through the Personal Health Gateway (PHG), which the
+   architecture commits the Smart Health Data Trust (SHDT), the patients' fiduciary, to
+   operate. In the preview environment SHN runs it, and it holds nothing itself and reads
+   through to canonical sources.
 
 Everything else in this document is an elaboration of these five ideas.
 
@@ -37,17 +42,17 @@ Everything else in this document is an elaboration of these five ideas.
 
 | Term | Meaning |
 |---|---|
-| **Holder** | An organization that holds clinical/administrative data and participates in the network: a *provider*, a *payer*, a *facility*, or the *PHG* (the SHN-operated patient surface). |
+| **Holder** | An organization that holds clinical/administrative data and participates in the network: a *provider*, a *payer*, a *facility*, or the *PHG* (the patient surface the SHDT operates). |
 | **Smart Gateway** | The holder-side service that terminates the wire contract. It is the only thing a holder's internal systems touch. It does all sealing, validation, token acquisition, and verification. |
 | **Hub** | The central, payload-blind message router. |
 | **Authorization Framework** | The central token-issuing service. Policy-evaluates every requested operation (default-deny) and mints signed, scope-bound tokens. Verification of those tokens is decentralized — every party checks them locally. |
 | **Frame** | The legal basis under which an operation occurs. Five frames are defined: `provider-tpo` (provider treatment/payment/operations), `payer-coverage` (payer coverage decisions), `facility-disclosure` (a facility disclosing records in answer to a federated query), `patient-access` (the patient reading their own data), and `patient-authorship` (the patient authoring data). Patient consent for a federated query is modeled as a *gating conjunct* on the provider's `provider-tpo` query — confirmed against the Consent service at token issuance — not as a frame of its own; and the patient-reading and patient-authoring frames are deliberately kept distinct and never collapsed into one "patient access" concept. |
 | **Leg** | One direction of one exchange (request or response). The unit of authorization and of audit: every leg gets its own token and its own audit record. |
 | **PCI** | The network-level patient identifier — a `pci:`-prefixed opaque value; how it is produced is internal and may change. Member IDs, MRNs, and other real-world identifiers cross the network **only inside sealed payloads**; all routing metadata and all audit records carry the PCI instead. |
-| **Envelope** | The wire unit: cleartext routing metadata (sender, recipient, transaction type, frame, correlation ID, authorization token, timestamp) plus an opaque ciphertext sealed to the recipient's public key. |
-| **Registry** | The directory of admitted holders: ID, role, encryption public key, signing public key, and base URL. Sourced from a provisioning manifest plus dynamic runtime admissions. |
-| **SHN** | The operator of every shared service — the Hub, the Authorization Framework, the Consent service, the Registrar, the Accounts service, the Audit Plane, and the PHG (patient surface). Its routing core, the Hub, is the conduit: it holds no decryption keys and no re-identifiable patient provenance. |
-| **Smart Health Data Trust (SHDT)** | The patient-data policy and fiduciary body. It sets the consent and patient-access standards the patient-facing services run under, holds the patient fiduciary duty, and carries oversight and enforcement authority. It is not an operator — the services themselves are run by SHN. |
+| **Envelope** | The wire unit: cleartext routing metadata (sender, recipient, transaction type, frame, correlation ID, authorization token, timestamp, and, where they apply, a consent reference and the tokens for other patients the leg involves) plus an opaque ciphertext sealed to the recipient's public key. |
+| **Registry** | The directory of admitted holders: ID, role, encryption public key, signing public key, and base URL. Sourced from a provisioning manifest plus runtime admissions, updates and removals. |
+| **SHN** | The operator of the shared network services — the Hub, the Authorization Framework, the Consent service, the Registrar, the Accounts service and the Audit Plane. Its routing core, the Hub, is the conduit: it holds no decryption keys and no re-identifiable patient provenance. In the preview environment SHN also runs the PHG (see "PHG — the patient surface"). |
+| **Smart Health Data Trust (SHDT)** | The patient-data policy and fiduciary body. It sets the consent and patient-access standards the patient-facing services run under, holds the patient fiduciary duty, carries oversight and enforcement authority, and is the PHG's operator under the architecture (in the preview environment SHN runs it). SHN may run the PHG's technical operations under the Trust's controls; the fiduciary authority (the patient-facing relationship, consent mediation, access and revocation decisions) stays with the Trust. |
 
 ---
 
@@ -60,9 +65,11 @@ same unit. Understanding this unit means understanding the system.
 ```
  sender gateway                      Hub (payload-blind)                 recipient gateway
  ──────────────                      ───────────────────                 ─────────────────
- 1. validate the FHIR payload
-    (egress, at observe and
-    strict; refused at strict)
+ 1. check the FHIR payload
+    (egress, at the gateway's
+    conformance level: none,
+    observe, structural or
+    strict)
  2. SEAL the payload to the
     recipient's public key
  3. obtain a TOKEN from the
@@ -76,19 +83,21 @@ same unit. Understanding this unit means understanding the system.
                                      7. replay + timestamp guards
                                      8. forward the ciphertext
                                         (cannot decrypt)      ─────────▶ 9. verify the token, open the
-                                                                            envelope, validate (ingress,
-                                                                            at observe and strict),
+                                                                            envelope, check it (ingress,
+                                                                            at its own level),
                                                                             identify the patient by its
                                                                             own system, do the work
                                      11. verify the RESPONSE   ◀───────  10. seal the response back, with
                                          token + sender                      a fresh response-leg token
-                                     12. append two SIGNED audit            bound to the SAME correlation
-                                         records ("routed",                 ID and patient
-                                         "answered") — mandatory,
+                                     12. append SIGNED audit                bound to the SAME correlation
+                                         records ("routed" before           ID and patient
+                                         forwarding, "answered"
+                                         after; one per patient
+                                         involved) — mandatory,
                                          fail-closed
  13. verify the response token
      against the original correlation
-     ID and sender; open; validate
+     ID and sender; open; check it
 ```
 
 Key properties of every leg:
@@ -107,16 +116,26 @@ Key properties of every leg:
   Framework; the Hub, the recipient, and the original sender each independently verify them
   against the published verification key.
 - **Audit is fail-closed.** The Hub appends a signed audit record *before* forwarding a request
-  and after relaying the response. If the audit append fails, the message does not flow.
-- **Validation is load-bearing where a participant asks for it.** At `observe` (the default)
-  and `strict` the gateways validate FHIR resources against a real FHIR validator on egress
-  *and* ingress (a payer's answer relayed verbatim is not re-validated on egress). At `strict`
-  a defect or a validator outage means rejection; at `observe` it is recorded and the message
-  is carried. A payload a gateway itself translated between IG lines is validated and refused
-  at every level.
-- **Replay is bounded.** Correlation IDs are one-time-use within a window at the Hub; holder
-  assertions carry one-time JTIs; envelope timestamps must fall within a small clock-skew
-  window.
+  and after verifying the response, one per patient the exchange involves. A token whose
+  payload hash does not match is recorded as `denied`, a request for an unknown recipient as
+  `unreachable`, and a forward that fails after `routed` as `failed`; the Hub's other
+  refusals (an assertion, token, binding, timestamp or replay failure) are answered without
+  an audit record. If the audit append fails, the message does not flow.
+- **Validation is load-bearing where a participant asks for it.** Each gateway runs at a
+  conformance level its participant chooses: `none` (no payload checks), `observe` (the
+  default: every check runs, a defect is recorded and the message carried), `structural` (a
+  message whose structure is broken is refused, other defects recorded) or `strict` (a defect,
+  or a validator outage, refuses). The checks run against a real FHIR validator on egress and
+  ingress, on what each leg's check covers: a PAS request carried from the provider's own
+  system is not `$validate`d, and a payer's answer relayed verbatim is not re-validated on
+  egress. A payload a gateway itself translated between IG lines is validated and refused at
+  every level.
+- **Replay is bounded.** The Hub refuses an envelope it has already routed within a two-hour
+  window, keyed on the correlation ID and the hash of the ciphertext, so exactly a
+  byte-identical envelope is refused; a retry seals new ciphertext and is routed. Envelope
+  timestamps must fall within a small clock-skew window. Holder assertions carry JTIs that the
+  Authorization Framework and the Registrar accept once; the Hub verifies an assertion's
+  signature, audience and expiry, and relies on the envelope guard instead.
 
 Exchanges are synchronous request/response today, but each leg is an independently authorized
 and audited envelope tied together only by the correlation ID — so asynchronous delivery is a
@@ -136,33 +155,39 @@ The holder-side termination point, run once per holder with a configured role:
 - **Provider** — originates workflows: eligibility checks, coverage-requirements lookups,
   questionnaire completion, prior-auth submissions and amendments, federated queries. Also
   exposes the two-phase pending-attestation API the patient surface drives. It additionally
-  accepts **native Da Vinci interactions** from the holder's own conformant systems — a CDS
-  Hooks `order-select` call (CRD), the DTR `$questionnaire-package` operation, and the PAS
-  `$submit` operation — and maps each onto the corresponding network leg, so a
-  standards-conformant provider system can drive the network through its existing Da Vinci
-  client without bespoke integration.
+  accepts **native Da Vinci interactions** from the holder's own conformant systems — CDS
+  Hooks `order-sign`, `order-select` and `order-dispatch` calls (CRD), the DTR
+  `$questionnaire-package` operation, and the PAS `$submit` operation (a `$submit` that names a
+  prior claim is an amendment) and `$inquire` — and maps each onto the corresponding network
+  leg, so a standards-conformant provider system can drive the network through its existing
+  Da Vinci client without bespoke integration.
 - **Payer** — receives sealed envelopes at its inbound endpoint and dispatches on
   transaction type: eligibility decisions, coverage-requirements cards, questionnaire serving,
   prior-auth adjudication. It answers out of a **content occupant** — there is no built-in
   adjudicator, and a payer gateway with no occupant configured refuses to boot rather than
-  serve an invented verdict. The published gateway binary's occupant is **native-forward**:
-  it delegates the eligibility, CRD, DTR, and PAS legs outward to the holder's own
-  Da Vinci-conformant payer system (its coverage-requirements rules engine,
-  `$questionnaire-package` service, and PAS adjudication endpoint) over authenticated SMART
-  Backend Services, so a payer keeps its existing Da Vinci stack as the source of truth for
-  decisions. A payer whose own decisioning has no separate Da Vinci endpoint to forward to
-  has two other options: build a custom binary against the gateway module and inject a Go
-  `engine.LegResponder` implementation directly (an in-process content occupant — not a
-  config-only path), or skip the gateway entirely and implement the wire protocol
-  natively with the public SDK's standalone `shnsdk.Responder` (a separate HTTP service, not
-  something injected into the gateway). Additionally serves a conventional RESTful
+  serve an invented verdict. The published gateway binary's occupant is **native-forward**,
+  and a payer gateway requires it: it delegates the CRD, DTR and PAS legs outward to the
+  holder's own Da Vinci-conformant payer system (its coverage-requirements rules engine,
+  `$questionnaire-package` service, and PAS adjudication and inquiry endpoints), so a payer
+  keeps its existing Da Vinci stack as the source of truth for decisions. The forwarding
+  authenticates with SMART Backend Services when the payer configures its credentials, and is
+  unauthenticated otherwise. Coverage eligibility is forwarded only when the payer names its
+  own eligibility endpoint; otherwise the gateway answers it from the payer's Coverage
+  records, or, with no system of record, answers that eligibility is not offered. A payer
+  whose own decisioning has no separate Da Vinci endpoint to forward to can skip the gateway
+  and implement the wire protocol natively with the public SDK's standalone
+  `shnsdk.Responder` and its `Adjudicator` (a separate HTTP service, not something injected
+  into the gateway); the gateway's in-process decision seam is internal and not for partner
+  use. Additionally serves a conventional RESTful
   **Patient Access API** (a published CapabilityStatement plus `ExplanationOfBenefit`
   read/search) gated by per-operation patient-access tokens.
 - **Facility** — responds to consent-gated federated record queries, re-checking consent
   itself before disclosing anything (a deliberate second gate beyond the central one).
-- **PHG gateway** — the sealed responder for patient-authored content: it builds and
-  signature-attests patient answers, so authorship evidence is constructed at the gateway
-  boundary, not by the patient app.
+- **PHG gateway** — the sealed responder for patient-authored content: it builds the
+  patient's answers and attaches their signature, so authorship evidence is constructed at
+  the gateway boundary, not by the patient app. Until patient identity proofing is in place,
+  the signature's identity token is a fixed placeholder, not a proof of the patient's
+  identity.
 
 The gateway owns all cryptography and conformance work for its holder: envelope
 sealing/opening, token acquisition and verification, holder assertions, per-message FHIR
@@ -182,8 +207,7 @@ holder's backend sit a few narrow, well-defined **seams**:
   replayed updates can't double-process), and record the `ExplanationOfBenefit` documents the
   Patient Access API serves.
 - A **decisioning seam** (payer side): the holder's coverage and medical-necessity policy,
-  supplied either as an injected adjudicator or by delegating outward to a real Da Vinci payer
-  system (above).
+  supplied by delegating outward to its own Da Vinci payer system (above).
 
 A holder binds these seams to its actual backend through **connectors**. Reference connectors
 ship for a US Core FHIR R4 system of record and a relational store, alongside a scaffold
@@ -193,14 +217,14 @@ the backend to change how it stores data, and it never faces the network directl
 is deliberately **self-contained** — it depends only on the published wire contract and these
 seams, never on any SHN-operated service's internals — so any participant can lift and run
 it. Conformance obligations therefore sit at a single, well-defined point per organization: its
-gateway, which validates every FHIR payload at the edge and enforces per-operation
-authorization before anything crosses the network.
+gateway, which checks FHIR payloads at the edge at the conformance level the organization
+chooses and enforces per-operation authorization before anything crosses the network.
 
 ### Hub
 
 The payload-blind router. It verifies the sender's signed assertion against the registry,
 verifies both legs' tokens (including the payload-hash binding and the response-leg subject and
-correlation constraints), enforces replay and timestamp guards, signs and appends both audit
+correlation constraints), enforces replay and timestamp guards, signs and appends the audit
 records, and relays the opaque ciphertext. It is constructed without any decryption key —
 blindness is structural, not behavioral.
 
@@ -220,19 +244,23 @@ only the draft order and coverage) and mints a signed token bound to the full ex
   scope            // minimum-necessary, policy-derived
   subject          // the patient, as a PCI — never a member ID
   frame            // the legal basis
-  correlationId    // one-time exchange identifier
+  correlationId    // exchange identifier, shared by the request and response legs
   holder           // the authenticated requester
   consentRef       // present only on the consent-gated federated query
-  payloadHash      // sha256 of the sealed ciphertext
+  involvement      // only on a token for another patient the leg involves (it rides
+                   // in the envelope's involved list, so the Hub records the exchange
+                   // under that patient too); absent on a leg's own token
+  payloadHash      // sha256 of the sealed ciphertext (empty on a patient-access read)
   expiry           // short-lived
   signature        // Ed25519, over all of the above
 }
 ```
 
 For the consent-gated federated query it first consults the Consent service and stamps the
-consent reference into the token — fail-closed if consent cannot be confirmed. Every decision,
-including denials and policy errors, is signed and appended to the audit chain before the
-caller hears the answer.
+consent reference into the token — fail-closed if consent cannot be confirmed. Every policy
+decision, including denials and policy errors, is signed and appended to the audit chain before
+the caller hears the answer. A request refused before policy runs (an unauthenticated caller, or
+a malformed request) is answered without an audit record.
 
 ### Consent service
 
@@ -253,10 +281,12 @@ The system's memory, designed so it can be trusted more than any single operator
   reference, the patient's PCI, and the hash of the (still-encrypted) payload. Never content,
   never member IDs.
 - **Authenticated writes.** The append endpoint only accepts records signed by an authorized
-  network key (Hub, Authorization Framework, Registrar); the signature covers the record
-  content.
-- **Durable and immutable.** Persisted in a store whose schema forbids update, delete, and
-  truncate.
+  network key (the Hub, the Authorization Framework, the Registrar, the Accounts service, and
+  the network's own reference payer holder for its patient-access reads); the signature covers
+  the record content. A partner-role holder may append records that name itself as sender,
+  signed with its own key.
+- **Durable and immutable.** In a deployed network, persisted in a store whose schema forbids
+  update, delete, and truncate.
 - **Truncation-evident.** A dedicated checkpoint key periodically signs a high-water mark
   (sequence + head hash) to an external anchor (versioned object storage), so cutting the tail
   of the chain is detectable, not just rewriting it. The checkpoint key attests only to the
@@ -272,11 +302,17 @@ records land — a freshness hint only; patient reads always go back to the cano
 
 ### PHG — the patient surface
 
-The SHN-operated Personal Health Gateway, presented to patients as their **Smart Health
-account** and run under the patient-fiduciary and patient-access standards set by the SHDT. Its
-defining property is that it is **non-custodial**: it persists no patient data
-and holds no clinical state. Every screen reads through, at request time, to a canonical
-source:
+The Personal Health Gateway, presented to patients as their **Smart Health account**, is
+operated by the SHDT as the patients' fiduciary, under the patient-fiduciary and
+patient-access standards the SHDT sets; SHN may run its technical operations under the Trust's
+controls. From v1 the architecture commits the PHG to storage encrypted under keys the patient
+holds: the records a patient elects to gather across holders, cached federated-query results
+and the patient's coordination artifacts are kept there, and only the patient's keys open
+them.
+
+**The preview environment is an interim state.** There, SHN runs the PHG, and it is
+**non-custodial**: it persists no patient data and holds no clinical state. Every screen reads
+through, at request time, to a canonical source:
 
 - **Activity / transparency** — the patient projection of the audit chain.
 - **Prior-authorization decisions** — approved and denied determinations read from the payer's
@@ -286,11 +322,13 @@ source:
 - **Questionnaire / attestation** — when a prior authorization is pending on
   patient-reported information, the patient completes and attests it in-app. The PHG acts as a
   stateless proxy to the provider's two-phase API; resume tokens stay server-side, and the
-  signed patient-authored answer is constructed at the PHG gateway responder over a sealed
-  `patient-authorship` leg.
+  patient-authored answer, with its signature (a placeholder identity token until identity
+  proofing; see "PHG gateway" above), is constructed at the PHG gateway responder over a
+  sealed `patient-authorship` leg.
 
-The patient's identity (and therefore which PCI they may read) is server-determined from the
-authenticated identity; the client cannot select an arbitrary subject.
+In a deployed PHG, the patient's identity (and therefore which PCI they may read) is
+server-determined from the authenticated identity; the client cannot select an arbitrary
+subject.
 
 ### Registrar and participant admission
 
@@ -298,8 +336,9 @@ Participation is governed by the registry. The base registry is established at p
 beyond that, an SHN-operated **Registrar** admits new holders at runtime through an
 admin-gated registration carrying the holder's keys, role, base URL, and a
 proof-of-possession signature. The Hub and the Authorization Framework poll the registrar's
-feed and merge it onto the provisioning base (`registry = base ∪ dynamic`, add-only; founding
-holders are immutable) — no restarts, live within seconds. The registrar also handles the
+feed and merge it onto the provisioning base (`registry = base ∪ dynamic`: admissions,
+updates and removals converge; founding holders are immutable) — no restarts, live within
+seconds. The registrar also handles the
 credential lifecycle — revocation, self-service deregistration, and key rotation — and signs
 every lifecycle event into the audit chain.
 
@@ -321,18 +360,19 @@ Security follows key placement; the map of who holds which key *is* the threat m
 | Component | Holds | Deliberately does NOT hold |
 |---|---|---|
 | **Each holder / gateway** | Its X25519 decryption key + Ed25519 signing key | Any other holder's keys |
-| **Hub** | An audit-record signing key | **Any decryption key** — it cannot read what it routes |
+| **Hub** | An audit-record signing key, and a transport key that signs the per-forward assertion recipients verify | **Any decryption key** — it cannot read what it routes |
 | **Authorization Framework** | The token-signing key (the verification key is published to all parties) | Clinical payloads — policy evaluates metadata only |
-| **Audit Plane** | The checkpoint-signing key (head attestation only) | Record-signing keys — it can only *accept* signed records, not author them |
-| **Registrar / SHN admin** | Lifecycle-signing and admission-gating keys | Holder private keys — registrants prove possession of their own |
+| **Audit Plane** | The checkpoint-signing key (head attestation only), and a transport key that authenticates its notifications to the PHG | Record-signing keys — it can only *accept* signed records, not author them |
+| **Registrar** | Its lifecycle-signing key, and the public keys of the admin keys allowed to admit holders | Holder private keys — registrants prove possession of their own |
 
 Supporting mechanisms:
 
 - **Envelopes** are sealed with NaCl sealed boxes (X25519): encrypted to the recipient's
   public key, openable only with the recipient's private key.
-- **Holder assertions** — short-lived, audience-scoped, single-use (one-time JTI) Ed25519
-  assertions — authenticate every call a holder makes to the Hub, the Authorization
-  Framework, and the Registrar.
+- **Holder assertions** — short-lived (at most an hour), audience-scoped Ed25519 assertions —
+  authenticate every call a holder makes to the Hub, the Authorization Framework, and the
+  Registrar. The Authorization Framework and the Registrar accept each assertion's JTI once;
+  the Hub verifies the assertion and guards replay on the envelope instead.
 - **One provisioning root.** A single provisioning step generates every holder keypair, every
   service key, and the registry manifest, so identity and trust roots are consistent across
   every deployment of the same network. In cloud deployments, secret material is split per
@@ -347,14 +387,14 @@ Supporting mechanisms:
 
 | Question | Mechanism |
 |---|---|
-| Who is the sender? | A signed, audience-scoped, expiring **holder assertion** (Ed25519), verified against the registry's signing key for that holder; one-time JTIs prevent assertion replay. |
+| Who is the sender? | A signed, audience-scoped, expiring **holder assertion** (Ed25519), verified against the registry's signing key for that holder. The Authorization Framework and the Registrar accept each JTI once; the Hub relies on its envelope replay guard. |
 | May they do this? | Default-deny policy in the Authorization Framework: role→frame→operation gated, minimum-necessary scope minted per operation. |
 | Is this token for *this* exchange? | Strict binding verification — frame, operation, correlation ID, holder, patient subject, and ciphertext hash must all match — checked independently by the Hub, the recipient, and the sender (response leg). |
-| Is this a replay? | Hub-side seen-correlation-ID cache with TTL, plus a tight envelope-timestamp window. |
-| Is the payload about the right patient? | The recipient resolves the decrypted payload's patient by its own system. On eligibility, federated query and patient-authored DTR it requires that patient to equal the token's subject. On the Da Vinci CRD, DTR and PAS legs the payer handles the patient the request names as it would directly, and files everything it records about the exchange under its own binding of that patient, never under the token's. |
+| Is this a replay? | The Hub refuses an envelope it has already routed within two hours (keyed on the correlation ID and the ciphertext hash), plus a tight envelope-timestamp window. |
+| Is the payload about the right patient? | The recipient resolves the decrypted payload's patient by its own system. On eligibility answered from the payer's own records, federated query and patient-authored DTR it requires that patient to equal the token's subject. An eligibility answer a payer's own eligibility endpoint gives about another patient is relayed below `strict`, recorded at `observe` and `structural`, and refused at `strict`. On the Da Vinci CRD, DTR and PAS legs the payer handles the patient the request names as it would directly, and files everything it records about the exchange under its own binding of that patient, never under the token's. |
 | Can anyone read it in transit? | Payloads are sealed to the recipient's X25519 key; only the recipient can open them. The Hub has no key. |
 | Did it really happen / was history edited? | Hub-signed, hash-chained, append-only audit with externally anchored signed checkpoints; the whole chain is independently re-verifiable. |
-| Is the data well-formed? | Real FHIR `$validate` at every gateway crossing, egress and ingress, at `observe` and `strict` (not at `none`), refused at `strict`; terminology validated against curated value sets. |
+| Is the data well-formed? | Real FHIR `$validate` at gateway crossings, egress and ingress, on what each leg's check covers, at the gateway's chosen level: not at `none`, recorded at `observe`, broken structure refused at `structural`, any defect refused at `strict`; terminology validated against curated value sets. |
 | Is patient identity protected? | Member IDs and demographics cross only inside sealed payloads; routing and audit use the opaque network identifier. |
 
 ---
@@ -367,8 +407,8 @@ and the implemented domain is **prior authorization**, end to end:
 1. **Coverage eligibility.** A provider sends a `CoverageEligibilityRequest`; the payer
    answers covered or not-covered.
 2. **Coverage requirements discovery (CRD).** At order time, the provider sends a CDS Hooks
-   `order-select` carrying only the draft order — a procedure identified by CPT or HCPCS
-   Level II — and coverage (minimum necessary). The payer's rules engine answers with a card:
+   `order-select`, `order-sign` or `order-dispatch` request carrying only the order — a
+   procedure identified by CPT or HCPCS Level II — and the coverage (minimum necessary). The payer's rules engine answers with a card:
    either "no prior authorization required" or "PA required" plus a canonical reference to the
    documentation questionnaire.
 3. **Documentation (DTR).** The provider fetches the payer's DTR `$questionnaire-package` — the
@@ -408,30 +448,44 @@ and the implemented domain is **prior authorization**, end to end:
 
 ## FHIR conformance
 
-- **Runtime gate.** At `observe` (the default) and `strict`, every message is validated
-  per-leg via FHIR `$validate` against a real, IG-enabled validation service (FHIR R4 + US
-  Core; key resources pin their `meta.profile`). A defect is recorded at `observe` and
-  refused at `strict`, in both directions, in the message path — not as an offline
-  afterthought.
+- **Runtime gate.** At `observe` (the default), `structural` and `strict`, a gateway validates
+  each leg's covered resources via FHIR `$validate` against a real, IG-enabled validation
+  service (FHIR R4 + US Core; key resources pin their `meta.profile`), in both directions, in
+  the message path — not as an offline afterthought. A defect is recorded at `observe`;
+  `structural` refuses a message whose structure is broken and records the rest; `strict`
+  refuses any defect. At `none` no payload check runs. Not everything is `$validate`d: a PAS
+  request carried from the provider's own system is not, nor is a payer's answer relayed
+  verbatim (a provider gateway checks the payer's DTR and PAS answers at its own level).
 - **Profile conformance.** Separately from the runtime gate, the prior-auth surface (PAS
   request/update Bundles, Claim, ClaimResponse, DTR QuestionnaireResponses, the PDex
   ExplanationOfBenefit, and the Da Vinci CDex data-request Tasks that carry federated queries)
   is conformance-tested as a dedicated **pre-deployment gate** that drives profile-directed
   `$validate` against an IG-loaded validator, with a documented allowlist for licensed
-  terminology an offline validator cannot expand. The pinned profile versions — US Core 6.1.0,
-  Da Vinci CRD/DTR/PAS 2.0.1, and PDex 2.1.0 — are advertised in the discovery document, so a
-  participant validates against exactly what the network does.
+  terminology an offline validator cannot expand. The network speaks three Da Vinci IG lines,
+  each with its pinned versions:
+
+  | Line | CRD | DTR | PAS | US Core | PDex |
+  |---|---|---|---|---|---|
+  | 2.0 | 2.0.1 | 2.0.1 | 2.0.1 | 6.1.0 | 2.1.0 |
+  | 2.1 | 2.1.0 | 2.1.0 | 2.1.0 | 7.0.0 | 2.1.0 |
+  | 2.2 | 2.2.1 | 2.2.0 | 2.2.1 | 7.0.0 | 2.1.0 |
+
+  Each gateway validates a line against that line's own IG packages, and the discovery
+  document advertises the versions per line, so a participant validates against exactly
+  what the network does.
 - **Published surface.** The payer publishes a Patient Access `CapabilityStatement`,
   conformance-tested against what is actually served.
 - **Terminology.** LOINC, ICD-10-CM, CPT, HCPCS Level II, and X12 codes come from curated value
   sets and are validator-checked — never free-generated. Procedures carry their native coding
   system end to end: a HCPCS-coded order produces a HCPCS-coded determination and
   patient-readable `ExplanationOfBenefit`, never silently rewritten to CPT.
-- **Delegated conformance.** In the optional native-delegation mode — where a holder's own Da
-  Vinci system answers a leg — that system is the conformance authority for the resources it
+- **Delegated conformance.** A payer gateway forwards the CRD, DTR and PAS legs to the payer's
+  own Da Vinci system, and that system is the conformance authority for the resources it
   authors. The network still applies its full security fence to every such leg (sealing,
-  per-operation authority, patient-binding, and tamper-evident audit), rather than re-validating
-  the delegated system's payloads against its own profiles.
+  per-operation authority, patient-binding, and tamper-evident audit). The payer gateway
+  relays those answers without re-validating them against its own profiles; it does check the
+  decision `ExplanationOfBenefit`s it builds from them, and a provider gateway checks the
+  payer's DTR and PAS answers at its own conformance level.
 
 ---
 
@@ -457,9 +511,10 @@ Organizations join the network in one of two ways:
 - **Option A — run the Smart Gateway.** Deploy the gateway at your boundary with your role
   and keys; it handles sealing, validation, tokens, and routing, and you implement the holder
   data interface against your own systems. The common, conformant case is **configuration
-  only, no code**: run one published bundle — the gateway image together with its co-located
-  IG-loaded FHIR validator — point it at a single discovery anchor, mount a registration bundle
-  carrying your role and keys, and you are on the network. A provider running the gateway can
+  only, no code**: build the published bundle — the gateway image together with its
+  co-located IG-loaded FHIR validator — from source, set your role, point it at a single
+  discovery anchor and at your own systems (a provider's system of record; a payer's Da Vinci
+  endpoints), mount a registration bundle carrying your keys, and you are on the network. A provider running the gateway can
   originate workflows by pointing an existing Da Vinci-conformant client at its native ingress
   (CDS Hooks, DTR, PAS), and a payer can let its own Da Vinci endpoints answer the CRD/DTR/PAS
   legs — the gateway translates those interactions onto authorized sealed legs. A participant
@@ -478,11 +533,13 @@ live within seconds, requires proof of key possession, and every lifecycle event
 rotation, revocation, deregistration — is signed into the audit chain.
 
 The same contracts serve operator-run reference holders and external participants alike —
-there is no separate "demo" path. This is demonstrated on a hosted preview network: two
-independent, third-party Da Vinci reference implementations — an external provider and an
-external payer, each running its own systems and holding its own keys — exchange a prior
-authorization **with one another** across the network, request and decision, on exactly the
-contracts above, with neither seeing the other's keys or infrastructure.
+there is no separate "demo" path. Two independent, third-party Da Vinci reference
+implementations — a provider and a payer, each running its own systems and holding its own
+keys — exchange a prior authorization **with one another** through the network's own
+services, request and decision, on exactly the contracts above, with neither seeing the
+other's keys or infrastructure. That exchange is a gate every relevant change passes in CI.
+On the hosted preview network, a participant's own Da Vinci client exchanges with the
+reference payer through the provider test endpoint.
 
 ---
 
@@ -503,6 +560,6 @@ The architecture's properties are not documentation claims; they are executable:
   validators, and a deployment smoke gate boots the fully separated service topology and runs
   every workflow through it.
 - **Cross-organization interoperability gates** run independent, third-party FHIR reference
-  implementations — an external provider and an external payer — against the live network,
-  proving the published contracts carry real participants, not only the operator's reference
-  holders.
+  implementations — an external provider and an external payer — across the network's own
+  services, hermetically in CI. They prove the
+  published contracts carry real participants, not only the operator's reference holders.

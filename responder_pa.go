@@ -564,6 +564,11 @@ func parsePASInquiry(body []byte) (PASInquiry, int, string) {
 			return PASInquiry{}, http.StatusForbidden, "inquiry Coverage is for another patient"
 		}
 	}
+	// And no resource it carries, contained or nested, is or names another
+	// patient (pasCarriesAnotherPatient), as the gateway reads the inquiry.
+	if pasCarriesAnotherPatient(body, pasMemberFromRef(cl.Patient.Reference)) {
+		return PASInquiry{}, http.StatusForbidden, "inconsistent patient in PAS inquiry"
+	}
 	stringExt := func(exts []map[string]json.RawMessage, want string) string {
 		for _, e := range exts {
 			var url, v string

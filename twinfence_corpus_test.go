@@ -10,12 +10,14 @@ import (
 )
 
 // The twin-fence corpus (testdata/twinfence/) is the shared conformance
-// vector set for the two request fences this module carries as deliberate
+// vector set for the request fences this module carries as deliberate
 // twins of the substrate gateway's engine:
 //
-//   - the FR-16/FR-27 attestation conformance fence (fenceAttestedItems), and
+//   - the FR-16/FR-27 attestation conformance fence (fenceAttestedItems);
 //   - the FR-32 supplemental-data / subject-bind fence on the conformant
-//     pas-claim-update leg (handlePASUpdate's guard block).
+//     pas-claim-update leg (handlePASUpdate's guard block), which reads the
+//     whole request for another patient (pasCarriesAnotherPatient); and
+//   - the PAS inquiry's subject read (parsePASInquiry).
 //
 // The vectors are MINTED upstream by the substrate's vector generator (the
 // same canonical byte source as testdata/vectors/) and committed here
@@ -144,13 +146,33 @@ func TestTwinFenceCorpus(t *testing.T) {
 				default:
 					t.Fatalf("unknown verdict %q", v.Expect)
 				}
+			case "inquiry-bind":
+				_, status, msg := parsePASInquiry(v.Bundle)
+				switch v.Expect {
+				case "accept":
+					if status != 0 {
+						t.Fatalf("inquiry reader rejected an accept vector: %d %s", status, msg)
+					}
+				case "reject":
+					if status == 0 {
+						t.Fatal("inquiry reader accepted a reject vector")
+					}
+					if v.RejectStatus != 0 && status != v.RejectStatus {
+						t.Fatalf("rejection status = %d, want %d (%s)", status, v.RejectStatus, msg)
+					}
+					if v.RejectContains != "" && !strings.Contains(msg, v.RejectContains) {
+						t.Fatalf("rejection message %q does not contain %q", msg, v.RejectContains)
+					}
+				default:
+					t.Fatalf("unknown verdict %q", v.Expect)
+				}
 			default:
 				t.Fatalf("unknown vector family %q — teach this driver the new family before committing its vectors", v.Family)
 			}
 		})
 	}
 	// Non-vacuity: both fences must have been driven in both directions.
-	for _, want := range []string{"attestation/accept", "attestation/reject", "update-bind/accept", "update-bind/reject"} {
+	for _, want := range []string{"attestation/accept", "attestation/reject", "update-bind/accept", "update-bind/reject", "inquiry-bind/accept", "inquiry-bind/reject"} {
 		if !seen[want] {
 			t.Fatalf("corpus carries no %s vector — the fence pair is no longer exercised in both directions", want)
 		}

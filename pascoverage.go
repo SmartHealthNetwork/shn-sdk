@@ -107,8 +107,10 @@ func readPASCoverage(record []byte) (pasCoverageRecord, error) {
 //   - subscriber and policyHolder are re-homed to that same Patient entry WHEN
 //     they name the same Patient the beneficiary does, both by a literal
 //     reference — the usual "subscriber is the patient" record, re-pointed with
-//     nothing lost. A beneficiary naming no literal Patient (an identifier
-//     only, or none) re-homes nothing. When they name the
+//     nothing lost. A literal reference is Patient/<id>, relative or
+//     absolute, with or without /_history/<version>; a beneficiary naming no
+//     literal Patient (an identifier only, a urn:uuid or contained #id
+//     reference, or none) re-homes nothing. When they name the
 //     Coverage's party (CoverageParty: a dependent's parent, a Patient contained
 //     in the Coverage that only these slots name, by their own reference
 //     member) they are carried with the record's JSON values, and so is the

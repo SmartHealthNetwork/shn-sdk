@@ -169,3 +169,20 @@ func TestParseConformantClaimSubmit_HasDR(t *testing.T) {
 		t.Error("hasDR = false, want true")
 	}
 }
+
+// pasMemberFromRef drops only a trailing version: a base whose path contains
+// /_history/ is part of the reference. The gateway's twin reads the same
+// table.
+func TestPASMemberFromRefReadsATrailingVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"Patient/MBR-COVERED":                                         "MBR-COVERED",
+		"Patient/MBR-COVERED/_history/2":                              "MBR-COVERED",
+		"https://shn.example/fhir/Patient/MBR-COVERED/_history/2":     "MBR-COVERED",
+		"https://ehr.example/_history/fhir/Patient/MBR-OX":            "MBR-OX",
+		"https://ehr.example/_history/fhir/Patient/MBR-OX/_history/3": "MBR-OX",
+	} {
+		if got := pasMemberFromRef(in); got != want {
+			t.Errorf("pasMemberFromRef(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

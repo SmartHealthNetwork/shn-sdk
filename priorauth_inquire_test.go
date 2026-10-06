@@ -516,6 +516,7 @@ func TestResponderInquire_Refusals(t *testing.T) {
 		{"group patient", bytes.Replace(good.Body, []byte(`"patient":{"reference":"https://shn.example/fhir/Patient/pat-1"}`), []byte(`"patient":{"reference":"Group/pat-1"}`), 1), 403, "inquiry Claim patient is not a Patient reference"},
 		{"patient not in bundle", bytes.Replace(good.Body, []byte(`"patient":{"reference":"https://shn.example/fhir/Patient/pat-1"}`), []byte(`"patient":{"reference":"Patient/pat-9"}`), 1), 403, "inquiry Claim patient is not in the bundle"},
 		{"coverage for another patient", bytes.Replace(good.Body, []byte(`"beneficiary":{"reference":"Patient/pat-1"}`), []byte(`"beneficiary":{"reference":"Patient/pat-2"}`), 1), 403, "inquiry Coverage is for another patient"},
+		{"coverage for another patient by a versioned reference", bytes.Replace(good.Body, []byte(`"beneficiary":{"reference":"Patient/pat-1"}`), []byte(`"beneficiary":{"reference":"Patient/pat-2/_history/2"}`), 1), 403, "inquiry Coverage is for another patient"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-inquire", "pas-inquire", "inq-"+strings.ReplaceAll(row.name, " ", "-"), row.body)
@@ -539,5 +540,19 @@ func TestResponderInquire_Refusals(t *testing.T) {
 	}
 	if res, err := parsePASOutcome(h.openResponse(t, body)); err != nil || res.Outcome != "approved" {
 		t.Fatalf("good inquiry answer: %+v %v", res, err)
+	}
+	// A versioned reference names the patient it versions, as the gateway's
+	// own inquiry reader reads it: the same inquiry naming its patient by
+	// versioned references is answered.
+	versioned := bytes.Replace(good.Body, []byte(`"patient":{"reference":"https://shn.example/fhir/Patient/pat-1"}`), []byte(`"patient":{"reference":"https://shn.example/fhir/Patient/pat-1/_history/2"}`), 1)
+	versioned = bytes.Replace(versioned, []byte(`"beneficiary":{"reference":"Patient/pat-1"}`), []byte(`"beneficiary":{"reference":"Patient/pat-1/_history/2"}`), 1)
+	versioned = bytes.Replace(versioned, []byte(`"resource":{"resourceType":"Patient"`), []byte(`"resource":{"meta":{"versionId":"2"},"resourceType":"Patient"`), 1)
+	if bytes.Count(versioned, []byte("/_history/2")) != 2 || !bytes.Contains(versioned, []byte(`"versionId":"2"`)) {
+		t.Fatal("fixture: the patient references were not versioned")
+	}
+	envBytes, hubHdr = h.buildForwardEnv(t, "pas-claim-inquire", "pas-inquire", "inq-versioned", versioned)
+	resp = postInbound(t, srv, envBytes, hubHdr)
+	if body := readBody(t, resp); resp.StatusCode != http.StatusOK {
+		t.Fatalf("versioned inquiry: %d %s", resp.StatusCode, body)
 	}
 }

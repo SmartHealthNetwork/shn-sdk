@@ -80,6 +80,7 @@ type conformantClaimSubmit struct {
 	qrSubject      string // QuestionnaireResponse.subject.reference, or "" if no QR
 	hasDR          bool   // a DiagnosticReport entry is present (FR-20 pended branch)
 	drSubject      string // DiagnosticReport.subject.reference, or "" if no DR
+	bundle         []byte // the Bundle as received, read whole for another patient (pasCarriesAnotherPatient)
 }
 
 // parseConformantClaimSubmit does ONE pass over a CONFORMANT PAS Claim Bundle, indexing entries
@@ -109,7 +110,7 @@ func parseConformantClaimSubmit(body []byte) (conformantClaimSubmit, bool) {
 		_ = json.Unmarshal(m[field], &v)
 		return v.Reference
 	}
-	var cs conformantClaimSubmit
+	cs := conformantClaimSubmit{bundle: body}
 	haveClaim := false
 	for _, e := range probe.Entry {
 		var rt struct {
@@ -161,7 +162,8 @@ func parseConformantClaimSubmit(body []byte) (conformantClaimSubmit, bool) {
 // and a Coverage with a beneficiary are REQUIRED, and the order subject, the Coverage
 // beneficiary, the QuestionnaireResponse subject (when a QR is present — REQUIRED then, a
 // subjectless QR could approve a Claim for a different patient), and the DiagnosticReport
-// subject (when present) must all reference the SAME member as Claim.patient. Returns (0, "") on
+// subject (when present) must all reference the SAME member as Claim.patient, and nothing else
+// the Bundle carries, contained or nested, may be or name another patient. Returns (0, "") on
 // accept, or (HTTP status, message) to write — the structural absences answer 400, the
 // consistency breaks 403, with the exact statuses and texts the substrate gateway uses.
 //
@@ -194,6 +196,11 @@ func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg strin
 	if cs.hasDR && pasMemberFromRef(cs.drSubject) != member {
 		return 403, "inconsistent patient in PAS bundle"
 	}
+	// Nothing else it carries, contained or nested, is or names another
+	// patient, read as the gateway reads it (pasCarriesAnotherPatient).
+	if pasCarriesAnotherPatient(cs.bundle, member) {
+		return 403, "inconsistent patient in PAS bundle"
+	}
 	return 0, ""
 }
 
@@ -218,7 +225,13 @@ func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg strin
 // Identical to the substrate gateway's own pasMemberFromRef (gateway/engine/pas_native.go), which
 // already resolved this for the native lane. The two fences are twins on purpose and must decide
 // the same bundle the same way.
+// A versioned reference names the same patient: Patient/<id>/_history/<version>
+// reads as <id>. Only a trailing version is dropped: a base whose path contains
+// /_history/ is part of the reference.
 func pasMemberFromRef(ref string) string {
+	if i := strings.LastIndex(ref, "/_history/"); i >= 0 && !strings.Contains(ref[i+len("/_history/"):], "/") {
+		ref = ref[:i]
+	}
 	if i := strings.LastIndex(ref, "Patient/"); i >= 0 {
 		return ref[i+len("Patient/"):]
 	}
