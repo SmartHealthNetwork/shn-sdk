@@ -627,13 +627,19 @@ bundle for `MBR-COVERED`, payer `00301`):
 sit beside it on the same Patient; the Patient's `id`, its demographics and
 `Coverage.subscriberId` are not what the payer matches on, and `subscriberId` alone does
 not match. A Patient carrying only your own identifier (an MRN under your system) is a
-member the payer has never seen: it creates a Patient of its own for it, links the claim
-to a Coverage whose beneficiary is still its stored member, and its answer names two
-members, which is refused as inconsistent patient linkage: you see a `502`. Two shapes answer without an error and are still not the exchange you
-meant: a request without `Coverage.beneficiary`, or whose references point at an external
-base, is answered `200` with `A3` "Not Required" (code and display disagree, §1.4) and no
-`CommunicationRequest` instead of the pend; and a `Claim.patient` given as an identifier only (`type` and `identifier`, no
-`reference`) makes the payer answer `500`.
+member the payer has never seen: it creates a Patient of its own for it and links the claim
+to a Coverage whose beneficiary is still its stored member. Its answer is `HTTP 200`, and
+that one answer names two members. It is carried as the payer sent it, so do not take the
+`200` for a decision about your patient; carry the appendix's member identifier beside
+your own. A payer may choose to have such an answer refused instead: you then see
+its `403`, whose text begins `PAS response has inconsistent patient linkage:` and names the
+entry and the patient it is about. A request
+without `Coverage.beneficiary`, or whose references point at an external base, also answers
+without an error and is still not the exchange you meant: `200` with `A3` "Not Required"
+(code and display disagree, §1.4) and no `CommunicationRequest` instead of the pend. A
+`Claim.patient` given as an identifier only (`type` and `identifier`, no `reference`) is
+refused before it reaches the payer: a `400` `OperationOutcome` (issue code `invalid`)
+whose diagnostics read `PAS bundle missing Claim.patient`.
 
 ```bash
 curl -s "https://pa-test.shn-preview.org/Claim/\$submit" \
@@ -823,8 +829,8 @@ canonical would request a different questionnaire.
 ### 6.3 PAS — an approval
 
 Submit the bundle from [Appendix A](#appendix-a--the-pas-request-bundle), with the three
-substitutions the appendix names for this route. The member-identity rule and the two
-warnings in §5.3 hold here unchanged: the payer matches `Patient.identifier`
+substitutions the appendix names for this route. The member-identity rule and the
+other shapes in §5.3 hold here unchanged: the payer matches `Patient.identifier`
 `http://example.org/MIN|12345678901`, not the Patient id or `subscriberId`.
 
 ```bash
@@ -1066,7 +1072,9 @@ as they are.
 
 A `502` is a failed exchange, not a payer verdict, and a `504` a failure with its cause
 named. Most texts for a failure after the payer received the request say so: `may have
-received`, `received this request`, or `received and answered`. A few do not, yet the payer
+received`, `received this request`, or `received and answered`, as does the endpoint's own
+failure, `500 {"error":"the provider test endpoint failed on this call; the payer may have
+received the request: check its outcome before resending"}`. A few do not, yet the payer
 may still have acted:
 
 - `502 response contract version mismatch …`, which comes after the payer answered;
@@ -1074,7 +1082,6 @@ may still have acted:
   received and answered this request` suffix;
 - the endpoint's own plain-text `502 upstream unavailable`, `504 upstream timeout` and
   `504 upstream timeout at the per-call limit`;
-- the endpoint's own `500 {"error":"door fault"}`;
 - a load balancer's HTML `504`.
 
 After one of these, or a text that says the payer may have received the request, check a PAS
@@ -1225,7 +1232,7 @@ reason of each case. A copy of the test cases you receive elsewhere may use othe
 members. The payer's decisions here depend on the order code, the reason (TC-08) and the
 documentation sent. If you change the member in a PAS request, keep the member identifier the
 payer matches on: a PAS request whose Patient carries only your own identifiers is answered
-`502` (§5.3).
+`200` with an answer that names two members, not a decision on yours (§5.3).
 
 Each request is derived from a file you already have: `crd-00301.json` (§5.1),
 `dtr-00301.json` (§5.2) or `pas-00301.json` (Appendix A). Get a token first (§3):
