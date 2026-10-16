@@ -122,7 +122,7 @@ func TestPASBuildersCarryACoveragesParty(t *testing.T) {
 		t.Run(name+"/submit", func(t *testing.T) {
 			in := conformantSubmitInputs(t)
 			in.Coverage = record
-			b, err := BuildConformantClaimBundle(in)
+			b, err := BuildConformantClaimBundleExact(in)
 			if err != nil {
 				t.Fatalf("refused a dependent's Coverage: %v", err)
 			}
@@ -131,7 +131,7 @@ func TestPASBuildersCarryACoveragesParty(t *testing.T) {
 		t.Run(name+"/update", func(t *testing.T) {
 			in := conformantUpdateInputsFromGolden(t)
 			in.Coverage = record
-			b, err := BuildConformantClaimUpdateBundle(in)
+			b, err := BuildConformantClaimUpdateBundleExact(in)
 			if err != nil {
 				t.Fatalf("refused a dependent's Coverage: %v", err)
 			}
@@ -145,7 +145,7 @@ func TestPASBuildersCarryACoveragesParty(t *testing.T) {
 		t.Run(name+"/absolute refs", func(t *testing.T) {
 			in := payerOrgEntryInputs(t)
 			in.Coverage = record
-			b, err := BuildConformantClaimBundle(in)
+			b, err := BuildConformantClaimBundleExact(in)
 			if err != nil {
 				t.Fatalf("refused a dependent's Coverage: %v", err)
 			}
@@ -195,7 +195,7 @@ func TestPASBuildersRefuseWhatIsNoParty(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			in := conformantSubmitInputs(t)
 			in.Coverage = []byte(tc.coverage)
-			_, err := BuildConformantClaimBundle(in)
+			_, err := BuildConformantClaimBundleExact(in)
 			if err == nil {
 				t.Fatal("accepted")
 			}
@@ -212,11 +212,11 @@ func dependentPASRequest(t *testing.T, slots []string) (request, decision []byte
 	t.Helper()
 	in = conformantSubmitInputs(t)
 	in.Coverage = dependentCoverage(in.MemberID, dependentParent, slots, "")
-	request, err := BuildConformantClaimBundle(in)
+	request, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
-	decision, err = BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
+	decision, err = BuildClaimResponseExact("AUTH", "", in.PatientRef, in.Corr, testAnswerRequest, in.Created)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestPASResponseCarriesACoveragesParty(t *testing.T) {
 			}
 		}
 		bad, _ := json.Marshal(b)
-		decision, err := BuildClaimResponse("AUTH", "", "Patient/MBR-OTHER", in.Corr, in.Created)
+		decision, err := BuildClaimResponseExact("AUTH", "", "Patient/MBR-OTHER", in.Corr, testAnswerRequest, in.Created)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -472,10 +472,10 @@ func buildEveryWay(t *testing.T, record []byte) map[string]error {
 	}
 	_, errs["entry"] = pasCoverageEntry(record, in.PatientRef, payerOrg)
 	in.Coverage = record
-	_, errs["submit"] = BuildConformantClaimBundle(in)
+	_, errs["submit"] = BuildConformantClaimBundleExact(in)
 	up := conformantUpdateInputsFromGolden(t)
 	up.Coverage = record
-	_, errs["update"] = BuildConformantClaimUpdateBundle(up)
+	_, errs["update"] = BuildConformantClaimUpdateBundleExact(up)
 	return errs
 }
 
@@ -524,7 +524,7 @@ func TestPASBuildersRefuseOutsideReferencesInAPartySlot(t *testing.T) {
 	}
 	in := conformantSubmitInputs(t)
 	in.Coverage = record
-	b, err := BuildConformantClaimBundle(in)
+	b, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +666,7 @@ func TestPASBuildersRefuseCaseVariantReferenceMembers(t *testing.T) {
 		}
 		in := conformantSubmitInputs(t)
 		in.Coverage = record
-		b, err := BuildConformantClaimBundle(in)
+		b, err := BuildConformantClaimBundleExact(in)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -804,14 +804,14 @@ func TestPASBuildersCarryTwoParties(t *testing.T) {
 	}
 	in := conformantSubmitInputs(t)
 	in.Coverage = record
-	request, err := BuildConformantClaimBundle(in)
+	request, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := coverageEntryOf(t, request)["contained"]; !jsonEqual(t, got, []byte(`[`+a+`,`+b+`]`)) {
 		t.Fatalf("contained %s", got)
 	}
-	decision, err := BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
+	decision, err := BuildClaimResponseExact("AUTH", "", in.PatientRef, in.Corr, testAnswerRequest, in.Created)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1071,7 +1071,7 @@ func TestDropContainedPayerOrgKeepsWhatAContainedResourceNames(t *testing.T) {
 	}
 	in := conformantSubmitInputs(t)
 	in.Coverage = record
-	request, err := BuildConformantClaimBundle(in)
+	request, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
 		t.Fatal(err)
 	}

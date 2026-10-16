@@ -665,14 +665,16 @@ func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Ti
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse member failed"}
 	}
 
+	// This standalone Responder keeps no Coverage of its own to read its payer
+	// identity from, so its answer restates the insurer the request named, as
+	// written (a literal reference or an identifier). A request that names none
+	// is refused: the answer would otherwise name a placeholder.
+	insurer, ok := ParseEligibilityRequestInsurer(plaintext)
+	if !ok {
+		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "the request names no insurer"}
+	}
 	covered, reason := r.cfg.Adjudicator.Eligibility(member)
-	// R11: this standalone Responder is a DIFFERENT deployment from the
-	// substrate gateway's promoted, Coverage-derived handler — it has no Coverage/SoR
-	// of its own to derive a real payer identity from, so it threads the ZERO-VALUE
-	// insurer (the occupant's existing data has nothing else to offer here), which
-	// BuildEligibilityResponse recognizes and marshals as today's literal
-	// Reference{Reference:"Organization/payer"} — byte-identical, unchanged behavior.
-	crrJSON, err := BuildEligibilityResponse(corr, "Patient/"+member, covered, reason, PayerIdentifier{}, now)
+	crrJSON, err := BuildEligibilityAnswer(corr, "Patient/"+member, covered, reason, insurer, now)
 	if err != nil {
 		return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build response failed"}
 	}

@@ -135,7 +135,7 @@ func TestPASProviderNPI(t *testing.T) {
 // --- the submitted request names a party, and resolves it ---
 
 func testSubmitInputs(provider string) ConformantClaimInputs {
-	return ConformantClaimInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage("MBR-1"),
+	return ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage("MBR-1"),
 		SR:             []byte(`{"resourceType":"ServiceRequest","id":"sr-1","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar"}]}}`),
 		Provider:       []byte(provider),
 		PatientRef:     "Patient/MBR-1",
@@ -182,7 +182,7 @@ func TestBuildConformantClaimBundle_NamesAndResolvesItsProvider(t *testing.T) {
 		{"a PractitionerRole", testRoleProvider, "PractitionerRole/prov-role"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body, err := BuildConformantClaimBundle(testSubmitInputs(tc.provider))
+			body, err := BuildConformantClaimBundleExact(testSubmitInputs(tc.provider))
 			if err != nil {
 				t.Fatalf("build: %v", err)
 			}
@@ -215,7 +215,7 @@ func TestBuildConformantClaimBundle_NamesAndResolvesItsProvider(t *testing.T) {
 			// entry's own fullUrl, which is the form the payer resolves.
 			abs := testSubmitInputs(tc.provider)
 			abs.AbsoluteRefs = true
-			absBody, err := BuildConformantClaimBundle(abs)
+			absBody, err := BuildConformantClaimBundleExact(abs)
 			if err != nil {
 				t.Fatalf("build absolute: %v", err)
 			}
@@ -239,7 +239,7 @@ func TestBuildConformantClaimBundle_RefusesAProviderItCannotName(t *testing.T) {
 		{"the payer's own entry", `{"resourceType":"Organization","id":"org-cms-payer"}`, "same bundle entry"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := BuildConformantClaimBundle(testSubmitInputs(tc.provider)); err == nil {
+			if _, err := BuildConformantClaimBundleExact(testSubmitInputs(tc.provider)); err == nil {
 				t.Fatal("a request that would identify nobody must be refused")
 			} else if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("refusal %q does not say %q", err, tc.want)
@@ -304,7 +304,7 @@ func TestCheckPASProviderResolves(t *testing.T) {
 // under a member it cannot key on, and answers a later inquiry with no match.
 // So the row reads the built bytes.
 func TestBuildConformantClaimBundle_NamesTheMember(t *testing.T) {
-	body, err := BuildConformantClaimBundle(testSubmitInputs(testOrgProvider))
+	body, err := BuildConformantClaimBundleExact(testSubmitInputs(testOrgProvider))
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestBuildConformantClaimBundle_RefusesAMemberItCannotName(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			in := testSubmitInputs(testOrgProvider)
 			tc.mutate(&in)
-			if _, err := BuildConformantClaimBundle(in); err == nil {
+			if _, err := BuildConformantClaimBundleExact(in); err == nil {
 				t.Fatal("a request that identifies no member must be refused")
 			} else if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("refusal %q does not say %q", err, tc.want)
@@ -463,7 +463,7 @@ func TestNewPriorAuthContinuation_ReadsTheSubmittedProvider(t *testing.T) {
 		`"requester":{"identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1644556676"}},` +
 		`"performer":[{"reference":"Organization/prov-org"}],` +
 		`"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar"}]}}`)
-	body, err := BuildConformantClaimBundle(in)
+	body, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -507,13 +507,13 @@ func TestNewPriorAuthContinuation_RefusesAProviderTheRequestDoesNotResolve(t *te
 // provider and is amended under another is holding two requests, not one.
 func TestBuildConformantClaimUpdateBundle_NamesTheSameParty(t *testing.T) {
 	in := testSubmitInputs(testOrgProvider)
-	submit, err := BuildConformantClaimBundle(in)
+	submit, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-1","status":"completed","subject":{"reference":"Patient/MBR-1"}}`)
 	prov := []byte(`{"resourceType":"Provenance","id":"prov-1","recorded":"2026-06-01T12:00:00Z","target":[{"reference":"QuestionnaireResponse/qr-1"}],"agent":[{"who":{"identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567890"}}}]}`)
-	update, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID),
+	update, err := BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: json.RawMessage(testCertTypeJSON), PriorClaim: testPriorClaim(t), Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID),
 		QR: qr, SR: in.SR, Provider: in.Provider, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
 		MemberID: in.MemberID, MemberIDSystem: in.MemberIDSystem, Provenance: prov, Corr: "corr-2", OriginalCorr: in.Corr,
 		Created: in.Created, Payer: in.Payer, PayerOrgEntry: true,
@@ -524,7 +524,7 @@ func TestBuildConformantClaimUpdateBundle_NamesTheSameParty(t *testing.T) {
 	if got, want := claimProviderRef(t, update), claimProviderRef(t, submit); got != want {
 		t.Fatalf("the amendment names %q and the submission named %q", got, want)
 	}
-	if _, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID),
+	if _, err := BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: json.RawMessage(testCertTypeJSON), PriorClaim: testPriorClaim(t), Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID),
 		QR: qr, SR: in.SR, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
 		MemberID: in.MemberID, MemberIDSystem: in.MemberIDSystem, Provenance: prov, Corr: "corr-2", OriginalCorr: in.Corr,
 		Created: in.Created, Payer: in.Payer, PayerOrgEntry: true,

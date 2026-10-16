@@ -59,11 +59,11 @@ func TestPASOperationGraphRetainsInputsAndRejectsMutations(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry = true
 	in.Insurer = testPayerOrganization(CMSPayerIdentity)
-	request, err := BuildConformantClaimBundle(in)
+	request, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decision, err := BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
+	decision, err := BuildClaimResponseExact("AUTH", "", in.PatientRef, in.Corr, testAnswerRequest, in.Created)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,8 +123,8 @@ func TestPASOperationGraphBoundsAndDuplicateKeys(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry = true
 	in.Insurer = testPayerOrganization(CMSPayerIdentity)
-	request, _ := BuildConformantClaimBundle(in)
-	decision, _ := BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
+	request, _ := BuildConformantClaimBundleExact(in)
+	decision, _ := BuildClaimResponseExact("AUTH", "", in.PatientRef, in.Corr, testAnswerRequest, in.Created)
 	if _, err := buildPASOperationResponse([]byte(`{"resourceType":"Bundle","resourceType":"Bundle","entry":[]}`), decision, in.Created); err == nil {
 		t.Fatal("duplicate JSON key accepted")
 	}
@@ -145,8 +145,8 @@ func TestPASOperationRejectsForeignSubjectForms(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry = true
 	in.Insurer = testPayerOrganization(CMSPayerIdentity)
-	request, _ := BuildConformantClaimBundle(in)
-	decision, _ := BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
+	request, _ := BuildConformantClaimBundleExact(in)
+	decision, _ := BuildClaimResponseExact("AUTH", "", in.PatientRef, in.Corr, testAnswerRequest, in.Created)
 	for _, field := range []string{"subjectReference", "patientReference", "subject"} {
 		for _, array := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s-array-%v", field, array), func(t *testing.T) {
@@ -223,8 +223,8 @@ func TestPASOperationEncounterParticipantIsNotPatientSubject(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry = true
 	in.Insurer = testPayerOrganization(CMSPayerIdentity)
-	request, _ := BuildConformantClaimBundle(in)
-	decision, _ := BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
+	request, _ := BuildConformantClaimBundleExact(in)
+	decision, _ := BuildClaimResponseExact("AUTH", "", in.PatientRef, in.Corr, testAnswerRequest, in.Created)
 	for _, role := range []string{"Practitioner", "PractitionerRole", "RelatedPerson"} {
 		t.Run(role, func(t *testing.T) {
 			var b map[string]any
@@ -244,8 +244,8 @@ func TestPASOperationResourceSpecificSubjectsRemainBound(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry = true
 	in.Insurer = testPayerOrganization(CMSPayerIdentity)
-	request, _ := BuildConformantClaimBundle(in)
-	decision, _ := BuildClaimResponse("AUTH", "", in.PatientRef, in.Corr, in.Created)
+	request, _ := BuildConformantClaimBundleExact(in)
+	decision, _ := BuildClaimResponseExact("AUTH", "", in.PatientRef, in.Corr, testAnswerRequest, in.Created)
 	for _, tc := range []struct{ resource, field string }{{"ResearchSubject", "individual"}, {"EnrollmentRequest", "candidate"}} {
 		for _, reference := range []string{in.PatientRef, "Organization/cms-payer"} {
 			t.Run(tc.resource+reference, func(t *testing.T) {

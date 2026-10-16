@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -195,10 +197,9 @@ func claimItemProductCode(t *testing.T, claim map[string]any) string {
 	return code
 }
 
-// claimHasInfoChangedOnEveryItem reports whether every Claim.item carries the PAS
-// infoChanged item extension — the element that tells a payer the amendment carries NEW
-// information and must be re-evaluated rather than answered from the prior decision.
-func claimHasInfoChangedOnEveryItem(t *testing.T, claim map[string]any) bool {
+// claimHasInfoChangedOnAnyItem reports whether any Claim.item carries the PAS
+// infoChanged item extension (the marker a payer re-evaluates an item on).
+func claimHasInfoChangedOnAnyItem(t *testing.T, claim map[string]any) bool {
 	t.Helper()
 	items, _ := claim["item"].([]any)
 	if len(items) == 0 {
@@ -207,18 +208,14 @@ func claimHasInfoChangedOnEveryItem(t *testing.T, claim map[string]any) bool {
 	for _, it := range items {
 		im, _ := it.(map[string]any)
 		exts, _ := im["extension"].([]any)
-		found := false
 		for _, e := range exts {
 			em, _ := e.(map[string]any)
 			if url, _ := em["url"].(string); strings.Contains(url, "infoChanged") {
-				found = true
+				return true
 			}
 		}
-		if !found {
-			return false
-		}
 	}
-	return true
+	return false
 }
 
 // TestPriorAuthClientIntoResponder_PendedThenResumed drives the published PA client into the
@@ -245,7 +242,8 @@ func TestPriorAuthClientIntoResponder_PendedThenResumed(t *testing.T) {
 	// A prior surgery with no operative report is what this test binary's policy pends on, so
 	// the submit pends and the resume — which attaches the report — approves.
 	req := PriorAuthRequest{
-		Member: "MBR-001", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
+		ClaimFacts: testClaimFacts(),
+		Member:     "MBR-001", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
 		Provider:         testRequestingProvider(),
 		Patient:          testMemberPatient("MBR-001"),
 		Coverage:         testMemberCoverageSearch("MBR-001"),
@@ -271,7 +269,7 @@ func TestPriorAuthClientIntoResponder_PendedThenResumed(t *testing.T) {
 	}
 
 	amended, err := senderIdent.ResumePriorAuth(context.Background(), hubSrv.Client(), ep, payer,
-		*res.Resume, demoSupplementalReport())
+		*res.Resume, demoSupplementalReport(res.Resume.PatientRef))
 	if err != nil {
 		t.Fatalf("ResumePriorAuth into the published Responder: %v", err)
 	}
@@ -361,12 +359,188 @@ func TestPriorAuthClientIntoResponder_PendedThenResumed(t *testing.T) {
 			t.Errorf("Claim.related[0].claim.reference = %q resolves to no bundle entry; entries are %v", priorRef, keysOf(urls))
 		}
 
-		// And it must be told the information CHANGED, or it carries the prior decision
-		// forward and the amendment comes back still pended.
-		if !claimHasInfoChangedOnEveryItem(t, claim) {
-			t.Error("amended Claim.item carries no infoChanged extension — a real payer keeps its prior decision and never re-evaluates")
+		// The infoChanged marker is derived from the submission, item by item:
+		// this amendment re-sends the submitted item exactly as it was (its
+		// new information is the operative report, which is not an item and
+		// cannot carry the marker), so no item carries it. The reference payer
+		// re-evaluates only items that carry it (hasInfoChanged), so it answers
+		// this amendment with the decision it already holds for the item.
+		if claimHasInfoChangedOnAnyItem(t, claim) {
+			t.Error("an amended Claim.item sent before exactly as now carries infoChanged")
+		}
+		// The pend asks item 1 for a LOINC operative note; the report the
+		// resume attaches is another LOINC report. The payer's own pend ties it to no
+		// item, so nothing is linked.
+		if _, ok := claim["supportingInfo"]; ok {
+			t.Errorf("an answer the pend did not ask for is linked: supportingInfo %v", claim["supportingInfo"])
 		}
 	})
+
+	t.Run("handle-keeps-the-payers-pend", func(t *testing.T) {
+		pended, detail, err := ParsePendedResponseDetail(res.Resume.PendedResponse)
+		if err != nil || !pended || len(detail.Tasks) == 0 || len(detail.Tasks[0].Items) == 0 || detail.Tasks[0].Items[0].Sequence != 1 {
+			t.Fatalf("the resume handle does not keep the payer's pend as received: pended=%v err=%v detail=%+v", pended, err, detail)
+		}
+	})
+}
+
+// TestPriorAuthClientIntoResponder_ResumeLinksTheAskedReport: the payer's pend
+// asks item 1 for exactly the report the resume attaches: the pend the handle
+// keeps names the code the caller's report states. ResumePriorAuth's amendment links the
+// report to item 1 through a new supportingInfo entry, and item 1 carries
+// infoChanged "added".
+func TestPriorAuthClientIntoResponder_ResumeLinksTheAskedReport(t *testing.T) {
+	h, responderIdent, senderIdent := newPAHarness(t)
+	_, responderSrv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
+	hub := newPairHub(t, h, responderSrv, responderIdent)
+	hubMux := http.NewServeMux()
+	hubMux.HandleFunc("/route", hub.route)
+	hubSrv := httptest.NewServer(hubMux)
+	t.Cleanup(hubSrv.Close)
+	ep := Endpoints{HubURL: hubSrv.URL, AuthzURL: h.authzSrv.URL}
+	payer := Payer{ID: h.responderID, EncPub: h.responderEnc, AuthzPub: h.authzPub}
+	req := PriorAuthRequest{
+		ClaimFacts: testClaimFacts(),
+		Member:     "MBR-001", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
+		Provider: testRequestingProvider(), Patient: testMemberPatient("MBR-001"), Coverage: testMemberCoverageSearch("MBR-001"),
+		MemberIDSystem: MemberSystem, Clinical: DemoLumbarContextPriorSurgery(),
+		ProcedureSystem: systemHCPCS, ProcedureCPT: "G0151", ProcedureDisplay: "Home health physical therapy, each 15 minutes",
+		DiagnosisICD10: "M54.16",
+	}
+	res, err := senderIdent.RunPriorAuth(context.Background(), hubSrv.Client(), ep, payer, req)
+	if err != nil || res.Outcome != "pended" || res.Resume == nil {
+		t.Fatalf("submit: outcome=%q err=%v", res.Outcome, err)
+	}
+	supp := demoSupplementalReport(res.Resume.PatientRef)
+	var own struct {
+		Code struct{ Coding []PASCoding } `json:"code"`
+	}
+	if err := json.Unmarshal(supp.Report, &own); err != nil || len(own.Code.Coding) == 0 {
+		t.Fatalf("the report states no code: %v", err)
+	}
+	var pend map[string]any
+	if err := json.Unmarshal(res.Resume.PendedResponse, &pend); err != nil {
+		t.Fatal(err)
+	}
+	restated := 0
+	for _, e := range pend["entry"].([]any) {
+		r := e.(map[string]any)["resource"].(map[string]any)
+		if r["resourceType"] != "Task" {
+			continue
+		}
+		for _, in := range r["input"].([]any) {
+			cc, _ := in.(map[string]any)["valueCodeableConcept"].(map[string]any)
+			codings, _ := cc["coding"].([]any)
+			for _, c := range codings {
+				if cm := c.(map[string]any); cm["code"] == testOperativeNote.Code {
+					cm["system"], cm["code"] = own.Code.Coding[0].System, own.Code.Coding[0].Code
+					restated++
+				}
+			}
+		}
+	}
+	if restated == 0 {
+		t.Fatal("the pend names no operative-note attachment to restate")
+	}
+	res.Resume.PendedResponse, _ = json.Marshal(pend)
+	if _, err := senderIdent.ResumePriorAuth(context.Background(), hubSrv.Client(), ep, payer, *res.Resume, supp); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	claim, _ := parsePairBundle(t, hub.leg(t, "pas-claim-update")).resourceOfType(t, "Claim")
+	infos, _ := claim["supportingInfo"].([]any)
+	items, _ := claim["item"].([]any)
+	if len(infos) != 1 || len(items) != 1 {
+		t.Fatalf("supportingInfo %v items %d, want one entry linked to the one item", infos, len(items))
+	}
+	ref, _ := infos[0].(map[string]any)["valueReference"].(map[string]any)["reference"].(string)
+	if !strings.HasSuffix(ref, "/DiagnosticReport/"+conformantPASDRID) {
+		t.Errorf("supportingInfo references %q, want the attached report", ref)
+	}
+	item := items[0].(map[string]any)
+	if seq, _ := item["informationSequence"].([]any); len(seq) != 1 || seq[0] != float64(1) {
+		t.Errorf("item 1 informationSequence %v, want [1]", item["informationSequence"])
+	}
+	var code string
+	for _, e := range item["extension"].([]any) {
+		if em := e.(map[string]any); em["url"] == pasInfoChangedExtensionURL {
+			code, _ = em["valueCode"].(string)
+		}
+	}
+	if code != pasInfoChangedAdded {
+		t.Errorf("item 1 infoChanged %q, want added", code)
+	}
+}
+
+// TestResumePriorAuthCarriesTheCallersReport is the tripwire for minted evidence: the
+// DiagnosticReport an amendment carries to the payer is the caller's own, with nothing the
+// caller did not supply. Its only changes are the bundle builder's own edits: the
+// bundle-local id, the dropped meta.profile, and its subject reference made absolute against the
+// bundle's base, as every reference in the bundle is. A report that states no effective date or
+// category reaches the payer stating none.
+func TestResumePriorAuthCarriesTheCallersReport(t *testing.T) {
+	full := func(patientRef string) []byte { return testOwnReport("dr-own", patientRef) }
+	bare := func(patientRef string) []byte {
+		return []byte(`{"resourceType":"DiagnosticReport","id":"dr-own","status":"final",` +
+			`"code":{"text":"operative report"},"subject":{"reference":"` + patientRef + `"}}`)
+	}
+	noID := func(patientRef string) []byte {
+		return []byte(`{"resourceType":"DiagnosticReport","status":"final",` +
+			`"code":{"text":"operative report"},"subject":{"reference":"` + patientRef + `"}}`)
+	}
+	for name, report := range map[string]func(string) []byte{"a full report": full, "a report stating no date or category": bare, "a report with no id": noID} {
+		t.Run(name, func(t *testing.T) {
+			h, responderIdent, senderIdent := newPAHarness(t)
+			_, responderSrv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
+			hub := newPairHub(t, h, responderSrv, responderIdent)
+			hubMux := http.NewServeMux()
+			hubMux.HandleFunc("/route", hub.route)
+			hubSrv := httptest.NewServer(hubMux)
+			t.Cleanup(hubSrv.Close)
+			ep := Endpoints{HubURL: hubSrv.URL, AuthzURL: h.authzSrv.URL}
+			payer := Payer{ID: h.responderID, EncPub: h.responderEnc, AuthzPub: h.authzPub}
+			req := PriorAuthRequest{
+				ClaimFacts: testClaimFacts(),
+				Member:     "MBR-001", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
+				Provider: testRequestingProvider(), Patient: testMemberPatient("MBR-001"),
+				Coverage: testMemberCoverageSearch("MBR-001"), MemberIDSystem: MemberSystem,
+				Clinical: DemoLumbarContextPriorSurgery(), ProcedureSystem: systemHCPCS,
+				ProcedureCPT: "G0151", ProcedureDisplay: "Home health physical therapy, each 15 minutes",
+				DiagnosisICD10: "M54.16",
+			}
+			res, err := senderIdent.RunPriorAuth(context.Background(), hubSrv.Client(), ep, payer, req)
+			if err != nil || res.Outcome != "pended" || res.Resume == nil {
+				t.Fatalf("submit: outcome %q, err %v", res.Outcome, err)
+			}
+			own := report(res.Resume.PatientRef)
+			if _, err := senderIdent.ResumePriorAuth(context.Background(), hubSrv.Client(), ep, payer, *res.Resume,
+				SupplementalReport{Report: own, ProvenanceAgent: ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "provider"}}); err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			sent, _ := parsePairBundle(t, hub.leg(t, "pas-claim-update")).resourceOfType(t, "DiagnosticReport")
+			var want map[string]any
+			if err := json.Unmarshal(own, &want); err != nil {
+				t.Fatal(err)
+			}
+			want["id"] = sent["id"]
+			delete(want, "meta")
+			sentSubject, _ := sent["subject"].(map[string]any)
+			sentRef, _ := sentSubject["reference"].(string)
+			if !strings.HasSuffix(sentRef, "/"+res.Resume.PatientRef) {
+				t.Fatalf("the amendment's DiagnosticReport is about %q, not the caller's %q", sentRef, res.Resume.PatientRef)
+			}
+			want["subject"] = map[string]any{"reference": sentRef}
+			if !reflect.DeepEqual(sent, want) {
+				t.Fatalf("the amendment's DiagnosticReport is not the caller's own:\n sent %v\n own  %v", sent, want)
+			}
+			for _, k := range []string{"effectiveDateTime", "category"} {
+				if _, stated := want[k]; !stated {
+					if _, ok := sent[k]; ok {
+						t.Errorf("the SDK filled in %s, which the caller's report does not state: %v", k, sent[k])
+					}
+				}
+			}
+		})
+	}
 }
 
 func keysOf(m map[string]bool) []string {
@@ -375,4 +549,181 @@ func keysOf(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestResumePriorAuth_PreReleaseHandleRefused: a resume handle written before
+// shn-sdk v0.62.0 carries no claimFacts and no submission record. Resuming it
+// would amend with facts this package supplies, so ResumePriorAuth refuses it
+// before anything is built or sent, naming what the handle lacks — never
+// amends with a default.
+func TestResumePriorAuth_PreReleaseHandleRefused(t *testing.T) {
+	h, responderIdent, senderIdent := newPAHarness(t)
+	_, responderSrv := h.makeResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now})
+	hub := newPairHub(t, h, responderSrv, responderIdent)
+	hubMux := http.NewServeMux()
+	hubMux.HandleFunc("/route", hub.route)
+	hubSrv := httptest.NewServer(hubMux)
+	t.Cleanup(hubSrv.Close)
+	ep := Endpoints{HubURL: hubSrv.URL, AuthzURL: h.authzSrv.URL}
+	payer := Payer{ID: h.responderID, EncPub: h.responderEnc, AuthzPub: h.authzPub}
+	req := PriorAuthRequest{
+		ClaimFacts: testClaimFacts(),
+		Member:     "MBR-001", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
+		Provider: testRequestingProvider(), Patient: testMemberPatient("MBR-001"), Coverage: testMemberCoverageSearch("MBR-001"),
+		MemberIDSystem: MemberSystem, Clinical: DemoLumbarContextPriorSurgery(),
+		ProcedureSystem: systemHCPCS, ProcedureCPT: "G0151", ProcedureDisplay: "Home health physical therapy, each 15 minutes", DiagnosisICD10: "M54.16",
+	}
+	res, err := senderIdent.RunPriorAuth(context.Background(), hubSrv.Client(), ep, payer, req)
+	if err != nil || res.Resume == nil {
+		t.Fatalf("pend: %v (resume %v)", err, res.Resume)
+	}
+	for name, tc := range map[string]struct {
+		strip func(*PriorAuthResume)
+		want  string
+	}{
+		"no claimFacts": {func(r *PriorAuthResume) { r.ClaimFacts = nil },
+			"pas-update-submit: Claim.type, Claim.priority and Claim.item.category " + ErrPASClaimFactAbsent.Error() + " (expected from the resume handle's claimFacts, which a handle written before shn-sdk v0.62.0 does not carry)"},
+		"no submission": {func(r *PriorAuthResume) { r.Submission = nil },
+			"pas-update-submit: the prior Claim's type, priority, created and items " + ErrPASClaimFactAbsent.Error() + " (expected from the resume handle's submission record, which a handle written before shn-sdk v0.62.0 does not carry)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			handle := *res.Resume
+			// The handle as an earlier release wrote it: the JSON round trip
+			// a stored handle takes, without the member it lacks.
+			raw, err := json.Marshal(handle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stored PriorAuthResume
+			if err := json.Unmarshal(raw, &stored); err != nil {
+				t.Fatal(err)
+			}
+			tc.strip(&stored)
+			// No endpoints: a refusal that came after anything was sent
+			// would fail on the wire instead, with another error.
+			_, err = senderIdent.ResumePriorAuth(context.Background(), nil, Endpoints{}, Payer{}, stored, demoSupplementalReport(handle.PatientRef))
+			if err == nil || !errors.Is(err, ErrPASClaimFactAbsent) || err.Error() != tc.want {
+				t.Fatalf("err = %v\nwant %s", err, tc.want)
+			}
+		})
+	}
+}
+
+// rePendingAdjudicator decides the submit and every later amendment by the test
+// policy, but pends the first amendment (its second call): a payer that still needs
+// more after the first answer.
+type rePendingAdjudicator struct {
+	paTestAdjudicator
+	calls int
+}
+
+func (a *rePendingAdjudicator) PriorAuth(qrJSON []byte, hasDR bool) (PASDecision, error) {
+	a.calls++
+	if a.calls == 2 { // the submit is call 1; the first amendment is call 2
+		return testPendedDecision(), nil
+	}
+	return a.paTestAdjudicator.PriorAuth(qrJSON, hasDR)
+}
+
+// TestPriorAuthClientIntoResponder_RePendedResumesAgain drives a prior authorization the
+// payer pends twice: on the submit, and again on the first amendment. The handle the
+// re-pended ResumePriorAuth returns must resume again — it carries the requesting provider's
+// and the member's coverage records the submission named, which the amendment must name
+// again (a handle without them is refused before anything is sealed).
+func TestPriorAuthClientIntoResponder_RePendedResumesAgain(t *testing.T) {
+	h, responderIdent, senderIdent := newPAHarness(t)
+	_, responderSrv := h.makeResponderSrv(t, responderIdent, &rePendingAdjudicator{paTestAdjudicator: paTestAdjudicator{now: h.now}})
+
+	hub := newPairHub(t, h, responderSrv, responderIdent)
+	hubMux := http.NewServeMux()
+	hubMux.HandleFunc("/route", hub.route)
+	hubSrv := httptest.NewServer(hubMux)
+	t.Cleanup(hubSrv.Close)
+
+	ep := Endpoints{HubURL: hubSrv.URL, AuthzURL: h.authzSrv.URL}
+	payer := Payer{ID: h.responderID, EncPub: h.responderEnc, AuthzPub: h.authzPub}
+	req := PriorAuthRequest{
+		ClaimFacts: testClaimFacts(),
+		Member:     "MBR-001", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
+		Provider:         testRequestingProvider(),
+		Patient:          testMemberPatient("MBR-001"),
+		Coverage:         testMemberCoverageSearch("MBR-001"),
+		MemberIDSystem:   MemberSystem,
+		Clinical:         DemoLumbarContextPriorSurgery(),
+		ProcedureSystem:  systemHCPCS,
+		ProcedureCPT:     "G0151",
+		ProcedureDisplay: "Home health physical therapy, each 15 minutes",
+		DiagnosisICD10:   "M54.16",
+	}
+
+	res, err := senderIdent.RunPriorAuth(context.Background(), hubSrv.Client(), ep, payer, req)
+	if err != nil {
+		t.Fatalf("RunPriorAuth: %v", err)
+	}
+	if res.Outcome != "pended" || res.Resume == nil {
+		t.Fatalf("submit = %q (resume %v), want pended with a resume handle", res.Outcome, res.Resume != nil)
+	}
+	// Each amendment is made a minute after the last, so the submit's own record
+	// and an amendment's differ.
+	senderIdent.Clock = func() time.Time { return h.now.Add(time.Minute) }
+	again, err := senderIdent.ResumePriorAuth(context.Background(), hubSrv.Client(), ep, payer,
+		*res.Resume, demoSupplementalReport(res.Resume.PatientRef))
+	if err != nil {
+		t.Fatalf("first ResumePriorAuth: %v", err)
+	}
+	if again.Outcome != "pended" || again.Resume == nil {
+		t.Fatalf("first amendment = %q (resume %v), want pended with a resume handle", again.Outcome, again.Resume != nil)
+	}
+	if !bytes.Equal(again.Resume.ProviderJSON, res.Resume.ProviderJSON) || !bytes.Equal(again.Resume.CoverageJSON, res.Resume.CoverageJSON) {
+		t.Errorf("re-pended handle does not carry the submission's provider and coverage records")
+	}
+	// It resumes the pend it was handed: the amendment's own pended answer.
+	if bytes.Equal(again.Resume.PendedResponse, res.Resume.PendedResponse) || len(again.Resume.PendedResponse) == 0 {
+		t.Errorf("re-pended handle does not carry the amendment's pended answer")
+	}
+	senderIdent.Clock = func() time.Time { return h.now.Add(2 * time.Minute) }
+	final, err := senderIdent.ResumePriorAuth(context.Background(), hubSrv.Client(), ep, payer,
+		*again.Resume, demoSupplementalReport(again.Resume.PatientRef))
+	if err != nil {
+		t.Fatalf("second ResumePriorAuth with the re-pended handle: %v", err)
+	}
+	if final.Outcome != "approved" {
+		t.Fatalf("second amendment = %q, want approved", final.Outcome)
+	}
+
+	// Every amendment continues the original submission, as a Smart Gateway's own
+	// amendment chain does (each amendment names the submit's correlation as the one
+	// it amends): the re-pended handle keeps the submission record and the original
+	// correlation, and the second amendment's prior Claim restates the submit, not
+	// the first amendment.
+	if !reflect.DeepEqual(again.Resume.Submission, res.Resume.Submission) || again.Resume.OriginalCorrelationID != res.Resume.OriginalCorrelationID {
+		t.Errorf("re-pended handle does not continue the original submission: submission %+v, correlation %q; want %+v, %q",
+			again.Resume.Submission, again.Resume.OriginalCorrelationID, res.Resume.Submission, res.Resume.OriginalCorrelationID)
+	}
+	second := parsePairBundle(t, hub.leg(t, "pas-claim-update"))
+	claim, _ := second.resourceOfType(t, "Claim")
+	related, _ := claim["related"].([]any)
+	if len(related) == 0 {
+		t.Fatal("the second amendment's Claim carries no related[]")
+	}
+	rel0, _ := related[0].(map[string]any)
+	relClaim, _ := rel0["claim"].(map[string]any)
+	priorRef, _ := relClaim["reference"].(string)
+	var prior struct {
+		Identifier []struct{ System, Value string } `json:"identifier"`
+		Created    string                           `json:"created"`
+	}
+	for _, e := range second.Entry {
+		if e.FullUrl == priorRef {
+			if err := json.Unmarshal(e.Resource, &prior); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if len(prior.Identifier) == 0 || prior.Identifier[0].Value != res.Resume.OriginalCorrelationID {
+		t.Errorf("the second amendment's prior Claim %q is identified as %+v, want the submit's correlation %q", priorRef, prior.Identifier, res.Resume.OriginalCorrelationID)
+	}
+	if prior.Created != res.Resume.Submission.Created {
+		t.Errorf("the second amendment's prior Claim was created %q, want the submit's %q", prior.Created, res.Resume.Submission.Created)
+	}
 }

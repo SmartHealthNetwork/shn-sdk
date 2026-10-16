@@ -89,9 +89,9 @@ func TestResponderStampsPerLegContractVersion(t *testing.T) {
 	})
 
 	t.Run("eligibility leg framed but never stamped (version-neutral)", func(t *testing.T) {
-		cer, err := BuildEligibilityRequest("MBR-001", "9999999999", h.now)
+		cer, err := BuildEligibilityRequestExact("MBR-001", "9999999999", CMSPayerIdentity, h.now)
 		if err != nil {
-			t.Fatalf("BuildEligibilityRequest: %v", err)
+			t.Fatalf("BuildEligibilityRequestExact: %v", err)
 		}
 		envBytes, hubHdr := h.buildForwardEnv(t, "coverage-eligibility", "eligibility-inquiry", "stamp-elig-1", cer)
 		resp := postInbound(t, srv, envBytes, hubHdr)

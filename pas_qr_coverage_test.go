@@ -17,8 +17,8 @@ func TestConformantPAS22OwnsQRCoverageReference(t *testing.T) {
 	update := conformantUpdateInputsFromGolden(t)
 	update.QR = qr
 	for name, build := range map[string]func() ([]byte, error){
-		"submit": func() ([]byte, error) { return BuildConformantClaimBundleAtLine("2.2", in) },
-		"update": func() ([]byte, error) { return BuildConformantClaimUpdateBundleAtLine("2.2", update) },
+		"submit": func() ([]byte, error) { return BuildConformantClaimBundleAtLineExact("2.2", in) },
+		"update": func() ([]byte, error) { return BuildConformantClaimUpdateBundleAtLineExact("2.2", update) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			data, err := build()

@@ -317,6 +317,7 @@ func cmdEligibility(args []string, stdout, stderr io.Writer) int {
 	hub := fs.String("hub", "", "Hub base URL (required)")
 	authz := fs.String("authz", "", "Authorization Framework base URL (required)")
 	payerID := fs.String("payer-id", "", "payer holder id (required)")
+	payerIdentifier := fs.String("payer-identifier", "", "the payer's identifier as the member's coverage names it, system=value (required: the request names it as its insurer)")
 	payerEnc := fs.String("payer-enc", "", "base64 payer X25519 encryption public key (required)")
 	authzPub := fs.String("authz-pub", "", "base64 Authorization Framework ed25519 verifying key (required)")
 	name := fs.String("name", "", "originating holder id (defaults to the manifest in --out)")
@@ -325,7 +326,7 @@ func cmdEligibility(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	missing := []string{}
-	for n, v := range map[string]string{"member": *member, "dob": *dob, "family": *family, "hub": *hub, "authz": *authz, "payer-id": *payerID, "payer-enc": *payerEnc, "authz-pub": *authzPub} {
+	for n, v := range map[string]string{"member": *member, "dob": *dob, "family": *family, "hub": *hub, "authz": *authz, "payer-id": *payerID, "payer-identifier": *payerIdentifier, "payer-enc": *payerEnc, "authz-pub": *authzPub} {
 		if v == "" {
 			missing = append(missing, "--"+n)
 		}
@@ -345,6 +346,12 @@ func cmdEligibility(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "shn eligibility: --authz-pub: %v\n", err)
 		return 2
 	}
+	var ids payerIDList
+	if err := ids.Set(*payerIdentifier); err != nil {
+		fmt.Fprintf(stderr, "shn eligibility: --payer-identifier: %v\n", err)
+		return 2
+	}
+	identity := ids[0]
 
 	holderID := *name
 	if holderID == "" {
@@ -364,7 +371,7 @@ func cmdEligibility(args []string, stdout, stderr io.Writer) int {
 
 	covered, reason, err := id.RunEligibility(context.Background(), http.DefaultClient,
 		shnsdk.Endpoints{HubURL: *hub, AuthzURL: *authz},
-		shnsdk.Payer{ID: *payerID, EncPub: encPub, AuthzPub: authzKey},
+		shnsdk.Payer{ID: *payerID, Identity: identity, EncPub: encPub, AuthzPub: authzKey},
 		*npi, *member, *dob, *family)
 	if err != nil {
 		fmt.Fprintf(stderr, "shn eligibility: %v\n", err)

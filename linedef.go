@@ -75,7 +75,7 @@ type PASDef struct {
 	//   - Claim.item.extension:certificationType  min=1 (canonical extension-certificationType)
 	//   - Claim.item.extension:requestType        min=1 (canonical extension-serviceItemRequestType)
 	//   - Claim.item.location[x]                  min=1 (CodeableConcept; X12278LocationType
-	//     required binding, itself bound to the NON-licensed CMS place-of-service code set)
+	//     required binding, which includes the NUBC type-of-bill and CMS place-of-service code sets)
 	// Gates the item-detail extensions + locationCodeableConcept the builders add at 2.1/2.2.
 	ClaimItemLineDetailRequired bool
 	// ClaimRelatedRelationshipRequired: PAS 2.1+ profile-claim-update requires
@@ -84,6 +84,15 @@ type PASDef struct {
 	// terminology code, not X12-licensed) — absent at 2.0.1. Verified against the PAS
 	// 2.1.0/2.2.1 package differential for profile-claim-update.json (unchanged 2.1.0→2.2.1).
 	ClaimRelatedRelationshipRequired bool
+	// SupportingInfoDocumentInformationRequired: PAS 2.2.1 profile-claim and
+	// profile-claim-update require, on every Claim.supportingInfo:
+	// AdditionalInformation entry, extension:documentInformation (min=1), whose
+	// reportTypeCode sub-extension carries an X12 PWK01 attachment report type
+	// (pas-pwk01-attachment-report-type-code, required binding). Absent at 2.0.1
+	// and 2.1.0, where the slice is sequence, category and a valueReference. An
+	// amendment links its attached answer to an item through that slice only
+	// where the line does not require a report type no source states.
+	SupportingInfoDocumentInformationRequired bool
 	// extended as package diffs dictate — additive fields only
 }
 
@@ -119,6 +128,8 @@ var pasLineDefs = map[string]PASDef{
 		ResponseBundleIdentifierRequired: true,
 		ClaimItemLineDetailRequired:      true,
 		ClaimRelatedRelationshipRequired: true,
+
+		SupportingInfoDocumentInformationRequired: true,
 	},
 }
 

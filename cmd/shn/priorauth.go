@@ -67,6 +67,7 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 	keys := fs.String("keys", "", "key directory holding your signing+encryption keys")
 	out := fs.String("out", ".", "alias for --keys (key directory)")
 	resumeOut := fs.String("resume-out", "shn-resume.json", "where to write the resume handle if the PA pends")
+	factFlags := registerClaimFactFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -142,6 +143,12 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 		ProcedureDisplay: persona.Order.Display, DiagnosisICD10: persona.Order.Diagnosis,
 		ProceedOnNotCovered: true,
 	}
+	// The claim's own facts: the persona's order as the descriptor advertises it,
+	// a flag beating it; neither → refused here, before any leg.
+	if req.ClaimFacts, err = personaClaimFacts(persona.Order, factFlags); err != nil {
+		fmt.Fprintf(stderr, "shn priorauth: persona %q: %v\n", *member, err)
+		return exitUsage
+	}
 	req, err = withTestPersonaRecords(req, persona)
 	if err != nil {
 		fmt.Fprintf(stderr, "shn priorauth: persona %q: %v\n", *member, err)
@@ -166,7 +173,7 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "outcome=pended needed=%s resume=%s\n", neededCodes(res.NeededItems), *resumeOut)
-		fmt.Fprintf(stdout, "resume with: shn priorauth resume --resume %s --report-id <id> --report-cpt <cpt> --discovery <url> --id <id> -keys <dir>\n", *resumeOut)
+		fmt.Fprintf(stdout, "resume with: shn priorauth resume --resume %s --report-file <your DiagnosticReport.json> --provenance-agent-system <namespace> --provenance-agent-value <id> --discovery <url> --id <id> -keys <dir>\n", *resumeOut)
 	case "denied":
 		reasonCode, rationale, appeal := "", "", ""
 		if res.Denial != nil {
@@ -187,9 +194,9 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 }
 
 // cmdPriorAuthResume implements `shn priorauth resume`: load a resume handle, run the
-// pended→amend ClaimUpdate, print the resumed outcome. The supplemental facts come from
-// flags — the caller names the evidence they actually hold (v0.46.0 removed the
-// fixture-supplemental shortcut that stamped a canned report instead).
+// pended→amend ClaimUpdate, print the resumed outcome. The supplemental report is the
+// DiagnosticReport file the caller's own system holds (--report-file), carried as it is:
+// the CLI builds no clinical content.
 func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("priorauth resume", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -198,9 +205,7 @@ func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 	id := fs.String("id", "", "your registered holder id (required)")
 	keys := fs.String("keys", "", "key directory holding your signing+encryption keys")
 	out := fs.String("out", ".", "alias for --keys (key directory)")
-	reportID := fs.String("report-id", "", "supplemental DiagnosticReport id (required)")
-	cpt := fs.String("report-cpt", "", "supplemental procedure CPT")
-	display := fs.String("report-display", "", "supplemental procedure display")
+	reportFile := fs.String("report-file", "", "the supplemental DiagnosticReport your system holds, as a JSON file (required)")
 	agentSystem := fs.String("provenance-agent-system", "", "source identifier namespace (holder: http://smarthealth.network/ids/holder; NPI: http://hl7.org/fhir/sid/us-npi)")
 	agentValue := fs.String("provenance-agent-value", "", "source holder id or NPI")
 	if err := fs.Parse(args); err != nil {
@@ -210,8 +215,8 @@ func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 	if keysDir == "" {
 		keysDir = *out
 	}
-	if *discovery == "" || *id == "" {
-		fmt.Fprintln(stderr, "shn priorauth resume: --discovery and --id are required")
+	if *discovery == "" || *id == "" || *reportFile == "" {
+		fmt.Fprintln(stderr, "shn priorauth resume: --discovery, --id and --report-file are required")
 		return exitUsage
 	}
 	handle, err := readResumeHandle(*resumePath)
@@ -219,7 +224,12 @@ func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "shn priorauth resume: read resume handle %q: %v\n", *resumePath, err)
 		return 1
 	}
-	supp := shnsdk.SupplementalReport{ReportID: *reportID, CPT: *cpt, Display: *display, ProvenanceAgent: shnsdk.ProvenanceIdentifier{System: *agentSystem, Value: *agentValue}}
+	report, err := os.ReadFile(*reportFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "shn priorauth resume: read report %q: %v\n", *reportFile, err)
+		return 1
+	}
+	supp := shnsdk.SupplementalReport{Report: report, ProvenanceAgent: shnsdk.ProvenanceIdentifier{System: *agentSystem, Value: *agentValue}}
 
 	ctx := context.Background()
 	c := http.DefaultClient

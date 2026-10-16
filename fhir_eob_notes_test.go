@@ -5,15 +5,29 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
-	"time"
 )
 
-func eobNotesParams(dec PADecision, notes []PASProcessNote) PADecisionEOBParams {
-	return PADecisionEOBParams{
-		ID: "e1", PatientRef: "Patient/p", CoverageRef: "Coverage/p",
-		CPTCode: "99348", CPTDisplay: "Home visit, established patient",
-		Decision: dec, Created: time.Unix(0, 0).UTC(), ProcessNotes: notes,
+// eobBaseParams states every element a decision EOB requires, as a request
+// Claim and a payer's ClaimResponse would supply them.
+func eobBaseParams() PADecisionEOBExactParams {
+	focal := true
+	return PADecisionEOBExactParams{
+		ID: "e1", PatientRef: "Patient/p",
+		ClaimType:    json.RawMessage(`{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"professional"}]}`),
+		Created:      "2026-06-03T00:00:00Z",
+		Insurer:      PADecisionEOBReference{Reference: "Organization/ins-1"},
+		Provider:     PADecisionEOBReference{Reference: "Practitioner/pr-1"},
+		Insurance:    []PADecisionEOBInsurance{{Focal: &focal, Coverage: PADecisionEOBReference{Reference: "Coverage/cov-1"}}},
+		Outcome:      "complete",
+		ItemSequence: 1,
+		CPTCode:      "99348", CPTDisplay: "Home visit, established patient",
 	}
+}
+
+func eobNotesParams(notes []PASProcessNote) PADecisionEOBExactParams {
+	p := eobBaseParams()
+	p.ProcessNotes = notes
+	return p
 }
 
 func eobProcessNotes(t *testing.T, raw []byte) ([]map[string]any, bool) {
@@ -34,27 +48,28 @@ func eobProcessNotes(t *testing.T, raw []byte) ([]map[string]any, bool) {
 }
 
 // TestBuildPADecisionEOB_SuppliedNotesOnly: a denied EOB built with the payer's
-// own notes carries exactly those notes, in order and numbered from 1, and no
-// fixed appeal text; an empty (non-nil) set carries no processNote at all.
+// own notes carries exactly those notes, in order, numbered only as the payer
+// numbered them, and no fixed appeal text; an empty (non-nil) set carries no
+// processNote at all.
 func TestBuildPADecisionEOB_SuppliedNotesOnly(t *testing.T) {
-	notes := []PASProcessNote{{Type: "print", Text: "Appeal within 45 days — see ¶ 3."}, {Text: "**Call** us."}}
-	raw, err := BuildPADecisionEOB(eobNotesParams(PADecisionDenied, notes))
+	notes := []PASProcessNote{{Number: 1, Type: "print", Text: "Appeal within 45 days — see ¶ 3."}, {Text: "**Call** us."}}
+	raw, err := BuildPADecisionEOBExact(eobNotesParams(notes))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, _ := eobProcessNotes(t, raw)
 	want := []map[string]any{
 		{"number": float64(1), "type": "print", "text": notes[0].Text},
-		{"number": float64(2), "text": notes[1].Text},
+		{"text": notes[1].Text},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("processNote = %v, want %v", got, want)
 	}
-	if bytes.Contains(raw, []byte(EOBAppealNote)) {
+	if bytes.Contains(raw, []byte("Appeal window")) {
 		t.Fatalf("EOB carries the fixed appeal note alongside the payer's own: %s", raw)
 	}
 
-	raw, err = BuildPADecisionEOB(eobNotesParams(PADecisionDenied, []PASProcessNote{}))
+	raw, err = BuildPADecisionEOBExact(eobNotesParams([]PASProcessNote{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +78,7 @@ func TestBuildPADecisionEOB_SuppliedNotesOnly(t *testing.T) {
 	}
 
 	// Supplied notes ride on an approval too; nothing is added when none are.
-	raw, err = BuildPADecisionEOB(eobNotesParams(PADecisionApproved, notes[:1]))
+	raw, err = BuildPADecisionEOBExact(eobNotesParams(notes[:1]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,25 +87,16 @@ func TestBuildPADecisionEOB_SuppliedNotesOnly(t *testing.T) {
 	}
 }
 
-// TestBuildPADecisionEOB_NilNotesKeepsDeprecatedDefault: with ProcessNotes nil
-// a denied EOB keeps the deprecated fixed EOBAppealNote (unchanged output for
-// existing callers) and an approved EOB carries none.
-func TestBuildPADecisionEOB_NilNotesKeepsDeprecatedDefault(t *testing.T) {
-	raw, err := BuildPADecisionEOB(eobNotesParams(PADecisionDenied, nil))
+// TestBuildPADecisionEOB_NilNotesWriteNone: with ProcessNotes nil no EOB
+// carries a processNote: the fixed appeal text the payer never sent is gone
+// .
+func TestBuildPADecisionEOB_NilNotesWriteNone(t *testing.T) {
+	raw, err := BuildPADecisionEOBExact(eobNotesParams(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _ := eobProcessNotes(t, raw)
-	want := []map[string]any{{"number": float64(1), "type": "print", "text": EOBAppealNote}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("processNote = %v, want the deprecated default %v", got, want)
-	}
-	raw, err = BuildPADecisionEOB(eobNotesParams(PADecisionApproved, nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v, ok := eobProcessNotes(t, raw); ok {
-		t.Fatalf("approved: processNote = %v, want absent", v)
+	if v, ok := eobProcessNotes(t, raw); ok || bytes.Contains(raw, []byte("Appeal window")) {
+		t.Fatalf("processNote = %v, want absent: %s", v, raw)
 	}
 }
 
@@ -98,7 +104,7 @@ func TestBuildPADecisionEOB_NilNotesKeepsDeprecatedDefault(t *testing.T) {
 // type outside the FHIR NoteType codes is refused.
 func TestBuildPADecisionEOB_NoteGuards(t *testing.T) {
 	for name, n := range map[string]PASProcessNote{"empty text": {Type: "print"}, "unknown type": {Type: "email", Text: "x"}} {
-		if _, err := BuildPADecisionEOB(eobNotesParams(PADecisionDenied, []PASProcessNote{{Text: "ok"}, n})); err == nil {
+		if _, err := BuildPADecisionEOBExact(eobNotesParams([]PASProcessNote{{Text: "ok"}, n})); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
 	}

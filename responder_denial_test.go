@@ -37,14 +37,14 @@ func deniedClaimResponse(t *testing.T, dec PASDecision, code, display, corr stri
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	claim, err := BuildConformantClaimBundle(ConformantClaimInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
+	claim, err := BuildConformantClaimBundleExact(ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: MemberSystem,
 		QR:             qr, SR: sr, PatientRef: patientRef, CoverageRef: "Coverage/" + member,
 		MemberID: member, Corr: corr, Created: h.now, Payer: CMSPayerIdentity, PayerOrgEntry: true,
 	})
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 	envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", corr, claim)
 	resp := postInbound(t, srv, envBytes, hubHdr)
@@ -217,7 +217,7 @@ func TestDecisionNotesMisplaced(t *testing.T) {
 func TestBuildDeniedResponseWithNotes_Guards(t *testing.T) {
 	now := time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC)
 	ok := []PASProcessNote{{Type: "printoper", Text: "fine"}}
-	if _, err := BuildDeniedResponseWithNotesAtLine("2.2", "Patient/p", "c", "", ok, now); err != nil {
+	if _, err := BuildDeniedResponseWithNotesAtLineExact("2.2", "Patient/p", "c", "", ok, testAnswerRequest, now); err != nil {
 		t.Fatalf("valid notes refused: %v", err)
 	}
 	for name, notes := range map[string][]PASProcessNote{
@@ -225,11 +225,11 @@ func TestBuildDeniedResponseWithNotes_Guards(t *testing.T) {
 		"unknown type": {{Type: "email", Text: "x"}},
 		"second bad":   {{Text: "x"}, {Type: "Print", Text: "y"}},
 	} {
-		if _, err := BuildDeniedResponseWithNotesAtLine("2.0", "Patient/p", "c", "r", notes, now); err == nil {
+		if _, err := BuildDeniedResponseWithNotesAtLineExact("2.0", "Patient/p", "c", "r", notes, testAnswerRequest, now); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
 	}
-	if _, err := BuildDeniedResponseWithNotesAtLine("9.9", "Patient/p", "c", "r", ok, now); err == nil || !strings.Contains(err.Error(), "BuildDeniedResponseWithNotesAtLine: unknown PAS line") {
-		t.Errorf("unknown line: err = %v, want it to name BuildDeniedResponseWithNotesAtLine", err)
+	if _, err := BuildDeniedResponseWithNotesAtLineExact("9.9", "Patient/p", "c", "r", ok, testAnswerRequest, now); err == nil || !strings.Contains(err.Error(), "BuildDeniedResponseWithNotesAtLineExact: unknown PAS line") {
+		t.Errorf("unknown line: err = %v, want it to name BuildDeniedResponseWithNotesAtLineExact", err)
 	}
 }

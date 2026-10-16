@@ -197,7 +197,7 @@ func TestRunEligibility_Hermetic(t *testing.T) {
 			covered, reason, err := id.RunEligibility(
 				context.Background(), authzSrv.Client(),
 				Endpoints{HubURL: hubSrv.URL, AuthzURL: authzSrv.URL},
-				Payer{ID: "payer", EncPub: payerPub, AuthzPub: signPub},
+				Payer{ID: "payer", Identity: CMSPayerIdentity, EncPub: payerPub, AuthzPub: signPub},
 				"9999999999", tc.member, "1975-04-02", "Johansson",
 			)
 			if err != nil {
@@ -210,6 +210,24 @@ func TestRunEligibility_Hermetic(t *testing.T) {
 				t.Error("not-covered branch: expected a non-empty reason")
 			}
 		})
+	}
+}
+
+// RunEligibility without the payer's identifier refuses before it authorizes
+// or sends anything: the request would otherwise name no payer.
+func TestRunEligibility_RefusesWithoutThePayerIdentity(t *testing.T) {
+	sent := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { sent++ }))
+	defer srv.Close()
+	id, err := GenerateIdentity("prov")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var enc [32]byte
+	_, _, err = id.RunEligibility(context.Background(), srv.Client(), Endpoints{HubURL: srv.URL, AuthzURL: srv.URL},
+		Payer{ID: "payer", EncPub: &enc}, "9999999999", "MBR-COVERED", "1975-04-02", "Johansson")
+	if !errors.Is(err, ErrPayerRecordAbsent) || sent != 0 {
+		t.Fatalf("err=%v, %d requests sent; want ErrPayerRecordAbsent before any request", err, sent)
 	}
 }
 
@@ -238,7 +256,7 @@ func TestRunEligibility_RejectsTamperedResponseToken(t *testing.T) {
 	_, _, err := id.RunEligibility(
 		context.Background(), authzSrv.Client(),
 		Endpoints{HubURL: hubSrv.URL, AuthzURL: authzSrv.URL},
-		Payer{ID: "payer", EncPub: payerPub, AuthzPub: wrongPub},
+		Payer{ID: "payer", Identity: CMSPayerIdentity, EncPub: payerPub, AuthzPub: wrongPub},
 		"9999999999", "MBR-COVERED", "1975-04-02", "Johansson",
 	)
 	if err == nil {
@@ -289,7 +307,7 @@ func TestRunEligibility_FramedAppError(t *testing.T) {
 	_, _, err = id.RunEligibility(
 		context.Background(), authzSrv.Client(),
 		Endpoints{HubURL: hubSrv.URL, AuthzURL: authzSrv.URL},
-		Payer{ID: "payer", EncPub: payerPub, AuthzPub: signPub, MessageFrames: []string{"v1"}},
+		Payer{ID: "payer", Identity: CMSPayerIdentity, EncPub: payerPub, AuthzPub: signPub, MessageFrames: []string{"v1"}},
 		"9999999999", "MBR-COVERED", "1975-04-02", "Johansson",
 	)
 	var ae *AppAnswerError

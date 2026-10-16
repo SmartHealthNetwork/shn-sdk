@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,7 +188,7 @@ func TestPriorAuthResume_HandleCarriesPayerID(t *testing.T) {
 		t.Errorf("resume handle should carry payerId: %s", raw)
 	}
 
-	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-id", "dr-uc04-operative", "--report-cpt", "72148", "--report-display", "MRI lumbar spine w/o contrast", "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-file", writeOwnReport(t, dir, resumeOut), "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
 	if code2 != exitOK {
 		t.Fatalf("priorauth resume exit=%d (want %d)\nstdout=%s\nstderr=%s", code2, exitOK, stdout2, stderr2)
 	}
@@ -228,7 +229,7 @@ func TestPriorAuthResume_LegacyHandle(t *testing.T) {
 		t.Errorf("a legacy-path pend must not stamp payerId onto the handle: %s", raw)
 	}
 
-	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-id", "dr-uc04-operative", "--report-cpt", "72148", "--report-display", "MRI lumbar spine w/o contrast", "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-file", writeOwnReport(t, dir, resumeOut), "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
 	if code2 != exitOK {
 		t.Fatalf("priorauth resume exit=%d (want %d)\nstdout=%s\nstderr=%s", code2, exitOK, stdout2, stderr2)
 	}
@@ -277,7 +278,7 @@ func TestPriorAuthResume_HandleWithoutPayerIDIgnoresLiveNetworkPersonas(t *testi
 		t.Fatalf("writeResumeHandle: %v", err)
 	}
 
-	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-id", "dr-uc04-operative", "--report-cpt", "72148", "--report-display", "MRI lumbar spine w/o contrast", "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	stdout2, stderr2, code2 := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-file", writeOwnReport(t, dir, resumeOut), "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
 	if code2 != exitOK {
 		t.Fatalf("priorauth resume exit=%d (want %d)\nstdout=%s\nstderr=%s", code2, exitOK, stdout2, stderr2)
 	}
@@ -286,5 +287,49 @@ func TestPriorAuthResume_HandleWithoutPayerIDIgnoresLiveNetworkPersonas(t *testi
 	}
 	if !strings.Contains(stderr2, "note: resolved via demoResponders — network predates persona payerId") {
 		t.Errorf("a payerId-less handle must take the legacy path driven by the HANDLE, even though the live network's personas carry a payerId: %s", stderr2)
+	}
+}
+
+// writeOwnReport writes, beside the resume handle, a DiagnosticReport as the caller's own
+// system holds it, about the handle's patient, and returns its path: what
+// `shn priorauth resume --report-file` sends. Its clinical values are this test record's own.
+func writeOwnReport(t *testing.T, dir, resumePath string) string {
+	t.Helper()
+	raw, err := os.ReadFile(resumePath)
+	if err != nil {
+		t.Fatalf("read resume handle: %v", err)
+	}
+	var h struct {
+		PatientRef string `json:"patientRef"`
+	}
+	if err := json.Unmarshal(raw, &h); err != nil || h.PatientRef == "" {
+		t.Fatalf("the resume handle names no patient (%v): %s", err, raw)
+	}
+	report := `{"resourceType":"DiagnosticReport","id":"dr-own","status":"final",` +
+		`"category":[{"coding":[{"system":"http://loinc.org","code":"LP29684-5","display":"Radiology"}]}],` +
+		`"code":{"coding":[{"system":"http://loinc.org","code":"18748-4","display":"Diagnostic imaging study"}]},` +
+		`"subject":{"reference":"` + h.PatientRef + `"},"effectiveDateTime":"2026-04-30"}`
+	path := filepath.Join(dir, "own-report.json")
+	if err := os.WriteFile(path, []byte(report), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// `shn priorauth resume` sends the report file the caller names, and builds none: without
+// --report-file it is a usage error, and a file it cannot read stops it before the network.
+func TestPriorAuthResume_ReportFile(t *testing.T) {
+	dir := t.TempDir()
+	resumeOut := filepath.Join(dir, "shn-resume.json")
+	if err := os.WriteFile(resumeOut, []byte(`{"patientRef":"Patient/MBR-UC04"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, code := runCLI("priorauth", "resume", "--resume", resumeOut, "--discovery", "http://127.0.0.1:1", "--id", "acme", "-keys", dir)
+	if code != exitUsage || !strings.Contains(stderr, "--report-file are required") {
+		t.Fatalf("no --report-file: exit %d (want %d), stderr %s", code, exitUsage, stderr)
+	}
+	_, stderr, code = runCLI("priorauth", "resume", "--resume", resumeOut, "--report-file", filepath.Join(dir, "absent.json"), "--discovery", "http://127.0.0.1:1", "--id", "acme", "-keys", dir)
+	if code != 1 || !strings.Contains(stderr, "read report") {
+		t.Fatalf("an unreadable --report-file: exit %d (want 1), stderr %s", code, stderr)
 	}
 }

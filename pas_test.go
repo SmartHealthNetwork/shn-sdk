@@ -35,7 +35,7 @@ func conformantSubmitInputs(t *testing.T) ConformantClaimInputs {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	return ConformantClaimInputs{
+	return ConformantClaimInputs{PASClaimFacts: testClaimFacts(),
 		Provider:       testRequestingProvider(),
 		Coverage:       testMemberCoverage(member),
 		Insurer:        testPayerOrganization(CMSPayerIdentity),
@@ -103,9 +103,9 @@ func coverageEntryFromBundle(t *testing.T, bundleJSON []byte) struct {
 func TestConformantClaimBundleStampsBareMemberIdentifier(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.MemberID = "MBR-COVERED"
-	b, err := BuildConformantClaimBundle(in)
+	b, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 	cov := coverageEntryFromBundle(t, b)
 	if want := "cov-mbr-covered"; cov.ID != want {
@@ -131,7 +131,7 @@ func TestConformantClaimBundleStampsBareMemberIdentifier(t *testing.T) {
 func TestConformantClaimBundleRejectsEmptyMemberID(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.MemberID = ""
-	if _, err := BuildConformantClaimBundle(in); err == nil {
+	if _, err := BuildConformantClaimBundleExact(in); err == nil {
 		t.Fatal("empty MemberID must error, not silently stamp CoverageRef")
 	}
 }
@@ -142,9 +142,9 @@ func TestConformantClaimBundleRejectsEmptyMemberID(t *testing.T) {
 func TestConformantClaimUpdateBundleStampsBareMemberIdentifier(t *testing.T) {
 	in := conformantUpdateInputsFromGolden(t)
 	in.MemberID = "MBR-COVERED"
-	b, err := BuildConformantClaimUpdateBundle(in)
+	b, err := BuildConformantClaimUpdateBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact: %v", err)
 	}
 	cov := coverageEntryFromBundle(t, b)
 	if want := "cov-mbr-covered"; cov.ID != want {
@@ -170,7 +170,7 @@ func TestConformantClaimUpdateBundleStampsBareMemberIdentifier(t *testing.T) {
 func TestConformantClaimUpdateBundleRejectsEmptyMemberID(t *testing.T) {
 	in := conformantUpdateInputsFromGolden(t)
 	in.MemberID = ""
-	if _, err := BuildConformantClaimUpdateBundle(in); err == nil {
+	if _, err := BuildConformantClaimUpdateBundleExact(in); err == nil {
 		t.Fatal("empty MemberID must error, not silently stamp CoverageRef")
 	}
 }
@@ -259,9 +259,9 @@ func TestConformantClaimBundleInsuranceCoverageNamesEntry(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.MemberID = "MBR-COVERED"
 	in.CoverageRef = "Coverage/MBR-COVERED" // the real gateway-caller shape — deliberately NOT stamped
-	b, err := BuildConformantClaimBundle(in)
+	b, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 	assertInsuranceCoverageNamesEntry(t, b, "MBR-COVERED")
 }
@@ -277,9 +277,9 @@ func TestConformantClaimBundleInsuranceCoverageAbsolutizes(t *testing.T) {
 	in.PayerOrgEntry = true
 	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 	in.AbsoluteRefs = true
-	b, err := BuildConformantClaimBundle(in)
+	b, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle(AbsoluteRefs:true): %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact(AbsoluteRefs:true): %v", err)
 	}
 	assertInsuranceCoverageNamesEntry(t, b, "MBR-COVERED")
 	ref := insuranceCoverageFromBundle(t, b)
@@ -298,9 +298,9 @@ func TestConformantClaimUpdateBundleInsuranceCoverageNamesEntry(t *testing.T) {
 	in := conformantUpdateInputsFromGolden(t)
 	in.MemberID = "MBR-COVERED"
 	in.CoverageRef = "Coverage/MBR-COVERED" // the real gateway-caller shape
-	b, err := BuildConformantClaimUpdateBundle(in)
+	b, err := BuildConformantClaimUpdateBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact: %v", err)
 	}
 	assertInsuranceCoverageNamesEntry(t, b, "MBR-COVERED")
 }
@@ -323,7 +323,7 @@ func TestConformantClaimBundleRefusesWithoutCoverageRecord(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			in := conformantSubmitInputs(t)
 			in.Coverage = tc.coverage
-			if _, err := BuildConformantClaimBundle(in); err == nil {
+			if _, err := BuildConformantClaimBundleExact(in); err == nil {
 				t.Fatal("a request with no coverage record of the participant's own must be refused, never carry a minted coverage")
 			}
 		})
@@ -335,7 +335,7 @@ func TestConformantClaimBundleRefusesWithoutCoverageRecord(t *testing.T) {
 func TestConformantClaimUpdateBundleRefusesWithoutCoverageRecord(t *testing.T) {
 	in := conformantUpdateInputsFromGolden(t)
 	in.Coverage = nil
-	if _, err := BuildConformantClaimUpdateBundle(in); err == nil {
+	if _, err := BuildConformantClaimUpdateBundleExact(in); err == nil {
 		t.Fatal("an amendment with no coverage record of the participant's own must be refused")
 	}
 }
@@ -400,9 +400,9 @@ func TestConformantClaimBundleCarriesEachMembersOwnCoverage(t *testing.T) {
 		in.PatientRef = "Patient/" + member
 		in.Coverage = testMemberCoverage(member)
 		in.CoverageRef = testMemberCoverageRef(member)
-		b, err := BuildConformantClaimBundle(in)
+		b, err := BuildConformantClaimBundleExact(in)
 		if err != nil {
-			t.Fatalf("BuildConformantClaimBundle(%s): %v", member, err)
+			t.Fatalf("BuildConformantClaimBundleExact(%s): %v", member, err)
 		}
 		cov := coverageEntryFromBundle(t, b)
 		return cov.ID, b
@@ -422,6 +422,8 @@ func TestConformantClaimBundleCarriesEachMembersOwnCoverage(t *testing.T) {
 // testdata/golden/conformant/pas-submit-request.json — demo persona, no br-payer
 // foreign seed.
 func TestBuildConformantClaimBundle_MatchesGolden(t *testing.T) {
+	// The registered golden is the v0.61.1 request: the deprecated builder
+	// still writes it byte for byte, the claim facts it ignores included.
 	want := readConformantGolden(t, "pas-submit-request.json")
 	got, err := BuildConformantClaimBundle(conformantSubmitInputs(t))
 	if err != nil {
@@ -453,9 +455,9 @@ func TestBuildConformantClaimBundle_OwnsQRContextRefs(t *testing.T) {
 	}
 	in.QR = wrongQR
 
-	got, err := BuildConformantClaimBundle(in)
+	got, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 
 	// Extract the QR entry's qr-context refs from the built bundle.
@@ -522,9 +524,9 @@ func TestBuildConformantClaimBundle_NoQR(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.QR = nil // no-doc: DTR skipped, no answered QR
 
-	got, err := BuildConformantClaimBundle(in)
+	got, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle(QR=nil): %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact(QR=nil): %v", err)
 	}
 
 	var bundle struct {
@@ -593,7 +595,7 @@ func TestBuildConformantClaimBundle_NoQR(t *testing.T) {
 // extension-requestedService is present → the SR ref.
 func TestConformantizePASClaim(t *testing.T) {
 	created := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	claimJSON, err := buildPASClaim("Patient/MBR-COVERED", "Coverage/MBR-COVERED", "Organization/test-requesting-provider", "corr-1", created)
+	claimJSON, err := buildPASClaim("Patient/MBR-COVERED", "Coverage/MBR-COVERED", "Organization/test-requesting-provider", "corr-1", created, testResolvedFacts(t, "2.0"))
 	if err != nil {
 		t.Fatalf("buildPASClaim: %v", err)
 	}
@@ -734,42 +736,46 @@ func itemHasLineDetailExtensions(t *testing.T, item map[string]json.RawMessage) 
 }
 
 // TestBuildConformantClaimBundleAtLine_RegressionFence: the legacy
-// BuildConformantClaimBundle is byte-identical to AtLine("2.0") for the same
+// BuildConformantClaimBundleExact is byte-identical to AtLine("2.0") for the same
 // inputs — existing exported signatures are unchanged, line 2.0 is just the
 // AtLine delegate.
 func TestBuildConformantClaimBundleAtLine_RegressionFence(t *testing.T) {
 	in := conformantSubmitInputs(t)
-	legacy, err := BuildConformantClaimBundle(in)
+	legacy, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
-	atLine, err := BuildConformantClaimBundleAtLine("2.0", in)
+	atLine, err := BuildConformantClaimBundleAtLineExact("2.0", in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundleAtLine(2.0): %v", err)
+		t.Fatalf("BuildConformantClaimBundleAtLineExact(2.0): %v", err)
 	}
 	if !bytes.Equal(legacy, atLine) {
-		t.Fatalf("BuildConformantClaimBundle != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
+		t.Fatalf("BuildConformantClaimBundleExact != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
 	}
 }
 
 // TestBuildConformantClaimBundleAtLine_ItemLineDetailByLine: PAS 2.1/2.2 add the
 // certificationType + requestType extensions and location[x] to Claim.item[0]
 // (verified via the PAS 2.1.0/2.2.1 package differential);
-// 2.0 does not carry them (regression fence).
+// 2.0 does not carry the extensions; the place of service the caller states is
+// carried at every line.
 func TestBuildConformantClaimBundleAtLine_ItemLineDetailByLine(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	for _, tc := range []struct {
 		line string
 		want bool
 	}{{"2.0", false}, {"2.1", true}, {"2.2", true}} {
-		got, err := BuildConformantClaimBundleAtLine(tc.line, in)
+		got, err := BuildConformantClaimBundleAtLineExact(tc.line, in)
 		if err != nil {
-			t.Fatalf("BuildConformantClaimBundleAtLine(%s): %v", tc.line, err)
+			t.Fatalf("BuildConformantClaimBundleAtLineExact(%s): %v", tc.line, err)
 		}
 		item := claimItemOf(t, got)
 		hasCert, hasReqType, hasLocation := itemHasLineDetailExtensions(t, item)
-		if hasCert != tc.want || hasReqType != tc.want || hasLocation != tc.want {
-			t.Errorf("line %s: hasCert=%v hasReqType=%v hasLocation=%v, want all %v", tc.line, hasCert, hasReqType, hasLocation, tc.want)
+		// The place of service and the request type are the requester's stated
+		// facts: carried at every line where they are stated (each 0..1 at 2.0,
+		// 1..1 from 2.1); the certificationType extension is written from 2.1.
+		if hasCert != tc.want || !hasReqType || !hasLocation {
+			t.Errorf("line %s: hasCert=%v hasReqType=%v hasLocation=%v, want certificationType %v and requestType and location true", tc.line, hasCert, hasReqType, hasLocation, tc.want)
 		}
 	}
 }
@@ -777,46 +783,48 @@ func TestBuildConformantClaimBundleAtLine_ItemLineDetailByLine(t *testing.T) {
 // TestBuildConformantClaimBundleAtLine_UnknownLineErrors: fail-closed — an
 // unrecognised line errors, never a silent 2.0 fallback.
 func TestBuildConformantClaimBundleAtLine_UnknownLineErrors(t *testing.T) {
-	if _, err := BuildConformantClaimBundleAtLine("9.9", conformantSubmitInputs(t)); err == nil {
-		t.Fatal("BuildConformantClaimBundleAtLine(\"9.9\") = nil error, want an error")
+	if _, err := BuildConformantClaimBundleAtLineExact("9.9", conformantSubmitInputs(t)); err == nil {
+		t.Fatal("BuildConformantClaimBundleAtLineExact(\"9.9\") = nil error, want an error")
 	}
 }
 
 // TestBuildConformantClaimUpdateBundleAtLine_RegressionFence: the legacy
-// BuildConformantClaimUpdateBundle is byte-identical to AtLine("2.0").
+// BuildConformantClaimUpdateBundleExact is byte-identical to AtLine("2.0").
 func TestBuildConformantClaimUpdateBundleAtLine_RegressionFence(t *testing.T) {
 	in := conformantUpdateInputsFromGolden(t)
-	legacy, err := BuildConformantClaimUpdateBundle(in)
+	legacy, err := BuildConformantClaimUpdateBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact: %v", err)
 	}
-	atLine, err := BuildConformantClaimUpdateBundleAtLine("2.0", in)
+	atLine, err := BuildConformantClaimUpdateBundleAtLineExact("2.0", in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundleAtLine(2.0): %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleAtLineExact(2.0): %v", err)
 	}
 	if !bytes.Equal(legacy, atLine) {
-		t.Fatalf("BuildConformantClaimUpdateBundle != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
 	}
 }
 
 // TestBuildConformantClaimUpdateBundleAtLine_DeltasByLine: PAS 2.1/2.2 add the
 // Claim.item line-detail (certificationType/requestType/location[x]) AND
 // Claim.related[0].relationship (patternCodeableConcept
-// ex-relatedclaimrelationship#prior) to the update Claim; 2.0 carries neither.
+// ex-relatedclaimrelationship#prior) to the update Claim; 2.0 requires neither,
+// and carries the item facts the caller states (each 0..1 there), the
+// amendment's certificationType among them.
 func TestBuildConformantClaimUpdateBundleAtLine_DeltasByLine(t *testing.T) {
 	in := conformantUpdateInputsFromGolden(t)
 	for _, tc := range []struct {
 		line string
 		want bool
 	}{{"2.0", false}, {"2.1", true}, {"2.2", true}} {
-		got, err := BuildConformantClaimUpdateBundleAtLine(tc.line, in)
+		got, err := BuildConformantClaimUpdateBundleAtLineExact(tc.line, in)
 		if err != nil {
-			t.Fatalf("BuildConformantClaimUpdateBundleAtLine(%s): %v", tc.line, err)
+			t.Fatalf("BuildConformantClaimUpdateBundleAtLineExact(%s): %v", tc.line, err)
 		}
 		item := claimItemOf(t, got)
 		hasCert, hasReqType, hasLocation := itemHasLineDetailExtensions(t, item)
-		if hasCert != tc.want || hasReqType != tc.want || hasLocation != tc.want {
-			t.Errorf("line %s item detail: hasCert=%v hasReqType=%v hasLocation=%v, want all %v", tc.line, hasCert, hasReqType, hasLocation, tc.want)
+		if !hasCert || !hasReqType || !hasLocation {
+			t.Errorf("line %s item detail: hasCert=%v hasReqType=%v hasLocation=%v, want the stated certificationType, requestType and location", tc.line, hasCert, hasReqType, hasLocation)
 		}
 
 		var bundle struct {
@@ -871,8 +879,8 @@ func TestBuildConformantClaimUpdateBundleAtLine_DeltasByLine(t *testing.T) {
 
 // TestBuildConformantClaimUpdateBundleAtLine_UnknownLineErrors: fail-closed rejection.
 func TestBuildConformantClaimUpdateBundleAtLine_UnknownLineErrors(t *testing.T) {
-	if _, err := BuildConformantClaimUpdateBundleAtLine("9.9", conformantUpdateInputsFromGolden(t)); err == nil {
-		t.Fatal("BuildConformantClaimUpdateBundleAtLine(\"9.9\") = nil error, want an error")
+	if _, err := BuildConformantClaimUpdateBundleAtLineExact("9.9", conformantUpdateInputsFromGolden(t)); err == nil {
+		t.Fatal("BuildConformantClaimUpdateBundleAtLineExact(\"9.9\") = nil error, want an error")
 	}
 }
 
@@ -1239,7 +1247,7 @@ func conformantUpdateInputsFromGolden(t *testing.T) ConformantClaimUpdateInputs 
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
 
-	return ConformantClaimUpdateInputs{
+	return ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: json.RawMessage(testCertTypeJSON), PriorClaim: testPriorClaim(t),
 		Provider:         testRequestingProvider(),
 		Coverage:         testMemberCoverage(member),
 		Insurer:          testPayerOrganization(CMSPayerIdentity),
@@ -1263,6 +1271,9 @@ func conformantUpdateInputsFromGolden(t *testing.T) ConformantClaimUpdateInputs 
 // testdata/golden/conformant/pas-update-request.json — demo persona, no br-payer
 // foreign seed.
 func TestBuildConformantClaimUpdateBundle_MatchesGolden(t *testing.T) {
+	// The registered golden is the v0.61.1 amendment: the deprecated builder
+	// still writes it byte for byte, the facts and prior Claim it ignores
+	// included.
 	want := readConformantGolden(t, "pas-update-request.json")
 	got, err := BuildConformantClaimUpdateBundle(conformantUpdateInputsFromGolden(t))
 	if err != nil {
@@ -1279,9 +1290,9 @@ func TestBuildConformantClaimUpdateBundle_NilDR_OmitsDREntry(t *testing.T) {
 	in := conformantUpdateInputsFromGolden(t)
 	in.DiagnosticReport = nil
 
-	got, err := BuildConformantClaimUpdateBundle(in)
+	got, err := BuildConformantClaimUpdateBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle (nil DR): %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact (nil DR): %v", err)
 	}
 
 	var bundle struct {
@@ -1366,7 +1377,7 @@ func TestBuildConformantClaimUpdateBundle_OwnsProvenanceTarget(t *testing.T) {
 	}
 	inDR := base
 	inDR.Provenance = wrongProvDR
-	gotDR, err := BuildConformantClaimUpdateBundle(inDR)
+	gotDR, err := BuildConformantClaimUpdateBundleExact(inDR)
 	if err != nil {
 		t.Fatalf("build DR variant: %v", err)
 	}
@@ -1382,7 +1393,7 @@ func TestBuildConformantClaimUpdateBundle_OwnsProvenanceTarget(t *testing.T) {
 	inQR := base
 	inQR.DiagnosticReport = nil
 	inQR.Provenance = wrongProvQR
-	gotQR, err := BuildConformantClaimUpdateBundle(inQR)
+	gotQR, err := BuildConformantClaimUpdateBundleExact(inQR)
 	if err != nil {
 		t.Fatalf("build QR variant: %v", err)
 	}
@@ -1462,9 +1473,9 @@ func TestBuildConformantClaimBundle_ProductOrServiceFromOrder_NoPayerOrgEntry(t 
 	}
 	in.SR = sr
 
-	got, err := BuildConformantClaimBundle(in)
+	got, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 	claim := claimFromBundle(t, got)
 	if code := claimItemProductServiceCode(t, claim); code != "G0151" {
@@ -1486,9 +1497,9 @@ func TestBuildConformantClaimUpdateBundle_ProductOrServiceFromOrder_NoPayerOrgEn
 	}
 	in.SR = sr
 
-	got, err := BuildConformantClaimUpdateBundle(in)
+	got, err := BuildConformantClaimUpdateBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact: %v", err)
 	}
 	claim := claimFromBundle(t, got)
 	if code := claimItemProductServiceCode(t, claim); code != "E0250" {
@@ -1505,7 +1516,7 @@ func TestBuildConformantClaimBundle_DeviceRequestOrder_NoPayerOrgEntry(t *testin
 	dr := []byte(`{"resourceType":"DeviceRequest","id":"x","status":"active","intent":"order",` +
 		`"subject":{"reference":"Patient/MBR-OX"},"codeCodeableConcept":{"coding":[{"system":` +
 		`"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E1390","display":"Oxygen concentrator"}]}}`)
-	out, err := BuildConformantClaimBundle(ConformantClaimInputs{Coverage: testMemberCoverage("MBR-OX"),
+	out, err := BuildConformantClaimBundleExact(ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage("MBR-OX"),
 		Insurer:        testPayerOrganization(CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: MemberSystem,
@@ -1531,8 +1542,8 @@ func TestBuildConformantClaimBundle_DeviceRequestOrder_NoPayerOrgEntry(t *testin
 func TestBuildConformantClaimBundle_OrderWithNoCode_Errors(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	in.SR = []byte(`{"resourceType":"ServiceRequest","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"}}`)
-	if _, err := BuildConformantClaimBundle(in); err == nil {
-		t.Fatal("BuildConformantClaimBundle with an order carrying no code = nil error, want a loud failure (never a silent 72148 fallback)")
+	if _, err := BuildConformantClaimBundleExact(in); err == nil {
+		t.Fatal("BuildConformantClaimBundleExact with an order carrying no code = nil error, want a loud failure (never a silent 72148 fallback)")
 	}
 }
 
@@ -1555,9 +1566,9 @@ func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 		`"subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":` +
 		`"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"L8000","display":"Breast prosthesis"}]}}`)
 
-	got, err := BuildConformantClaimBundle(in)
+	got, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle(PayerOrgEntry:true): %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact(PayerOrgEntry:true): %v", err)
 	}
 
 	var bundle struct {
@@ -1651,9 +1662,9 @@ func TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable(t *
 	in.PayerOrgEntry = true
 	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 
-	got, err := BuildConformantClaimUpdateBundle(in)
+	got, err := BuildConformantClaimUpdateBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle(PayerOrgEntry:true): %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact(PayerOrgEntry:true): %v", err)
 	}
 
 	var bundle struct {
@@ -1778,9 +1789,9 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_True(t *testing.T) {
 	in.ContainedInsurer = true
 	in.AbsoluteRefs = true
 
-	got, err := BuildConformantClaimBundle(in)
+	got, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle(AbsoluteRefs:true): %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact(AbsoluteRefs:true): %v", err)
 	}
 
 	// Parse all entries and build a fullUrl index.
@@ -1935,9 +1946,9 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_False(t *testing.T) {
 	in := conformantSubmitInputs(t)
 	// Default zero-value is false.
 
-	got, err := BuildConformantClaimBundle(in)
+	got, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle(AbsoluteRefs:false): %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact(AbsoluteRefs:false): %v", err)
 	}
 
 	claim := claimFromBundle(t, got)
@@ -1957,14 +1968,14 @@ func TestBuildConformantClaimBundle_AbsoluteRefs_False(t *testing.T) {
 	}
 }
 
-// TestBuildConformantClaimBundle_DeviceRequestOrder proves that BuildConformantClaimBundle
+// TestBuildConformantClaimBundle_DeviceRequestOrder proves that BuildConformantClaimBundleExact
 // accepts a DeviceRequest order (DME home-oxygen use case): the built bundle carries the
 // DeviceRequest as an entry (not a ServiceRequest), and the Claim item productOrService is
 // sourced from the DeviceRequest's codeCodeableConcept (E0431), not the SR.code field.
 // The DeviceRequest entry is stamped with the sibling id "convergence-dr".
 func TestBuildConformantClaimBundle_DeviceRequestOrder(t *testing.T) {
 	dr := []byte(`{"resourceType":"DeviceRequest","id":"x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-OX"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0431"}]}}`)
-	out, err := BuildConformantClaimBundle(ConformantClaimInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage("MBR-OX"),
+	out, err := BuildConformantClaimBundleExact(ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage("MBR-OX"),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: MemberSystem,
 		SR:             dr, PatientRef: "Patient/MBR-OX", CoverageRef: "Coverage/MBR-OX", MemberID: "MBR-OX",
@@ -1997,9 +2008,9 @@ func TestBuildConformantClaimUpdateBundle_AbsoluteRefs_OutOfBundleRefsUntouched(
 	base.AbsoluteRefs = true
 	base.ContainedInsurer = true
 
-	got, err := BuildConformantClaimUpdateBundle(base)
+	got, err := BuildConformantClaimUpdateBundleExact(base)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle(AbsoluteRefs:true): %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact(AbsoluteRefs:true): %v", err)
 	}
 
 	// Find the Provenance entry and confirm agent.who.reference is still relative.
@@ -2080,7 +2091,7 @@ func TestConformantDeviceRequestContextResolvesToOrder(t *testing.T) {
 	_ = json.Unmarshal(in.QR, &qr)
 	qr["extension"] = json.RawMessage(`[{"url":"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context","valueReference":{"reference":"DeviceRequest/actual-order"}}]`)
 	in.QR, _ = json.Marshal(qr)
-	out, err := BuildConformantClaimBundle(in)
+	out, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2182,7 +2193,7 @@ func TestParsePendedDetail_ReadsEachLine(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		in := testPendedInputs(line, "Patient/MBR-1", "corr-detail")
 		in.Task.Items = append(in.Task.Items, questionnaireNeed(line, 2))
-		raw, err := BuildPendedClaimResponseAtLine(line, in)
+		raw, err := BuildPendedClaimResponseAtLineExact(line, in)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2264,7 +2275,7 @@ func TestCDexHandoffTaskDistinct(t *testing.T) {
 	if bytes.Contains(cdex, []byte(PASTaskProfile)) || bytes.Contains(cdex, []byte("attachment-request")) {
 		t.Errorf("the CDex Task carries PAS content: %s", cdex)
 	}
-	raw, err := BuildPendedClaimResponseAtLine("2.0", testPendedInputs("2.0", "Patient/MBR-1", "corr-cdex"))
+	raw, err := BuildPendedClaimResponseAtLineExact("2.0", testPendedInputs("2.0", "Patient/MBR-1", "corr-cdex"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2301,7 +2312,7 @@ func TestNeededItemsDeprecatedStillPopulated(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		in := testPendedInputs(line, "Patient/MBR-1", "corr-needed")
 		in.Task.Items = append(in.Task.Items, questionnaireNeed(line, 2))
-		raw, err := BuildPendedClaimResponseAtLine(line, in)
+		raw, err := BuildPendedClaimResponseAtLineExact(line, in)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2340,12 +2351,12 @@ func TestNeededItemsDeprecatedStillPopulated(t *testing.T) {
 func TestSubmitBuilderMintsItemTraceNumbers(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		sub := conformantSubmitInputs(t)
-		submit, err := BuildConformantClaimBundleAtLine(line, sub)
+		submit, err := BuildConformantClaimBundleAtLineExact(line, sub)
 		if err != nil {
 			t.Fatal(err)
 		}
 		upd := conformantUpdateInputsFromGolden(t)
-		update, err := BuildConformantClaimUpdateBundleAtLine(line, upd)
+		update, err := BuildConformantClaimUpdateBundleAtLineExact(line, upd)
 		if err != nil {
 			t.Fatal(err)
 		}

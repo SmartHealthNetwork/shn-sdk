@@ -1,5 +1,7 @@
 package shnsdk
 
+import "encoding/json"
+
 // Discovery is the SHN network discovery descriptor (accountsvc GET /discovery): the
 // machine-readable, FR-37 conformance surface for the sealed-envelope protocol. It is
 // SUFFICIENT to drive the loop — endpoints + AuthzPublicKeyURL + persona payerId
@@ -63,6 +65,14 @@ type Discovery struct {
 	// (HubAcceptsInvolved). A gateway sends such a field only to a Hub that
 	// lists it: an older Hub would drop it without an error. Additive.
 	HubAccepts []string `json:"hubAccepts,omitempty"`
+	// ScenarioPersonas are the personas SHN's own /scenario routes originate
+	// for, one per (scenario, lane, persona set), each with that persona's own
+	// statement of its order and claim facts. A driver of a route sends the
+	// persona's member, its order's system and code, and Order.ClaimFacts().
+	// ADDITIVE optional field; no wire protocol version bump. The network's
+	// descriptor does not state it yet: until it does, the field is absent and
+	// ScenarioPersona finds no persona.
+	ScenarioPersonas []DiscoveryScenarioPersona `json:"scenarioPersonas,omitempty"`
 }
 
 // HubAcceptsInvolved is the Discovery.HubAccepts entry for Metadata.Involved:
@@ -146,6 +156,14 @@ type DiscoveryPersona struct {
 	// precedent). Producer: internal/accountsvc/discovery.go, DERIVED from
 	// gateway/engine's DemoOrderCodes() — never a hand-copied second table.
 	Order *DiscoveryOrder `json:"order,omitempty"`
+	// SupplementalReport is the DiagnosticReport this persona's own synthetic system
+	// holds as the evidence for its pended order, as JSON, its subject the persona's
+	// Patient/<memberId>: what a participant's system would send with ResumePriorAuth
+	// (SupplementalReport.Report). Present exactly when ExpectedAfterAmend is non-empty.
+	// ADDITIVE optional field — an older consumer ignores it; does NOT bump
+	// wireProtocolVersion (ExpectedPriorAuth precedent). Absent ⇒ the network states no
+	// report, and a consumer has none to send. Producer: internal/accountsvc/discovery.go.
+	SupplementalReport json.RawMessage `json:"supplementalReport,omitempty"`
 }
 
 // DiscoveryOrder is a persona's advertised prior-auth order: the code SYSTEM (CPT or
@@ -154,9 +172,82 @@ type DiscoveryPersona struct {
 // with exactly these four values for this persona, rather than a fixed generic order —
 // the mirrored reference-payer families decide their verdict off the code alone, so the
 // order and the advertised verdict must travel together.
+//
+// From shn-sdk v0.62.0 (additive, omitempty) it also carries the persona's own
+// statement of the request facts a prior-authorization claim states — claim
+// type, priority, X12 1365 service category, place of service (a CMS place of
+// service or NUBC type of bill) and X12 1525 request type. They are the test participant's statement, per persona; SHN's
+// claim builder supplies none of them. ClaimFacts turns them into the
+// request's PASClaimFacts; an older descriptor simply lacks them.
 type DiscoveryOrder struct {
-	System    string `json:"system"`
-	Code      string `json:"code"`
-	Display   string `json:"display"`
-	Diagnosis string `json:"diagnosis"`
+	System          string     `json:"system"`
+	Code            string     `json:"code"`
+	Display         string     `json:"display"`
+	Diagnosis       string     `json:"diagnosis"`
+	ClaimType       *PASCoding `json:"claimType,omitempty"`
+	Priority        *PASCoding `json:"priority,omitempty"`
+	ServiceCategory *PASCoding `json:"serviceCategory,omitempty"`
+	PlaceOfService  *PASCoding `json:"placeOfService,omitempty"`
+	RequestType     *PASCoding `json:"requestType,omitempty"`
+}
+
+// ClaimFacts is the persona's stated request facts as PASClaimFacts, each
+// coding exactly as the descriptor states it; a fact the descriptor does not
+// state stays nil (the builder then refuses or omits it per line).
+func (o DiscoveryOrder) ClaimFacts() (PASClaimFacts, error) {
+	var f PASClaimFacts
+	for _, x := range []struct {
+		c   *PASCoding
+		out *json.RawMessage
+	}{
+		{o.ClaimType, &f.ClaimType}, {o.Priority, &f.Priority}, {o.ServiceCategory, &f.ServiceCategory},
+		{o.PlaceOfService, &f.PlaceOfService}, {o.RequestType, &f.RequestType},
+	} {
+		if x.c == nil {
+			continue
+		}
+		raw, err := json.Marshal(x.c)
+		if err != nil {
+			return PASClaimFacts{}, err
+		}
+		*x.out = raw
+	}
+	return f, nil
+}
+
+// DiscoveryScenarioPersona is the persona one SHN /scenario route originates
+// for on one origination lane ("demo", "provider-data" or "conformance") and
+// persona set ("" or "canary"), and that persona's own statement of its order
+// and the request facts its prior-authorization claim states. The statement is
+// the test participant's, per persona; the route carries what the driver sends
+// and supplies none of it. Order is nil for a scenario that originates no
+// prior authorization (an eligibility check).
+type DiscoveryScenarioPersona struct {
+	Scenario   string          `json:"scenario"`
+	Lane       string          `json:"lane"`
+	PersonaSet string          `json:"personaSet,omitempty"`
+	MemberID   string          `json:"memberId"`
+	Order      *DiscoveryOrder `json:"order,omitempty"`
+	// Amendment is the persona's statement about the amendments its scenario
+	// sends (absent when the scenario sends none).
+	Amendment *DiscoveryAmendment `json:"amendment,omitempty"`
+}
+
+// DiscoveryAmendment is a persona's own statement about an amendment it sends:
+// the X12 1322 certificationType it states on the amending Claim (required
+// from PAS 2.1, carried at 2.0 when stated). A driver passes it as the route's
+// certificationType.
+type DiscoveryAmendment struct {
+	CertificationType *PASCoding `json:"certificationType,omitempty"`
+}
+
+// ScenarioPersona returns the persona the descriptor states for a route's
+// scenario, lane and persona set; ok is false when it states none.
+func (d Discovery) ScenarioPersona(scenario, lane, personaSet string) (DiscoveryScenarioPersona, bool) {
+	for _, p := range d.ScenarioPersonas {
+		if p.Scenario == scenario && p.Lane == lane && p.PersonaSet == personaSet {
+			return p, true
+		}
+	}
+	return DiscoveryScenarioPersona{}, false
 }

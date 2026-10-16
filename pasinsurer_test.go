@@ -28,9 +28,9 @@ func payerOrgEntryInputs(t *testing.T) ConformantClaimInputs {
 // inquiry named the participant's own record matched nothing, and swapping only
 // that one id made the same inquiry return the authorization.
 func TestConformantClaimBundleNamesThePayersOwnRecord(t *testing.T) {
-	b, err := BuildConformantClaimBundle(payerOrgEntryInputs(t))
+	b, err := BuildConformantClaimBundleExact(payerOrgEntryInputs(t))
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 	var bundle struct {
 		Entry []struct {
@@ -105,7 +105,7 @@ func TestConformantClaimBundleRefusesWithoutThePayersOwnRecord(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			in := payerOrgEntryInputs(t)
 			in.Insurer, in.Payer = tc.insurer, tc.payer
-			_, err := BuildConformantClaimBundle(in)
+			_, err := BuildConformantClaimBundleExact(in)
 			if err == nil {
 				t.Fatal("a request naming a payer organization the participant does not hold must be refused")
 			}
@@ -123,7 +123,7 @@ func TestConformantClaimUpdateBundleRefusesWithoutThePayersOwnRecord(t *testing.
 	in := conformantUpdateInputsFromGolden(t)
 	in.PayerOrgEntry, in.AbsoluteRefs = true, true
 	in.Insurer = nil
-	if _, err := BuildConformantClaimUpdateBundle(in); err == nil {
+	if _, err := BuildConformantClaimUpdateBundleExact(in); err == nil {
 		t.Fatal("an amendment with no payer record of the participant's own must be refused")
 	}
 }
@@ -187,7 +187,7 @@ func TestConformantClaimBundleRefusesACoverageThatReferencesWhatItDoesNotCarry(t
 	t.Run("a subscriber who is the member travels, re-homed", func(t *testing.T) {
 		in := payerOrgEntryInputs(t)
 		in.Coverage = []byte(base + `,"subscriber":{"reference":"Patient/` + member + `"}}`)
-		b, err := BuildConformantClaimBundle(in)
+		b, err := BuildConformantClaimBundleExact(in)
 		if err != nil {
 			t.Fatalf("a subscriber naming the member must travel, re-homed: %v", err)
 		}
@@ -205,7 +205,7 @@ func TestConformantClaimBundleRefusesACoverageThatReferencesWhatItDoesNotCarry(t
 		t.Run(tc.name, func(t *testing.T) {
 			in := payerOrgEntryInputs(t)
 			in.Coverage = []byte(tc.coverage)
-			_, err := BuildConformantClaimBundle(in)
+			_, err := BuildConformantClaimBundleExact(in)
 			if err == nil {
 				t.Fatal("a coverage referencing a record this request does not carry must be refused, not quietly stripped")
 			}

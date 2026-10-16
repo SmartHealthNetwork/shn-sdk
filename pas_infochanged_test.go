@@ -17,7 +17,7 @@ func infoChangedTestSR() []byte {
 }
 
 func infoChangedTestInputs(infoChanged bool) ConformantClaimInputs {
-	return ConformantClaimInputs{Coverage: testMemberCoverage("MBR-PD-UC04"),
+	return ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage("MBR-PD-UC04"),
 		Insurer:        testPayerOrganization(CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: MemberSystem,
@@ -32,10 +32,8 @@ func infoChangedTestInputs(infoChanged bool) ConformantClaimInputs {
 	}
 }
 
-// claimItemHasInfoChanged mirrors the gateway's engine-local requestClaimHasInfoChanged
-// predicate: it reports whether any Claim entry in a $submit bundle carries the PAS
-// infoChanged item extension (the gateway poll discriminator). Replicated here so the SDK
-// test proves the built bytes satisfy exactly what the gateway gate checks.
+// claimItemHasInfoChanged reports whether any Claim entry in a $submit bundle carries the
+// PAS infoChanged item extension.
 func claimItemHasInfoChanged(t *testing.T, bundleJSON []byte) bool {
 	t.Helper()
 	var b struct {
@@ -77,11 +75,11 @@ func TestBuildConformantClaimBundle_InfoChangedDefaultByteIdentical(t *testing.T
 	unset.InfoChanged = false // explicit false
 	explicitFalse := infoChangedTestInputs(false)
 
-	a, err := BuildConformantClaimBundle(unset)
+	a, err := BuildConformantClaimBundleExact(unset)
 	if err != nil {
 		t.Fatalf("build (unset): %v", err)
 	}
-	b, err := BuildConformantClaimBundle(explicitFalse)
+	b, err := BuildConformantClaimBundleExact(explicitFalse)
 	if err != nil {
 		t.Fatalf("build (explicit false): %v", err)
 	}
@@ -96,18 +94,17 @@ func TestBuildConformantClaimBundle_InfoChangedDefaultByteIdentical(t *testing.T
 }
 
 // TestBuildConformantClaimBundle_InfoChangedTrueCarriesExtension proves InfoChanged:true
-// emits the Da Vinci PAS infoChanged item extension on the Claim — the exact element the
-// gateway's requestClaimHasInfoChanged poll discriminator reads. It does NOT add a
-// prior-claim ref (this is a fresh submit, not an update).
+// emits the Da Vinci PAS infoChanged item extension on the Claim, as the caller states it.
+// It does NOT add a prior-claim ref (this is a fresh submit, not an update).
 func TestBuildConformantClaimBundle_InfoChangedTrueCarriesExtension(t *testing.T) {
-	bundleJSON, err := BuildConformantClaimBundle(infoChangedTestInputs(true))
+	bundleJSON, err := BuildConformantClaimBundleExact(infoChangedTestInputs(true))
 	if err != nil {
 		t.Fatalf("build (InfoChanged:true): %v", err)
 	}
 	if !claimItemHasInfoChanged(t, bundleJSON) {
 		t.Fatalf("InfoChanged:true bundle missing the infoChanged item extension:\n%s", bundleJSON)
 	}
-	// The extension value mirrors the update builder's appendInfoChangedToClaimItems: valueCode "changed".
+	// The extension value is appendInfoChangedToClaimItems': valueCode "changed".
 	// And a fresh submit must NOT carry Claim.related[prior].
 	var b struct {
 		Entry []struct {
@@ -138,7 +135,7 @@ func TestBuildConformantClaimBundle_InfoChangedTrueCarriesExtension(t *testing.T
 			for _, ext := range it.Extension {
 				if ext.URL == pasInfoChangedExtensionURL {
 					if ext.ValueCode != "changed" {
-						t.Fatalf("infoChanged valueCode = %q, want %q (mirror appendInfoChangedToClaimItems)", ext.ValueCode, "changed")
+						t.Fatalf("infoChanged valueCode = %q, want %q (appendInfoChangedToClaimItems)", ext.ValueCode, "changed")
 					}
 					sawChanged = true
 				}

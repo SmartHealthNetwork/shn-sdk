@@ -11,9 +11,9 @@ import "testing"
 // actually sent — never carried in from a caller's memory of the earlier request.
 func TestNewPriorAuthContinuation_KnowsTheClaimAnAmendmentAmends(t *testing.T) {
 	upd := conformantUpdateInputsFromGolden(t)
-	bundle, err := BuildConformantClaimUpdateBundle(upd)
+	bundle, err := BuildConformantClaimUpdateBundleExact(upd)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact: %v", err)
 	}
 	cont, err := NewPriorAuthContinuation("2.0", "payer", "MBR-COVERED", bundle, nil)
 	if err != nil {
@@ -38,9 +38,9 @@ func TestNewPriorAuthContinuation_KnowsTheClaimAnAmendmentAmends(t *testing.T) {
 	// REJECTION half: a SUBMISSION amends nothing, so it names one identifier and
 	// no more — the reader adds only what the bytes state.
 	sub := conformantSubmitInputs(t)
-	subBundle, err := BuildConformantClaimBundle(sub)
+	subBundle, err := BuildConformantClaimBundleExact(sub)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 	subCont, err := NewPriorAuthContinuation("2.0", "payer", "MBR-COVERED", subBundle, nil)
 	if err != nil {
@@ -66,9 +66,9 @@ func TestNewPriorAuthContinuation_KnowsTheClaimAnAmendmentAmends(t *testing.T) {
 // decision arrived.
 func TestPriorAuthContinuation_RecordsTheAnswersOwnAdministrativeReference(t *testing.T) {
 	sub := conformantSubmitInputs(t)
-	bundle, err := BuildConformantClaimBundle(sub)
+	bundle, err := BuildConformantClaimBundleExact(sub)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 	cont, err := NewPriorAuthContinuation("2.0", "payer", "MBR-COVERED", bundle, nil)
 	if err != nil {

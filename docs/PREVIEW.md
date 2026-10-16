@@ -169,13 +169,18 @@ shn revoke acme-7f3a --accounts https://accounts.shn-preview.org
 
 Run a coverage-eligibility round-trip (UC-01) for a seeded persona, originating from
 your registered identity. Resolve the payer encryption key (from the registrar
-`/holders` feed) and the Authorization Framework verifying key (from `/pubkey`), then:
+`/holders` feed) and the Authorization Framework verifying key (from `/pubkey`), then
+run it. From shn-sdk v0.62.0 it takes the payer's identifier as the persona's coverage names it
+(`--payer-identifier system=value`; the discovery persona's `payerId`): the request names that
+payer as its insurer, as a Smart Gateway's eligibility request does from shn-gateway v0.62.0,
+and the command refuses without it:
 
 ```sh
 shn eligibility --name acme-7f3a \
   --member MBR-D-UC01 --dob 1972-03-14 --family Larsen \
   --hub https://hub.shn-preview.org --authz https://authz.shn-preview.org \
-  --payer-id conformance-payer --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
+  --payer-id conformance-payer --payer-identifier urn:oid:2.16.840.1.113883.6.300=00001 \
+  --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
 # → covered: true
 ```
 
@@ -186,7 +191,8 @@ same holder — a reason-bearing negative, not an absence):
 shn eligibility --name acme-7f3a \
   --member MBR-D-UC01-NC --dob 1972-03-14 --family Larsen-Terminated \
   --hub https://hub.shn-preview.org --authz https://authz.shn-preview.org \
-  --payer-id conformance-payer --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
+  --payer-id conformance-payer --payer-identifier urn:oid:2.16.840.1.113883.6.300=00001 \
+  --payer-enc "$PAYER_ENC_PUB" --authz-pub "$AUTHZ_PUB" -out ./keys
 # → covered: false
 # → reason: …
 ```
@@ -205,8 +211,30 @@ prints the outcome:
 shn priorauth --member MBR-D-UC04 --discovery https://accounts.shn-preview.org \
   --id acme-7f3a -keys ./keys
 # → outcome=pended needed=<whatever the live payer's Task names> resume=shn-resume.json
-# → resume with: shn priorauth resume --resume shn-resume.json --report-id <id> --report-cpt <cpt> --discovery <url> --id <id> -keys <dir>
+# → resume with: shn priorauth resume --resume shn-resume.json --report-file <your DiagnosticReport.json> --provenance-agent-system <namespace> --provenance-agent-value <id> --discovery <url> --id <id> -keys <dir>
 ```
+
+**The claim's request facts.** From shn-sdk v0.62.0 the SDK supplies none of a
+prior-authorization claim's request facts: its type, priority, service category, place of service
+and request type are the requester's to state (and from shn-gateway v0.62.0 a Smart Gateway's
+prior-authorization origination routes take them in their request body, `claimFacts`). `shn priorauth`
+takes them from the persona's `order` block in the discovery descriptor (`claimType`,
+`priority`, `serviceCategory`, `placeOfService`, `requestType` — the test persona's own
+statement), or from these flags, and a flag beats the descriptor: `--claim-type`
+(`Claim.type`: a code from the line's ClaimTypes system,
+`http://terminology.hl7.org/CodeSystem/claim-type`, e.g. `professional`), `--priority`
+(`Claim.priority`: `http://terminology.hl7.org/CodeSystem/processpriority`, e.g. `normal`),
+`--service-category` (`Claim.item.category`: an X12 1365 service type), `--place-of-service`
+(`Claim.item.location`: a CMS place-of-service code; the descriptor's `placeOfService` may
+instead state a NUBC type of bill) and `--request-type`
+(the `Claim.item` request type: an X12 1525 request category).
+
+From shn-sdk v0.62.0, claim type, priority and service category are required: with neither the
+descriptor nor the flag stating one, the command refuses before it sends anything, naming the
+element, the flag and the descriptor (from shn-gateway v0.62.0 a Smart Gateway's origination
+route likewise refuses a request missing one, with 422, before any leg). Place of service and request
+type are optional at the line `shn priorauth` submits (PAS 2.0): each is carried when stated
+and omitted when neither states it.
 
 **Why pended — how the reference payer actually decides.** The demo persona roster
 rides four HCPCS families — `E0250`, `E1390`, `G0151`, `J3490` — and the reference
@@ -232,16 +260,20 @@ questionnaire canonical), which is what your run prints.
 > See `docs/PARTICIPANT_PROTOCOL.md` §7a.2 and §7b.
 
 Resume by amending the pended request with a supplemental report (a `DiagnosticReport`
-plus a `Provenance` naming its source). The amendment `ResumePriorAuth` (what
-`shn priorauth resume` calls) builds is a Da Vinci Claim Update that refers to the prior
-claim. The payer answers it, and that answer is what `shn priorauth resume` prints.
+plus a `Provenance` naming its source). From shn-gateway v0.62.0 and shn-sdk v0.62.0, the report is the one your system
+holds, sent as it is: the SDK and the CLI build none and fill in no value. The amendment
+`ResumePriorAuth` (what `shn priorauth resume` calls) builds is a Da Vinci Claim Update
+that refers to the prior claim. The payer answers it, and that answer is what
+`shn priorauth resume` prints.
 
-> **The supplemental report is synthetic until a later SDK release.** The
-> `DiagnosticReport` that `shn priorauth resume` and `ResumePriorAuth` send carries a
-> fixed effective date (`2026-05-15`) and a Radiology category that the SDK supplies.
-> Neither comes from your system, and the report carries no content beyond its code. Use
-> it only with the synthetic personas here, and never to send real evidence. A later
-> release takes the report from your own system and refuses when you supply none.
+From shn-gateway v0.62.0 and shn-sdk v0.62.0, for a test persona, the network states the report the persona's synthetic system holds,
+in discovery (`supplementalReport`), with the persona as its subject. Save it as the
+report file:
+
+```sh
+curl -s https://accounts.shn-preview.org/discovery \
+  | jq '.demoPersonas[] | select(.memberId == "MBR-D-UC04") | .supplementalReport' > report.json
+```
 
 **The amendment does not decide; the payer does, later.** The reference payer answers an
 amendment of a pended request with another pend, and its own timer decides that request
@@ -256,8 +288,7 @@ again as a new request.
 
 ```sh
 shn priorauth resume --resume shn-resume.json \
-  --report-id dr-uc04-operative --report-cpt 72148 \
-  --report-display "MRI lumbar spine w/o contrast" \
+  --report-file report.json \
   --provenance-agent-system "http://smarthealth.network/ids/holder" \
   --provenance-agent-value "acme-7f3a" \
   --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys
@@ -271,9 +302,11 @@ against the real Da Vinci reference payer: the amendment is answered with a pend
 later inquiry reads the approval. `preAuthRef` is the reference payer's own authorization
 number, `AUTH-` followed by four digits.
 
-`--report-id`, `--provenance-agent-system` and `--provenance-agent-value` are
-**required** on every resume: the report needs an id, and supplemental data must name its
-source. The SDK refuses the resume before sending the amendment when either is missing.
+From shn-gateway v0.62.0 and shn-sdk v0.62.0, `--report-file`, `--provenance-agent-system` and
+`--provenance-agent-value` are **required** on every resume: the amendment carries your report, and supplemental data
+must name its source. The SDK refuses the resume before sending the amendment when the
+report is missing, is not a `DiagnosticReport`, or names another subject than the
+persona's patient, and when the source is missing.
 
 ---
 
@@ -525,9 +558,9 @@ asserts that too. It needs no FHIR validator: the network validates server-side.
 > `--persona MBR-D-UC01-NC`, `--persona MBR-D-UC08`): none of them has an amend step. A
 > later SDK release makes the amend step inquire for the decision.
 >
-> The amend step's supplemental report is synthetic. `shn doctor` builds it from the
-> persona's own order code, with the fixed effective date and Radiology category the SDK
-> supplies (§3a), and sends it to the reference payer.
+> From shn-gateway v0.62.0 and shn-sdk v0.62.0, the amend step sends the supplemental report the network states for the persona in
+> discovery (§3a), the record its synthetic system holds, as it is: `shn doctor` builds no
+> report. A network that states none for the persona gets no amendment.
 
 ```sh
 shn doctor --discovery https://accounts.shn-preview.org --id acme-7f3a -keys ./keys

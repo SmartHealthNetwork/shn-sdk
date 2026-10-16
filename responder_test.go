@@ -86,9 +86,9 @@ func buildValidForward(
 
 	member := "MBR-001"
 	subjectPCI = ResolvePCI(member, "1975-04-02", "Johansson")
-	fhirPayload, err := BuildEligibilityRequest(member, "9999999999", now)
+	fhirPayload, err := BuildEligibilityRequestExact(member, "9999999999", CMSPayerIdentity, now)
 	if err != nil {
-		t.Fatalf("BuildEligibilityRequest: %v", err)
+		t.Fatalf("BuildEligibilityRequestExact: %v", err)
 	}
 
 	corrID = "corr-responder-test-1"
@@ -649,9 +649,9 @@ func TestResponder_RejectionRows(t *testing.T) {
 		}
 		env.Metadata.Sender = "unknown-holder-xyz"
 		// Use a well-formed CER payload so parsing succeeds; only ResolveEnc fails.
-		cerPayload, err := BuildEligibilityRequest("MBR-001", "9999999999", now)
+		cerPayload, err := BuildEligibilityRequestExact("MBR-001", "9999999999", CMSPayerIdentity, now)
 		if err != nil {
-			t.Fatalf("BuildEligibilityRequest unknownSender: %v", err)
+			t.Fatalf("BuildEligibilityRequestExact unknownSender: %v", err)
 		}
 		// Re-seal to responder's key so decryption succeeds.
 		resealedEnv, err := Seal(env.Metadata, cerPayload, responderIdent.EncPub)

@@ -89,9 +89,9 @@ func TestResponderFramesSuccessForCapableRequester(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
 	srv := h.makeFramedResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now}, framesV1)
 
-	cer, err := BuildEligibilityRequest("MBR-001", "9999999999", h.now)
+	cer, err := BuildEligibilityRequestExact("MBR-001", "9999999999", CMSPayerIdentity, h.now)
 	if err != nil {
-		t.Fatalf("BuildEligibilityRequest: %v", err)
+		t.Fatalf("BuildEligibilityRequestExact: %v", err)
 	}
 	envBytes, hubHdr := h.buildForwardEnv(t, "coverage-eligibility", "eligibility-inquiry", "frame-ok-1", cer)
 
@@ -132,9 +132,9 @@ func TestResponderLegacyWhenNoResolver(t *testing.T) {
 	// NOT a v1 frame.
 	t.Run("success stays bare", func(t *testing.T) {
 		srv := h.makeFramedResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now}, nil)
-		cer, err := BuildEligibilityRequest("MBR-001", "9999999999", h.now)
+		cer, err := BuildEligibilityRequestExact("MBR-001", "9999999999", CMSPayerIdentity, h.now)
 		if err != nil {
-			t.Fatalf("BuildEligibilityRequest: %v", err)
+			t.Fatalf("BuildEligibilityRequestExact: %v", err)
 		}
 		envBytes, hubHdr := h.buildForwardEnv(t, "coverage-eligibility", "eligibility-inquiry", "legacy-ok-1", cer)
 		resp := postInbound(t, srv, envBytes, hubHdr)
@@ -178,9 +178,9 @@ func TestResponderMechanicalErrorsStayBare(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
 	srv := h.makeFramedResponderSrv(t, responderIdent, &paTestAdjudicator{now: h.now}, framesV1)
 
-	cer, err := BuildEligibilityRequest("MBR-001", "9999999999", h.now)
+	cer, err := BuildEligibilityRequestExact("MBR-001", "9999999999", CMSPayerIdentity, h.now)
 	if err != nil {
-		t.Fatalf("BuildEligibilityRequest: %v", err)
+		t.Fatalf("BuildEligibilityRequestExact: %v", err)
 	}
 	envBytes, _ := h.buildForwardEnv(t, "coverage-eligibility", "eligibility-inquiry", "mech-1", cer)
 

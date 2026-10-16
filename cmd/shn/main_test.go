@@ -185,11 +185,27 @@ func TestEligibility_RejectsBadPayerKey(t *testing.T) {
 	_, stderr, code := runCLI("eligibility",
 		"--member", "M1", "--dob", "1980-01-01", "--family", "Johansson",
 		"--hub", "http://hub", "--authz", "http://authz",
-		"--payer-id", "payer-1", "--payer-enc", "!!notbase64!!", "--authz-pub", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+		"--payer-id", "payer-1", "--payer-identifier", "urn:oid:2.16.840.1.113883.6.300=00001",
+		"--payer-enc", "!!notbase64!!", "--authz-pub", base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	if code == 0 {
 		t.Fatal("bad payer-enc should fail")
 	}
 	if !strings.Contains(strings.ToLower(stderr), "payer-enc") {
 		t.Errorf("stderr should mention payer-enc: %s", stderr)
+	}
+}
+
+// TestEligibility_RequiresThePayerIdentifier: the request names the payer as
+// its insurer, so the command refuses without --payer-identifier, and with one
+// that is not system=value, before it sends anything.
+func TestEligibility_RequiresThePayerIdentifier(t *testing.T) {
+	base := []string{"eligibility", "--member", "M1", "--dob", "1980-01-01", "--family", "Johansson",
+		"--hub", "http://hub", "--authz", "http://authz", "--payer-id", "payer-1",
+		"--payer-enc", base64.StdEncoding.EncodeToString(make([]byte, 32)), "--authz-pub", base64.StdEncoding.EncodeToString(make([]byte, 32))}
+	if _, stderr, code := runCLI(base...); code != 2 || !strings.Contains(stderr, "--payer-identifier") {
+		t.Fatalf("without --payer-identifier: exit %d, stderr %s; want 2 naming the flag", code, stderr)
+	}
+	if _, stderr, code := runCLI(append(base, "--payer-identifier", "00001")...); code != 2 || !strings.Contains(stderr, "system=value") {
+		t.Fatalf("a malformed --payer-identifier: exit %d, stderr %s; want 2 naming the form", code, stderr)
 	}
 }

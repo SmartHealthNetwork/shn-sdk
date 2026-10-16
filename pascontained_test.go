@@ -98,9 +98,9 @@ func TestBuildConformantClaimBundle_ContainedPayerOrgNotStranded(t *testing.T) {
 	in.Payer = bridgingPayer
 	in.PayerOrgEntry, in.ContainedInsurer, in.AbsoluteRefs = true, true, true
 
-	got, err := BuildConformantClaimBundle(in)
+	got, err := BuildConformantClaimBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 	if stranded := strandedContained(t, got); len(stranded) != 0 {
 		t.Errorf("the authored request strands %v — a contained resource referenced from nowhere is FHIR dom-3, which the egress validator refuses: %s", stranded, got)
@@ -128,9 +128,9 @@ func TestBuildConformantClaimUpdateBundle_ContainedPayerOrgNotStranded(t *testin
 	in.Payer = bridgingPayer
 	in.PayerOrgEntry, in.ContainedInsurer, in.AbsoluteRefs = true, true, true
 
-	got, err := BuildConformantClaimUpdateBundle(in)
+	got, err := BuildConformantClaimUpdateBundleExact(in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact: %v", err)
 	}
 	if stranded := strandedContained(t, got); len(stranded) != 0 {
 		t.Errorf("the authored amendment strands %v: %s", stranded, got)

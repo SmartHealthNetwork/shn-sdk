@@ -324,7 +324,7 @@ func (errReader) Read([]byte) (int, error) { return 0, errors.New("connection re
 // {"error": msg} with its status.
 func TestSDKResponder_PreAuthRefusalsBare(t *testing.T) {
 	h, ident, _ := newPAHarness(t)
-	cer, err := BuildEligibilityRequest("MBR-001", "9999999999", h.now)
+	cer, err := BuildEligibilityRequestExact("MBR-001", "9999999999", CMSPayerIdentity, h.now)
 	if err != nil {
 		t.Fatal(err)
 	}

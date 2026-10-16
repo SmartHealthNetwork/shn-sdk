@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"testing"
 )
 
@@ -69,14 +70,36 @@ func demoLumbarOrder() (cpt, display, icd10 string) {
 	return "72148", "MRI lumbar spine w/o contrast", "M51.16"
 }
 
-// demoSupplementalReport returns the operative DiagnosticReport + provenance facts this
-// package's own resume/amend tests attach to a pended demo lumbar PA. Test-only
-// (unexported) for the same reason as demoLumbarOrder above.
-func demoSupplementalReport() SupplementalReport {
+// demoSupplementalReport returns the operative DiagnosticReport, as this package's own
+// tests' synthetic system holds it, and its provenance facts, which the resume/amend
+// tests attach to a pended demo lumbar PA for patientRef. Test-only (unexported) for the
+// same reason as demoLumbarOrder above.
+func demoSupplementalReport(patientRef string) SupplementalReport {
 	return SupplementalReport{
-		ReportID:        "dr-uc04-operative",
-		CPT:             "72148",
-		Display:         "MRI lumbar spine w/o contrast",
+		Report:          testOwnReport("dr-uc04-operative", patientRef),
 		ProvenanceAgent: ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "provider"},
 	}
+}
+
+// testOwnReport is a DiagnosticReport as a participant's own system holds it, for these
+// tests: every clinical value in it (the date, the category, the code) is this test
+// record's own, stated here. The SDK builds no report; it carries the caller's.
+func testOwnReport(id, patientRef string) []byte {
+	b, err := json.Marshal(map[string]any{
+		"resourceType": "DiagnosticReport",
+		"id":           id,
+		"meta":         map[string]any{"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"}},
+		"status":       "final",
+		"category": []any{map[string]any{"coding": []any{map[string]string{
+			"system": "http://loinc.org", "code": "LP29684-5", "display": "Radiology"}}}},
+		"code": map[string]any{"coding": []any{map[string]string{
+			"system": "http://loinc.org", "code": "18748-4", "display": "Diagnostic imaging study"}}},
+		"subject":           map[string]string{"reference": patientRef},
+		"effectiveDateTime": "2026-04-30",
+		"presentedForm":     []any{map[string]string{"contentType": "text/plain", "data": "U3ludGhldGljIGltYWdpbmcgcmVwb3J0Lg=="}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

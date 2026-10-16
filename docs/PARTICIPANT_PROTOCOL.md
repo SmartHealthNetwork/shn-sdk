@@ -115,9 +115,10 @@ table below).
 | `igVersions` | Pinned IG versions the network validates against (server-side gate). |
 | `contractVersions` | Legacy — no longer populated in the network descriptor: participant declarations are participant truth, carried per-participant in the registrar feed (§2.3) and the participant directory (below). Field retained for wire compatibility. |
 | `igVersionsByLine` | Per-line IG pin sets: each contract line (`"2.0"`, `"2.1"`, `"2.2"`) maps to the IG versions that line validates against — same keys and composition as `igVersions`, which remains the 2.0-line snapshot. Additive field. |
-| `bridgedContractVersions` | Contract lines the network's gateways can build or bridge (version-matched routing and translation, §8.6) — the network's contract capability surface. Additive field. |
+| `bridgedContractVersions` | Contract lines the network's gateways can build or bridge (version-matched routing and translation, §8.6) — the network's contract capability surface. It is the SDK's native set, so it still names `pa.pdex@2.1`, which from shn-gateway v0.62.0 no gateway declares or builds, until the SDK release after shn-sdk v0.62.0 drops it. Additive field. |
 | `publishedVersions` | Optional: the SDK, Smart Gateway and kit versions this deployment was built against (`{"sdk", "gateway", "kit"}`; `gateway` may be absent). Omitted when the deployment does not publish them. Additive field. |
 | `fhirValidateURL` | Optional: the FHIR `$validate` endpoint a Smart Gateway uses for per-message validation (§8). Omitted when the network exposes none. Additive field. |
+| `scenarioPersonas` | Optional: the synthetic persona each of the network's own test scenarios (the `/scenario` routes a Smart Gateway serves for testing) sends, per scenario, lane and persona set: its `memberId`, its `order` (the order and the claim facts the persona states, §7a.3) and, for a scenario that amends, its `amendment.certificationType`. A test driver sends exactly what the persona states and refuses a scenario the descriptor states no persona for; it never fills a value in. Read it with `shnsdk.Discovery.ScenarioPersona`. Omitted by a descriptor that publishes no scenarios. Additive field, from shn-sdk v0.62.0 and shn-gateway v0.62.0. |
 | `hubAccepts` | Optional envelope fields the network's Hub reads. `involved` means the Hub records a leg under every patient its `involved` list names (§5.1): send `involved` only when it is listed. Additive field. |
 | `endpoints.{hub,authz,registrar,patientAccess,accounts}` | The live participant-facing base URLs, always present. `hub` is where you originate a leg (`POST /route`); `authz` mints/serves tokens; `registrar` serves the holder feed; `patientAccess` is the FHIR/Patient-Access surface (`GET /metadata`); `accounts` is the Accounts service that serves this descriptor and self-serve registration (§2.3a). |
 | `endpoints.{consent,audit,phg}` | Optional base URLs for the Global Person Consent service, the Audit Plane and the PHG; each is omitted when the deployment does not publish it. |
@@ -160,7 +161,7 @@ IDs — nothing else (no keys, no base URLs). Sorted by `id`.
 
 ```json
 [
-  { "id": "acme-payer", "role": "payer", "contractVersions": ["pa.pas@2.0", "pa.pdex@2.1"], "payerIds": [{ "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00078" }] },
+  { "id": "acme-payer", "role": "payer", "contractVersions": ["pa.pas@2.0"], "payerIds": [{ "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00078" }] },
   { "id": "acme-provider", "role": "provider" }
 ]
 ```
@@ -236,7 +237,7 @@ admitted at runtime (§2.3). The operator produces a
       "signPub": "<base64 Ed25519 32-byte public key>",
       "baseURL": "https://acme-payer.example.com",
       "payerIds": [{ "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00078" }],
-      "contractVersions": ["pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0", "pa.pdex@2.1"]
+      "contractVersions": ["pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0"]
     }
   ],
   "authzPub": "<base64 Ed25519 public key — Authorization Framework signer>",
@@ -322,7 +323,7 @@ Body (JSON, all keys base64-standard-encoded):
   "signPub": "<base64 Ed25519 32-byte public key>",
   "baseURL": "https://external-payer.example.com",
   "messageFrames": ["v1"],
-  "contractVersions": ["pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0", "pa.pdex@2.1"],
+  "contractVersions": ["pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0"],
   "requestFrames": ["v1", "v1op"],
   "pop":     "<base64 Ed25519 signature — registration proof-of-possession>"
 }
@@ -336,7 +337,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `signPub` | Base64 Ed25519 public key (32 bytes raw) — assertion verification |
 | `baseURL` | Where the Hub delivers inbound envelopes. Must be a publicly resolvable https URL — no userinfo, no ASCII control characters (< 0x20) — and must not redirect at /substrate/inbound (the Hub refuses redirects). Originator-only clients are never dialed but the URL must still validate. |
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. At most 8 tokens, each matching `^[a-z0-9]{1,16}$`. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
-| `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`). A current SDK or Smart Gateway build declares `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1` by default; the lines the network's gateways can build or bridge are the discovery descriptor's `bridgedContractVersions` (§1a). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. An originating Smart Gateway reads the recipient's declaration to choose each leg's contract line (version-matched routing, §8.6). |
+| `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`). A current SDK or Smart Gateway build declares `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, `pa.pdex@2.1` by default (from shn-gateway v0.62.0 a gateway declares `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0` and no `pa.pdex@2.1`, and a gateway whose declared set names it refuses to boot; shn-sdk v0.62.0 still declares and accepts it, and the SDK release after it drops it); the lines the network's gateways can build or bridge are the discovery descriptor's `bridgedContractVersions` (§1a). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. An originating Smart Gateway reads the recipient's declaration to choose each leg's contract line (version-matched routing, §8.6). |
 | `requestFrames` | **Optional** JSON array of the sealed request-frame versions this holder accepts (today `"v1"` and `"v1op"` — see §6.3). **Self-declared**, stamped by the SDK/gateway build like `messageFrames`, with the same limits (at most 8 tokens, each `^[a-z0-9]{1,16}$`). Omitted ⇒ requests to you are sent bare. Outside the PoP signing payload. |
 | `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted**: on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). At admission the registrar checks only the role and this uniqueness; the entry-shape rules (count, both parts present, no whitespace or `\|`, no repeats) are applied by `PUT /register/{id}/payer-ids` and by the self-serve access request (§2.3a). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). Identities acquired **after** admission are attested through `PUT /register/{id}/payer-ids` (§2.4) — same authority — so a payer never re-onboards to become routable on a new one. |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
@@ -578,7 +579,7 @@ X-Holder-Assertion: base64(json(assertion))   // holderId="external-payer", audi
   "signPub": "<base64 Ed25519 32-byte public key — NEW>",
   "baseURL": "https://external-payer.example.com",
   "messageFrames": ["v1"],
-  "contractVersions": ["pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0", "pa.pdex@2.1"],
+  "contractVersions": ["pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0"],
   "pop":     "<base64 Ed25519 signature over the canonical payload, by the NEW signPub private key>"
 }
 ```
@@ -1336,6 +1337,10 @@ The Hub enforces:
     does not forward the request; the records already written for a request it
     was about to forward are closed `failed`. An answer is still delivered,
     with its own `answered` record, and the missing paired record is counted.
+    Before dropping it, the Hub retries a paired record whose append failed
+    transiently (no answer, a `5xx` or a `429`), at most twice for the whole
+    answer, as the same signed record under the same `recordId`, so it is
+    never written twice.
   - These are rules on the envelope's shape and authority, the same at every
     conformance level.
 - The leg's own `authzToken` must carry no `involvement` (§4.2): a token minted
@@ -1500,10 +1505,14 @@ the point of the guard (§5.1). Nor can the Hub know whether a failed forward
 actually reached the recipient (a timeout can fire after delivery). Never
 releasing an envelope keeps each one, while the Hub remembers it, to at most one
 routed attempt, never two `routed` records for the same bytes: `routed` +
-`answered`, `routed` + `failed`, or `routed` alone. A `routed` record stands alone
-when the Hub refuses an answer envelope the recipient returned (it cannot decode,
-verify or record it: a `502` marked `X-SHN-Delivered: yes`, §6.1). Today the
-Hub writes no terminal record for that leg.
+`answered`, `routed` + `failed`, or `routed` alone. When the Hub refuses an answer
+envelope the recipient returned (it cannot decode, verify or record it: a `502`
+marked `X-SHN-Delivered: yes`, §6.1), it closes the leg `failed`. A `routed`
+record stands alone only when the Hub cannot write that closing record either.
+One leg can also carry both terminal records, `answered` and then `failed`: when
+the Audit Plane wrote the `answered` record but the Hub did not learn it had
+(the acknowledgement was lost), the Hub refuses the answer it could not record
+and closes the leg `failed`. The later record is what the requester got.
 
 **A retry is a new exchange.** It gets its own audit trail and its own
 processing at the recipient, which may see the same `correlationId` more than
@@ -1582,10 +1591,16 @@ Two things are **not** leg outcomes:
   the envelope at verification or as a replay, could not write its `routed`
   record, or could not encode the envelope. A leg your gateway reports as
   `failed` because the Hub could not accept the recipient's answer
-  (`X-SHN-Delivered: yes`) is `routed` + `failed` when the answer could not be
-  read, and a `routed` record with no terminal record when the Hub refused the
-  answer envelope (§6.1a); one the recipient may have received
-  (`unknown`) is `routed` + `failed`.
+  (`X-SHN-Delivered: yes`: it could not read, decode, verify or record it) is
+  `routed` + `failed`, and so is one the recipient may have received
+  (`unknown`). A `failed` record closing a refused answer is the request's own
+  record with only its outcome, time and record id changed: nothing in it
+  comes from the answer.
+  The leg's own `routed` record is followed by its `answered` or `failed`
+  record, also when your gateway stopped waiting for the Hub, unless an append
+  fails (the Hub then answers `audit append failed`, if your gateway is still
+  waiting). An involved patient's paired `answered` record can be missing
+  (§5.1, "The Hub enforces").
 
 ### 6.2 Holder inbound surface — receive a routed leg
 
@@ -2344,6 +2359,7 @@ res, err := id.RunPriorAuth(ctx, httpClient, endpoints, payer, shnsdk.PriorAuthR
     Patient:  patientJSON,  // your Patient resource for the member (its id is the member id)
     Coverage: coverageJSON, // your Coverage search result: the member's Coverage and its payor Organization
     Provider: providerJSON, // your Organization or PractitionerRole record for the requester, with its NPI
+    ClaimFacts: facts,      // your statement of the claim's type, priority, category, place of service, request type
     ProceedOnNotCovered: true,
 })
 // res.Outcome == "pended", res.Resume != nil (resume via ResumePriorAuth, §7b, to reach "approved")
@@ -2361,6 +2377,45 @@ questionnaire request have been sent.
 The coverage check is built from these records with `BuildCRDRequest` and names no FHIR server.
 `Hook` chooses its hook: `order-sign` (the default: the order is signed and goes on to prior
 authorization) or `order-select` (the order is still being chosen; the request selects it).
+
+**The claim's request facts are yours to state** (from shn-sdk v0.62.0, Breaking).
+`ClaimFacts` (`shnsdk.PASClaimFacts`) carries five codings the PAS Claim states and only the
+requester can state: `ClaimType` (`Claim.type`, from `http://terminology.hl7.org/CodeSystem/claim-type`),
+`Priority` (`Claim.priority`, e.g. `http://terminology.hl7.org/CodeSystem/processpriority` `normal`),
+`ServiceCategory` (`Claim.item.category`, an X12 1365 service type), `PlaceOfService`
+(`Claim.item.location[x]`, a CMS place-of-service or NUBC type-of-bill code) and `RequestType` (the item's
+X12 1525 request type). Each is carried onto the Claim as you state it. The builders hold
+no defaults and read none of them from the order: no published mapping derives them from
+a ServiceRequest, DeviceRequest or Encounter. Which ones are required follows the PAS
+Claim profile at the line: type, priority and category at every line; place of service
+and request type from PAS 2.1. At 2.0 both are optional (`Claim.item.location[x]` and the
+item's `requestType` extension, `extension-serviceItemRequestType`, are 0..1): each is carried
+when you state it and omitted when you do not. A required fact you do not state (or state as JSON `null`) is refused
+before anything is sent — `RunPriorAuth` refuses before its first leg — with an error
+wrapping `shnsdk.ErrPASClaimFactAbsent` that names the element;
+`shnsdk.CheckPASClaimFactsAtLine` answers the same refusal without building anything. Earlier releases wrote the same
+constants on every request (`professional`, priority `normal` without a system, X12 1365
+`1`, place of service `11`, request type `IN`); a caller that relied on them now states
+its own. The discovery descriptor's persona `order` block states each test persona's facts
+(`claimType`, `priority`, `serviceCategory`, `placeOfService`, `requestType`), and
+`DiscoveryOrder.ClaimFacts()` turns them into `PASClaimFacts`.
+
+From shn-sdk v0.62.0, an amendment (`BuildConformantClaimUpdateBundleExact`) also takes `CertificationType` (the X12
+1322 kind of amendment, required from PAS 2.1; at 2.0, where the Claim allows it 0..1 on the
+item, carried when stated and omitted when not) and `PriorClaim` (the submission you
+recorded, read off the bytes you sent with `shnsdk.PASPriorClaimOf`: its Claim type and
+priority as sent, its created and its items, all required). The prior-Claim entry restates
+the type, priority and created as sent, and the builder derives the PAS `infoChanged` item
+marker from the items (see §7b.2); you state no marker. `Pend` (optional) is the payer's
+pended answer: the attached answer is linked to the items it asks the answer for (§7b.2). A submission's certificationType
+is X12 1322 `I` Initial, a fact of the operation, written from PAS 2.1. The derived
+`infoChanged` marker compares an item's certificationType only when the submitted item and
+the amendment's item both state one: a different kind marks the item `changed` (as the PAS
+2.2.1 Claim-HomecareAuthorizationUpdateExample marks its cancelled item), and a kind stated
+where the submission stated none (a PAS 2.0 submission states none) marks nothing by itself. `ResumePriorAuth` takes the
+claim facts and the submission from the resume handle (`claimFacts`, `submission`) and
+amends at PAS 2.0, the line `RunPriorAuth` submits at, where an amendment states no
+certificationType; a handle written before v0.62.0 lacks them and is refused.
 
 Note there is no `Clinical` field set. The reference payer's verdict for this family is
 a function of the order's HCPCS code, not of the DTR answers, and `RunPriorAuth` only
@@ -2392,7 +2447,7 @@ type legSender func(transactionType, requestOp, responseOp, correlationID, opera
 
 func manualPriorAuth(send legSender, payer shnsdk.Payer, member, memberIDSystem, orderingNPI, hookInstance, claimCorrelation string,
 	orderID string, orderJSON, patientJSON, coverageJSON, memberCoverageJSON, payerOrgJSON, providerJSON []byte,
-	clinical shnsdk.ClinicalContext, now time.Time) (shnsdk.PriorAuthResult, error) {
+	clinical shnsdk.ClinicalContext, facts shnsdk.PASClaimFacts, now time.Time) (shnsdk.PriorAuthResult, error) {
 	patientRef := "Patient/" + member
 	coverageRef := "Coverage/" + member
 
@@ -2486,11 +2541,12 @@ func manualPriorAuth(send legSender, payer shnsdk.Payer, member, memberIDSystem,
 	if err != nil {
 		return shnsdk.PriorAuthResult{}, err
 	}
-	bundle, err := shnsdk.BuildConformantClaimBundle(shnsdk.ConformantClaimInputs{
+	bundle, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{
 		QR: qrJSON, SR: orderJSON, Provider: providerJSON, Coverage: coverageJSON, Insurer: payerOrgJSON,
 		PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member, MemberIDSystem: memberIDSystem,
 		Corr: claimCorrelation, Created: now, Payer: payerID,
-		AbsoluteRefs: true, // as RunPriorAuth sends it
+		AbsoluteRefs:  true,  // as RunPriorAuth sends it
+		PASClaimFacts: facts, // your own statement of the request; a required one absent refuses the build
 	})
 	if err != nil {
 		return shnsdk.PriorAuthResult{}, err
@@ -2520,6 +2576,14 @@ that does not declare `"v1op"` cannot receive the `$questionnaire-package` reque
 a payer `RunPriorAuth` sends the deprecated older request (`BuildQuestionnaireFetchWithCoverage`), which a
 Smart Gateway payer refuses (`400`, "names no operation", §6.3). `PreAuthRef` on an approved
 outcome is the reference payer's own authorization number, shape `AUTH-NNNN`.
+
+From shn-sdk v0.62.0, `facts` is your own statement of the request: the Claim's type,
+priority, item category, place of service and request type, each a coding your system holds.
+The build (`BuildConformantClaimBundleExact`, and `RunPriorAuth`) carries them as stated and
+holds no default; one the PAS line requires that you do not state refuses the build
+(`ErrPASClaimFactAbsent`). The Deprecated `BuildConformantClaimBundle` and
+`BuildConformantClaimUpdateBundle` (and their `AtLine` forms) keep their shn-sdk v0.61.1
+bytes, ignore these facts, and are removed in the SDK release after v0.62.0.
 
 **The Coverage a PAS request carries.** `BuildConformantClaimBundle` and
 `BuildConformantClaimUpdateBundle` (and their `AtLine` forms) carry your own Coverage record
@@ -2749,7 +2813,7 @@ from submission through amendment and inquiry. A payer echoes it on the matching
 
 A pended PAS response carries a Task for each kind of information the payer asks
 for. `shnsdk.BuildPendedTasks(line, …)` builds it and
-`shnsdk.BuildPendedClaimResponseAtLine(line, …)` builds the whole pended response
+`shnsdk.BuildPendedClaimResponseAtLineExact(line, …)` builds the whole pended response
 (the `ClaimResponse` with one A4 item per request line asked about, then the
 Tasks). The facts below are read from the published PAS packages
 (`StructureDefinition-profile-task`, `CodeSystem-PASTempCodes`,
@@ -2831,7 +2895,7 @@ the gateway's `leg.resent` observer event and log line name the refused attempt'
 correlation identifier. A gateway relaying its participant's own amendment (the Da
 Vinci ingress) relays the `409` and never resends it on the participant's behalf.
 
-The update Bundle the SDK's builder (`BuildConformantClaimUpdateBundle`) produces
+The update Bundle the SDK's builder (`BuildConformantClaimUpdateBundleExact`) produces
 carries, in this order: the update `Claim`, the member's `Patient`, the `Coverage`, the
 `ServiceRequest`, the `QuestionnaireResponse`, the requesting provider's record, the
 payer's `Organization`, a prior `Claim`, the `DiagnosticReport` when there is one, and
@@ -2842,19 +2906,40 @@ the `Provenance`:
   prior `Claim` entry below (this binds the amendment to the pended claim; the
   payer's system decides what an update whose `related[]` names no authorization it
   holds means, and the reference payer refuses one whose prior it never stored, or
-  whose prior Claim the Bundle does not carry). Every item carries the Da Vinci PAS
-  `infoChanged` extension (`valueCode` `changed`) and the submission's item trace
-  number (§7b.1).
+  whose prior Claim the Bundle does not carry). Every item carries the submission's
+  item trace number (§7b.1). From shn-sdk v0.62.0, the Da Vinci PAS `infoChanged` item extension is derived
+  from the submission you recorded (`PASPriorClaim.Items`), item by item, as the PAS
+  IG's update example shows: an item you sent before exactly as now carries none, an
+  item whose sequence the submission had no item for carries `added`, and an item that
+  differs from the submitted one carries `changed`. Its context is `Claim.item` at every
+  PAS line, so supporting documentation is never marked itself; an amendment that
+  re-sends its item unchanged carries no `infoChanged`.
+- **The attached answer is linked to the item the payer asked for it about.** From shn-sdk v0.62.0, pass the
+  payer's pended answer as `ConformantClaimUpdateInputs.Pend` (`ResumePriorAuth` takes it
+  from the handle's `pendedResponse`). When a pended-response `Task` names an item's line
+  with a need your attached answer meets (the report's `code` carries the requested
+  attachment code, or the amended `QuestionnaireResponse` answers the requested
+  questionnaire), the Claim gains a `supportingInfo` entry (category PASTempCodes
+  `additionalInformation`, a reference to the answer) and that item an
+  `informationSequence` pointing at it. The item then differs from the submission only by
+  the link, which is new information, so it carries `infoChanged` `added` (PASTempCodes:
+  "new information that was not sent previously"; the IG's update examples show no linked
+  item). An answer no pended item asks for is linked to nothing and marks nothing. At PAS
+  2.2 nothing is linked: there the `supportingInfo` slice requires an X12 PWK01 report type
+  that neither the pend nor the answer states.
 - A **prior `Claim`** entry the SDK synthesizes so that reference resolves. It is a
-  restatement, not your original Claim: only its correlation identifier is the
-  original's; its `created` is the amendment's time, and its type (`professional`)
-  and priority (`normal`) are the builder's own. Do not read its other values as the
-  original's.
+  restatement, not your original Claim: its correlation identifier is the submission's,
+  and from shn-sdk v0.62.0 so are its `created` and its type and priority (each the
+  CodeableConcept exactly as the submission sent it, every member of every coding), read
+  off the bytes it sent (`shnsdk.PASPriorClaimOf`); it states no items.
 - The **unchanged** `QuestionnaireResponse` and `ServiceRequest` from exchange-1.
-- An operative **`DiagnosticReport`** — the new clinical evidence.
-  (`BuildDiagnosticReport` declares the US Core DiagnosticReport Note profile; the
-  update builder removes `meta.profile` from the report, so the report travels
-  declaring no profile.) From shn-gateway v0.57.0, when a
+- A **`DiagnosticReport`**: the new clinical evidence, the report your own system holds,
+  as it holds it. The SDK builds no report and fills in no value of one: its date,
+  category, code and content are your system's. The update builder gives the report its
+  bundle-local id, removes its `meta.profile` (so the report travels declaring no
+  profile), makes each of its references that names an entry of the bundle absolute
+  against the bundle's base, as it does for every entry, and re-encodes it as it places
+  it in the bundle; it changes nothing else. From shn-gateway v0.57.0, when a
   provider's gateway builds this amendment itself, it reads the report from the
   provider's system of record exactly as held, and the only change it makes to the
   report's content is registered edit E-06: when that system holds the member's
@@ -2885,20 +2970,29 @@ the `Provenance`:
   meet that requirement as a named precondition rather than a refusal three legs
   deep.
 
+From shn-gateway v0.62.0 and shn-sdk v0.62.0, `ResumePriorAuth` also refuses, before anything is sealed, a `supp.Report`
+that is absent, is not a `DiagnosticReport`, or names any `subject.reference` other than the
+resume handle's `PatientRef`, `Patient/<member id>` (the authorization's patient): the
+bundle it builds names that patient, so a report about any other subject would point at
+nothing in it. If your system names the patient by its own id, re-point the report's
+`subject.reference` to `PatientRef` before you send it. A report needs no `id` of its
+own: the builder gives it the bundle-local one.
+
 **One-call path** (`ResumePriorAuth`):
 
 ```go
 // resume is the PriorAuthResume written by RunPriorAuth when outcome=="pended".
-// supp carries the supplemental DiagnosticReport facts + the required ProvenanceAgent.
-// SupplementalReport is a plain struct — build it yourself; shn-sdk ships no fixture
-// constructor for it. Its own CPT/display need not match the order's HCPCS code — G0151
-// is used here only because it is this worked example's own advertised family. The
-// G0151 family's resolution itself is NOT evidence-driven — the payer re-pends and its
-// own pend-resolution timer is what later flips the same claim to a decision,
-// independent of this report's specific content. Provenance is required because the
-// network's own rule says supplemental data must carry attribution — not because either
-// payer's verdict reads it.
-supp := shnsdk.SupplementalReport{ReportID: "dr-uc04-operative", CPT: "G0151", Display: "Home health services"}
+// supp carries the DiagnosticReport your system holds, as JSON, and the required
+// ProvenanceAgent. Read the report from your system: the SDK builds none. Its subject
+// must be resume.PatientRef (re-point it if your system names the patient by its own id). For a network test persona, discovery states the report its
+// synthetic system holds (DiscoveryPersona.SupplementalReport). The G0151 family's
+// resolution itself is NOT evidence-driven — the payer re-pends and its own
+// pend-resolution timer is what later flips the same claim to a decision, independent of
+// this report's specific content. Provenance is required because the network's own rule
+// says supplemental data must carry attribution — not because either payer's verdict
+// reads it.
+report, err := readDiagnosticReportFromYourSystem(resume.MemberID) // your own read
+supp := shnsdk.SupplementalReport{Report: report}
 supp.ProvenanceAgent = shnsdk.ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "acme-7f3a"} // required
 res, err := id.ResumePriorAuth(ctx, c, ep, payer, resume, supp)
 // res.Outcome == "pended" against the reference payer: it accepted the amendment and is
@@ -2917,23 +3011,21 @@ _ = got.PreAuthRef
 //       shnsdk.WithWait(20*time.Second), shnsdk.WithInquiryRecords(records))
 ```
 
-`ResumePriorAuth` validates `supp.ProvenanceAgent` before touching the wire — an
-absent agent returns an error immediately rather than a cryptic payer rejection.
+From shn-gateway v0.62.0 and shn-sdk v0.62.0, `ResumePriorAuth` validates `supp.ProvenanceAgent` and `supp.Report`
+before touching the wire — either one missing or unusable returns an error immediately rather than a cryptic
+payer rejection.
 
-> **The supplemental report is synthetic until a later SDK release.** The
-> `DiagnosticReport` that `ResumePriorAuth` (and `shn priorauth resume`) builds from
-> `SupplementalReport` carries a fixed effective date (`2026-05-15`) and a Radiology
-> category that the SDK supplies, not values from your system, and no content beyond its
-> code. `BuildDiagnosticReport`, used in the manual path below, builds the same resource.
-> Use either only with synthetic test personas, never to send real evidence. A later
-> release takes the report from your own system and refuses when you supply none.
-
-**What an amendment does, and what decides — measured against the reference payer with no
-gateway in between.** The amendment CARRIES evidence. It does not decide. The reference
+**What an amendment does, and what decides — measured directly against the reference
+payer.** The amendment CARRIES evidence. It does not decide. The reference
 payer resolves a pended request by its own internal timer and by nothing else, and an
 amendment that lands while the request is pended is answered `200` with a fresh pend (`A4`)
-and that timer re-armed. `ResumePriorAuth`'s bundle carries a `Provenance` entry, the Da Vinci
-PAS `infoChanged` extension on every item, and `Claim.related[0].claim` with both the
+and that timer re-armed — when the amendment's items carry the PAS `infoChanged` extension,
+which is what its update path re-evaluates. An amendment whose items carry none (its item
+re-sent exactly as submitted, its new evidence outside the items) is answered with the
+decision the payer already holds for each item: the pend while its timer has not run, its
+resolution after. From shn-sdk v0.62.0, `ResumePriorAuth`'s bundle carries a `Provenance` entry, `infoChanged`
+only on items that differ from the submission or that it links the attached report to (the
+items the payer's pend asks the report for), and `Claim.related[0].claim` with both the
 original submission's `identifier` and a `reference` to the prior `Claim` entry the bundle
 carries; none of those choices changes the payer's verdict.
 
@@ -2967,13 +3059,16 @@ amendment's answer returns. The reference payer never answers an amendment
 For a non-Go participant or a Go participant that needs to inspect intermediates:
 
 ```
-# Build the supplemental FHIR resources:
-drJSON   = BuildDiagnosticReport(reportID, patientRef, cptCode, display)
+# The supplemental report is the DiagnosticReport your system holds (its id is reportID);
+# build only its Provenance:
+drJSON   = <your system's DiagnosticReport, as JSON>
 provJSON = BuildProvenanceWithIdentifier("DiagnosticReport/"+reportID, provenanceAgent, now)
 
 # Build the update bundle (Claim.related[] → originalCorrelationID):
-updateBundle = BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
+updateBundle = BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{
     QR: qrJSON, SR: srJSON, DiagnosticReport: drJSON, Provenance: provJSON,
+    PASClaimFacts: facts, CertificationType: certType,                         # your own statement (from shn-sdk v0.62.0)
+    PriorClaim: PASPriorClaimOf(submittedBundle), Pend: pendedResponse,        # the submission you recorded; the payer's pend
     Provider: providerJSON, Coverage: coverageJSON, Insurer: payerOrgJSON,   # the records the submission named
     PatientRef: patientRef, CoverageRef: coverageRef,
     MemberID: memberID, MemberIDSystem: memberIDSystem,                        # both required
@@ -2989,10 +3084,9 @@ pended, needed = ParsePendedResponse(updResp)
 # else:   result = ParseClaimResponse(updResp)   # approved or denied
 ```
 
-`BuildDiagnosticReport` writes a fixed `effectiveDateTime` (`2026-05-15`) and a fixed
-Radiology category (`RAD`, v2-0074), whatever the report is; when your system holds the
-report, send its own DiagnosticReport instead. `MemberIDSystem` is the namespace your
-own records name the member under; the builder refuses an amendment without it.
+From shn-gateway v0.62.0 and shn-sdk v0.62.0, the SDK has no DiagnosticReport builder: a report's date, category and content are facts
+only your system holds. `MemberIDSystem` is the namespace your own records name the
+member under; the builder refuses an amendment without it.
 
 `originalCorrID` is the correlation identifier from exchange-1 — the value the
 envelope carried when the submit leg was routed (the payer's ledger key for the
@@ -3361,12 +3455,17 @@ Smart Gateway, a provider gateway's Da Vinci ingress, and the Hub. A facility's 
 PHG's gateway publishes none. Participants implementing any of these surfaces must
 conform to the declared IG canonicals and profiles.
 
-- **Payer `/metadata`** — the CMS-0057 Patient Access API (PDex PA EOB)
-  statement. `implementationGuide` carries the versioned PDex canonical
-  matching the payer's declared `pa.pdex` contract line:
-  `http://hl7.org/fhir/us/davinci-pdex/ImplementationGuide/hl7.fhir.us.davinci-pdex|2.1.0`.
-  `rest[0].resource` declares `ExplanationOfBenefit` (`read`, `search-type`)
-  against the `pdex-priorauthorization` profile.
+- **Payer `/metadata`** — the CMS-0057 Patient Access API statement.
+  `rest[0].resource` declares `ExplanationOfBenefit` (`read`, `search-type`).
+  From shn-gateway v0.62.0 it names no `supportedProfile` and no
+  `implementationGuide`: the decision EOB carries the payer's own adjudication
+  and is base FHIR R4, because `pdex-priorauthorization`'s closed adjudication
+  slicing needs an amount, a reason or units on every adjudication and cannot
+  carry a payer's amountless decision without an amount the payer never
+  stated. Before v0.62.0 it declared that profile, and its
+  `implementationGuide` carried the versioned PDex canonical matching the
+  payer's declared `pa.pdex` contract line
+  (`http://hl7.org/fhir/us/davinci-pdex/ImplementationGuide/hl7.fhir.us.davinci-pdex|2.1.0`).
 - **Provider ingress `GET /metadata`** — the Da Vinci ingress statement for
   foreign EHR/CDS clients calling into the Smart Gateway's ingress edge.
   `implementationGuide` lists one versioned canonical for each `pa.crd`,
@@ -3438,10 +3537,10 @@ GET {provider-ingress}/.well-known/davinci-configuration
   | `pa.dtr` | `davinci_dtr_qpackage_endpoint` |
   | `pa.pas` | `davinci_pas_submission_endpoint` |
 
-  `pa.pdex` has **no** HRex code here: the patient-access endpoint belongs to
-  the payer edge, which has no config-pinned self base URL yet. Additive: a
-  future deployment adds that config field and reuses this same builder with
-  the `davinci_pdex_patient_endpoint#2.1` code.
+  `pa.pdex` has **no** HRex code here: no gateway declares a `pa.pdex` line
+  (from shn-gateway v0.62.0), because the Patient Access decision EOB is base FHIR R4 and
+  does not meet PDex. The connectivity checks still read a peer's own
+  `davinci_pdex_patient_endpoint` as `pa.pdex`.
 
 ### 8.6 Version-matched routing
 
@@ -3520,7 +3619,8 @@ matters only when two declared sets share no line:
 
 - **Native set.** The Smart Gateway and this SDK build every PA contract at
   **three** lines — `pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`,
-  `pa.pas@{2.0,2.1,2.2}` — plus `pa.pdex@2.1`. Each line's payloads are built
+  `pa.pas@{2.0,2.1,2.2}` (before shn-gateway v0.62.0, also `pa.pdex@2.1`, which
+  shn-sdk v0.62.0 still names). Each line's payloads are built
   against that line's own IG package pins and validated against a `$validate`
   lane loaded with *that line's* packages (one validator per line — a single
   server cannot host two versions of the same IG). `shnsdk.NativeContractVersions()`
@@ -3529,12 +3629,15 @@ matters only when two declared sets share no line:
   rotation `contractVersions`, its `CapabilityStatement`s' versioned
   `implementationGuide` canonicals, its `.well-known/davinci-configuration`, and
   the `/holders` feed peers select against (§1a, §2.3, §8.4, §8.5). It defaults
-  to the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`,
-  `pa.pdex@2.1`) and is operator-configurable to any **subset of the native
-  set**. From shn-gateway v0.59.0, a payer's gateway that forwards to its own
+  to the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`, and before
+  shn-gateway v0.62.0 also `pa.pdex@2.1`, which shn-sdk v0.62.0's default still names) and
+  is operator-configurable to any **subset of the native set**. From shn-gateway
+  v0.62.0 no set names `pa.pdex@2.1`: the payer gateway's Patient Access decision EOB is
+  base FHIR R4, not PDex, so a declaration must not claim it, and a gateway
+  whose declared set still names it refuses to boot, saying to remove it. From shn-gateway v0.59.0, a payer's gateway that forwards to its own
   system and declares that system's versions (`PAYER_DAVINCI_CONTRACT_VERSIONS`)
   but leaves its own declaration unset derives it from them: the system's
-  `pa.crd`, `pa.dtr` and `pa.pas` lines, plus `pa.pdex@2.1`. Declaring a line the build cannot produce is a configuration error that
+  `pa.crd`, `pa.dtr` and `pa.pas` lines (before shn-gateway v0.62.0, plus `pa.pdex@2.1`). Declaring a line the build cannot produce is a configuration error that
   fails at boot, not a routing outcome; so is declaring a line with no
   `$validate` lane configured for it. All four surfaces read one accessor, so a
   deployment cannot declare one set locally and a different one to its peers.
@@ -3655,6 +3758,104 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-10-16 — From shn-sdk v0.62.0, a prior authorization the payer pends again on its amendment can be resumed again (§7b.2).**
+  shn-sdk v0.62.0 is the next SDK release, not yet published. `ResumePriorAuth` returns a
+  fresh `Resume` handle when the payer pends the amendment. That handle is now the
+  submission's handle with only the payer's continuation, the needed items and the pended
+  answer (`PendedResponse`, the amendment's own) replaced, so it keeps the requesting
+  provider's and the member's coverage records (`ProviderJSON`, `CoverageJSON`), and the
+  next amendment still continues the original submission. Before, it dropped the two
+  records, and a second `ResumePriorAuth` with it was refused for want of the payer's
+  Organization record.
+- **2026-10-10 — From shn-sdk v0.62.0 and shn-gateway v0.62.0, no eligibility request, Coverage or prior-authorization answer names a placeholder payer. Breaking.**
+  Both are the next releases, not yet published. The SDK's eligibility request and answer,
+  its Coverage builder and its prior-authorization answers used to name the payer
+  `Organization/payer`, a reference to no resource and no participant's record, and the
+  answers stated the claim type `professional` whatever the request said. An eligibility
+  request now names its payer by the identifier the member's Coverage names
+  (`Payer.Identity`; `shn eligibility --payer-identifier system=value`), an answer
+  restates the insurer its request named, as written (an identifier, or the literal
+  reference an earlier release sends), a Coverage names the payer it is given as its payor,
+  and a prior-authorization answer restates the request Claim's own type and insurer as
+  sent. Without the value, each refuses rather than build: `shnsdk.ErrPayerRecordAbsent`,
+  `shnsdk.ErrPASAnswerSourceAbsent`, and a 400 from a Responder answering an eligibility
+  request that names no insurer, or a prior-authorization request whose Claim states no
+  type or insurer. The exact API changes are in the SDK's release notes.
+- **2026-10-10 — From shn-gateway v0.62.0 and shn-sdk v0.62.0, an amendment carries the caller's own supplemental report, and the SDK builds none (§7b.2). Breaking.**
+  Both are the next releases, not yet published. `ResumePriorAuth` used to build the
+  amendment's DiagnosticReport from a report id, a CPT code and a display, writing an
+  effective date and a category no participant's system stated. `SupplementalReport.Report`
+  is now the DiagnosticReport the caller's own system holds, as JSON, carried as it is
+  apart from the bundle builder's own edits (§7b.2); `ReportID`, `CPT`, `Display` and
+  `BuildDiagnosticReport` are removed. A report that is absent, not a `DiagnosticReport`,
+  or about another subject than the authorization's patient is refused before anything is
+  sent. `shn priorauth resume` takes `--report-file` in place of `--report-id`,
+  `--report-cpt` and `--report-display`. The discovery descriptor states each amending
+  persona's report (`supplementalReport`), which `shn doctor` sends; with none stated,
+  doctor sends no amendment.
+- **2026-10-06 — From shn-sdk v0.62.0 and shn-gateway v0.62.0, a prior-authorization Claim states the requester's own request facts (§7a.3, §7b.2). Breaking.**
+  Both are the next releases, not yet published. The PAS request builders, `RunPriorAuth`
+  and `ResumePriorAuth` take `ClaimFacts` (`shnsdk.PASClaimFacts`): the Claim's type,
+  priority, item category, place of service and request type, each a coding the requester
+  states and the build carries as stated. They used to write the same constants on every
+  request (`professional`, priority `normal` without a system, X12 1365 `1`, place of
+  service `11`, request type `IN`); nothing is read from the order, and nothing is
+  defaulted. A fact the PAS Claim profile requires at the line and the requester does not
+  state is refused before anything is sent, with an error wrapping
+  `shnsdk.ErrPASClaimFactAbsent` that names the element (`shnsdk.CheckPASClaimFactsAtLine`
+  answers the same without building anything). An amendment states its own
+  `CertificationType` (X12 1322, required from PAS 2.1) and restates the submission it
+  continues (`PriorClaim`, read off the bytes sent with `shnsdk.PASPriorClaimOf`); a resume
+  handle written before shn-sdk v0.62.0 carries no `claimFacts` or `submission` and is
+  refused. `shn priorauth`
+  reads the facts from the discovery descriptor's persona `order` block, or from
+  `--claim-type`, `--priority`, `--service-category`, `--place-of-service` and
+  `--request-type`. A Smart Gateway's prior-authorization origination routes take the same
+  facts in their request body (`claimFacts`, `certificationType`, with the `member` and the
+  `order` they are stated for) and refuse a missing one with 422 before any leg.
+- **2026-10-06 — From shn-sdk v0.62.0 and shn-gateway v0.62.0, an amendment's `infoChanged` marker is derived, and its attached answer is linked to the item the payer asked about (§7b.2).**
+  Both are the next releases, not yet published. An amendment used to carry the PAS
+  `infoChanged` item extension (`changed`) on every item. It now carries it only on an item
+  that differs from the recorded submission (`changed`) or that the submission had no item
+  for (`added`); an item re-sent exactly as submitted carries none, and no one states the
+  marker. When the payer's pended answer (`ConformantClaimUpdateInputs.Pend`, the resume
+  handle's `pendedResponse`) names an item's line with a need the amendment's attached
+  answer meets, the Claim gains a `supportingInfo` entry for the answer, that item an
+  `informationSequence` pointing at it, and the item `infoChanged` `added`; nothing is
+  linked at PAS 2.2, whose `supportingInfo` slice requires a report type no source states.
+  A payer that re-evaluates only marked items answers an unmarked amendment with the
+  decision it already holds.
+- **2026-10-06 — From shn-gateway v0.62.0 and shn-sdk v0.62.0, a decision ExplanationOfBenefit states only what the payer's answer and the request supply (§8.4).**
+  Both are the next releases, not yet published. The payer gateway's Patient Access
+  decision EOB reads every element from the request Claim or the payer's ClaimResponse:
+  its item adjudication is the payer's own for the request item that codes the order, and
+  the payer's PAS review action is re-expressed value for value in the PDex review action
+  extension, the one defined for the EOB adjudication context. It used to write a
+  `submitted` `0 USD` amount, a reviewer `Practitioner`, an `Organization/payer` insurer, a
+  fixed appeal note and a CARC `50` on a denial; none is written now. The EOB is base FHIR
+  R4 and claims no profile. A decision is never refused over this record: where the EOB
+  cannot state the decision as the payer wrote it, the decision is relayed exactly and
+  recorded without an EOB, and the gateway emits `pa.decision-eob-not-written` naming the
+  detail by its position only. From shn-sdk v0.62.0, `shnsdk.BuildPADecisionEOBExact` takes
+  these sources: `PADecisionEOBExactParams` holds the payer's and the request's own values
+  where `PADecisionEOBParams` holds `Decision`, `AuthNumber`, `ReviewAction` and
+  `DenialReasons`. `BuildPADecisionEOB`, `PADecisionEOBParams` and `EOBAppealNote` keep their
+  shn-sdk v0.61.1 behaviour, Deprecated, and are removed in the SDK release after v0.62.0.
+- **2026-10-06 — From shn-gateway v0.62.0, no gateway declares `pa.pdex@2.1` (§2.3, §8.4, §8.6).**
+  shn-gateway v0.62.0 is the next gateway release, not yet published. The payer gateway's
+  Patient Access decision ExplanationOfBenefit carries exactly what the payer stated, as
+  base FHIR R4, and the Patient Access CapabilityStatement claims no PDex, so the
+  `pa.pdex@2.1` contract line no longer describes anything a gateway does. It leaves the
+  gateway's native set and build default (discovery's `bridgedContractVersions` keeps
+  naming it until the SDK release after v0.62.0, which drops it); a payer that derives its declaration from its system's versions declares only
+  that system's CRD, DTR and PAS lines. **Breaking (configuration):** a gateway whose
+  `SHN_CONTRACT_VERSIONS` still names `pa.pdex@2.1` refuses to boot, saying to remove it;
+  remove it before upgrading (the set without it boots on earlier releases too).
+  shn-sdk v0.62.0 still names `pa.pdex@2.1` in `shnsdk.NativeContractVersions()` and its
+  default set, and `shn register` / `shn rotate --contract-versions` still accept it; the
+  SDK release after it drops it the same way. Patient Access is not a network leg, so no
+  exchange, route or line selection changes. A peer's own PDex publication is still read
+  by the connectivity checks; it is not version drift.
 - **2026-10-02 — From shn-gateway v0.62.0, a PAS answer is read at its IG line, at the answer's candidate lines (§8.1).**
   shn-gateway v0.62.0 is the next gateway release, not yet published. A payer's PAS `$submit` or amendment answer is read by the graph rule of its IG line, as
   each line's specification states it: at PAS 2.0.1 every reference the answer makes resolves

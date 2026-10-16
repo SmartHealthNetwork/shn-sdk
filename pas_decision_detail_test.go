@@ -32,7 +32,7 @@ func TestParseClaimResponse_DecisionDetail(t *testing.T) {
 	if res.Outcome != "denied" || res.Denial == nil || res.Denial.ReasonCode != "A3" {
 		t.Fatalf("result %+v", res)
 	}
-	if want := []PASProcessNote{{Type: "print", Text: "Appeal within 45 days."}, {Text: "Call us."}}; !reflect.DeepEqual(res.ProcessNotes, want) {
+	if want := []PASProcessNote{{Number: 1, Type: "print", Text: "Appeal within 45 days."}, {Number: 2, Text: "Call us."}}; !reflect.DeepEqual(res.ProcessNotes, want) {
 		t.Fatalf("ProcessNotes = %+v, want %+v", res.ProcessNotes, want)
 	}
 	wantRA := &PASReviewAction{
@@ -59,7 +59,7 @@ func TestParseClaimResponse_DecisionDetail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Outcome != "approved" || !reflect.DeepEqual(res.ProcessNotes, []PASProcessNote{{Type: "display", Text: "Approved for 6 visits."}}) ||
+	if res.Outcome != "approved" || !reflect.DeepEqual(res.ProcessNotes, []PASProcessNote{{Number: 1, Type: "display", Text: "Approved for 6 visits."}}) ||
 		!reflect.DeepEqual(res.ReviewAction, &PASReviewAction{Code: PASCoding{System: X12ReviewDecisionSystem, Code: "A1"}}) ||
 		res.DenialReasons != nil {
 		t.Fatalf("approved result %+v (review action %+v)", res, res.ReviewAction)

@@ -43,12 +43,12 @@ func buildOnLane(t *testing.T, update bool, lane pasLane, insurer []byte, payer 
 		in := conformantUpdateInputsFromGolden(t)
 		in.PayerOrgEntry, in.ContainedInsurer, in.AbsoluteRefs = lane.payerOrgEntry, lane.containedInsurer, lane.absoluteRefs
 		in.Insurer, in.Payer = insurer, payer
-		return BuildConformantClaimUpdateBundle(in)
+		return BuildConformantClaimUpdateBundleExact(in)
 	}
 	in := conformantSubmitInputs(t)
 	in.PayerOrgEntry, in.ContainedInsurer, in.AbsoluteRefs = lane.payerOrgEntry, lane.containedInsurer, lane.absoluteRefs
 	in.Insurer, in.Payer = insurer, payer
-	return BuildConformantClaimBundle(in)
+	return BuildConformantClaimBundleExact(in)
 }
 
 // TestConformantClaimBuilders_RefuseWithoutThePayersOwnRecordOnEveryLane: a
@@ -261,7 +261,7 @@ func TestConformantClaimBundle_KeepsAContainedOrganizationThatIsNotThePayerEntry
 	in := conformantSubmitInputs(t)
 	in.Coverage = testMemberCoverageWithContainedPayer("MBR-COVERED", "cms-payer", CMSPayerIdentity)
 	in.Insurer = []byte(ownPayerRecord)
-	out, err := BuildConformantClaimBundle(in)
+	out, err := BuildConformantClaimBundleExact(in)
 	if out != nil || err == nil || !strings.Contains(err.Error(), "cms-payer") {
 		t.Fatalf("out=%s err=%v; want a refusal naming the contained record nothing references", out, err)
 	}
@@ -281,11 +281,11 @@ func TestConformantClaimBuilders_AbsoluteRefsCarryNumbersAsWritten(t *testing.T)
 			if update {
 				in := conformantUpdateInputsFromGolden(t)
 				in.Coverage, in.AbsoluteRefs = coverage, absolute
-				out, err = BuildConformantClaimUpdateBundle(in)
+				out, err = BuildConformantClaimUpdateBundleExact(in)
 			} else {
 				in := conformantSubmitInputs(t)
 				in.Coverage, in.AbsoluteRefs = coverage, absolute
-				out, err = BuildConformantClaimBundle(in)
+				out, err = BuildConformantClaimBundleExact(in)
 			}
 			if err != nil {
 				t.Fatalf("update=%t absolute=%t: %v", update, absolute, err)

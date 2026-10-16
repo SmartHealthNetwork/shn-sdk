@@ -3,7 +3,9 @@ package shnsdk
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -141,6 +143,23 @@ type PriorAuthResume struct {
 	// ADDITIVE serialized field: a handle written before inquiry support lacks
 	// it, and Inquire refuses such a handle (ErrNoContinuation).
 	Continuation *PriorAuthContinuation `json:"continuation,omitempty"`
+
+	// ClaimFacts are the submission's own request facts (PriorAuthRequest.
+	// ClaimFacts), which the amendment states again; Submission is the recorded
+	// submission (PASPriorClaimOf: its Claim type and priority as sent, its
+	// created and its items), which the amendment's prior-Claim entry restates
+	// and its infoChanged marker is derived from. ADDITIVE serialized fields
+	// (shn-sdk v0.62.0): a handle written earlier lacks them, and resume
+	// refuses it rather than amend with values this package would supply.
+	ClaimFacts *PASClaimFacts `json:"claimFacts,omitempty"`
+	Submission *PASPriorClaim `json:"submission,omitempty"`
+
+	// PendedResponse is the payer's pended answer this handle resumes,
+	// exactly as received. The amendment links its attached report to the
+	// items this pend asks it for (ConformantClaimUpdateInputs.Pend).
+	// ADDITIVE serialized field (shn-sdk v0.62.0): a handle written earlier
+	// lacks it, and its amendment links nothing.
+	PendedResponse json.RawMessage `json:"pendedResponse,omitempty"`
 }
 
 // pasBundleBaseURL is the deterministic base for entry fullUrls. A non-urn:uuid
@@ -152,7 +171,7 @@ const pasBundleBaseURL = "https://shn.example/fhir"
 
 // pasBundleIdentifierSystem is the Bundle.identifier.system stamped on every PAS
 // Bundle this package builds (submit, conformant submit, update). Promoted from the
-// repeated literal once a sibling builder (BuildConformantClaimBundle) landed a third
+// repeated literal once a sibling builder (BuildConformantClaimBundleExact) landed a third
 // use (a prior review deferral). The value is identical to the prior literal, so the
 // byte-parity-locked builders stay byte-identical.
 const pasBundleIdentifierSystem = "urn:shn:pas:bundle"
@@ -194,7 +213,7 @@ func pasInjectResourceType(raw []byte, rt string) ([]byte, error) {
 
 // buildPASClaim constructs a FHIR Claim JSON for a preauthorization request
 // (related is nil for the initial submit bundle; the conformant builder
-// BuildConformantClaimBundle reuses it. The X12 1365 service-type coding on Claim.item
+// BuildConformantClaimBundleExact reuses it. The X12 1365 service-type coding on Claim.item
 // carries the licensed binding target, the actual procedure stays on the referenced
 // ServiceRequest).
 //
@@ -203,29 +222,22 @@ func pasInjectResourceType(raw []byte, rt string) ([]byte, error) {
 // resolves; see pasProviderEntry and checkPASProviderResolves.
 //
 // coverageRef is stamped as insurance[0].coverage.reference here, but
-// BuildConformantClaimBundle OVERWRITES that element bundle-side with a reference to
+// BuildConformantClaimBundleExact OVERWRITES that element bundle-side with a reference to
 // the Coverage ENTRY the request carries (see setInsuranceCoverageEntryRef), exactly
 // as it names the insurer, which this Claim leaves unset, via repointInsurerToEntry.
 // Nothing conformant reaches the wire carrying this coverage value.
-func buildPASClaim(patientRef, coverageRef, providerRef, correlationID string, created time.Time) ([]byte, error) {
+//
+// The request's own facts — type, priority, item category and place of service —
+// are the resolved facts (see PASClaimFacts), spliced on exactly as their source
+// stated them; this function states none of them itself.
+func buildPASClaim(patientRef, coverageRef, providerRef, correlationID string, created time.Time, facts pasResolvedFacts) ([]byte, error) {
 	claim := fhir.Claim{
-		Id:     strPtr("claim-" + correlationID),
-		Status: fhir.FinancialResourceStatusCodesActive,
-		Type: fhir.CodeableConcept{
-			Coding: []fhir.Coding{{
-				System: strPtr("http://terminology.hl7.org/CodeSystem/claim-type"),
-				Code:   strPtr("professional"),
-			}},
-		},
+		Id:       strPtr("claim-" + correlationID),
+		Status:   fhir.FinancialResourceStatusCodesActive,
 		Use:      fhir.UsePreauthorization,
 		Patient:  fhir.Reference{Reference: strPtr(patientRef)},
 		Created:  created.UTC().Format(time.RFC3339),
 		Provider: fhir.Reference{Reference: strPtr(providerRef)},
-		Priority: fhir.CodeableConcept{
-			Coding: []fhir.Coding{{
-				Code: strPtr("normal"),
-			}},
-		},
 		Insurance: []fhir.ClaimInsurance{{
 			Sequence: 1,
 			Focal:    true,
@@ -233,13 +245,6 @@ func buildPASClaim(patientRef, coverageRef, providerRef, correlationID string, c
 		}},
 		Item: []fhir.ClaimItem{{
 			Sequence: 1,
-			Category: &fhir.CodeableConcept{
-				Coding: []fhir.Coding{{
-					System:  strPtr("https://codesystem.x12.org/005010/1365"),
-					Code:    strPtr("1"),
-					Display: strPtr("Medical Care"),
-				}},
-			},
 			ProductOrService: fhir.CodeableConcept{
 				Coding: []fhir.Coding{{
 					System:  strPtr("https://codesystem.x12.org/005010/1365"),
@@ -258,11 +263,15 @@ func buildPASClaim(patientRef, coverageRef, providerRef, correlationID string, c
 	if err != nil {
 		return nil, err
 	}
+	raw, err = spliceClaimFacts(raw, facts)
+	if err != nil {
+		return nil, err
+	}
 	return pasInjectResourceType(raw, "Claim")
 }
 
 // Conformant $submit fixed (deterministic) resource ids. The LEAN conformant Claim
-// Bundle (BuildConformantClaimBundle) uses these so the bundle-local references are
+// Bundle (BuildConformantClaimBundleExact) uses these so the bundle-local references are
 // stable + internally consistent. Demo-persona only — no br-payer foreign seed.
 const (
 	conformantPASClaimID          = "convergence-claim"
@@ -270,7 +279,7 @@ const (
 	conformantPASDeviceRequestID  = "convergence-dr"
 	conformantPASQRID             = "convergence-qr"
 
-	// Conformant amended re-POST fixed ids (BuildConformantClaimUpdateBundle).
+	// Conformant amended re-POST fixed ids (BuildConformantClaimUpdateBundleExact).
 	conformantPASClaimUpdateID = "convergence-claim-update"
 	conformantPASUpdateQRID    = "convergence-qr-amended"
 	conformantPASDRID          = "convergence-dr-operative"
@@ -289,7 +298,7 @@ const (
 
 	// extQRContext is the Da Vinci DTR QuestionnaireResponse-level extension whose
 	// valueReference points at the Coverage / ServiceRequest the QR was completed in
-	// (FillQuestionnaire emits one per ref). BuildConformantClaimBundle rewrites these to
+	// (FillQuestionnaire emits one per ref). BuildConformantClaimBundleExact rewrites these to
 	// the bundle-local Coverage/SR ids so the builder owns them. MUST match dtr.qrContextExt.
 	extQRContext = "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/qr-context"
 
@@ -311,19 +320,18 @@ const (
 	// licensed X12 code systems the two extensions above bind to (required binding,
 	// unexpandable offline — same "curated code, allowlisted" posture as the existing
 	// X12 1365 productOrService/category and X12 306 reviewAction codes in this file).
-	// The codes below (certificationType "I" Initial; requestType "IN" Initial Medical
-	// Services Reservation) are copied VERBATIM from the PAS 2.2.1 package's own
-	// conformant example instance (example/Claim-MedicalServicesAuthorizationExample.json)
-	// — not invented (FR-36 no-hallucination).
+	// This package writes no code from either system of its own accord: a
+	// submission's certificationType is "I" Initial (a fact of the operation, see
+	// pasSubmitCertificationType); an amendment's and every requestType are the
+	// caller's (PASClaimFacts, ConformantClaimUpdateInputs.CertificationType).
 	pasSystemX12CertificationType      = "https://codesystem.x12.org/005010/1322"
 	pasSystemX12ServiceItemRequestType = "https://codesystem.x12.org/005010/1525"
 
 	// pasSystemCMSPlaceOfService is the CMS place-of-service code system
 	// Claim.item.location[x]'s X12278LocationType required binding includes
 	// (ValueSet-X12278LocationType.json compose — NOT X12-licensed, a public CMS code
-	// set). Code "11" ("Office") is copied verbatim from the same PAS 2.2.1 example
-	// instance's locationCodeableConcept (no display given there — omitted here too,
-	// rather than inventing one).
+	// set). The code is the caller's PlaceOfService (PASClaimFacts), never the
+	// order's; this package states none.
 	pasSystemCMSPlaceOfService = "https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set"
 
 	// pasRelatedClaimRelationshipSystem is the STANDARD (non-licensed) HL7 terminology
@@ -336,14 +344,38 @@ const (
 )
 
 // addPASLineItemDetail appends the PAS 2.1+ Claim.item line-detail — the
-// certificationType + requestType extensions and locationCodeableConcept — to
-// Claim.item[0], gated on def.ClaimItemLineDetailRequired. No-op (byte-identical)
-// when the flag is false (line 2.0). Shared by the submit and update conformant
+// certificationType + requestType extensions, each the resolved coding — to
+// Claim.item[0], gated on def.ClaimItemLineDetailRequired. At line 2.0, where
+// the PAS 2.0.1 Claim allows each extension 0..1 on Claim.item, a stated one
+// is appended (certificationType first, as from 2.1) and an absent one is
+// omitted (nothing stated: no-op, byte-identical). A submission resolves no
+// certificationType at 2.0 (its "I" is written from 2.1 only), so only an
+// amendment's stated one reaches the item there. The place of service is not added here: it
+// is the order's or the caller's, spliced onto the item at every line where it
+// is stated (spliceClaimFacts). Shared by the submit and update conformant
 // builders; called AFTER conformantizePASClaim so it APPENDS to (rather than is
 // clobbered by) the existing extension-requestedService slice.
-func addPASLineItemDetail(claimJSON []byte, def PASDef) ([]byte, error) {
-	if !def.ClaimItemLineDetailRequired {
-		return claimJSON, nil
+func addPASLineItemDetail(claimJSON []byte, def PASDef, facts pasResolvedFacts) ([]byte, error) {
+	var add []map[string]any
+	switch {
+	case def.ClaimItemLineDetailRequired:
+		if facts.certificationType == nil || facts.requestType == nil || facts.location == nil {
+			return nil, errors.New("addPASLineItemDetail: certificationType, requestType and location must be resolved from PAS 2.1")
+		}
+		add = []map[string]any{
+			{"url": pasExtCertificationType, "valueCodeableConcept": facts.certificationType},
+			{"url": pasExtServiceItemRequestType, "valueCodeableConcept": facts.requestType},
+		}
+	default:
+		if facts.certificationType != nil {
+			add = append(add, map[string]any{"url": pasExtCertificationType, "valueCodeableConcept": facts.certificationType})
+		}
+		if facts.requestType != nil {
+			add = append(add, map[string]any{"url": pasExtServiceItemRequestType, "valueCodeableConcept": facts.requestType})
+		}
+		if len(add) == 0 {
+			return claimJSON, nil
+		}
 	}
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(claimJSON, &m); err != nil {
@@ -362,32 +394,12 @@ func addPASLineItemDetail(claimJSON []byte, def PASDef) ([]byte, error) {
 			return nil, fmt.Errorf("addPASLineItemDetail: parse item extension: %w", err)
 		}
 	}
-	exts = append(exts,
-		map[string]any{
-			"url": pasExtCertificationType,
-			"valueCodeableConcept": map[string]any{"coding": []map[string]any{{
-				"system": pasSystemX12CertificationType, "code": "I", "display": "Initial",
-			}}},
-		},
-		map[string]any{
-			"url": pasExtServiceItemRequestType,
-			"valueCodeableConcept": map[string]any{"coding": []map[string]any{{
-				"system": pasSystemX12ServiceItemRequestType, "code": "IN", "display": "Initial Medical Services Reservation",
-			}}},
-		},
-	)
+	exts = append(exts, add...)
 	extJSON, err := json.Marshal(exts)
 	if err != nil {
 		return nil, fmt.Errorf("addPASLineItemDetail: marshal extension: %w", err)
 	}
 	items[0]["extension"] = extJSON
-	locJSON, err := json.Marshal(map[string]any{"coding": []map[string]any{{
-		"system": pasSystemCMSPlaceOfService, "code": "11",
-	}}})
-	if err != nil {
-		return nil, fmt.Errorf("addPASLineItemDetail: marshal location: %w", err)
-	}
-	items[0]["locationCodeableConcept"] = locJSON
 	itemsJSON, err := json.Marshal(items)
 	if err != nil {
 		return nil, fmt.Errorf("addPASLineItemDetail: marshal items: %w", err)
@@ -523,17 +535,15 @@ type ConformantClaimInputs struct {
 	//
 	// Deprecated: from shn-sdk v0.59.0 every request carries the payer this way.
 	PayerOrgEntry bool
-	// InfoChanged (single-shot resolve discriminator): when true the submit Claim's item[*]
-	// carries the Da Vinci PAS infoChanged item extension ({"url": pasInfoChangedExtensionURL,
-	// "valueCode": "changed"} — the SAME shape the UPDATE builder appends unconditionally via
-	// appendInfoChangedToClaimItems). It is the gateway payer-side POLL DISCRIMINATOR, not a verdict input:
-	// the payer gate polls the timer-resolved terminal A1 (GET ClaimResponse/{id}) when the order is
-	// a single-shot ServiceRequest signalling "resolve to terminal" via this extension, instead of
-	// returning the A4 pend for a reference-payer amendment leg. On a FRESH submit (no Claim.related[prior],
-	// which this builder never emits) infoChanged is benign on br-payer — its re-evaluation path is
-	// gated on a prior claim, absent here — so br-payer still does A4→timer→A1. Default false →
-	// byte-identical to every existing caller. NO prior-claim ref is added (this is a submit, not an
-	// update).
+	// InfoChanged, when true, marks every submit Claim item[*] with the Da Vinci PAS
+	// infoChanged item extension ({"url": pasInfoChangedExtensionURL, "valueCode":
+	// "changed"}, appendInfoChangedToClaimItems) — the caller's own statement, carried
+	// as stated. The UPDATE builder does not use it: an amendment's markers are derived
+	// item by item from the recorded submission (pasInfoChangedMarks). SHN's own
+	// gateways set it on no request. On a FRESH submit (no Claim.related[prior], which
+	// this builder never emits) infoChanged is benign on br-payer — its re-evaluation
+	// path is gated on a prior claim, absent here. Default false. NO prior-claim ref is
+	// added (this is a submit, not an update).
 	InfoChanged bool
 	// Payer is the payer identity (system|value) the leg is routed on — the identity
 	// read from the patient's Coverage. Insurer must carry it as an identifier; a
@@ -551,9 +561,16 @@ type ConformantClaimInputs struct {
 	// half of what a payer matches an inquiry on, and the Patient this request
 	// carries is otherwise an id with nothing identifying the person behind it.
 	MemberIDSystem string
+	// PASClaimFacts are the request's own facts — claim type, priority, service
+	// category, place of service and request type — as the requester states
+	// them. See PASClaimFacts for when BuildConformantClaimBundle(AtLine)Exact
+	// refuses. The Deprecated BuildConformantClaimBundle(AtLine) ignores them.
+	// certificationType is not among them: a submission is X12 1322 "I"
+	// Initial, a fact of the operation, written from PAS 2.1.
+	PASClaimFacts
 }
 
-// BuildConformantClaimBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
+// BuildConformantClaimBundleExact assembles a LEAN, generic, demo-persona-derived CONFORMANT
 // Da Vinci $submit Claim Bundle — the only PA $submit contract (the minimized
 // BuildClaimBundle has been removed). The entry set is exactly what the
 // payer-side parseConformantPASSubjects (gateway/engine/pas_native.go) + the SHN-native
@@ -578,22 +595,22 @@ type ConformantClaimInputs struct {
 // ConformantClaimInputs.Insurer); without one the builder refuses. Deterministic (no
 // time.Now/random); the QR/SR/refs are demo-persona-derived by the caller.
 //
-// BuildConformantClaimBundle speaks PAS line 2.0 — it is BuildConformantClaimBundleAtLine("2.0", in),
-// byte-identical (regression-fenced by test/sdkparity). Use BuildConformantClaimBundleAtLine to
+// BuildConformantClaimBundleExact speaks PAS line 2.0 — it is BuildConformantClaimBundleAtLineExact("2.0", in),
+// byte-identical (regression-fenced by test/sdkparity). Use BuildConformantClaimBundleAtLineExact to
 // target 2.1/2.2 (PAS package differential: Claim.item certificationType/requestType/location[x]).
-func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
+func BuildConformantClaimBundleExact(in ConformantClaimInputs) ([]byte, error) {
 	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
 	return buildConformantClaimBundle(def, in)
 }
 
-// BuildConformantClaimBundleAtLine is BuildConformantClaimBundle parameterized by PAS
+// BuildConformantClaimBundleAtLineExact is BuildConformantClaimBundleExact parameterized by PAS
 // line ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed — never a silent 2.0
 // fallback). ONE code path: the line-conditional sections are driven entirely by the
 // resolved PASDef (see addPASLineItemDetail), not inline per-line branches.
-func BuildConformantClaimBundleAtLine(line string, in ConformantClaimInputs) ([]byte, error) {
+func BuildConformantClaimBundleAtLineExact(line string, in ConformantClaimInputs) ([]byte, error) {
 	def, ok := PASLineDef(line)
 	if !ok {
-		return nil, fmt.Errorf("shnsdk: BuildConformantClaimBundleAtLine: unknown PAS line %q", line)
+		return nil, fmt.Errorf("shnsdk: BuildConformantClaimBundleAtLineExact: unknown PAS line %q", line)
 	}
 	return buildConformantClaimBundle(def, in)
 }
@@ -607,11 +624,20 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	// The party this request comes from, checked BEFORE anything is assembled: a
 	// request that names nobody is refused here rather than sent to a payer that
 	// would store it unfindable.
+	// The request's own facts, as the requester states them, refused — before
+	// anything is assembled — where a required one is not stated.
+	facts, err := resolvePASClaimFacts(def, in.PASClaimFacts)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
+	}
+	if def.ClaimItemLineDetailRequired {
+		facts.certificationType = pasSubmitCertificationType
+	}
 	providerRef, providerURL, err := pasProviderEntry(in.Provider)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
-	claimJSON, err := buildPASClaim(in.PatientRef, in.CoverageRef, providerRef, in.Corr, in.Created)
+	claimJSON, err := buildPASClaim(in.PatientRef, in.CoverageRef, providerRef, in.Corr, in.Created, facts)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: build claim: %w", err)
 	}
@@ -625,7 +651,7 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	}
 	// PAS 2.1+ (def-driven, PAS package differential): append the item-detail extensions +
 	// location[x]. No-op at line 2.0 (def.ClaimItemLineDetailRequired false).
-	claimJSON, err = addPASLineItemDetail(claimJSON, def)
+	claimJSON, err = addPASLineItemDetail(claimJSON, def, facts)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: add line item detail: %w", err)
 	}
@@ -650,10 +676,9 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: repoint insurer to entry: %w", err)
 	}
-	// Single-shot resolve discriminator (poll discriminator, NOT a verdict input): append the PAS
-	// infoChanged item extension when requested. NO prior-claim ref is added (fresh submit) — so it
-	// stays benign on br-payer (whose re-evaluation is gated on a prior claim) while still flipping
-	// the SHN payer gate into the timer-poll lane. Default false → byte-identical.
+	// The caller's own infoChanged statement (InfoChanged): every item marked "changed" when
+	// requested. NO prior-claim ref is added (fresh submit), so it stays benign on br-payer
+	// (whose re-evaluation is gated on a prior claim). Default false → byte-identical.
 	if in.InfoChanged {
 		claimJSON, err = appendInfoChangedToClaimItems(claimJSON)
 		if err != nil {
@@ -898,7 +923,7 @@ func stripMetaProfile(resourceJSON []byte) ([]byte, error) {
 // the ServiceRequest- or DeviceRequest-typed qr-context points at srRef — matching each qr-context
 // extension by the resourceType PREFIX of its existing valueReference.reference (a ref
 // starting "Coverage/" → coverageRef; one starting "ServiceRequest/" → srRef). This makes
-// BuildConformantClaimBundle SELF-CONSISTENT: the QR's qr-context refs resolve to the
+// BuildConformantClaimBundleExact SELF-CONSISTENT: the QR's qr-context refs resolve to the
 // bundle-local Coverage/SR regardless of what the caller put in the QR (closing the
 // dangling-ref hazard parseConformantPASSubjects does not catch). Other extensions
 // (e.g. intendedUse) and all other fields are left verbatim. Deterministic.
@@ -1410,27 +1435,16 @@ func BuildProvenance(targetRef, agentWho string, recorded time.Time) ([]byte, er
 // buildPASUpdateClaim constructs the FHIR Claim for an UPDATE bundle: identical to
 // buildPASClaim but with related[] referencing the original claim by correlation
 // identifier (FR-21). Ported byte-for-byte from internal/pas.buildClaim's related path.
-// coverageRef carries the same caveat as buildPASClaim's: BuildConformantClaimUpdateBundle
+// coverageRef carries the same caveat as buildPASClaim's: BuildConformantClaimUpdateBundleExact
 // overwrites insurance[0].coverage with a logical reference before the bundle is assembled.
-func buildPASUpdateClaim(patientRef, coverageRef, providerRef, correlationID, originalCorrelationID string, created time.Time) ([]byte, error) {
+func buildPASUpdateClaim(patientRef, coverageRef, providerRef, correlationID, originalCorrelationID string, created time.Time, facts pasResolvedFacts) ([]byte, error) {
 	claim := fhir.Claim{
-		Id:     strPtr("claim-" + correlationID),
-		Status: fhir.FinancialResourceStatusCodesActive,
-		Type: fhir.CodeableConcept{
-			Coding: []fhir.Coding{{
-				System: strPtr("http://terminology.hl7.org/CodeSystem/claim-type"),
-				Code:   strPtr("professional"),
-			}},
-		},
+		Id:       strPtr("claim-" + correlationID),
+		Status:   fhir.FinancialResourceStatusCodesActive,
 		Use:      fhir.UsePreauthorization,
 		Patient:  fhir.Reference{Reference: strPtr(patientRef)},
 		Created:  created.UTC().Format(time.RFC3339),
 		Provider: fhir.Reference{Reference: strPtr(providerRef)},
-		Priority: fhir.CodeableConcept{
-			Coding: []fhir.Coding{{
-				Code: strPtr("normal"),
-			}},
-		},
 		Insurance: []fhir.ClaimInsurance{{
 			Sequence: 1,
 			Focal:    true,
@@ -1438,13 +1452,6 @@ func buildPASUpdateClaim(patientRef, coverageRef, providerRef, correlationID, or
 		}},
 		Item: []fhir.ClaimItem{{
 			Sequence: 1,
-			Category: &fhir.CodeableConcept{
-				Coding: []fhir.Coding{{
-					System:  strPtr("https://codesystem.x12.org/005010/1365"),
-					Code:    strPtr("1"),
-					Display: strPtr("Medical Care"),
-				}},
-			},
 			ProductOrService: fhir.CodeableConcept{
 				Coding: []fhir.Coding{{
 					System:  strPtr("https://codesystem.x12.org/005010/1365"),
@@ -1470,6 +1477,10 @@ func buildPASUpdateClaim(patientRef, coverageRef, providerRef, correlationID, or
 	if err != nil {
 		return nil, err
 	}
+	raw, err = spliceClaimFacts(raw, facts)
+	if err != nil {
+		return nil, err
+	}
 	return pasInjectResourceType(raw, "Claim")
 }
 
@@ -1477,10 +1488,10 @@ func buildPASUpdateClaim(patientRef, coverageRef, providerRef, correlationID, or
 // ENTRY every amendment carries (see the call site in buildConformantClaimUpdateBundle). br-payer's
 // resolvePriorClaim (PasSubmitService.java:379-403) reads .reference, NOT .identifier, and 400s
 // "The prior Claim referenced in Claim.related.claim must be included in the Bundle" without it.
-// The existing .identifier is preserved. infoChanged is a SEPARATE, unconditional concern (every
-// lane) — see appendInfoChangedToClaimItems; this function used to fold both together as
-// setPriorClaimReferenceAndInfoChanged, which forced infoChanged to share a lane gate the
-// reference no longer has.
+// The existing .identifier is preserved. infoChanged is a SEPARATE concern, derived per item from
+// the recorded submission (pasInfoChangedMarks, applyInfoChangedMarks); this function used to fold
+// both together as setPriorClaimReferenceAndInfoChanged, which forced infoChanged to share a lane
+// gate the reference no longer has.
 //
 // Generic-map round-trip, mirroring repointInsurerToEntry.
 func setPriorClaimReference(claimJSON []byte, priorClaimRef string) ([]byte, error) {
@@ -1511,12 +1522,10 @@ func setPriorClaimReference(claimJSON []byte, priorClaimRef string) ([]byte, err
 
 // appendInfoChangedToClaimItems appends the Da Vinci PAS infoChanged item extension
 // ({"url": pasInfoChangedExtensionURL, "valueCode": "changed"}) to every Claim.item[*] of a
-// marshalled Claim JSON. It is the SINGLE source of the exact infoChanged extension shape — the
-// UPDATE builder (buildConformantClaimUpdateBundle, unconditionally, every lane) and the
-// single-shot SUBMIT (BuildConformantClaimBundle InfoChanged) both emit the identical element
-// through it, so the gateway's requestClaimHasInfoChanged poll discriminator fires the same way
-// for both. Errors when the Claim has no item[]. Generic-map round-trip (mirrors the other
-// reference-payer-lane post-processors).
+// marshalled Claim JSON. Its one caller is the SUBMIT builder's InfoChanged option
+// (BuildConformantClaimBundleExact), the caller's own statement; the UPDATE builder marks items
+// by their derived code instead (applyInfoChangedMarks). Errors when the Claim has no
+// item[]. Generic-map round-trip (mirrors the other reference-payer-lane post-processors).
 func appendInfoChangedToClaimItems(claimJSON []byte) ([]byte, error) {
 	var claim map[string]interface{}
 	if err := json.Unmarshal(claimJSON, &claim); err != nil {
@@ -1580,10 +1589,8 @@ func stampItemTraceNumbers(claimJSON []byte, corr string) ([]byte, error) {
 }
 
 // appendInfoChangedToClaimItemsMap mutates a decoded Claim map in place, appending the infoChanged
-// item extension to every item. Factored out of appendInfoChangedToClaimItems (its only caller) so
-// the extension shape has one definition even if a future generic-map caller needs it without a
-// marshal round-trip (setPriorClaimReference used to be such a caller, before infoChanged became
-// an unconditional, separate concern — see buildConformantClaimUpdateBundle).
+// item extension with code "changed" to every item. Its only caller is
+// appendInfoChangedToClaimItems.
 func appendInfoChangedToClaimItemsMap(claim map[string]interface{}) error {
 	items, _ := claim["item"].([]interface{})
 	if len(items) == 0 {
@@ -1603,38 +1610,31 @@ func appendInfoChangedToClaimItemsMap(claim map[string]interface{}) error {
 	return nil
 }
 
-// buildPriorClaimEntry synthesizes the prior Claim every amendment carries as a resolvable bundle
+// buildPriorClaimEntry restates the prior Claim every amendment carries as a resolvable bundle
 // ENTRY (see setPriorClaimReference). It stands for the original submit's claim:
 // br-payer's resolvePriorClaim finds it via related[0].claim.reference, then searches the stored
 // authorization by its FIRST identifier — so it carries urn:shn:correlation|OriginalCorr (the
-// initial submit's stored Claim identifier). br-payer reads only the identifier, but the bundle is
-// SHN-produced, so this entry must be a base-FHIR-VALID Claim (FR-36 egress $validate): it carries
-// every required Claim element (status/type/use/patient/created/provider/priority/insurance),
-// mirroring the conformant submit/update Claim shape. NOT first in the bundle, so PasBundleValidator's
-// first-entry profile checks do not apply.
+// initial submit's stored Claim identifier). The bundle is SHN-produced, so this entry must be a
+// base-FHIR-VALID Claim (FR-36 egress $validate): it carries every required Claim element
+// (status/type/use/patient/created/provider/priority/insurance). NOT first in the bundle, so
+// PasBundleValidator's first-entry profile checks do not apply.
 //
-// KNOWN SEAM, kept visible rather than hidden: this is a restatement this package synthesizes, not
-// the requester's original Claim. Its created is the AMENDMENT's time (the created argument), not
-// the time the original was created, and its type and priority restate this builder's own
-// constants rather than anything read from the original request. Only the correlation identifier
-// is the original's. Until it is replaced by the requester's own prior Claim (or omitted where no
-// payer needs it), a reader must not treat this entry's other values as the original's.
-func buildPriorClaimEntry(patientRef, coverageRef, providerRef, payerOrgID, originalCorr string, created time.Time) ([]byte, error) {
+// Its type, priority and created are the RECORDED SUBMISSION'S own (PASPriorClaim), as the
+// submission sent them — never this builder's constants and never the amendment's own time. Its
+// item list is not restated (Claim.item is 0..* in base R4). A record that lacks any of the three
+// refuses the amendment (PASPriorClaim.check).
+func buildPriorClaimEntry(patientRef, coverageRef, providerRef, payerOrgID, originalCorr string, prior PASPriorClaim) ([]byte, error) {
+	if err := prior.check(); err != nil {
+		return nil, err
+	}
 	claim := fhir.Claim{
-		Id:     strPtr(conformantPASClaimID),
-		Status: fhir.FinancialResourceStatusCodesActive,
-		Type: fhir.CodeableConcept{
-			Coding: []fhir.Coding{{
-				System: strPtr("http://terminology.hl7.org/CodeSystem/claim-type"),
-				Code:   strPtr("professional"),
-			}},
-		},
+		Id:       strPtr(conformantPASClaimID),
+		Status:   fhir.FinancialResourceStatusCodesActive,
 		Use:      fhir.UsePreauthorization,
 		Patient:  fhir.Reference{Reference: strPtr(patientRef)},
-		Created:  created.UTC().Format(time.RFC3339),
+		Created:  prior.Created,
 		Provider: fhir.Reference{Reference: strPtr(providerRef)},
 		Insurer:  &fhir.Reference{Reference: strPtr("Organization/" + payerOrgID)},
-		Priority: fhir.CodeableConcept{Coding: []fhir.Coding{{Code: strPtr("normal")}}},
 		Insurance: []fhir.ClaimInsurance{{
 			Sequence: 1,
 			Focal:    true,
@@ -1649,7 +1649,237 @@ func buildPriorClaimEntry(patientRef, coverageRef, providerRef, payerOrgID, orig
 	if err != nil {
 		return nil, err
 	}
+	// The submitted type and priority, each the CodeableConcept exactly as
+	// sent: every member of every coding, never rebuilt from system and code.
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	m["type"], m["priority"] = prior.ClaimType, prior.Priority
+	if raw, err = json.Marshal(m); err != nil {
+		return nil, err
+	}
 	return pasInjectResourceType(raw, "Claim")
+}
+
+// check refuses a recorded submission that cannot be restated as it was sent,
+// or whose items cannot be compared with the amendment's.
+func (p PASPriorClaim) check() error {
+	switch {
+	case pasFactIsAbsent(p.ClaimType):
+		return pasFactAbsent("the prior Claim's type", "the recorded submission (PASPriorClaim.ClaimType)")
+	case pasFactIsAbsent(p.Priority):
+		return pasFactAbsent("the prior Claim's priority", "the recorded submission (PASPriorClaim.Priority)")
+	case strings.TrimSpace(p.Created) == "":
+		return pasFactAbsent("the prior Claim's created", "the recorded submission (PASPriorClaim.Created; a continuation written before this release does not record it, and the amendment's own time is never restated as the original's)")
+	case len(p.Items) == 0:
+		return pasFactAbsent("the prior Claim's items", "the recorded submission (PASPriorClaim.Items: which of the amendment's items changed is read against them)")
+	}
+	return nil
+}
+
+// The PAS infoChanged codes (PASTempCodes, PASInformationChangeMode): "added"
+// is new information that was not sent previously, "changed" previously sent
+// information that has been changed.
+const (
+	pasInfoChangedAdded   = "added"
+	pasInfoChangedChanged = "changed"
+)
+
+// pasInfoChangedMarks derives, for each item of an amendment's operative
+// Claim (the bundle's first entry), the PAS infoChanged code its difference
+// from the prior Claim states: "added" for an item whose sequence the prior
+// Claim has no item for, "changed" for one whose prior item differs in any
+// member or value, none for one sent before exactly as now. Both sides are the
+// built bytes: the amendment's bundle as built and the submission's items as
+// sent, compared as JSON values with any infoChanged and certificationType
+// extension set aside. The certificationType (X12 1322) is compared on its
+// own, and only when both the prior item and the amendment's item state one: a
+// different kind on the same item is a change the IG marks (PAS 2.2.1
+// Claim-HomecareAuthorizationUpdateExample marks its item 2, certificationType
+// "3" cancel where it was "I", as "changed"), while an amendment stating a kind
+// where the prior stated none (a PAS 2.0 submission writes none) has nothing
+// to compare and marks nothing from that alone. The extension's context is Claim.item at every PAS line (2.0.1, 2.1.0, 2.2.1),
+// so an amendment's other new content (its supporting documentation) carries
+// none. The result maps an item's position to its code.
+func pasInfoChangedMarks(bundle []byte, prior []json.RawMessage) (map[int]string, error) {
+	var b struct {
+		Entry []struct {
+			Resource struct {
+				Item []json.RawMessage `json:"item"`
+			} `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundle, &b); err != nil || len(b.Entry) == 0 {
+		return nil, fmt.Errorf("read the amendment's Claim items: %v", err)
+	}
+	type seqItem struct {
+		Sequence            int   `json:"sequence"`
+		InformationSequence []int `json:"informationSequence"`
+	}
+	type sentItem struct {
+		canonical string
+		links     []int
+		certType  string
+	}
+	priorBySeq := map[int]sentItem{}
+	for _, raw := range prior {
+		var it seqItem
+		if err := json.Unmarshal(raw, &it); err != nil {
+			return nil, fmt.Errorf("the prior Claim's items: %w", err)
+		}
+		c, err := pasItemWithoutInfoChanged(raw)
+		if err != nil {
+			return nil, fmt.Errorf("the prior Claim's items: %w", err)
+		}
+		ct, err := pasItemCertificationType(raw)
+		if err != nil {
+			return nil, fmt.Errorf("the prior Claim's items: %w", err)
+		}
+		priorBySeq[it.Sequence] = sentItem{c, it.InformationSequence, ct}
+	}
+	marks := map[int]string{}
+	for i, raw := range b.Entry[0].Resource.Item {
+		var it seqItem
+		if err := json.Unmarshal(raw, &it); err != nil {
+			return nil, fmt.Errorf("the amendment's items: %w", err)
+		}
+		was, sent := priorBySeq[it.Sequence]
+		if !sent {
+			marks[i] = pasInfoChangedAdded
+			continue
+		}
+		now, err := pasItemWithoutInfoChanged(raw)
+		if err != nil {
+			return nil, fmt.Errorf("the amendment's items: %w", err)
+		}
+		certType, err := pasItemCertificationType(raw)
+		if err != nil {
+			return nil, fmt.Errorf("the amendment's items: %w", err)
+		}
+		switch {
+		case now != was.canonical:
+			marks[i] = pasInfoChangedChanged
+		case certType != "" && was.certType != "" && certType != was.certType:
+			marks[i] = pasInfoChangedChanged
+		case pasGainsLink(it.InformationSequence, was.links):
+			// The item as sent before, now pointing at supporting information it
+			// did not point at: new information not sent previously.
+			marks[i] = pasInfoChangedAdded
+		}
+	}
+	return marks, nil
+}
+
+// pasItemCertificationType is what an item's certificationType extension
+// states, as its codings' system|code pairs in order, or "" when the item
+// states none. A display is not part of the statement: an amendment stating
+// {system, code} without the display the submission carried states the same
+// kind of request, so it does not mark the item changed.
+func pasItemCertificationType(raw json.RawMessage) (string, error) {
+	type coding struct {
+		System string `json:"system"`
+		Code   string `json:"code"`
+	}
+	var it struct {
+		Extension []struct {
+			URL                  string `json:"url"`
+			ValueCodeableConcept *struct {
+				Coding []coding `json:"coding"`
+			} `json:"valueCodeableConcept"`
+			ValueCoding *coding `json:"valueCoding"`
+		} `json:"extension"`
+	}
+	if err := json.Unmarshal(raw, &it); err != nil {
+		return "", err
+	}
+	for _, e := range it.Extension {
+		if e.URL != pasExtCertificationType {
+			continue
+		}
+		var cs []coding
+		switch {
+		case e.ValueCodeableConcept != nil:
+			cs = e.ValueCodeableConcept.Coding
+		case e.ValueCoding != nil:
+			cs = []coding{*e.ValueCoding}
+		}
+		parts := make([]string, 0, len(cs))
+		for _, c := range cs {
+			parts = append(parts, c.System+"|"+c.Code)
+		}
+		return strings.Join(parts, ","), nil
+	}
+	return "", nil
+}
+
+// pasGainsLink reports whether an item's informationSequence names an entry
+// the submitted item's did not.
+func pasGainsLink(now, before []int) bool {
+	for _, n := range now {
+		if !slices.Contains(before, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// pasItemWithoutInfoChanged is an item as a canonical JSON value (object
+// members ordered, numbers as written) with any infoChanged or
+// certificationType extension (the request's kind, see pasInfoChangedMarks)
+// and its informationSequence set aside, so two items compare equal exactly when every
+// other member and value is the same. A gained link is read separately
+// (pasGainsLink): it is information added, not information changed.
+func pasItemWithoutInfoChanged(raw json.RawMessage) (string, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var it map[string]any
+	if err := dec.Decode(&it); err != nil {
+		return "", err
+	}
+	delete(it, "informationSequence")
+	if exts, ok := it["extension"].([]any); ok {
+		kept := exts[:0:0]
+		for _, e := range exts {
+			if em, ok := e.(map[string]any); ok && (em["url"] == pasInfoChangedExtensionURL || em["url"] == pasExtCertificationType) {
+				continue
+			}
+			kept = append(kept, e)
+		}
+		if len(kept) == 0 {
+			delete(it, "extension")
+		} else {
+			it["extension"] = kept
+		}
+	}
+	out, err := json.Marshal(it)
+	return string(out), err
+}
+
+// applyInfoChangedMarks appends to each marked item of a built Claim the PAS
+// infoChanged extension with its derived code.
+func applyInfoChangedMarks(claimJSON []byte, marks map[int]string) ([]byte, error) {
+	var claim map[string]interface{}
+	if err := json.Unmarshal(claimJSON, &claim); err != nil {
+		return nil, fmt.Errorf("infoChanged: unmarshal claim: %w", err)
+	}
+	items, _ := claim["item"].([]interface{})
+	for i, code := range marks {
+		if i >= len(items) {
+			return nil, fmt.Errorf("infoChanged: claim has no item %d", i)
+		}
+		im, ok := items[i].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("infoChanged: item %d is not an object", i)
+		}
+		ext, _ := im["extension"].([]interface{})
+		im["extension"] = append(ext, map[string]interface{}{"url": pasInfoChangedExtensionURL, "valueCode": code})
+	}
+	out, err := json.Marshal(claim)
+	if err != nil {
+		return nil, fmt.Errorf("infoChanged: marshal claim: %w", err)
+	}
+	return out, nil
 }
 
 // ConformantClaimUpdateInputs are the inputs the conformant amended re-POST builder needs from
@@ -1715,10 +1945,48 @@ type ConformantClaimUpdateInputs struct {
 	// same way the submission did, so the payer matching an inquiry finds one
 	// authorization rather than none.
 	MemberIDSystem string
+	// PASClaimFacts are the amendment's own facts, read exactly as for
+	// ConformantClaimInputs.PASClaimFacts. This and the fields below through Pend
+	// are read by BuildConformantClaimUpdateBundle(AtLine)Exact; the Deprecated
+	// BuildConformantClaimUpdateBundle(AtLine) ignores them.
+	PASClaimFacts
+	// CertificationType is the kind of amendment this is (Claim.item extension
+	// certificationType, an X12 1322 coding): the caller states it; the builder
+	// does not assume one. REQUIRED from PAS 2.1, where the builder refuses
+	// without it; at 2.0 (0..1 on Claim.item) carried when stated and omitted
+	// when absent.
+	CertificationType json.RawMessage
+	// PriorClaim is the recorded submission (PASPriorClaimOf): the prior-Claim
+	// entry restates its type, priority and created as sent, and the builder
+	// derives the PAS infoChanged marker from its items — no caller states it.
+	// An item of this amendment whose sequence the submission had no item for
+	// carries infoChanged "added"; one that differs from the submitted item in
+	// any member or value carries "changed"; one sent before exactly as now
+	// carries none. The extension's context is Claim.item at every PAS line, so
+	// nothing else is marked. An item this amendment links its attached answer
+	// to (Pend) differs from the submitted item only by the link, which is new
+	// information not sent previously: it carries "added" (PASTempCodes; the
+	// IG's update examples show no linked item, so the code is read from the
+	// code system's definitions). REQUIRED: see PASPriorClaim.
+	PriorClaim PASPriorClaim
+	// Pend is the payer's pended response this amendment answers, exactly as
+	// received (optional). The amendment's attached answer — DiagnosticReport
+	// when set, else the amended QR — is documentation answering the payer's
+	// request for a specific item, and is linked to the items the payer's own
+	// pend asks it for: Claim.item.informationSequence pointing at a new
+	// Claim.supportingInfo entry (PASTempCodes additionalInformation)
+	// referencing it. An item is linked only when a pended-response Task names
+	// its line with a need the answer meets (its attachment code, or the
+	// questionnaire a QR answers); nil, or a pend that ties the answer to no
+	// item, links nothing. Nothing is linked at PAS 2.2, whose
+	// supportingInfo:AdditionalInformation requires an X12 PWK01 report type
+	// no source states (PASDef.SupportingInfoDocumentInformationRequired).
+	// ADDITIVE (shn-sdk v0.62.0).
+	Pend []byte
 }
 
-// BuildConformantClaimUpdateBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
-// Da Vinci amended re-POST Claim Bundle — the conformant update sibling of BuildConformantClaimBundle
+// BuildConformantClaimUpdateBundleExact assembles a LEAN, generic, demo-persona-derived CONFORMANT
+// Da Vinci amended re-POST Claim Bundle — the conformant update sibling of BuildConformantClaimBundleExact
 // (which stays untouched). It carries the conformant $submit lean shape PLUS:
 //   - Claim.related[prior] referencing the original submit correlation (FR-21)
 //   - a Provenance entry (FR-32 — REQUIRED)
@@ -1727,39 +1995,68 @@ type ConformantClaimUpdateInputs struct {
 // Entry order: Claim, Patient, Coverage, ServiceRequest, QuestionnaireResponse,
 // DiagnosticReport (when present), Provenance.
 //
-// meta.profile: NO meta.profile on any entry (identical to BuildConformantClaimBundle).
+// meta.profile: NO meta.profile on any entry (identical to BuildConformantClaimBundleExact).
 // Deterministic (no time.Now/random); caller injects Created. It reuses the
 // byte-parity-locked buildPASUpdateClaim helper (the minimized BuildClaimUpdateBundle
 // public builder has been removed — this is the sole PA-update builder).
 //
-// BuildConformantClaimUpdateBundle speaks PAS line 2.0 — it is
-// BuildConformantClaimUpdateBundleAtLine("2.0", in), byte-identical (regression-fenced
-// by test/sdkparity). Use BuildConformantClaimUpdateBundleAtLine to target 2.1/2.2
+// BuildConformantClaimUpdateBundleExact speaks PAS line 2.0 — it is
+// BuildConformantClaimUpdateBundleAtLineExact("2.0", in), byte-identical (regression-fenced
+// by test/sdkparity). Use BuildConformantClaimUpdateBundleAtLineExact to target 2.1/2.2
 // (PAS package differential: Claim.item line-detail + Claim.related.relationship).
-func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, error) {
+func BuildConformantClaimUpdateBundleExact(in ConformantClaimUpdateInputs) ([]byte, error) {
 	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
 	return buildConformantClaimUpdateBundle(def, in)
 }
 
-// BuildConformantClaimUpdateBundleAtLine is BuildConformantClaimUpdateBundle
+// BuildConformantClaimUpdateBundleAtLineExact is BuildConformantClaimUpdateBundleExact
 // parameterized by PAS line ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
-func BuildConformantClaimUpdateBundleAtLine(line string, in ConformantClaimUpdateInputs) ([]byte, error) {
+func BuildConformantClaimUpdateBundleAtLineExact(line string, in ConformantClaimUpdateInputs) ([]byte, error) {
 	def, ok := PASLineDef(line)
 	if !ok {
-		return nil, fmt.Errorf("shnsdk: BuildConformantClaimUpdateBundleAtLine: unknown PAS line %q", line)
+		return nil, fmt.Errorf("shnsdk: BuildConformantClaimUpdateBundleAtLineExact: unknown PAS line %q", line)
 	}
 	return buildConformantClaimUpdateBundle(def, in)
 }
 
 func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs) ([]byte, error) {
+	// The builder is deterministic: build once unmarked, derive which items
+	// differ from the recorded submission (the bytes as they go out, both
+	// sides), and build again with those items marked.
+	unmarked, err := buildConformantClaimUpdateBundleMarked(def, in, nil)
+	if err != nil {
+		return nil, err
+	}
+	marks, err := pasInfoChangedMarks(unmarked, in.PriorClaim.Items)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
+	if len(marks) == 0 {
+		return unmarked, nil
+	}
+	return buildConformantClaimUpdateBundleMarked(def, in, marks)
+}
+
+func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdateInputs, marks map[int]string) ([]byte, error) {
 	// --- Claim: reuse buildPASUpdateClaim (emits related[] by OriginalCorr), then
 	// conformantize (extension-requestedService; productOrService is set from the order
 	// below, unconditionally) and restamp id to the update-specific conformant id. ---
+	// The amendment's own facts: the same reading as the submission's,
+	// plus the certificationType only the caller can state (the kind of
+	// amendment this is), and the recorded submission the prior-Claim entry
+	// restates. Every refusal comes before anything is assembled.
+	facts, err := resolvePASUpdateFacts(def, in.PASClaimFacts, in.CertificationType)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
+	if err := in.PriorClaim.check(); err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
 	providerRef, providerURL, err := pasProviderEntry(in.Provider)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
-	claimJSON, err := buildPASUpdateClaim(in.PatientRef, in.CoverageRef, providerRef, in.Corr, in.OriginalCorr, in.Created)
+	claimJSON, err := buildPASUpdateClaim(in.PatientRef, in.CoverageRef, providerRef, in.Corr, in.OriginalCorr, in.Created, facts)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: build claim: %w", err)
 	}
@@ -1777,7 +2074,7 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	// PAS 2.1+ (def-driven, PAS package differential): item-detail extensions + location[x],
 	// and Claim.related[0].relationship (ex-relatedclaimrelationship#prior). No-op at
 	// line 2.0.
-	claimJSON, err = addPASLineItemDetail(claimJSON, def)
+	claimJSON, err = addPASLineItemDetail(claimJSON, def, facts)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: add line item detail: %w", err)
 	}
@@ -1794,7 +2091,7 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	}
 	// The payer this amendment names — the participant's own record, the same one
 	// the submission named, carried as the entry the insurer names. Same as
-	// BuildConformantClaimBundle; see pasPayerOrgEntry.
+	// BuildConformantClaimBundleExact; see pasPayerOrgEntry.
 	payerOrg, err := pasPayerOrgEntry(in.Insurer, in.Payer)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
@@ -1803,17 +2100,30 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: repoint insurer to entry: %w", err)
 	}
-	// infoChanged is UNCONDITIONAL (register R5/Task-A finding, 2026-08-25): no lane flag
-	// gates correctness/conformance content — the same ruling as the §13
-	// productOrService fix above (setClaimItemProductFromSR runs unconditionally too). br-payer's
-	// hasInfoChanged (PasSubmitService.java:316/449) gates re-evaluation on this marker; a demo/
-	// hermetic amendment that never carried it was previously resolved ONLY by the mirror's own
-	// bare-Provenance tolerance (internal/brpayermirror), a shape no real Da Vinci PAS payer
-	// accepts. Converging here retires that tolerance's justification (see
-	// amendmentRequestsResolution).
-	claimJSON, err = appendInfoChangedToClaimItems(claimJSON)
+	// The attached answer, linked to the items the payer's own pend asks it
+	// for (linkPASAnswer; nothing when the pend ties it to none). The answer is
+	// the supplemental resource this amendment's Provenance attributes: the
+	// report when there is one, else the amended QR — each with the
+	// bundle-local id it rides under below.
+	answer, err := withResourceID(in.QR, conformantPASUpdateQRID)
+	if in.DiagnosticReport != nil {
+		answer, err = withResourceID(in.DiagnosticReport, conformantPASDRID)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant update: append infoChanged: %w", err)
+		return nil, fmt.Errorf("shnsdk: conformant update: the attached answer: %w", err)
+	}
+	claimJSON, err = linkPASAnswer(def, claimJSON, in.Pend, answer)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
+	// infoChanged is derived, never stated: the items the first build found
+	// added to or changed from the recorded submission (pasInfoChangedMarks)
+	// carry it, with the code that says which; the rest carry none.
+	if len(marks) > 0 {
+		claimJSON, err = applyInfoChangedMarks(claimJSON, marks)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+		}
 	}
 	// The item trace numbers are the SUBMISSION'S, not this amendment's. An item
 	// trace number identifies the service line, and an amendment is about the lines
@@ -1935,7 +2245,7 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	// The prior Claim as a resolvable bundle ENTRY (NOT first → not profile-validated by
 	// PasBundleValidator; carries urn:shn:correlation|OriginalCorr, what br-payer searches the
 	// stored authorization on). The operative update Claim's related.reference resolves to it.
-	priorClaimJSON, err := buildPriorClaimEntry(in.PatientRef, coverageRef, providerRef, payerOrg.id, in.OriginalCorr, in.Created)
+	priorClaimJSON, err := buildPriorClaimEntry(in.PatientRef, coverageRef, providerRef, payerOrg.id, in.OriginalCorr, in.PriorClaim)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: build prior claim entry: %w", err)
 	}
@@ -1986,7 +2296,7 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if err != nil {
 		return nil, err
 	}
-	// Reference-payer lane only: same absolute-ref rewrite as BuildConformantClaimBundle.
+	// Reference-payer lane only: same absolute-ref rewrite as BuildConformantClaimBundleExact.
 	// Out-of-bundle refs (e.g. Provenance.agent Organization/provider or
 	// Practitioner/<npi>) are left untouched — they don't appear in the entry set.
 	if in.AbsoluteRefs {
@@ -2437,8 +2747,9 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 			End string `json:"end"`
 		} `json:"preAuthPeriod"`
 		ProcessNote []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Number int    `json:"number"`
+			Type   string `json:"type"`
+			Text   string `json:"text"`
 		} `json:"processNote"`
 		Item []struct {
 			ItemSequence int `json:"itemSequence"`
@@ -2624,7 +2935,7 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 	var typedNotes []PASProcessNote
 	for _, n := range probe.ProcessNote {
 		if n.Text != "" {
-			typedNotes = append(typedNotes, PASProcessNote{Type: n.Type, Text: n.Text})
+			typedNotes = append(typedNotes, PASProcessNote{Number: n.Number, Type: n.Type, Text: n.Text})
 		}
 	}
 	// detail adds the payer's decision detail to a terminal result.

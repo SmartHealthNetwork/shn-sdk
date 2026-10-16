@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
 
 // PayerIdentifier is a Coverage.payor Organization identifier (system|value) used for routing.
@@ -20,6 +22,22 @@ var CMSPayerIdentity = PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300"
 
 // ErrNoCoveragePayer: the Coverage value names no payer this SDK can resolve.
 var ErrNoCoveragePayer = errors.New("shnsdk: no payer can be resolved from the coverage")
+
+// ErrPayerRecordAbsent: a builder that names a payer was given none. It names
+// the payer by the identifier the caller's own records give it (a Coverage's
+// payor, or for a payer its own Organization), or, for an answer, by the insurer
+// its request named, and never a placeholder such as Organization/payer: without
+// one it refuses rather than build.
+var ErrPayerRecordAbsent = errors.New("shnsdk: no payer record supplied, so nothing is built: SHN's builders name the caller's own payer and never a placeholder")
+
+// named reports whether p names a payer: both its system and its value.
+func (p PayerIdentifier) named() bool { return p.System != "" && p.Value != "" }
+
+// reference is p as a logical FHIR Reference (Reference.identifier): a payer
+// known by its identifier, not by a resource in the message.
+func (p PayerIdentifier) reference() fhir.Reference {
+	return fhir.Reference{Identifier: &fhir.Identifier{System: strPtr(p.System), Value: strPtr(p.Value)}}
+}
 
 // ErrAmbiguousCoveragePayer: the Coverage Bundle's Coverages name more than one payer.
 var ErrAmbiguousCoveragePayer = errors.New("shnsdk: the coverage names more than one payer")

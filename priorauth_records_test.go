@@ -96,6 +96,12 @@ func TestRunPriorAuth_CallerRecordsRefused(t *testing.T) {
 		"a hook without the caller's records": func(r *PriorAuthRequest) {
 			r.Patient, r.Coverage, r.Hook = nil, nil, "order-sign"
 		},
+		"no claim type": func(r *PriorAuthRequest) {
+			r.Patient, r.Coverage, r.ClaimFacts.ClaimType = patient, coverage, nil
+		},
+		"priority null": func(r *PriorAuthRequest) {
+			r.Patient, r.Coverage, r.ClaimFacts.Priority = patient, coverage, json.RawMessage("null")
+		},
 		"coverage not a searchset": func(r *PriorAuthRequest) {
 			r.Patient, r.Coverage = patient, []byte(`{"resourceType":"Coverage","id":"c","beneficiary":{"reference":"Patient/MBR-COVERED"}}`)
 		},

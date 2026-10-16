@@ -25,6 +25,9 @@ type PriorAuthContinuation struct {
 	// ClaimType and Priority are the submitted Claim's type and priority.
 	ClaimType PASCoding `json:"claimType"`
 	Priority  PASCoding `json:"priority"`
+	// Created is the submitted Claim's created, exactly as sent. ADDITIVE
+	// (shn-sdk v0.62.0): a continuation recorded earlier lacks it.
+	Created string `json:"created,omitempty"`
 	// MemberID is the member identifier the request was made for.
 	MemberID string `json:"memberId"`
 	// ProviderNPI is the requesting provider's NPI, when known.
@@ -96,7 +99,8 @@ func NewPriorAuthContinuation(line, payerHolder, memberID string, request, respo
 				Identifier *PASIdentifier `json:"identifier"`
 			} `json:"claim"`
 		} `json:"related"`
-		Type struct {
+		Created string `json:"created"`
+		Type    struct {
 			Coding []PASCoding `json:"coding"`
 		} `json:"type"`
 		Priority struct {
@@ -129,6 +133,7 @@ func NewPriorAuthContinuation(line, payerHolder, memberID string, request, respo
 			c.ClaimIdentifiers = append(c.ClaimIdentifiers, *id)
 		}
 	}
+	c.Created = cl.Created
 	if len(cl.Type.Coding) > 0 {
 		c.ClaimType = cl.Type.Coding[0]
 	}

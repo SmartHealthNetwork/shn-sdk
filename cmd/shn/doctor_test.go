@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,6 +45,8 @@ type fakeNetwork struct {
 	// paPended makes the PAS submit PEND (Bundle + Task) and the ClaimUpdate APPROVE —
 	// the pended→resume→approved path.
 	paPended bool
+	// updates records each ClaimUpdate bundle the payer was sent, as it opened it.
+	updates [][]byte
 	// paUC08Denied makes the PAS submit return the real PAS A3 denied ClaimResponse
 	// (reviewActionCode A3) — the denied path the widened ParseClaimResponse classifies.
 	paUC08Denied bool
@@ -245,6 +248,7 @@ func (f *fakeNetwork) payloadFor(txType string, reqPlain []byte) []byte {
 			`"outcome":"complete","preAuthRef":"PA-APPROVED-123",` +
 			`"preAuthPeriod":{"end":"2026-12-31"}}`)
 	case "pas-claim-update":
+		f.updates = append(f.updates, append([]byte(nil), reqPlain...))
 		// The amend approves (the operative report cleared the pend).
 		return []byte(`{"resourceType":"ClaimResponse","status":"active","type":{"coding":[{"code":"professional"}]},` +
 			`"use":"preauthorization","patient":{"reference":"Patient/X"},"created":"` +
@@ -329,7 +333,7 @@ func newFakeNetwork(t *testing.T) (*fakeNetwork, string, string) {
 		payerEnc: payerPriv, payerPub: payerPub,
 		payerID: "payer", now: now,
 		personas: []shnsdk.DiscoveryPersona{
-			{MemberID: "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson", ExpectedEligibility: "covered", ExpectedPriorAuth: "approved", PayerID: &cms, Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "L8000", Display: "Breast prosthesis, mastectomy bra", Diagnosis: "Z90.10"}},
+			{MemberID: "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson", ExpectedEligibility: "covered", ExpectedPriorAuth: "approved", PayerID: &cms, Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "L8000", Display: "Breast prosthesis, mastectomy bra", Diagnosis: "Z90.10", ClaimType: &shnsdk.PASCoding{System: shnsdk.PASSystemClaimType, Code: "professional"}, Priority: &shnsdk.PASCoding{System: shnsdk.PASSystemProcessPriority, Code: "normal"}, ServiceCategory: &shnsdk.PASCoding{System: shnsdk.PASSystemX12ServiceType, Code: "1"}, PlaceOfService: &shnsdk.PASCoding{System: shnsdk.PASSystemPlaceOfService, Code: "12"}, RequestType: &shnsdk.PASCoding{System: shnsdk.PASSystemX12RequestCategory, Code: "HS"}}},
 			{MemberID: "MBR-NOTCOVERED", DOB: "1975-04-02", Family: "Johansson", ExpectedEligibility: "not-covered", PayerID: &cms},
 		},
 	}
@@ -659,13 +663,24 @@ func TestDoctor_OutcomeMismatch(t *testing.T) {
 	}
 }
 
+// personaReport is a DiagnosticReport as a persona's own synthetic system holds it, as the
+// network states it in discovery.
+func personaReport(member string) json.RawMessage {
+	return json.RawMessage(`{"resourceType":"DiagnosticReport","id":"dr-supp-` + member + `","status":"final",` +
+		`"category":[{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/v2-0074","code":"RAD"}]}],` +
+		`"code":{"coding":[{"system":"http://loinc.org","code":"18748-4","display":"Diagnostic imaging study"}]},` +
+		`"subject":{"reference":"Patient/` + member + `"},"effectiveDateTime":"2026-04-30"}`)
+}
+
 // TestDoctor_PriorAuthPendedResume: a pended persona pends, doctor resumes with the
-// demo supplemental, and the post-amend outcome is approved → exitOK.
+// supplemental report the network states for the persona, and the post-amend outcome is
+// approved → exitOK.
 func TestDoctor_PriorAuthPendedResume(t *testing.T) {
 	f, devID, dir := newFakeNetwork(t)
 	f.paPended = true
 	f.personas = []shnsdk.DiscoveryPersona{
-		{MemberID: "MBR-UC04", DOB: "1982-11-03", Family: "Chen", ExpectedEligibility: "covered", ExpectedPriorAuth: "pended", ExpectedAfterAmend: "approved", Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "G0151", Display: "Services of a qualified physical therapist in the home health setting, each 15 minutes", Diagnosis: "I63.9"}},
+		{MemberID: "MBR-UC04", DOB: "1982-11-03", Family: "Chen", ExpectedEligibility: "covered", ExpectedPriorAuth: "pended", ExpectedAfterAmend: "approved", Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "G0151", Display: "Services of a qualified physical therapist in the home health setting, each 15 minutes", Diagnosis: "I63.9", ClaimType: &shnsdk.PASCoding{System: shnsdk.PASSystemClaimType, Code: "professional"}, Priority: &shnsdk.PASCoding{System: shnsdk.PASSystemProcessPriority, Code: "normal"}, ServiceCategory: &shnsdk.PASCoding{System: shnsdk.PASSystemX12ServiceType, Code: "42"}, PlaceOfService: &shnsdk.PASCoding{System: shnsdk.PASSystemPlaceOfService, Code: "12"}, RequestType: &shnsdk.PASCoding{System: shnsdk.PASSystemX12RequestCategory, Code: "HS"}},
+			SupplementalReport: personaReport("MBR-UC04")},
 	}
 	srv := f.start(t)
 	id, err := loadIdentity(dir, devID)
@@ -684,6 +699,60 @@ func TestDoctor_PriorAuthPendedResume(t *testing.T) {
 	if !strings.Contains(stdout, "after amend approved") {
 		t.Errorf("stdout should report the post-amend approved line: %s", stdout)
 	}
+	// The amendment carried the report the network states for the persona, its facts
+	// unchanged: doctor built none.
+	if len(f.updates) != 1 {
+		t.Fatalf("the payer was sent %d amendments, want 1", len(f.updates))
+	}
+	var b struct {
+		Entry []struct {
+			Resource map[string]any `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(f.updates[0], &b); err != nil {
+		t.Fatalf("parse the amendment: %v", err)
+	}
+	var stated map[string]any
+	_ = json.Unmarshal(personaReport("MBR-UC04"), &stated)
+	found := false
+	for _, e := range b.Entry {
+		if e.Resource["resourceType"] != "DiagnosticReport" {
+			continue
+		}
+		found = true
+		for _, k := range []string{"effectiveDateTime", "category", "code", "status"} {
+			if !reflect.DeepEqual(e.Resource[k], stated[k]) {
+				t.Errorf("the amendment's report %s is %v, not the stated %v", k, e.Resource[k], stated[k])
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the amendment carried no DiagnosticReport")
+	}
+}
+
+// TestDoctor_PriorAuthPendedNoReport: a network that states no supplemental report for a
+// persona gets no amendment: doctor has no evidence of its own to send, and builds none.
+func TestDoctor_PriorAuthPendedNoReport(t *testing.T) {
+	f, devID, dir := newFakeNetwork(t)
+	f.paPended = true
+	f.personas = []shnsdk.DiscoveryPersona{
+		{MemberID: "MBR-UC04", DOB: "1982-11-03", Family: "Chen", ExpectedEligibility: "covered", ExpectedPriorAuth: "pended", ExpectedAfterAmend: "approved", Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "G0151", Display: "Services of a qualified physical therapist in the home health setting, each 15 minutes", Diagnosis: "I63.9", ClaimType: &shnsdk.PASCoding{System: shnsdk.PASSystemClaimType, Code: "professional"}, Priority: &shnsdk.PASCoding{System: shnsdk.PASSystemProcessPriority, Code: "normal"}, ServiceCategory: &shnsdk.PASCoding{System: shnsdk.PASSystemX12ServiceType, Code: "42"}, PlaceOfService: &shnsdk.PASCoding{System: shnsdk.PASSystemPlaceOfService, Code: "12"}, RequestType: &shnsdk.PASCoding{System: shnsdk.PASSystemX12RequestCategory, Code: "HS"}}},
+	}
+	srv := f.start(t)
+	id, err := loadIdentity(dir, devID)
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	f.requesterEnc = id.EncPub
+
+	stdout, stderr, code := runCLI("doctor", "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	if code != exitOK {
+		t.Fatalf("doctor exit=%d (want %d)\nstdout=%s\nstderr=%s", code, exitOK, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "⚠ priorauth MBR-UC04: pended; the network states no supplemental report for this persona, so no amendment is sent") || strings.Contains(stdout, "after amend") {
+		t.Errorf("doctor amended with no report stated: %s", stdout)
+	}
 }
 
 // TestDoctor_PriorAuthDenied: a denied persona (A3 review action) → exitOK (the outcome
@@ -692,7 +761,7 @@ func TestDoctor_PriorAuthDenied(t *testing.T) {
 	f, devID, dir := newFakeNetwork(t)
 	f.paUC08Denied = true
 	f.personas = []shnsdk.DiscoveryPersona{
-		{MemberID: "MBR-UC08", DOB: "1971-02-09", Family: "Okafor", ExpectedEligibility: "covered", ExpectedPriorAuth: "denied", Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "J3490", Display: "Unclassified drugs - investigational gene therapy agent", Diagnosis: "D57.1"}},
+		{MemberID: "MBR-UC08", DOB: "1971-02-09", Family: "Okafor", ExpectedEligibility: "covered", ExpectedPriorAuth: "denied", Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "J3490", Display: "Unclassified drugs - investigational gene therapy agent", Diagnosis: "D57.1", ClaimType: &shnsdk.PASCoding{System: shnsdk.PASSystemClaimType, Code: "professional"}, Priority: &shnsdk.PASCoding{System: shnsdk.PASSystemProcessPriority, Code: "normal"}, ServiceCategory: &shnsdk.PASCoding{System: shnsdk.PASSystemX12ServiceType, Code: "1"}, PlaceOfService: &shnsdk.PASCoding{System: shnsdk.PASSystemPlaceOfService, Code: "11"}, RequestType: &shnsdk.PASCoding{System: shnsdk.PASSystemX12RequestCategory, Code: "IN"}}},
 	}
 	srv := f.start(t)
 	id, err := loadIdentity(dir, devID)
@@ -755,7 +824,7 @@ func TestDoctor_PendWithContinuationIsAPass(t *testing.T) {
 			f.personas = []shnsdk.DiscoveryPersona{{
 				MemberID: "MBR-UC04", DOB: "1982-11-03", Family: "Chen",
 				ExpectedEligibility: "covered", ExpectedPriorAuth: "pended", PayerID: &cms,
-				Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "G0151", Display: "Services of a qualified physical therapist in the home health setting, each 15 minutes", Diagnosis: "I63.9"},
+				Order: &shnsdk.DiscoveryOrder{System: "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets", Code: "G0151", Display: "Services of a qualified physical therapist in the home health setting, each 15 minutes", Diagnosis: "I63.9", ClaimType: &shnsdk.PASCoding{System: shnsdk.PASSystemClaimType, Code: "professional"}, Priority: &shnsdk.PASCoding{System: shnsdk.PASSystemProcessPriority, Code: "normal"}, ServiceCategory: &shnsdk.PASCoding{System: shnsdk.PASSystemX12ServiceType, Code: "42"}, PlaceOfService: &shnsdk.PASCoding{System: shnsdk.PASSystemPlaceOfService, Code: "12"}, RequestType: &shnsdk.PASCoding{System: shnsdk.PASSystemX12RequestCategory, Code: "HS"}},
 			}}
 			srv := f.start(t)
 			id, err := loadIdentity(dir, devID)
@@ -776,5 +845,27 @@ func TestDoctor_PendWithContinuationIsAPass(t *testing.T) {
 				t.Errorf("stdout must report the payer's own outcome: %s", stdout)
 			}
 		})
+	}
+}
+
+// The persona's eligibility request names its own payerId, else the resolved
+// payer's one attested identifier, else none (the request is refused): doctor
+// never chooses among several attested identifiers.
+func TestPersonaPayerIdentityIsThePersonasOrTheOneAttested(t *testing.T) {
+	a := shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00402"}
+	b := shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00403"}
+	for name, tc := range map[string]struct {
+		persona shnsdk.DiscoveryPersona
+		holder  holderEntry
+		want    shnsdk.PayerIdentifier
+	}{
+		"the persona's own":            {shnsdk.DiscoveryPersona{PayerID: &a}, holderEntry{PayerIDs: []shnsdk.PayerIdentifier{b}}, a},
+		"the one attested":             {shnsdk.DiscoveryPersona{}, holderEntry{PayerIDs: []shnsdk.PayerIdentifier{b}}, b},
+		"none attested":                {shnsdk.DiscoveryPersona{}, holderEntry{}, shnsdk.PayerIdentifier{}},
+		"two attested, none to choose": {shnsdk.DiscoveryPersona{}, holderEntry{PayerIDs: []shnsdk.PayerIdentifier{a, b}}, shnsdk.PayerIdentifier{}},
+	} {
+		if got := personaPayerIdentity(tc.persona, tc.holder); got != tc.want {
+			t.Errorf("%s: %+v, want %+v", name, got, tc.want)
+		}
 	}
 }

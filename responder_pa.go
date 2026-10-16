@@ -201,9 +201,27 @@ func (r *Responder) handlePASSubmit(plaintext []byte, tok Token, corr string, no
 // fhirJSON is the FHIR JSON media type.
 const fhirJSON = "application/fhir+json"
 
+// answerRequest reads what an answer restates from the request it answers: the
+// request Claim's type and insurer, as written. A request that lacks either is
+// refused (400): the answer would otherwise state a value no one supplied.
+func answerRequest(request []byte) (PASAnswerRequest, handlerResult, bool) {
+	req, err := PASAnswerRequestOf(request)
+	if err == nil {
+		err = req.check()
+	}
+	if err != nil {
+		return PASAnswerRequest{}, handlerResult{appStatus: http.StatusBadRequest, errMsg: "the request Claim states no type or insurer for the answer to restate"}, false
+	}
+	return req, handlerResult{}, true
+}
+
 // approvedAnswer is the approved PAS response for the request.
 func (r *Responder) approvedAnswer(request []byte, patient, corr string, dec PASDecision, now time.Time) handlerResult {
-	crJSON, err := BuildClaimResponse(dec.PreAuthRef, dec.ValidUntil, patient, corr, now)
+	req, refused, ok := answerRequest(request)
+	if !ok {
+		return refused
+	}
+	crJSON, err := BuildClaimResponseExact(dec.PreAuthRef, dec.ValidUntil, patient, corr, req, now)
 	if err != nil {
 		return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build claim response failed"}
 	}
@@ -217,7 +235,11 @@ func (r *Responder) approvedAnswer(request []byte, patient, corr string, dec PAS
 // deniedAnswer is the denied PAS response for the request: the adjudicator's
 // own reason and notes, or none.
 func (r *Responder) deniedAnswer(request []byte, patient, corr string, dec PASDecision, now time.Time) handlerResult {
-	denJSON, err := BuildDeniedResponseWithNotesAtLine("2.0", patient, corr, dec.DenyReason, dec.ProcessNotes, now)
+	req, refused, ok := answerRequest(request)
+	if !ok {
+		return refused
+	}
+	denJSON, err := BuildDeniedResponseWithNotesAtLineExact("2.0", patient, corr, dec.DenyReason, dec.ProcessNotes, req, now)
 	if err != nil {
 		// The builder's error names only a note's position and type code.
 		return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build denied response failed: " + err.Error()}
@@ -244,11 +266,15 @@ func (r *Responder) pendedAnswer(request []byte, patient, corr string, dec PASDe
 	if !ok {
 		return nil, handlerResult{appStatus: http.StatusBadRequest, errMsg: "incomplete PAS request graph"}
 	}
+	req, refused, ok := answerRequest(request)
+	if !ok {
+		return nil, refused
+	}
 	payerURL := dec.PayerURL
 	if payerURL == "" {
 		payerURL = r.cfg.PublicBaseURL
 	}
-	pendedJSON, err := BuildPendedClaimResponseAtLine("2.0", PendedResponseInputs{
+	pendedJSON, err := BuildPendedClaimResponseAtLineExact("2.0", PendedResponseInputs{
 		Correlation: corr,
 		Created:     now,
 		Task: PendedTaskInputs{
@@ -262,6 +288,7 @@ func (r *Responder) pendedAnswer(request []byte, patient, corr string, dec PASDe
 			AuthoredOn: now,
 			Items:      dec.PendedItems,
 		},
+		Request: req,
 	})
 	if err != nil {
 		return nil, handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build pended response failed: " + err.Error()}

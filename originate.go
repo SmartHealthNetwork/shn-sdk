@@ -51,6 +51,11 @@ type Payer struct {
 	// questionnaire request is sent as a framed operation IFF it declares
 	// RequestFrameV1Op ("v1op"), and as the older questionnaire request otherwise.
 	RequestFrames []string
+	// Identity is the payer's identifier as the member's own Coverage names it
+	// (its payor). RunEligibility's request names the payer by it, and refuses
+	// without one (ErrPayerRecordAbsent). The other legs read the payer
+	// from the Coverage the request carries and do not use it.
+	Identity PayerIdentifier
 }
 
 // RunEligibility runs one coverage-eligibility round-trip through the substrate and
@@ -81,7 +86,7 @@ func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoi
 	pci := ResolvePCI(memberID, birthDate, familyName)
 
 	// Step 2 — build the FHIR CoverageEligibilityRequest payload.
-	cer, err := BuildEligibilityRequest(memberID, npi, now)
+	cer, err := BuildEligibilityRequestExact(memberID, npi, payer.Identity, now)
 	if err != nil {
 		return false, "", fmt.Errorf("shnsdk: build eligibility request: %w", err)
 	}

@@ -12,7 +12,7 @@ var testNow = time.Date(2026, 6, 4, 0, 0, 0, 0, time.UTC)
 
 // -- Builder round-trip tests --
 
-// TestBuildClaimResponse_ApprovedRoundTrip: BuildClaimResponse → SDK's own
+// TestBuildClaimResponse_ApprovedRoundTrip: BuildClaimResponseExact → SDK's own
 // ParseClaimResponse reads approved + preAuthRef + validUntil.
 func TestBuildClaimResponse_ApprovedRoundTrip(t *testing.T) {
 	const (
@@ -21,9 +21,9 @@ func TestBuildClaimResponse_ApprovedRoundTrip(t *testing.T) {
 		patientRef = "Patient/MBR-01"
 		corrID     = "corr-cr-1"
 	)
-	cr, err := BuildClaimResponse(preAuthRef, validUntil, patientRef, corrID, testNow)
+	cr, err := BuildClaimResponseExact(preAuthRef, validUntil, patientRef, corrID, testAnswerRequest, testNow)
 	if err != nil {
-		t.Fatalf("BuildClaimResponse: %v", err)
+		t.Fatalf("BuildClaimResponseExact: %v", err)
 	}
 	res, err := ParseClaimResponse(cr)
 	if err != nil {
@@ -57,15 +57,16 @@ func testPendedInputs(line, patientRef, corrID string) PendedResponseInputs {
 			PayerURL:   "https://payer.test/fhir",
 			Items:      []PendedItem{{Sequence: 1, AttachmentCodes: []PASCoding{testOperativeNote}}},
 		},
+		Request: testAnswerRequest,
 	}
 }
 
-// TestBuildPendedResponse_RoundTrip: BuildPendedClaimResponseAtLine →
+// TestBuildPendedResponse_RoundTrip: BuildPendedClaimResponseAtLineExact →
 // ParsePendedResponse reads pended=true and the needed attachment.
 func TestBuildPendedResponse_RoundTrip(t *testing.T) {
-	resp, err := BuildPendedClaimResponseAtLine("2.0", testPendedInputs("2.0", "Patient/MBR-UC04", "corr-pend-1"))
+	resp, err := BuildPendedClaimResponseAtLineExact("2.0", testPendedInputs("2.0", "Patient/MBR-UC04", "corr-pend-1"))
 	if err != nil {
-		t.Fatalf("BuildPendedClaimResponseAtLine: %v", err)
+		t.Fatalf("BuildPendedClaimResponseAtLineExact: %v", err)
 	}
 	pended, items, err := ParsePendedResponse(resp)
 	if err != nil {
@@ -82,13 +83,13 @@ func TestBuildPendedResponse_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestBuildDeniedResponse_RoundTrip: BuildDeniedResponse → SDK's own
+// TestBuildDeniedResponse_RoundTrip: BuildDeniedResponseExact → SDK's own
 // ParseClaimResponse reads Outcome "denied" + ReasonCode "A3" + rationale.
 func TestBuildDeniedResponse_RoundTrip(t *testing.T) {
 	const rationale = "Conservative therapy of at least 6 weeks is not documented."
-	cr, err := BuildDeniedResponse("Patient/MBR-UC08", "corr-deny-1", rationale, testNow)
+	cr, err := BuildDeniedResponseExact("Patient/MBR-UC08", "corr-deny-1", rationale, testAnswerRequest, testNow)
 	if err != nil {
-		t.Fatalf("BuildDeniedResponse: %v", err)
+		t.Fatalf("BuildDeniedResponseExact: %v", err)
 	}
 	res, err := ParseClaimResponse(cr)
 	if err != nil {
@@ -111,7 +112,7 @@ func TestBuildDeniedResponse_RoundTrip(t *testing.T) {
 // -- PAS responder builders at line --
 
 // TestBuildClaimResponseAtLine_RegressionFenceAndRejection: the legacy
-// BuildClaimResponse is byte-identical to AtLine("2.0"); an unrecognised line
+// BuildClaimResponseExact is byte-identical to AtLine("2.0"); an unrecognised line
 // errors (fail-closed).
 func TestBuildClaimResponseAtLine_RegressionFenceAndRejection(t *testing.T) {
 	const (
@@ -120,39 +121,39 @@ func TestBuildClaimResponseAtLine_RegressionFenceAndRejection(t *testing.T) {
 		patientRef = "Patient/MBR-01"
 		corrID     = "corr-cr-atline"
 	)
-	legacy, err := BuildClaimResponse(preAuthRef, validUntil, patientRef, corrID, testNow)
+	legacy, err := BuildClaimResponseExact(preAuthRef, validUntil, patientRef, corrID, testAnswerRequest, testNow)
 	if err != nil {
-		t.Fatalf("BuildClaimResponse: %v", err)
+		t.Fatalf("BuildClaimResponseExact: %v", err)
 	}
-	atLine, err := BuildClaimResponseAtLine("2.0", preAuthRef, validUntil, patientRef, corrID, testNow)
+	atLine, err := BuildClaimResponseAtLineExact("2.0", preAuthRef, validUntil, patientRef, corrID, testAnswerRequest, testNow)
 	if err != nil {
-		t.Fatalf("BuildClaimResponseAtLine(2.0): %v", err)
+		t.Fatalf("BuildClaimResponseAtLineExact(2.0): %v", err)
 	}
 	if !bytes.Equal(legacy, atLine) {
-		t.Fatalf("BuildClaimResponse != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
+		t.Fatalf("BuildClaimResponseExact != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
 	}
-	if _, err := BuildClaimResponseAtLine("9.9", preAuthRef, validUntil, patientRef, corrID, testNow); err == nil {
-		t.Fatal("BuildClaimResponseAtLine(\"9.9\") = nil error, want an error")
+	if _, err := BuildClaimResponseAtLineExact("9.9", preAuthRef, validUntil, patientRef, corrID, testAnswerRequest, testNow); err == nil {
+		t.Fatal("BuildClaimResponseAtLineExact(\"9.9\") = nil error, want an error")
 	}
 }
 
 // TestBuildDeniedResponseAtLine_RegressionFenceAndRejection mirrors the
-// ClaimResponse case for BuildDeniedResponse.
+// ClaimResponse case for BuildDeniedResponseExact.
 func TestBuildDeniedResponseAtLine_RegressionFenceAndRejection(t *testing.T) {
 	const rationale = "Conservative therapy of at least 6 weeks is not documented."
-	legacy, err := BuildDeniedResponse("Patient/MBR-UC08", "corr-deny-atline", rationale, testNow)
+	legacy, err := BuildDeniedResponseExact("Patient/MBR-UC08", "corr-deny-atline", rationale, testAnswerRequest, testNow)
 	if err != nil {
-		t.Fatalf("BuildDeniedResponse: %v", err)
+		t.Fatalf("BuildDeniedResponseExact: %v", err)
 	}
-	atLine, err := BuildDeniedResponseAtLine("2.0", "Patient/MBR-UC08", "corr-deny-atline", rationale, testNow)
+	atLine, err := BuildDeniedResponseAtLineExact("2.0", "Patient/MBR-UC08", "corr-deny-atline", rationale, testAnswerRequest, testNow)
 	if err != nil {
-		t.Fatalf("BuildDeniedResponseAtLine(2.0): %v", err)
+		t.Fatalf("BuildDeniedResponseAtLineExact(2.0): %v", err)
 	}
 	if !bytes.Equal(legacy, atLine) {
-		t.Fatalf("BuildDeniedResponse != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
+		t.Fatalf("BuildDeniedResponseExact != AtLine(\"2.0\"):\n legacy: %s\n atLine: %s", legacy, atLine)
 	}
-	if _, err := BuildDeniedResponseAtLine("9.9", "Patient/MBR-UC08", "corr-deny-atline", rationale, testNow); err == nil {
-		t.Fatal("BuildDeniedResponseAtLine(\"9.9\") = nil error, want an error")
+	if _, err := BuildDeniedResponseAtLineExact("9.9", "Patient/MBR-UC08", "corr-deny-atline", rationale, testAnswerRequest, testNow); err == nil {
+		t.Fatal("BuildDeniedResponseAtLineExact(\"9.9\") = nil error, want an error")
 	}
 }
 
@@ -167,15 +168,15 @@ func TestBuildPendedResponseAtLine_RegressionFenceAndRejection(t *testing.T) {
 	if _, err := BuildPendedResponseAtLine("2.0", "Patient/MBR-UC04", "corr-pend-atline", needed, testNow); !errors.Is(err, ErrPendedResponseNeedsTaskFacts) {
 		t.Fatalf("BuildPendedResponseAtLine error = %v, want ErrPendedResponseNeedsTaskFacts", err)
 	}
-	if _, err := BuildPendedClaimResponseAtLine("9.9", testPendedInputs("2.0", "Patient/MBR-UC04", "corr-pend-atline")); err == nil {
-		t.Fatal("BuildPendedClaimResponseAtLine(\"9.9\") = nil error, want an error")
+	if _, err := BuildPendedClaimResponseAtLineExact("9.9", testPendedInputs("2.0", "Patient/MBR-UC04", "corr-pend-atline")); err == nil {
+		t.Fatal("BuildPendedClaimResponseAtLineExact(\"9.9\") = nil error, want an error")
 	}
 	// Bundle.timestamp: the PAS StructureDefinition sets min=1 on
 	// Bundle.timestamp at every line (2.0.1/2.1.0/2.2.1) — assert it at each.
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
-		got, err := BuildPendedClaimResponseAtLine(line, testPendedInputs(line, "Patient/MBR-UC04", "corr-pend-atline-ts"))
+		got, err := BuildPendedClaimResponseAtLineExact(line, testPendedInputs(line, "Patient/MBR-UC04", "corr-pend-atline-ts"))
 		if err != nil {
-			t.Fatalf("BuildPendedClaimResponseAtLine(%s): %v", line, err)
+			t.Fatalf("BuildPendedClaimResponseAtLineExact(%s): %v", line, err)
 		}
 		if ts := pendedBundleTimestamp(t, got); ts != testNow.UTC().Format(time.RFC3339) {
 			t.Errorf("line %s: Bundle.timestamp = %q, want %q", line, ts, testNow.UTC().Format(time.RFC3339))
@@ -226,7 +227,7 @@ func TestBuildPendedResponseAtLine_BundleIdentifierByLine(t *testing.T) {
 		line     string
 		wantsIdn bool
 	}{{"2.0", false}, {"2.1", false}, {"2.2", true}} {
-		got, err := BuildPendedClaimResponseAtLine(tc.line, testPendedInputs(tc.line, "Patient/MBR-UC04", corrID))
+		got, err := BuildPendedClaimResponseAtLineExact(tc.line, testPendedInputs(tc.line, "Patient/MBR-UC04", corrID))
 		if err != nil {
 			t.Fatalf("BuildPendedResponseAtLine(%s): %v", tc.line, err)
 		}
@@ -283,15 +284,15 @@ func TestClaimResponseRequestByLine(t *testing.T) {
 		line string
 		want bool
 	}{{"2.0", false}, {"2.1", true}, {"2.2", true}} {
-		approved, err := BuildClaimResponseAtLine(tc.line, "PA-abc123", "2026-09-02", "Patient/MBR-01", corrID, testNow)
+		approved, err := BuildClaimResponseAtLineExact(tc.line, "PA-abc123", "2026-09-02", "Patient/MBR-01", corrID, testAnswerRequest, testNow)
 		if err != nil {
-			t.Fatalf("BuildClaimResponseAtLine(%s): %v", tc.line, err)
+			t.Fatalf("BuildClaimResponseAtLineExact(%s): %v", tc.line, err)
 		}
-		denied, err := BuildDeniedResponseAtLine(tc.line, "Patient/MBR-UC08", corrID, "not documented", testNow)
+		denied, err := BuildDeniedResponseAtLineExact(tc.line, "Patient/MBR-UC08", corrID, "not documented", testAnswerRequest, testNow)
 		if err != nil {
-			t.Fatalf("BuildDeniedResponseAtLine(%s): %v", tc.line, err)
+			t.Fatalf("BuildDeniedResponseAtLineExact(%s): %v", tc.line, err)
 		}
-		pended, err := BuildPendedClaimResponseAtLine(tc.line, testPendedInputs(tc.line, "Patient/MBR-UC04", corrID))
+		pended, err := BuildPendedClaimResponseAtLineExact(tc.line, testPendedInputs(tc.line, "Patient/MBR-UC04", corrID))
 		if err != nil {
 			t.Fatalf("BuildPendedResponseAtLine(%s): %v", tc.line, err)
 		}
@@ -342,7 +343,7 @@ func TestBuildPendedResponseAtLine_OutcomeByLine(t *testing.T) {
 	for _, tc := range []struct {
 		line, want string
 	}{{"2.0", "queued"}, {"2.1", "queued"}, {"2.2", "complete"}} {
-		got, err := BuildPendedClaimResponseAtLine(tc.line, testPendedInputs(tc.line, "Patient/MBR-UC04", "corr-pend-outcome"))
+		got, err := BuildPendedClaimResponseAtLineExact(tc.line, testPendedInputs(tc.line, "Patient/MBR-UC04", "corr-pend-outcome"))
 		if err != nil {
 			t.Fatalf("BuildPendedResponseAtLine(%s): %v", tc.line, err)
 		}
@@ -376,7 +377,7 @@ func TestBuildPendedResponseAtLine_OutcomeByLine(t *testing.T) {
 func TestPendedBuilderDecisionSurvivesTaskRemoval(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
-			raw, err := BuildPendedClaimResponseAtLine(line, testPendedInputs(line, "Patient/member", "pending-content"))
+			raw, err := BuildPendedClaimResponseAtLineExact(line, testPendedInputs(line, "Patient/member", "pending-content"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -403,7 +404,7 @@ func TestBuildClaimResponseOmitsUnspecifiedAuthorizationPeriod(t *testing.T) {
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
 			for _, until := range []string{"", "2026-09-30"} {
-				raw, err := BuildClaimResponseAtLine(line, "AUTH-REAL", until, "Patient/member", "period-test", testNow)
+				raw, err := BuildClaimResponseAtLineExact(line, "AUTH-REAL", until, "Patient/member", "period-test", testAnswerRequest, testNow)
 				if err != nil {
 					t.Fatal(err)
 				}

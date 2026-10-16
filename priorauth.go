@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -97,6 +98,15 @@ type PriorAuthRequest struct {
 	// "not-covered" (the originator's own stop, no PAS leg). Same semantics as the
 	// substrate originator's proceedOnNotCovered.
 	ProceedOnNotCovered bool
+	// ClaimFacts are the request's own facts the claim states — its type,
+	// priority, service category, and (optional at the line this orchestrator
+	// submits, PAS 2.0) place of service and request type — read from your own
+	// records. ClaimType, Priority and ServiceCategory are REQUIRED: the order
+	// this orchestrator builds states none of them, and nothing here supplies
+	// one, so RunPriorAuth refuses before its first leg without them (see
+	// PASClaimFacts and ErrPASClaimFactAbsent). The shn CLI fills them from the
+	// discovery descriptor's persona order, or from its flags.
+	ClaimFacts PASClaimFacts
 }
 
 // DemoLumbarContext returns the complete ClinicalContext for the demo lumbar-MRI
@@ -120,9 +130,8 @@ func DemoLumbarContext() ClinicalContext {
 
 // DemoLumbarContextPriorSurgery is DemoLumbarContext plus a prior lumbar surgery — the
 // fill a member with an operative history produces. It is the context the pended→amend
-// exercise uses, because the amend carries that surgery's operative DiagnosticReport (a
-// SupplementalReport you build yourself — this package ships no fixture constructor for
-// one); the PEND itself comes from the payer's own policy on the order, never from this
+// exercise uses, because the amend carries that surgery's operative DiagnosticReport (the
+// report your own system holds, in a SupplementalReport — this package builds none); the PEND itself comes from the payer's own policy on the order, never from this
 // field.
 func DemoLumbarContextPriorSurgery() ClinicalContext {
 	cc := DemoLumbarContext()
@@ -198,6 +207,12 @@ func requirePriorAuthRecords(req PriorAuthRequest) error {
 		return errors.New("prior authorization: your own record for the requesting provider is required (PriorAuthRequest.Provider): a payer matches an inquiry on the member id plus the ordering or rendering provider identifier")
 	}
 	if _, err := payerOrgFromCoverageSearch(req.Coverage); err != nil {
+		return fmt.Errorf("prior authorization: %w", err)
+	}
+	// The claim's own facts, by the rule the PAS build applies at the line
+	// this orchestrator submits (2.0): a request the build would refuse sends
+	// nothing, not even the coverage check.
+	if err := CheckPASClaimFactsAtLine("2.0", req.ClaimFacts); err != nil {
 		return fmt.Errorf("prior authorization: %w", err)
 	}
 	return nil
@@ -488,7 +503,7 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-submit: your Coverage search result names no payer identity: %w", err)
 	}
-	bundleJSON, err := BuildConformantClaimBundle(ConformantClaimInputs{
+	bundleJSON, err := BuildConformantClaimBundleExact(ConformantClaimInputs{
 		QR:             qrJSON,
 		SR:             srJSON,
 		Provider:       req.Provider,
@@ -500,6 +515,7 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 		MemberIDSystem: memberSystem,
 		Corr:           pasCorr,
 		Created:        id.now(),
+		PASClaimFacts:  req.ClaimFacts,
 		// The same reason ResumePriorAuth sets it: a real payer resolves references
 		// against the absolute entry fullUrls of the bundle it was handed, and refuses
 		// a relative one it cannot find (the payer Organization rides as a resolvable
@@ -533,8 +549,19 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 		// submit correlation the ClaimUpdate.related[] references, the bound subject,
 		// the submit QR/SR the update re-includes unchanged, and the
 		// continuation facts an inquiry needs.
+		// The record an amendment of this submission needs, read off the
+		// bytes sent (its type, priority, created and items). The handle
+		// carries it beside the records the amendment re-sends; the
+		// continuation, which carries no clinical content, does not.
+		submission, err := PASPriorClaimOf(bundleJSON)
+		if err != nil {
+			return PriorAuthResult{}, fmt.Errorf("pas-submit: record the submission: %w", err)
+		}
+		facts := req.ClaimFacts
 		result.Resume = &PriorAuthResume{
 			Continuation:          &cont,
+			ClaimFacts:            &facts,
+			Submission:            &submission,
 			OriginalCorrelationID: pasCorr,
 			PatientRef:            patientRef,
 			CoverageRef:           coverageRef,
@@ -546,6 +573,7 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 			ProviderJSON:          json.RawMessage(req.Provider),
 			CoverageJSON:          json.RawMessage(req.Coverage),
 			NeededItems:           result.NeededItems,
+			PendedResponse:        json.RawMessage(pasResp),
 		}
 	}
 	return result, nil
@@ -575,7 +603,7 @@ func (id Identity) runLeg(ctx context.Context, c *http.Client, ep Endpoints, pay
 // request-frame contract) — the token this SDK's request at txType is BUILT at, or "" for a version-neutral leg
 // (coverage-eligibility — mirrors the gateway's paCatalog "" Contract). This SDK does
 // NOT do per-line content negotiation: every Build* helper the PA-chain legs use
-// targets a single fixed native line (BuildClaimResponse's "speaks PAS line 2.0"
+// targets a single fixed native line (BuildClaimResponseExact's "speaks PAS line 2.0"
 // comment is the precedent), so the token is a static per-leg constant rather than a
 // selected one. It is used BOTH to frame the request (toward a requestFrames-
 // declaring payer) and as the expected stamp on that leg's response
@@ -766,23 +794,66 @@ func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoint
 }
 
 // SupplementalReport is the NEW clinical evidence a ClaimUpdate amendment attaches,
-// plus its FR-32 provenance facts. ProvenanceAgent is REQUIRED: the payer REJECTS
-// supplemental data without Provenance. Use the registered holder namespace
-// http://smarthealth.network/ids/holder or the NPI namespace
-// http://hl7.org/fhir/sid/us-npi with the actual source identifier.
-// ResumePriorAuth validates it BEFORE
-// sealing and fails with a clear error — the dev meets FR-32 as a named
-// precondition, not a cryptic three-legs-deep payer rejection.
+// plus its FR-32 provenance facts.
+//
+// Report is the DiagnosticReport your own system holds, as the JSON it holds: its
+// effective date, category, code and content are your system's facts, and the SDK
+// carries them as they are. It builds no clinical content of its own and fills in no
+// default. Its subject must be the authorization's patient (the resume handle's PatientRef,
+// Patient/<member id>): if your system names the patient by its own id, re-point
+// subject.reference before you send it.
+//
+// ProvenanceAgent is REQUIRED: the payer REJECTS supplemental data without
+// Provenance. Use the registered holder namespace http://smarthealth.network/ids/holder
+// or the NPI namespace http://hl7.org/fhir/sid/us-npi with the actual source
+// identifier.
+//
+// ResumePriorAuth checks both BEFORE sealing and fails with a clear error: the dev
+// meets each as a named precondition, not a cryptic three-legs-deep payer rejection.
 type SupplementalReport struct {
-	ReportID        string               // the DiagnosticReport id (e.g. "dr-uc04-operative")
-	CPT             string               // procedure code (e.g. "72148")
-	Display         string               // procedure display
+	Report          []byte               // your system's DiagnosticReport, as JSON — REQUIRED
 	ProvenanceAgent ProvenanceIdentifier // FR-32 source identifier — REQUIRED
 }
 
+// reportID checks supp.Report is a DiagnosticReport about patientRef and returns its id, which
+// may be empty: the bundle builder gives the report its bundle-local id and points the
+// Provenance at it. It reads the report and changes nothing in it. The subject is checked
+// because the bundle the SDK builds names the authorization's patient: a report about any other
+// subject would point at nothing in it.
+func (supp SupplementalReport) reportID(patientRef string) (string, error) {
+	if len(bytes.TrimSpace(supp.Report)) == 0 {
+		return "", fmt.Errorf("SupplementalReport.Report is required: the DiagnosticReport your system holds (the SDK builds none)")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(supp.Report, &fields); err != nil || fields == nil {
+		return "", fmt.Errorf("SupplementalReport.Report is not a JSON object")
+	}
+	var rt, id string
+	if err := json.Unmarshal(fields["resourceType"], &rt); err != nil || rt != "DiagnosticReport" {
+		return "", fmt.Errorf("SupplementalReport.Report is not a DiagnosticReport (resourceType %s)", strings.TrimSpace(string(fields["resourceType"])))
+	}
+	if raw, ok := fields["id"]; ok {
+		if err := json.Unmarshal(raw, &id); err != nil {
+			return "", fmt.Errorf("SupplementalReport.Report's id is not a string: %s", raw)
+		}
+	}
+	var subject struct {
+		Reference string `json:"reference"`
+	}
+	if raw, ok := fields["subject"]; !ok || json.Unmarshal(raw, &subject) != nil || subject.Reference == "" {
+		return "", fmt.Errorf("SupplementalReport.Report names no subject.reference; it must be the authorization's patient %q", patientRef)
+	}
+	if subject.Reference != patientRef {
+		return "", fmt.Errorf("SupplementalReport.Report is about %q, not the authorization's patient %q: re-point its subject.reference to %q",
+			subject.Reference, patientRef, patientRef)
+	}
+	return id, nil
+}
+
 // ResumePriorAuth drives the exchange-2 ClaimUpdate from a pended PA's resume
-// handle: validate supp (complete source identifier → else error, no wire) → build the
-// operative DiagnosticReport + Provenance → BuildConformantClaimUpdateBundle (reusing the
+// handle: validate supp (complete source identifier, and the caller's own report about the
+// authorization's patient → else error, no wire) → build its Provenance →
+// BuildConformantClaimUpdateBundleExact (the caller's report carried as it is) (reusing the
 // submit QR/SR unchanged, related[] → the original submit correlation, FR-21) → ONE sealed
 // round-trip via runLeg under pas-claim-update / pas-update-submit / pas-update-response
 // → parse the response. The outcome set is approved | pended | denied: the payer can
@@ -814,15 +885,16 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 	if err := supp.ProvenanceAgent.validate(); err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: SupplementalReport.ProvenanceAgent is required (FR-32: supplemental data must be attributed)")
 	}
-	if supp.ReportID == "" {
-		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: SupplementalReport.ReportID is required")
-	}
-
-	drJSON, err := BuildDiagnosticReport(supp.ReportID, resume.PatientRef, supp.CPT, supp.Display)
+	// The report is the caller's own, carried as it is: no clinical value is built here.
+	reportID, err := supp.reportID(resume.PatientRef)
 	if err != nil {
-		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: build diagnostic report: %w", err)
+		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: %w", err)
 	}
-	provJSON, err := BuildProvenanceWithIdentifier("DiagnosticReport/"+supp.ReportID, supp.ProvenanceAgent, id.now())
+	drJSON := supp.Report
+	if reportID == "" {
+		reportID = conformantPASDRID // the bundle-local id the builder gives it
+	}
+	provJSON, err := BuildProvenanceWithIdentifier("DiagnosticReport/"+reportID, supp.ProvenanceAgent, id.now())
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: build provenance: %w", err)
 	}
@@ -843,7 +915,22 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: your Coverage search result names no payer identity: %w", err)
 	}
-	bundleJSON, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{
+	// The amendment states the submission's own facts and restates the recorded
+	// submission (its type, priority, created and items). A handle written
+	// before shn-sdk v0.62.0 carries neither, and is refused rather than
+	// amended with values this package would supply.
+	if resume.ClaimFacts == nil {
+		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: Claim.type, Claim.priority and Claim.item.category %w (expected from the resume handle's claimFacts, which a handle written before shn-sdk v0.62.0 does not carry)", ErrPASClaimFactAbsent)
+	}
+	if resume.Submission == nil {
+		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: the prior Claim's type, priority, created and items %w (expected from the resume handle's submission record, which a handle written before shn-sdk v0.62.0 does not carry)", ErrPASClaimFactAbsent)
+	}
+	bundleJSON, err := BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{
+		PASClaimFacts: *resume.ClaimFacts,
+		PriorClaim:    *resume.Submission,
+		// The payer's pend the handle kept: the attached report is linked to
+		// the items it asks the report for, and to no other.
+		Pend:             resume.PendedResponse,
 		QR:               resume.QRJSON,
 		SR:               resume.SRJSON,
 		Provider:         resume.ProviderJSON,
@@ -905,19 +992,13 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 			}
 			cont = &next
 		}
-		result.Resume = &PriorAuthResume{
-			Continuation:          cont,
-			OriginalCorrelationID: resume.OriginalCorrelationID,
-			PatientRef:            resume.PatientRef,
-			CoverageRef:           resume.CoverageRef,
-			MemberID:              resume.MemberID,
-			MemberIDSystem:        resume.MemberIDSystem,
-			SubjectPCI:            resume.SubjectPCI,
-			QRJSON:                resume.QRJSON,
-			SRJSON:                resume.SRJSON,
-			NeededItems:           result.NeededItems,
-			PayerID:               resume.PayerID,
-		}
+		// The handle is the original submission's, copied whole so no fact of it is
+		// lost: only what the payer now holds, still needs and last answered changes.
+		handle := resume
+		handle.Continuation = cont
+		handle.NeededItems = result.NeededItems
+		handle.PendedResponse = json.RawMessage(updResp)
+		result.Resume = &handle
 	}
 	return result, nil
 }

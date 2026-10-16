@@ -197,12 +197,12 @@ func TestParseServiceRequestSubject(t *testing.T) {
 }
 
 // TestParseCoverageBeneficiary verifies that ParseCoverageBeneficiary extracts the
-// beneficiary reference from BuildCoverage output and rejects wrong resourceType.
+// beneficiary reference from BuildCoverageExact output and rejects wrong resourceType.
 func TestParseCoverageBeneficiary(t *testing.T) {
 	const patientRef = "Patient/MBR-COVERED"
-	cov, err := BuildCoverage(patientRef, "MBR-COVERED")
+	cov, err := BuildCoverageExact(patientRef, "MBR-COVERED", CMSPayerIdentity)
 	if err != nil {
-		t.Fatalf("BuildCoverage: %v", err)
+		t.Fatalf("BuildCoverageExact: %v", err)
 	}
 	got, err := ParseCoverageBeneficiary(cov)
 	if err != nil {

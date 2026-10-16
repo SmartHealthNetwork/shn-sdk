@@ -1,6 +1,7 @@
 package shnsdk_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -109,13 +110,28 @@ func TestParseOrderProductCoding_DeviceRequest(t *testing.T) {
 // catches — the builder refuses loudly instead. Prefix check ONLY: a member id that
 // contains "/" elsewhere is the payer's business, not ours.
 func TestBuildCoverageRejectsCoveragePrefixedMember(t *testing.T) {
-	if _, err := shnsdk.BuildCoverage("Patient/p1", "Coverage/MBR-X"); err == nil {
+	if _, err := shnsdk.BuildCoverageExact("Patient/p1", "Coverage/MBR-X", shnsdk.CMSPayerIdentity); err == nil {
 		t.Fatal("Coverage/-prefixed member must refuse loudly (signature-compatible semantic break)")
 	} else if !strings.Contains(err.Error(), "must be the bare member id") {
 		t.Fatalf("refusal must name the contract it enforces, got %v", err)
 	}
 	// The bare member id — the only correct value — still builds.
-	if _, err := shnsdk.BuildCoverage("Patient/p1", "MBR-X"); err != nil {
+	if _, err := shnsdk.BuildCoverageExact("Patient/p1", "MBR-X", shnsdk.CMSPayerIdentity); err != nil {
 		t.Fatalf("bare member id must build: %v", err)
+	}
+}
+
+// BuildCoverageExact names the payer the member's coverage is with, by its
+// identifier, and refuses without one: it never writes a placeholder payor.
+func TestBuildCoverageNamesThePayerOrRefuses(t *testing.T) {
+	b, err := shnsdk.BuildCoverageExact("Patient/p1", "MBR-X", shnsdk.PayerIdentifier{System: shnsdk.CMSPayerIdentity.System, Value: "00402"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00402"}}]`) {
+		t.Fatalf("payor: %s, want the payer's identifier", b)
+	}
+	if b, err := shnsdk.BuildCoverageExact("Patient/p1", "MBR-X", shnsdk.PayerIdentifier{}); !errors.Is(err, shnsdk.ErrPayerRecordAbsent) || b != nil {
+		t.Fatalf("no payer: err=%v built=%s, want ErrPayerRecordAbsent and nothing built", err, b)
 	}
 }

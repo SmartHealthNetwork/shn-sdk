@@ -1,6 +1,7 @@
 package shnsdk
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -19,8 +20,8 @@ const (
 	systemUSCoreDocClass = "http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category"
 
 	// docRefDateUC05 is the fixed instant for the operative DocumentReference
-	// disclosed by the external facility (matches the operative DiagnosticReport
-	// effectiveDateTime date — 2026-05-15). FHIR DocumentReference.date is an instant
+	// disclosed by the external facility (the date of the network's synthetic operative
+	// report, 2026-05-15). FHIR DocumentReference.date is an instant
 	// type, so a full ISO 8601 timestamp is required. recordClinicalDate truncates to
 	// YYYY-MM-DD for InRange comparison (FR-24). Fixed value keeps the golden
 	// byte-deterministic (FR-35/FR-39). Mirrors internal/fhirmap.docRefDateUC05.
@@ -39,47 +40,28 @@ const (
 	CARCSystem = "https://x12.org/codes/claim-adjustment-reason-codes"
 	RARCSystem = "https://x12.org/codes/remittance-advice-remark-codes"
 
-	// pdexReviewActionURL and pdexReviewActionCodeURL are the PDex review
-	// action extension and its code sub-extension.
-	pdexReviewActionURL     = "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewAction"
-	pdexReviewActionCodeURL = "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewActionCode"
-
-	// systemCARC is the X12 Claim Adjustment Reason Codes system (PDex PPA denial
-	// reason binding). CARC 50 = "non-covered… not deemed a 'medical necessity'."
-	// Mirrors internal/fhirmap.systemCARC (eob.go).
-	systemCARC = "https://x12.org/codes/claim-adjustment-reason-codes"
-
-	// systemPDexAdjudication is the PDex Adjudication Discriminator code system.
-	// Mirrors internal/fhirmap.systemPDexAdjudication (eob.go).
-	systemPDexAdjudication = "http://hl7.org/fhir/us/davinci-pdex/CodeSystem/PDexAdjudicationDiscriminator"
-
-	// systemPAProcedureCPT reuses the package CPT system const (order.go).
-	// Mirrors internal/fhirmap.systemPAProcedureCPT (eob.go).
-	systemPAProcedureCPT = systemCPT
-
-	// systemAdjudication is the standard FHIR adjudication codesystem; "submitted"
-	// is in the PDex "adjudicationamounttype" slice binding (PDexAdjudication VS).
+	// systemAdjudication is the standard FHIR adjudication codesystem; its
+	// "submitted" code carries the request item's net on a decision EOB.
 	// Mirrors internal/fhirmap.systemAdjudication (eob.go).
 	systemAdjudication = "http://terminology.hl7.org/CodeSystem/adjudication"
-
-	// EOBAppealNote is the fixed appeal-rights text BuildPADecisionEOB writes on a
-	// denied EOB when PADecisionEOBParams.ProcessNotes is nil.
-	// Mirrors internal/fhirmap.EOBAppealNote (eob.go).
-	//
-	// Deprecated: the payer's own appeal terms belong in
-	// PADecisionEOBParams.ProcessNotes. The nil-notes default that emits this text
-	// will be removed in a later release.
-	EOBAppealNote = "Appeal window: 30 days from the date of this determination. " +
-		"A peer-to-peer review with the medical director may be requested before filing a formal appeal."
 )
 
-// BuildEligibilityRequest constructs a FHIR R4 CoverageEligibilityRequest for the
-// member, ordering NPI, and date of service (now). Returns FHIR JSON. PORTED
-// standalone from internal/fhirmap.BuildEligibilityRequest with the SAME field
-// shapes so the wire resource is identical — proven by the cross-module parity
-// test (test/sdkparity/fhir_parity_test.go), which feeds an SDK-built request to
-// the substrate parser.
-func BuildEligibilityRequest(memberID, npi string, now time.Time) ([]byte, error) {
+// BuildEligibilityRequestExact constructs a FHIR R4 CoverageEligibilityRequest for the
+// member, ordering NPI, and date of service (now). Returns FHIR JSON. Its
+// v0.61.1 form, the Deprecated BuildEligibilityRequest, is the one the
+// cross-module parity test fences against internal/fhirmap; this builder names
+// the payer by identifier, which neither of them does.
+//
+// payer is the payer the member's own Coverage names (its payor's identifier),
+// the one the request is routed to. The request's insurer names it as a
+// logical reference (Reference.identifier). Without one the builder refuses
+// (ErrPayerRecordAbsent): it never writes a placeholder (through shn-sdk
+// v0.61.x the insurer was the literal Organization/payer, which named no
+// resource and no participant's record).
+func BuildEligibilityRequestExact(memberID, npi string, payer PayerIdentifier, now time.Time) ([]byte, error) {
+	if !payer.named() {
+		return nil, fmt.Errorf("shnsdk: eligibility request insurer: %w", ErrPayerRecordAbsent)
+	}
 	created := now.UTC().Format(time.RFC3339)
 	patientRef := "Patient/" + memberID
 	providerRef := "Practitioner/" + npi
@@ -88,7 +70,7 @@ func BuildEligibilityRequest(memberID, npi string, now time.Time) ([]byte, error
 		Purpose:  []fhir.EligibilityRequestPurpose{fhir.EligibilityRequestPurposeBenefits},
 		Patient:  fhir.Reference{Reference: strPtr(patientRef)},
 		Created:  created,
-		Insurer:  fhir.Reference{Reference: strPtr("Organization/payer")},
+		Insurer:  payer.reference(),
 		Provider: &fhir.Reference{Reference: strPtr(providerRef)},
 	}
 	return json.Marshal(cer)
@@ -122,31 +104,64 @@ func ParseEligibilityResponse(b []byte) (covered bool, reason string, err error)
 	return covered, reason, nil
 }
 
-// BuildEligibilityResponse constructs a FHIR R4 CoverageEligibilityResponse for the
+// BuildEligibilityResponseExact constructs a FHIR R4 CoverageEligibilityResponse for the
 // payer side of a coverage-eligibility check. When covered, insurance is in force;
 // when not covered, inforce is false and reason is carried in the disposition.
-// PORTED standalone from
-// internal/fhirmap.BuildEligibilityResponse with identical field shapes — proven by
-// the cross-module parity test (test/sdkparity/fhir_parity_test.go).
+// Its v0.61.1 form, the Deprecated BuildEligibilityResponse, is the one the
+// cross-module parity test fences against internal/fhirmap; this builder refuses
+// an insurer without both a system and a value, which neither of them does.
 //
 // insurer names the member's real Coverage payor — the promoted engine handler
 // derives it from SoR.OpenCoverage via shnsdk.ParsePayerIdentifier, one Coverage
 // read feeding both the verdict and the identity. It is stamped as a LOGICAL reference
 // (Reference.identifier), the standard FHIR idiom for an identifier known but not locally
-// resolvable as a URL. A ZERO-VALUE insurer (both System and Value empty) preserves
-// today's byte-identical output — the pre-insurer literal Reference{Reference:
-// "Organization/payer"} — for callers not yet threading a real Coverage-derived identity
-// (sdk/responder.go's standalone Responder has no Coverage/SoR of its own; parity safety).
+// resolvable as a URL. Without one the builder refuses (ErrPayerRecordAbsent): through
+// shn-sdk v0.61.x a zero insurer wrote the placeholder Organization/payer, which named no
+// resource and no participant's record.
 //
 // The "req-" prefix on the request reference is applied here so callers pass only the
 // bare correlationID. created is supplied by the caller so the resource is
 // byte-deterministic for a given clock.
-func BuildEligibilityResponse(correlationID, patientRef string, covered bool, reason string, insurer PayerIdentifier, created time.Time) ([]byte, error) {
-	member := strings.TrimPrefix(patientRef, "Patient/")
-	insurerRef := fhir.Reference{Reference: strPtr("Organization/payer")}
-	if insurer.System != "" || insurer.Value != "" {
-		insurerRef = fhir.Reference{Identifier: &fhir.Identifier{System: strPtr(insurer.System), Value: strPtr(insurer.Value)}}
+func BuildEligibilityResponseExact(correlationID, patientRef string, covered bool, reason string, insurer PayerIdentifier, created time.Time) ([]byte, error) {
+	if !insurer.named() {
+		return nil, fmt.Errorf("shnsdk: eligibility response insurer: %w", ErrPayerRecordAbsent)
 	}
+	return buildEligibilityResponse(correlationID, patientRef, covered, reason, insurer.reference(), created)
+}
+
+// BuildEligibilityAnswer is BuildEligibilityResponseExact for an answer that names the
+// payer its request named: requestInsurer is the request's insurer Reference as
+// written (ParseEligibilityRequestInsurer), in whatever form it takes, a literal
+// reference included, and it is restated JSON-equal, every member carried (a
+// primitive's extension and a member the FHIR model does not know included).
+// Absent, null or empty, the builder refuses (ErrPayerRecordAbsent) rather than
+// name a payer of its own.
+func BuildEligibilityAnswer(correlationID, patientRef string, covered bool, reason string, requestInsurer json.RawMessage, created time.Time) ([]byte, error) {
+	if !isJSONObjectWithMembers(requestInsurer) {
+		return nil, fmt.Errorf("shnsdk: eligibility answer insurer, from the request it answers: %w", ErrPayerRecordAbsent)
+	}
+	// The request's insurer is carried as raw JSON, never decoded into the FHIR
+	// model: the model has no place for a primitive's extension (_reference,
+	// _display) or a member it does not know, and would drop it. This field takes
+	// the base's place in the encoding (the outer field wins).
+	type answerBase fhir.CoverageEligibilityResponse
+	answer := struct {
+		answerBase
+		Insurer json.RawMessage `json:"insurer"`
+	}{answerBase: answerBase(eligibilityResponse(correlationID, patientRef, covered, reason, fhir.Reference{}, created)), Insurer: requestInsurer}
+	raw, err := json.Marshal(answer)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: marshal eligibility answer: %w", err)
+	}
+	return pasInjectResourceType(raw, "CoverageEligibilityResponse")
+}
+
+func buildEligibilityResponse(correlationID, patientRef string, covered bool, reason string, insurerRef fhir.Reference, created time.Time) ([]byte, error) {
+	return json.Marshal(eligibilityResponse(correlationID, patientRef, covered, reason, insurerRef, created))
+}
+
+func eligibilityResponse(correlationID, patientRef string, covered bool, reason string, insurerRef fhir.Reference, created time.Time) fhir.CoverageEligibilityResponse {
+	member := strings.TrimPrefix(patientRef, "Patient/")
 	resp := fhir.CoverageEligibilityResponse{
 		Status:  fhir.FinancialResourceStatusCodesActive,
 		Purpose: []fhir.EligibilityResponsePurpose{fhir.EligibilityResponsePurposeBenefits},
@@ -175,7 +190,28 @@ func BuildEligibilityResponse(correlationID, patientRef string, covered bool, re
 	if !covered && reason != "" {
 		resp.Disposition = strPtr(reason)
 	}
-	return json.Marshal(resp)
+	return resp
+}
+
+// ParseEligibilityRequestInsurer returns the insurer Reference a
+// CoverageEligibilityRequest names, exactly as written: a logical reference
+// (Reference.identifier, as BuildEligibilityRequestExact writes it) or a literal one,
+// as earlier releases sent. ok is false when the request names no insurer.
+func ParseEligibilityRequestInsurer(data []byte) (insurer json.RawMessage, ok bool) {
+	var req struct {
+		ResourceType string          `json:"resourceType"`
+		Insurer      json.RawMessage `json:"insurer"`
+	}
+	if json.Unmarshal(data, &req) != nil || req.ResourceType != "CoverageEligibilityRequest" || !isJSONObjectWithMembers(req.Insurer) {
+		return nil, false
+	}
+	return req.Insurer, true
+}
+
+// isJSONObjectWithMembers reports whether raw is a JSON object with at least one member.
+func isJSONObjectWithMembers(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	return json.Unmarshal(raw, &obj) == nil && len(obj) > 0
 }
 
 // ParseEligibilityRequestMember extracts the member ID from a
@@ -204,51 +240,6 @@ func ParseEligibilityRequestMember(data []byte) (memberID string, err error) {
 	}
 	ref := *req.Patient.Reference
 	return strings.TrimPrefix(ref, "Patient/"), nil
-}
-
-const (
-	// profileUSCoreDiagnosticReportNote — US Core 6.1.0 DiagnosticReport Note profile.
-	// Mirrors internal/fhirmap.profileUSCoreDiagnosticReportNote.
-	profileUSCoreDiagnosticReportNote = "http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note"
-	// systemV2DiagnosticService — HL7 v2-0074 code system for the required category.
-	systemV2DiagnosticService = "http://terminology.hl7.org/CodeSystem/v2-0074"
-	// effectiveDateUC04 — fixed effective date for supplemental DiagnosticReports
-	// (deterministic across runs; no clock). Mirrors internal/fhirmap.effectiveDateUC04.
-	effectiveDateUC04 = "2026-05-15"
-)
-
-// BuildDiagnosticReport builds a US Core DiagnosticReport (Note profile) for the
-// supplemental operative report attached to a pended prior-auth amendment (FR-32).
-// Reimplements internal/fhirmap.BuildDiagnosticReport standalone; test/sdkparity
-// asserts byte-identity. systemCPT is the package const from order.go.
-// Fixed effectiveDateTime ⇒ deterministic (no clock).
-func BuildDiagnosticReport(id, patientRef, cptCode, display string) ([]byte, error) {
-	effectiveDate := effectiveDateUC04
-	dr := fhir.DiagnosticReport{
-		Id:     strPtr(id),
-		Meta:   &fhir.Meta{Profile: []string{profileUSCoreDiagnosticReportNote}},
-		Status: fhir.DiagnosticReportStatusFinal,
-		Category: []fhir.CodeableConcept{
-			{
-				Coding: []fhir.Coding{{
-					System:  strPtr(systemV2DiagnosticService),
-					Code:    strPtr("RAD"),
-					Display: strPtr("Radiology"),
-				}},
-			},
-		},
-		Code: fhir.CodeableConcept{
-			Coding: []fhir.Coding{{
-				System:  strPtr(systemCPT),
-				Code:    strPtr(cptCode),
-				Display: strPtr(display),
-			}},
-		},
-		Subject:           &fhir.Reference{Reference: strPtr(patientRef)},
-		EffectiveDateTime: &effectiveDate,
-	}
-	// fhir.DiagnosticReport.MarshalJSON injects resourceType automatically.
-	return json.Marshal(dr)
 }
 
 func strPtr(s string) *string { return &s }
@@ -280,8 +271,8 @@ func BuildDocumentReference(id, patientRef, drRef string) ([]byte, error) {
 		},
 		Subject: &fhir.Reference{Reference: strPtr(patientRef)},
 		// Date is the creation/indexing instant of the document — used for FR-24
-		// range filtering (recordClinicalDate reads this field). Fixed to match the
-		// operative DiagnosticReport effectiveDateTime (2026-05-15, FR-35/FR-39).
+		// range filtering (recordClinicalDate reads this field). Fixed to the date of the
+		// network's synthetic operative report (2026-05-15, FR-35/FR-39).
 		Date: &date,
 		Content: []fhir.DocumentReferenceContent{
 			{Attachment: fhir.Attachment{
@@ -296,40 +287,220 @@ func BuildDocumentReference(id, patientRef, drRef string) ([]byte, error) {
 	return json.Marshal(dr)
 }
 
-// PADecision selects the adjudication shape of a PDex PA decision EOB.
-// Promoted verbatim from internal/fhirmap.PADecision.
-type PADecision int
-
+// The payer's review action is re-expressed in the EOB's own extension. PAS
+// defines extension-reviewAction for ClaimResponse.item.adjudication (and
+// Claim.item) only, so carried onto ExplanationOfBenefit.item.adjudication it
+// is an extension used out of its context, which base FHIR R4 validation
+// refuses. PDex defines the same extension, with the same sub-extensions, for
+// the ExplanationOfBenefit adjudication contexts. It is used here only because
+// it is the one defined for that context: the EOB still claims no PDex profile
+// (no meta.profile, no CapabilityStatement claim). Every value is copied
+// exactly; only the extension and sub-extension URLs change, and only as this
+// registered table maps them, field for field (PAS 2.0.1/2.1.0/2.2.1 and PDex
+// 2.1.0 both define code, number, reasonCode and secondSurgicalOpinionFlag).
+// A payer sub-extension the table does not map writes no EOB
+// (PADecisionEOBUnmappedError): it is never dropped.
+// Mirrors internal/fhirmap.reviewActionSubExtensionPDex (eob.go).
 const (
-	PADecisionApproved PADecision = iota
-	PADecisionDenied
+	pasReviewActionURL  = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction"
+	pdexReviewActionURL = "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewAction"
 )
 
-// eobJSON and its supporting types are package-local structs for the PDex PA
-// decision ExplanationOfBenefit wire shape. Promoted verbatim from
-// internal/fhirmap/eob.go.
-type eobJSON struct {
-	ResourceType string             `json:"resourceType"`
-	Id           string             `json:"id"`
-	Status       string             `json:"status"`
-	Type         eobCodeableConcept `json:"type"`
-	Use          string             `json:"use"`
-	Patient      eobReference       `json:"patient"`
-	PreAuthRef   []string           `json:"preAuthRef,omitempty"`
-	Created      string             `json:"created"`
-	Insurer      eobReference       `json:"insurer"`
-	Provider     eobReference       `json:"provider"`
-	Outcome      string             `json:"outcome"`
-	Insurance    []eobInsurance     `json:"insurance"`
-	Item         []eobItem          `json:"item"`
-	ProcessNote  []eobProcessNote   `json:"processNote,omitempty"`
+var reviewActionSubExtensionPDex = map[string]string{
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode": "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewActionCode",
+	"number":                    "number",
+	"reasonCode":                "reasonCode",
+	"secondSurgicalOpinionFlag": "secondSurgicalOpinionFlag",
 }
 
+// PADecisionEOBUnmappedError reports a sub-extension of the payer's review
+// action that the EOB's review action has no counterpart for: the EOB is not
+// built, and the sub-extension is never dropped. URL is the payer's;
+// Position is the sub-extension's 1-based place in the review action. The
+// error text names the position only, never the payer's URL, so a finding or
+// log line built from it carries no payload value.
+type PADecisionEOBUnmappedError struct {
+	URL      string
+	Position int
+}
+
+func (e *PADecisionEOBUnmappedError) Error() string {
+	return fmt.Sprintf("shnsdk: review action sub-extension %d has no counterpart in the EOB review action", e.Position)
+}
+
+// jsonMember is one member of a JSON object, its value as written.
+type jsonMember struct {
+	Key   string
+	Value json.RawMessage
+}
+
+// jsonObjectMembers reads a JSON object's members in order, each value as
+// written; ok is false for anything that is not an object.
+func jsonObjectMembers(b json.RawMessage) ([]jsonMember, bool) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, false
+	}
+	var out []jsonMember
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		key, ok := t.(string)
+		if !ok {
+			return nil, false
+		}
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, false
+		}
+		out = append(out, jsonMember{Key: key, Value: v})
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return nil, false
+	}
+	return out, true
+}
+
+// jsonObject writes members back as one object, in order.
+func jsonObject(members []jsonMember) json.RawMessage {
+	var b bytes.Buffer
+	b.WriteByte('{')
+	for i, m := range members {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		k, _ := json.Marshal(m.Key)
+		b.Write(k)
+		b.WriteByte(':')
+		b.Write(m.Value)
+	}
+	b.WriteByte('}')
+	return b.Bytes()
+}
+
+// withURL rewrites an extension object's url member, every other member as
+// written. ok is false when the object has no string url.
+func withURL(ext json.RawMessage, rewrite func(string) (string, error)) (json.RawMessage, error) {
+	members, ok := jsonObjectMembers(ext)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: payer review action extension is not a JSON object")
+	}
+	for i, m := range members {
+		if m.Key != "url" {
+			continue
+		}
+		var u string
+		if err := json.Unmarshal(m.Value, &u); err != nil {
+			return nil, fmt.Errorf("shnsdk: payer review action extension url is not a string")
+		}
+		to, err := rewrite(u)
+		if err != nil {
+			return nil, err
+		}
+		members[i].Value, _ = json.Marshal(to)
+	}
+	return jsonObject(members), nil
+}
+
+// transcribeReviewAction re-expresses one payer adjudication's PAS review
+// action in the EOB's own extension (see the table above). Every other member
+// of the adjudication, and every value inside the review action, is carried as
+// written.
+func transcribeReviewAction(adj json.RawMessage) (json.RawMessage, error) {
+	members, ok := jsonObjectMembers(adj)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: payer adjudication is not a JSON object")
+	}
+	for i, m := range members {
+		if m.Key != "extension" {
+			continue
+		}
+		var exts []json.RawMessage
+		if err := json.Unmarshal(m.Value, &exts); err != nil {
+			return nil, fmt.Errorf("shnsdk: payer adjudication extension is not a list")
+		}
+		for j, ext := range exts {
+			var head struct {
+				URL string `json:"url"`
+			}
+			if json.Unmarshal(ext, &head) != nil || head.URL != pasReviewActionURL {
+				continue
+			}
+			outer, ok := jsonObjectMembers(ext)
+			if !ok {
+				return nil, fmt.Errorf("shnsdk: payer review action is not a JSON object")
+			}
+			for k, om := range outer {
+				switch om.Key {
+				case "url":
+					outer[k].Value, _ = json.Marshal(pdexReviewActionURL)
+				case "extension":
+					var subs []json.RawMessage
+					if err := json.Unmarshal(om.Value, &subs); err != nil {
+						return nil, fmt.Errorf("shnsdk: payer review action sub-extensions are not a list")
+					}
+					parts := make([]string, 0, len(subs))
+					for n, sub := range subs {
+						t, err := withURL(sub, func(u string) (string, error) {
+							if to, ok := reviewActionSubExtensionPDex[u]; ok {
+								return to, nil
+							}
+							return "", &PADecisionEOBUnmappedError{URL: u, Position: n + 1}
+						})
+						if err != nil {
+							return nil, err
+						}
+						parts = append(parts, string(t))
+					}
+					outer[k].Value = json.RawMessage("[" + strings.Join(parts, ",") + "]")
+				}
+			}
+			exts[j] = jsonObject(outer)
+		}
+		parts := make([]string, 0, len(exts))
+		for _, e := range exts {
+			parts = append(parts, string(e))
+		}
+		members[i].Value = json.RawMessage("[" + strings.Join(parts, ",") + "]")
+	}
+	return jsonObject(members), nil
+}
+
+// eobJSON and its supporting types are package-local structs for the decision
+// ExplanationOfBenefit wire shape (base FHIR R4; no profile is claimed).
+// Promoted verbatim from internal/fhirmap/eob.go.
+type eobJSON struct {
+	ResourceType string            `json:"resourceType"`
+	Id           string            `json:"id"`
+	Status       string            `json:"status"`
+	Type         json.RawMessage   `json:"type"`
+	Use          string            `json:"use"`
+	Patient      eobReference      `json:"patient"`
+	PreAuthRef   []string          `json:"preAuthRef,omitempty"`
+	Created      string            `json:"created"`
+	Insurer      eobReference      `json:"insurer"`
+	Provider     eobReference      `json:"provider"`
+	Outcome      string            `json:"outcome"`
+	Insurance    []eobInsurance    `json:"insurance"`
+	Item         []eobItem         `json:"item"`
+	AddItem      []json.RawMessage `json:"addItem,omitempty"`
+	Adjudication []json.RawMessage `json:"adjudication,omitempty"`
+	ProcessNote  []eobProcessNote  `json:"processNote,omitempty"`
+}
+
+// eobProcessNote is one payer note: its number only when the payer stated
+// one (R4 processNote.number is 0..1), never a number of this builder's.
 type eobProcessNote struct {
-	Number int    `json:"number"`
+	Number int    `json:"number,omitempty"`
 	Type   string `json:"type,omitempty"`
 	Text   string `json:"text"`
 }
+
+// eobNoteTypes is the FHIR R4 NoteType value set (required binding on
+// ExplanationOfBenefit.processNote.type).
+var eobNoteTypes = map[string]bool{"display": true, "print": true, "printoper": true}
 
 type eobInsurance struct {
 	Focal    bool         `json:"focal"`
@@ -337,27 +508,9 @@ type eobInsurance struct {
 }
 
 type eobItem struct {
-	Sequence         int                `json:"sequence"`
-	ProductOrService eobCodeableConcept `json:"productOrService"`
-	Adjudication     []eobAdjudication  `json:"adjudication"`
-}
-
-type eobAdjudication struct {
-	Extension []eobExtension      `json:"extension,omitempty"`
-	Category  eobCodeableConcept  `json:"category"`
-	Reason    *eobCodeableConcept `json:"reason,omitempty"`
-	Amount    *eobMoney           `json:"amount,omitempty"`
-}
-
-type eobExtension struct {
-	Extension            []eobExtension      `json:"extension,omitempty"`
-	URL                  string              `json:"url"`
-	ValueCodeableConcept *eobCodeableConcept `json:"valueCodeableConcept,omitempty"`
-}
-
-type eobMoney struct {
-	Value    json.Number `json:"value"`
-	Currency string      `json:"currency"`
+	Sequence         int               `json:"sequence"`
+	ProductOrService json.RawMessage   `json:"productOrService"`
+	Adjudication     []json.RawMessage `json:"adjudication,omitempty"`
 }
 
 type eobCodeableConcept struct {
@@ -370,87 +523,148 @@ type eobCoding struct {
 	Display string `json:"display,omitempty"`
 }
 type eobReference struct {
-	Reference string `json:"reference,omitempty"`
+	Reference  string          `json:"reference,omitempty"`
+	Identifier json.RawMessage `json:"identifier,omitempty"`
+	Display    string          `json:"display,omitempty"`
 }
 
-// BuildPADecisionEOB builds the Da Vinci PDex Prior Authorization (PPA)
-// ExplanationOfBenefit for a PA decision (FR-28): use=preauthorization,
-// outcome=complete. The item adjudication shape branches on decision:
-//   - PADecisionDenied: with the payer's decision detail stated (ReviewAction or
-//     DenialReasons), the amount adjudication carrying the review action plus one
-//     denialreason per supplied code; otherwise the deprecated denialreason slice
-//     carrying CARC 50 (authNumber ignored — a denial has no authorization).
-//
-// processNote carries PADecisionEOBParams.ProcessNotes when they are non-nil; when
-// they are nil a denied EOB keeps the deprecated fixed EOBAppealNote.
-//   - PADecisionApproved: a "submitted" adjudication (standard adjudication
-//     CodeSystem, in the PDexAdjudication binding) with no Reason/no denialreason,
-//     and the authorization number on EOB.preAuthRef so the patient surface (PHG)
-//     renders the approved auth from the FHIR resource (no appeal processNote).
-//
-// Validated base-R4 + curated terminology; the PDex profile pin is the tracked
-// fast-follow (no meta.profile set; base-R4 conformance is the pinned posture).
-//
-// Promoted verbatim from internal/fhirmap.BuildPADecisionEOB; parity
-// proven by test/sdkparity/fhirmap_builders_parity_test.go (byte-equal, both
-// branches). FR-36 boundary guard: no fhircodes value-set referenced —
-// terminology-agnostic (codes come in as params / package-local system* URI consts).
-// PADecisionEOBParams groups the inputs to BuildPADecisionEOB — a struct rather than
-// positional args (most of them same-typed strings, easy to transpose) so the public
-// call site is readable and the param set can grow without a breaking change.
-//
-// CPTDisplay is the human-readable service description rendered on the EOB's
-// item[].productOrService.coding[].display (FR-28). It is sourced from the request's
-// ServiceRequest (ParseServiceRequestProcedure) so the patient surface shows the
-// ACTUAL ordered service, not a fixed string. Adding it is non-breaking ONLY for KEYED
-// struct literals (PADecisionEOBParams{ID: …, CPTCode: …, CPTDisplay: …}); always
-// construct this struct with keyed fields.
-type PADecisionEOBParams struct {
-	ID          string
-	PatientRef  string
-	CoverageRef string
-	CPTCode     string
-	CPTDisplay  string
-	// ProcedureSystem is the system URI of item[].productOrService.coding (FR-28).
-	// Empty defaults to AMA-CPT (systemPAProcedureCPT) — so existing keyed callers are
-	// byte-identical. Set it (from ParseServiceRequestProductCoding) to carry the order's
-	// ACTUAL system (e.g. HCPCS) so a HCPCS order yields a HCPCS-system EOB, not a CPT-locked one.
-	ProcedureSystem string
-	Decision        PADecision
-	AuthNumber      string
-	Created         time.Time
-	// ProcessNotes are the payer's own notes (for example its appeal window),
-	// written as EOB.processNote in order and numbered from 1, on either
-	// decision. A note without text, or with a type other than "display",
-	// "print" or "printoper", is refused. A non-nil empty slice writes no
-	// processNote.
-	//
-	// Nil keeps the deprecated default: a denied EOB carries the fixed
-	// EOBAppealNote and an approved EOB carries none. That default will be
-	// removed in a later release; pass the payer's notes (or an empty slice).
-	ProcessNotes []PASProcessNote
+// eobSubmittedAmount is the adjudication the request item's net is carried
+// on when the payer stated no "submitted" adjudication of its own.
+type eobSubmittedAmount struct {
+	Category eobCodeableConcept `json:"category"`
+	Amount   json.RawMessage    `json:"amount"`
+}
 
-	// ReviewAction is the payer's own review decision (PriorAuthResult
-	// .ReviewAction): its X12 306 code (X12ReviewDecisionSystem; never A4,
-	// never A1 or A6 on a denial, never A3 on an approval)
-	// and any X12 886 reasons (X12ReviewDecisionReasonSystem). It is written
-	// as the reviewAction extension of the item's amount adjudication.
-	ReviewAction *PASReviewAction
-	// DenialReasons are the payer's own claim adjustment reason (CARCSystem)
-	// or remittance advice remark (RARCSystem) codes for a denial
-	// (PriorAuthResult.DenialReasons). Each is written as one denialreason
-	// adjudication, exactly as given; they are refused on an approval.
-	//
-	// Setting ReviewAction or DenialReasons (a non-nil empty slice included)
-	// states the payer's decision detail. A denied EOB then carries a
-	// denialreason only for the codes given, and always carries the decision
-	// as a review action on the amount adjudication (0 USD, the placeholder an
-	// approval uses): the payer's ReviewAction, or, when none is given, A3
-	// Not Certified, the X12 code of the denial itself. Setting neither keeps
-	// the deprecated default: a denied EOB carries the fixed denialreason CARC
-	// 50, which the payer never stated. That default will be removed in a
-	// later release.
-	DenialReasons []PASCoding
+// PADecisionEOBReference is a reference a decision EOB states exactly as its
+// source wrote it. When Identifier is set — the source reference carried one,
+// or the resource it names in the source Bundle does (for example a
+// provider's NPI or a Coverage's member identifier) — the EOB writes
+// Reference.identifier, as written, instead of the literal reference, which
+// may not resolve in the payer's Patient Access store. Otherwise it writes
+// Reference as written. Display is carried when the source reference has one.
+// Nothing here is minted: a reference with neither a Reference nor an
+// Identifier is absent.
+type PADecisionEOBReference struct {
+	Reference  string
+	Identifier json.RawMessage
+	Display    string
+}
+
+func (r PADecisionEOBReference) absent() bool {
+	return r.Reference == "" && !rawPresent(r.Identifier)
+}
+
+func (r PADecisionEOBReference) wire() eobReference {
+	if rawPresent(r.Identifier) {
+		return eobReference{Identifier: r.Identifier, Display: r.Display}
+	}
+	return eobReference{Reference: r.Reference, Display: r.Display}
+}
+
+// PADecisionEOBInsurance is one of the request Claim's insurance entries:
+// its focal flag and its coverage, as written.
+type PADecisionEOBInsurance struct {
+	Focal    *bool
+	Coverage PADecisionEOBReference
+}
+
+// PADecisionEOBAbsentError reports an element the decision EOB requires
+// whose source supplied no value: the EOB is not built, and nothing is
+// filled in for it. Element names the EOB element.
+type PADecisionEOBAbsentError struct{ Element string }
+
+func (e *PADecisionEOBAbsentError) Error() string {
+	return "shnsdk: decision EOB " + e.Element + " absent at its source"
+}
+
+// rawPresent reports whether a raw JSON value states something (not empty,
+// not null).
+func rawPresent(b json.RawMessage) bool {
+	s := strings.TrimSpace(string(b))
+	return s != "" && s != "null"
+}
+
+// adjudicationStatesSubmitted reports whether a payer adjudication entry's
+// category is the standard "submitted" adjudication: the adjudication code
+// system's "submitted", or that code stated with no system.
+func adjudicationStatesSubmitted(raw json.RawMessage) bool {
+	var a struct {
+		Category struct {
+			Coding []eobCoding `json:"coding"`
+		} `json:"category"`
+	}
+	if json.Unmarshal(raw, &a) != nil {
+		return false
+	}
+	for _, c := range a.Category.Coding {
+		if (c.System == systemAdjudication || c.System == "") && c.Code == "submitted" {
+			return true
+		}
+	}
+	return false
+}
+
+// PADecisionEOBExactParams groups the inputs to BuildPADecisionEOBExact; always
+// construct it with keyed fields.
+type PADecisionEOBExactParams struct {
+	ID         string
+	PatientRef string
+	// ClaimType is the request Claim's type (a CodeableConcept), as written.
+	ClaimType json.RawMessage
+	// Created is the payer's ClaimResponse.created, as written (on the
+	// inquiry leg, the ClaimResponse that carried the decision). Never a
+	// clock reading.
+	Created string
+	// Insurer is the payer's ClaimResponse.insurer.
+	Insurer PADecisionEOBReference
+	// Provider is the request Claim's provider.
+	Provider PADecisionEOBReference
+	// Insurance is the request Claim's insurance entries, in order.
+	Insurance []PADecisionEOBInsurance
+	// Outcome is the payer's ClaimResponse.outcome, as written.
+	Outcome string
+	// ItemSequence is the request Claim item's sequence (the item the
+	// ClaimResponse's item.itemSequence answers).
+	ItemSequence int
+	// ProductOrService is the request Claim item's productOrService (a
+	// CodeableConcept), as written. When set it is carried exactly and
+	// CPTCode, CPTDisplay and ProcedureSystem are not read.
+	ProductOrService json.RawMessage
+	CPTCode          string
+	CPTDisplay       string
+	// ProcedureSystem is the system URI of item[].productOrService.coding
+	// (FR-28), as the source states it. It is never defaulted: empty writes
+	// a coding with no system (R4 Coding.system is 0..1).
+	ProcedureSystem string
+	// PreAuthRefs are the payer's own authorization numbers, exactly as it
+	// stated them: its ClaimResponse.preAuthRef and any review action number,
+	// in that order. Written as EOB.preAuthRef, duplicates once; never
+	// inferred from the decision.
+	PreAuthRefs []string
+	// ProcessNotes are the payer's own notes (for example its appeal window),
+	// written as EOB.processNote in order, on either decision, each with the
+	// number the payer stated (none when it stated none). A note without
+	// text, or with a type other than "display", "print" or "printoper", is
+	// refused. Nil or empty writes no processNote.
+	ProcessNotes []PASProcessNote
+	// Adjudications are the payer's own ClaimResponse item.adjudication
+	// entries for the item, each a JSON object carried as written: its
+	// category, its amount only when the payer stated one and its reason value
+	// for value, and its PAS review action re-expressed, value for value, in
+	// the EOB's own review action extension (see reviewActionSubExtensionPDex).
+	Adjudications []json.RawMessage
+	// SubmittedAmount is the request Claim item's net (a Money), as written.
+	// It is carried as a "submitted" adjudication only when no entry of
+	// Adjudications states "submitted".
+	SubmittedAmount json.RawMessage
+	// HeaderAdjudications are the payer's ClaimResponse.adjudication entries
+	// (PAS lets a payer state its review action there), carried onto the
+	// EOB's header adjudication with the same transcription as the item's.
+	HeaderAdjudications []json.RawMessage
+	// AddItems are the payer's ClaimResponse.addItem entries for the item,
+	// each a JSON object carried as written onto EOB.addItem, its
+	// adjudication transcribed as the item's.
+	AddItems []json.RawMessage
 }
 
 // PASReviewAction is a payer's review decision on a prior-authorization
@@ -459,54 +673,6 @@ type PADecisionEOBParams struct {
 type PASReviewAction struct {
 	Code    PASCoding
 	Reasons []PASCoding
-}
-
-// eobReviewAction renders a review action as the PDex reviewAction
-// extension, refusing a value the profile's bindings exclude.
-func eobReviewAction(ra PASReviewAction) (eobExtension, error) {
-	c := ra.Code
-	switch {
-	case c.Code == "" || c.System != X12ReviewDecisionSystem:
-		return eobExtension{}, fmt.Errorf("shnsdk: review action code must be an X12 306 code (%s)", X12ReviewDecisionSystem)
-	case c.Code == "A4":
-		return eobExtension{}, fmt.Errorf("shnsdk: review action A4 (pended) is not a decision")
-	}
-	ext := eobExtension{URL: pdexReviewActionURL, Extension: []eobExtension{{
-		URL:                  pdexReviewActionCodeURL,
-		ValueCodeableConcept: &eobCodeableConcept{Coding: []eobCoding{{System: c.System, Code: c.Code, Display: c.Display}}},
-	}}}
-	for i, r := range ra.Reasons {
-		if r.Code == "" || r.System != X12ReviewDecisionReasonSystem {
-			return eobExtension{}, fmt.Errorf("shnsdk: review action reason %d must be an X12 886 code (%s)", i+1, X12ReviewDecisionReasonSystem)
-		}
-		ext.Extension = append(ext.Extension, eobExtension{
-			URL:                  "reasonCode",
-			ValueCodeableConcept: &eobCodeableConcept{Coding: []eobCoding{{System: r.System, Code: r.Code, Display: r.Display}}},
-		})
-	}
-	return ext, nil
-}
-
-// eobReviewActionContradicts reports whether an X12 306 code states the
-// opposite of the decision: a certification (A1 in total, A6 with changes)
-// on a denial, or A3 (not certified) on an approval. A2 (certified, partial)
-// is carried on either: a partial certification is an approval, and the Da
-// Vinci reference payer denies with A2.
-func eobReviewActionContradicts(decision PADecision, code string) bool {
-	if decision == PADecisionDenied {
-		return code == "A1" || code == "A6"
-	}
-	return code == "A3"
-}
-
-// eobAmountAdjudication is the amount-type adjudication slice with the 0 USD
-// placeholder: a prior authorization carries no adjudicated dollar figure,
-// and the slice requires the amount.
-func eobAmountAdjudication() eobAdjudication {
-	return eobAdjudication{
-		Category: eobCodeableConcept{Coding: []eobCoding{{System: systemAdjudication, Code: "submitted", Display: "Submitted Amount"}}},
-		Amount:   &eobMoney{Value: "0", Currency: "USD"},
-	}
 }
 
 // davinciIGCanonical builds a versioned Da Vinci implementationGuide canonical
@@ -521,74 +687,45 @@ func davinciIGCanonical(ig, pkgVersion string) string {
 // version, resolved via PASLineDef).
 const pasProfileClaimBase = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim"
 
-// pdexPackageVersionByLine resolves a PDex line ("2.1") to its manifest-pinned
-// package version ("2.1.0"). Unlike CRD/DTR/PAS, PDex has exactly one native line
-// today (tools/contracts/manifest.json pins "hl7.fhir.us.davinci-pdex" as a single
-// top-level value, not per-line) — a minimal inline lookup rather than a full
-// PDexDef/linedef.go map (YAGNI; promote it if/when PDex goes multi-line).
-var pdexPackageVersionByLine = map[string]string{"2.1": "2.1.0"}
-
-// BuildPatientAccessCapabilityStatement returns the CMS-0057/PDex Patient Access
+// BuildPatientAccessCapabilityStatementExact returns the CMS-0057 Patient Access
 // CapabilityStatement the payer serves at GET /metadata (FR-37): a kind=instance
-// server statement declaring the ExplanationOfBenefit read+search surface (PDex PA
-// EOB profile), gated by the per-operation patient-access token (AI-11). It mirrors
-// the real payer routes (GET /ExplanationOfBenefit?patient= and /ExplanationOfBenefit/{id})
-// and validates as a base FHIR CapabilityStatement (0 errors).
+// server statement declaring the ExplanationOfBenefit read+search surface, gated
+// by the per-operation patient-access token (AI-11). It mirrors the real payer
+// routes (GET /ExplanationOfBenefit?patient= and /ExplanationOfBenefit/{id}) and
+// validates as a base FHIR CapabilityStatement (0 errors).
 //
-// declared is the deployment's declared contract-version token set — the gateway
-// passes Gateway.declaredContractVersions() (SHN_CONTRACT_VERSIONS, D1a); an SDK
-// caller with no declared-set config passes SupportedContractVersions(), whose
-// output is byte-identical to the pre-declared-set hardcoded PDex 2.1.0 canonical. The
-// statement's implementationGuide
-// carries one versioned canonical per declared pa.pdex@<line> token, resolved via
-// pdexPackageVersionByLine; a declared line this build cannot resolve is silently
-// skipped (the declared set may legitimately name lines/contracts this statement
-// does not speak — never a fabricated canonical, never a build error over foreign
-// evidence). Tokens for other contracts (pa.crd/pa.dtr/pa.pas) are ignored — the
-// Patient Access API is PDex-only.
+// It claims neither a supportedProfile nor an implementationGuide: the decision
+// EOBs are base FHIR R4 and do not meet Da Vinci PDex, whose closed
+// adjudication slicing needs an amount, a reason or units on every
+// adjudication and so cannot carry a payer's amountless decision without an
+// amount the payer never stated. declared (the deployment's declared
+// contract-version token set) is accepted for signature stability and does not
+// change the statement. From shn-gateway v0.62.0 no gateway declares a
+// pa.pdex line either (ContractPAPDex21), so neither the statement nor the
+// declaration claims PDex.
 //
-// Promoted verbatim from internal/fhirmap.BuildPatientAccessCapabilityStatement.
-// fhircodes-clean — no value-set references; dependency-light.
-func BuildPatientAccessCapabilityStatement(created time.Time, declared []string) ([]byte, error) {
+// Its v0.61.1 form, the Deprecated BuildPatientAccessCapabilityStatement, is
+// the one internal/fhirmap delegates to. fhircodes-clean — no value-set references; dependency-light.
+func BuildPatientAccessCapabilityStatementExact(created time.Time, declared []string) ([]byte, error) {
 	doc := "Patient Access to prior-authorization decisions. Each request carries a per-operation patient-access authority token bound to the patient (AI-11) — no blanket access."
 	sec := "Per-operation patient-access bearer token (substrate Authorization Framework); subject-bound, signature-covered."
-	var igs []string
-	seen := map[string]bool{}
-	for _, tok := range declared {
-		contract, line, ok := strings.Cut(tok, "@")
-		if !ok || contract != "pa.pdex" {
-			continue
-		}
-		pkgVer, ok := pdexPackageVersionByLine[line]
-		if !ok {
-			continue
-		}
-		if ig := davinciIGCanonical("davinci-pdex", pkgVer); !seen[ig] {
-			igs = append(igs, ig)
-			seen[ig] = true
-		}
-	}
+	_ = declared // the statement names no implementation guide (see the doc comment)
 	cs := fhir.CapabilityStatement{
 		Status:      fhir.PublicationStatusActive,
 		Date:        created.UTC().Format(time.RFC3339),
 		Kind:        fhir.CapabilityStatementKindInstance,
 		FhirVersion: fhir.FHIRVersion4_0_1,
-		// Versioned IG canonical(s): the "|<version>" suffix
-		// pins the generation, one per declared pa.pdex line, matching HRex's
-		// #major.minor endpoint-code convention.
-		ImplementationGuide: igs,
-		Format:              []string{"json"},
-		Software:            &fhir.CapabilityStatementSoftware{Name: "SHN Payer Patient Access API"},
+		Format:      []string{"json"},
+		Software:    &fhir.CapabilityStatementSoftware{Name: "SHN Payer Patient Access API"},
 		Implementation: &fhir.CapabilityStatementImplementation{
-			Description: "SHN CMS-0057 Patient Access API (Da Vinci PDex Prior Authorization ExplanationOfBenefit).",
+			Description: "SHN CMS-0057 Patient Access API (prior-authorization decision ExplanationOfBenefit, base FHIR R4).",
 		},
 		Rest: []fhir.CapabilityStatementRest{{
 			Mode:          fhir.RestfulCapabilityModeServer,
 			Documentation: &doc,
 			Security:      &fhir.CapabilityStatementRestSecurity{Description: &sec},
 			Resource: []fhir.CapabilityStatementRestResource{{
-				Type:             fhir.ResourceTypeExplanationOfBenefit,
-				SupportedProfile: []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-priorauthorization"},
+				Type: fhir.ResourceTypeExplanationOfBenefit,
 				Interaction: []fhir.CapabilityStatementRestResourceInteraction{
 					{Code: fhir.TypeRestfulInteractionRead},
 					{Code: fhir.TypeRestfulInteractionSearchType},
@@ -620,8 +757,8 @@ func BuildPatientAccessCapabilityStatement(created time.Time, declared []string)
 // manifest-pinned package version (fail-silent skip on a line this build does not
 // speak natively — never a fabricated canonical); pa.pas additionally contributes a
 // per-line `profile-claim|<pkgver>` supportedProfile pin on the Claim resource (one
-// per declared PAS line). A declared token for an unrelated contract (e.g.
-// pa.pdex, or a future workstream's) is ignored — this statement is CRD/DTR/PAS-only.
+// per declared PAS line). A declared token for an unrelated contract (a future
+// workstream's) is ignored — this statement is CRD/DTR/PAS-only.
 func BuildProviderIngressCapabilityStatement(created time.Time, declared []string) ([]byte, error) {
 	doc := "Da Vinci ingress for foreign EHR/CDS clients: PAS Claim/$submit and Claim/$inquire, DTR $questionnaire-package (FHIR operations below), and CRD CDS Hooks discovered at /cds-services. Version-specific endpoint codes are published at /.well-known/davinci-configuration (HRex 1.2.0)."
 	sec := "SMART Backend Services (client_credentials, private_key_jwt); configuration at /.well-known/smart-configuration."
@@ -727,113 +864,208 @@ func BuildHubCapabilityStatement(created time.Time) ([]byte, error) {
 	return json.Marshal(cs)
 }
 
-func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
-	id, patientRef, coverageRef, cptCode, cptDisplay, decision, authNumber, created :=
-		p.ID, p.PatientRef, p.CoverageRef, p.CPTCode, p.CPTDisplay, p.Decision, p.AuthNumber, p.Created
-	procedureSystem := p.ProcedureSystem
-	if procedureSystem == "" {
-		procedureSystem = systemPAProcedureCPT // backward-compatible default
+// BuildPADecisionEOBExact builds the ExplanationOfBenefit a payer gateway keeps as
+// the patient-facing record of a payer's prior-authorization decision (FR-28),
+// stating only what the payer's answer and the request supply.
+//
+//   - From the request Claim, carried as written: type, provider, insurance
+//     (focal and coverage), the item's sequence and its net.
+//   - From the payer's ClaimResponse, carried as written: created, insurer,
+//     outcome, the item's adjudication entries (category, amount and reasons
+//     value for value; the review action re-expressed value for value in the
+//     EOB's own extension), its notes and its own authorization numbers
+//     (preAuthRef), whatever the decision.
+//   - The record's own: status active, use preauthorization, the bound
+//     patient, and the order's product coding.
+//
+// The request's net is added as a "submitted" adjudication only when the
+// payer stated no "submitted" entry of its own. With no payer adjudication
+// and no net the item carries no adjudication. No amount, review action,
+// reason code or note the sources did not state is ever written.
+//
+// The resource is base FHIR R4 and claims no profile: Da Vinci PDex
+// pdex-priorauthorization's closed adjudication slicing needs an amount, a
+// reason or units on every adjudication, so it cannot carry a payer's
+// amountless decision without an amount the payer never stated.
+//
+// A required element with no value (ClaimType, Created, Insurer, Provider,
+// Insurance and each entry's focal and coverage, Outcome, ItemSequence) is
+// refused with *PADecisionEOBAbsentError, and a payer review action
+// sub-extension the EOB's extension has no counterpart for with
+// *PADecisionEOBUnmappedError: the EOB is not built.
+//
+// Its v0.61.1 form, the Deprecated BuildPADecisionEOB, is the one
+// test/sdkparity fences against internal/fhirmap; this builder is not that
+// shape.
+func BuildPADecisionEOBExact(p PADecisionEOBExactParams) ([]byte, error) {
+	absent := func(element string) ([]byte, error) { return nil, &PADecisionEOBAbsentError{Element: element} }
+	switch {
+	case !rawPresent(p.ClaimType):
+		return absent("type")
+	case p.Created == "":
+		return absent("created")
+	case p.Insurer.absent():
+		return absent("insurer")
+	case p.Provider.absent():
+		return absent("provider")
+	case len(p.Insurance) == 0:
+		return absent("insurance")
+	case p.Outcome == "":
+		return absent("outcome")
+	case p.ItemSequence < 1:
+		return absent("item.sequence")
 	}
-	supplied, err := pasDeniedNotes(p.ProcessNotes)
-	if err != nil {
-		return nil, err
+	insurance := make([]eobInsurance, 0, len(p.Insurance))
+	for _, in := range p.Insurance {
+		if in.Focal == nil {
+			return absent("insurance.focal")
+		}
+		if in.Coverage.absent() {
+			return absent("insurance.coverage")
+		}
+		insurance = append(insurance, eobInsurance{Focal: *in.Focal, Coverage: in.Coverage.wire()})
 	}
-	detailed := p.ReviewAction != nil || p.DenialReasons != nil
-	var review *eobExtension
-	if p.ReviewAction != nil {
-		ext, err := eobReviewAction(*p.ReviewAction)
+	product := p.ProductOrService
+	if !rawPresent(product) {
+		b, err := json.Marshal(eobCodeableConcept{Coding: []eobCoding{{System: p.ProcedureSystem, Code: p.CPTCode, Display: p.CPTDisplay}}})
 		if err != nil {
 			return nil, err
 		}
-		if eobReviewActionContradicts(decision, p.ReviewAction.Code.Code) {
-			return nil, fmt.Errorf("shnsdk: review action %s contradicts the decision", p.ReviewAction.Code.Code)
-		}
-		review = &ext
+		product = b
 	}
-	if len(p.DenialReasons) > 0 && decision != PADecisionDenied {
-		return nil, fmt.Errorf("shnsdk: denial reasons on a decision that is not a denial")
-	}
-	var denialReasons []eobAdjudication
-	for i, r := range p.DenialReasons {
-		if r.Code == "" || (r.System != CARCSystem && r.System != RARCSystem) {
-			return nil, fmt.Errorf("shnsdk: denial reason %d must be a CARC (%s) or RARC (%s) code", i+1, CARCSystem, RARCSystem)
+	var notes []eobProcessNote
+	for i, n := range p.ProcessNotes {
+		if n.Text == "" {
+			return nil, fmt.Errorf("shnsdk: process note %d has no text", i+1)
 		}
-		denialReasons = append(denialReasons, eobAdjudication{
-			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemPDexAdjudication, Code: "denialreason"}}},
-			Reason:   &eobCodeableConcept{Coding: []eobCoding{{System: r.System, Code: r.Code, Display: r.Display}}},
+		if n.Type != "" && !eobNoteTypes[n.Type] {
+			return nil, fmt.Errorf("shnsdk: process note %d type is not display, print or printoper", i+1)
+		}
+		notes = append(notes, eobProcessNote{Number: n.Number, Type: n.Type, Text: n.Text})
+	}
+	header, err := transcribeAdjudications("header adjudication", p.HeaderAdjudications)
+	if err != nil {
+		return nil, err
+	}
+	addItems := make([]json.RawMessage, 0, len(p.AddItems))
+	for i, ai := range p.AddItems {
+		t, err := transcribeAddItem(ai)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: payer addItem %d: %w", i+1, err)
+		}
+		addItems = append(addItems, t)
+	}
+	// The payer's own adjudication, value for value; the request's net only
+	// where the payer stated no submitted entry.
+	var adjudication []json.RawMessage
+	payerSubmitted := false
+	for i, a := range p.Adjudications {
+		if !json.Valid(a) || !strings.HasPrefix(strings.TrimSpace(string(a)), "{") {
+			return nil, fmt.Errorf("shnsdk: payer adjudication %d is not a JSON object", i+1)
+		}
+		payerSubmitted = payerSubmitted || adjudicationStatesSubmitted(a)
+	}
+	if !payerSubmitted && rawPresent(p.SubmittedAmount) {
+		b, err := json.Marshal(eobSubmittedAmount{
+			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemAdjudication, Code: "submitted", Display: "Submitted Amount"}}},
+			Amount:   p.SubmittedAmount,
 		})
+		if err != nil {
+			return nil, err
+		}
+		adjudication = append(adjudication, b)
+	}
+	for _, a := range p.Adjudications {
+		t, err := transcribeReviewAction(a)
+		if err != nil {
+			return nil, err
+		}
+		adjudication = append(adjudication, t)
 	}
 	eob := eobJSON{
 		ResourceType: "ExplanationOfBenefit",
-		Id:           id,
+		Id:           p.ID,
 		Status:       "active",
-		Type:         eobCodeableConcept{Coding: []eobCoding{{System: "http://terminology.hl7.org/CodeSystem/claim-type", Code: "professional"}}},
+		Type:         p.ClaimType,
 		Use:          "preauthorization",
-		Patient:      eobReference{Reference: patientRef},
-		Created:      created.UTC().Format(time.RFC3339),
-		Insurer:      eobReference{Reference: "Organization/payer"},
-		Provider:     eobReference{Reference: "Practitioner/reviewer-uc08"},
-		Outcome:      "complete",
-		Insurance:    []eobInsurance{{Focal: true, Coverage: eobReference{Reference: coverageRef}}},
+		Patient:      eobReference{Reference: p.PatientRef},
+		Created:      p.Created,
+		Insurer:      p.Insurer.wire(),
+		Provider:     p.Provider.wire(),
+		Outcome:      p.Outcome,
+		Insurance:    insurance,
 		Item: []eobItem{{
-			Sequence:         1,
-			ProductOrService: eobCodeableConcept{Coding: []eobCoding{{System: procedureSystem, Code: cptCode, Display: cptDisplay}}},
+			Sequence:         p.ItemSequence,
+			ProductOrService: product,
+			Adjudication:     adjudication,
 		}},
+		Adjudication: header,
+		ProcessNote:  notes,
 	}
-	switch decision {
-	case PADecisionApproved:
-		// Approval: the PDex "adjudicationamounttype" adjudication slice — category
-		// "submitted" (standard adjudication codesystem, in the PDexAdjudication
-		// binding) with the slice-required amount. No denialreason / no CARC; this is a
-		// conformant approved PA decision (validated against pdex-priorauthorization).
-		// The amount is 0 USD — a pre-authorization carries no adjudicated dollar
-		// figure; the slice mandates the element's presence, so 0 is the deliberate
-		// "not applicable to a pre-auth" placeholder, not a real payment amount.
-		amount := eobAmountAdjudication()
-		if review != nil {
-			amount.Extension = []eobExtension{*review}
-		}
-		eob.Item[0].Adjudication = []eobAdjudication{amount}
-		// Carry the authorization number ON the resource as EOB.preAuthRef (the FHIR
-		// field for a pre-authorization reference number — a plain string, no
-		// terminology), so the patient surface renders the approved auth from the EOB
-		// (FR-28). No processNote on an approval (no appeal/peer-to-peer applies).
-		if authNumber != "" {
-			eob.PreAuthRef = []string{authNumber}
-		}
-	default: // PADecisionDenied
-		if detailed {
-			// The payer's decision: its review action, or the denial's own X12
-			// code; a denialreason only for each code the payer supplied.
-			if review == nil {
-				ext, err := eobReviewAction(PASReviewAction{Code: PASCoding{System: X12ReviewDecisionSystem, Code: "A3", Display: "Not Certified"}})
-				if err != nil {
-					return nil, err
-				}
-				review = &ext
-			}
-			amount := eobAmountAdjudication()
-			amount.Extension = []eobExtension{*review}
-			eob.Item[0].Adjudication = append([]eobAdjudication{amount}, denialReasons...)
-			break
-		}
-		// Deprecated default (see PADecisionEOBParams.DenialReasons).
-		eob.Item[0].Adjudication = []eobAdjudication{{
-			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemPDexAdjudication, Code: "denialreason"}}},
-			Reason:   &eobCodeableConcept{Coding: []eobCoding{{System: systemCARC, Code: "50", Display: "These are non-covered services because this is not deemed a 'medical necessity' by the payer"}}},
-		}}
-		if p.ProcessNotes == nil {
-			// Deprecated default (see PADecisionEOBParams.ProcessNotes).
-			eob.ProcessNote = []eobProcessNote{{Number: 1, Type: "print", Text: EOBAppealNote}}
-		}
+	if len(addItems) > 0 {
+		eob.AddItem = addItems
 	}
-	// FR-28: the payer's own notes travel ON the FHIR resource so the patient
-	// surface renders them from the EOB, not a UI string.
-	if p.ProcessNotes != nil {
-		eob.ProcessNote = nil
-		for _, n := range supplied {
-			eob.ProcessNote = append(eob.ProcessNote, eobProcessNote(n))
+	// The payer's own authorization numbers travel ON the resource as
+	// EOB.preAuthRef so the patient surface renders them from the EOB (FR-28).
+	seen := map[string]bool{}
+	for _, ref := range p.PreAuthRefs {
+		if ref != "" && !seen[ref] {
+			seen[ref] = true
+			eob.PreAuthRef = append(eob.PreAuthRef, ref)
 		}
 	}
 	return json.Marshal(eob)
+}
+
+// transcribeAdjudications transcribes a list of payer adjudication entries
+// (each a JSON object) as the item's are; what names the list in a refusal.
+func transcribeAdjudications(what string, in []json.RawMessage) ([]json.RawMessage, error) {
+	var out []json.RawMessage
+	for i, a := range in {
+		if !json.Valid(a) || !strings.HasPrefix(strings.TrimSpace(string(a)), "{") {
+			return nil, fmt.Errorf("shnsdk: payer %s %d is not a JSON object", what, i+1)
+		}
+		t, err := transcribeReviewAction(a)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// transcribeAddItem carries one payer addItem as written, its adjudication
+// transcribed as the item's and its subdetailSequence under the EOB's member
+// name, subDetailSequence.
+func transcribeAddItem(raw json.RawMessage) (json.RawMessage, error) {
+	members, ok := jsonObjectMembers(raw)
+	if !ok {
+		return nil, fmt.Errorf("not a JSON object")
+	}
+	for i, m := range members {
+		if m.Key == "subdetailSequence" {
+			// R4 names this member ClaimResponse.addItem.subdetailSequence and
+			// ExplanationOfBenefit.addItem.subDetailSequence: the name is
+			// transcribed, the value carried as written.
+			members[i].Key = "subDetailSequence"
+			continue
+		}
+		if m.Key != "adjudication" {
+			continue
+		}
+		var adjs []json.RawMessage
+		if err := json.Unmarshal(m.Value, &adjs); err != nil {
+			return nil, fmt.Errorf("adjudication is not a list")
+		}
+		t, err := transcribeAdjudications("addItem adjudication", adjs)
+		if err != nil {
+			return nil, err
+		}
+		parts := make([]string, 0, len(t))
+		for _, a := range t {
+			parts = append(parts, string(a))
+		}
+		members[i].Value = json.RawMessage("[" + strings.Join(parts, ",") + "]")
+	}
+	return jsonObject(members), nil
 }

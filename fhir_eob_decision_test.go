@@ -3,17 +3,51 @@ package shnsdk
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 )
 
-// eobAdjudications decodes item[0].adjudication of a decision EOB.
-func eobAdjudications(t *testing.T, raw []byte) []map[string]any {
+const (
+	pasRA  = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction"
+	pasRAC = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode"
+	pdxRA  = "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewAction"
+	pdxRAC = "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewActionCode"
+)
+
+// payerReviewAction is a payer's PAS review action as a ClaimResponse states
+// it, with the given sub-extensions after its code; pdexReviewAction is the
+// same with the EOB's own URLs and every value unchanged.
+func payerReviewAction(code, display string, more ...string) string {
+	return reviewActionWith(pasRA, pasRAC, code, display, more...)
+}
+
+func pdexReviewAction(code, display string, more ...string) string {
+	return reviewActionWith(pdxRA, pdxRAC, code, display, more...)
+}
+
+func reviewActionWith(outer, codeURL, code, display string, more ...string) string {
+	subs := []string{`{"url":"` + codeURL + `","valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/005010/306","code":"` + code + `","display":"` + display + `"}]}}`}
+	subs = append(subs, more...)
+	return `{"url":"` + outer + `","extension":[` + strings.Join(subs, ",") + `]}`
+}
+
+const (
+	submittedCat = `"category":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/adjudication","code":"submitted","display":"Submitted Amount"}]}`
+	reasonEntry  = `{"category":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-pdex/CodeSystem/PDexAdjudicationDiscriminator","code":"denialreason"}]},"reason":{"coding":[{"system":"https://x12.org/codes/claim-adjustment-reason-codes","code":"197","display":"Precertification/authorization absent"}]}}`
+	numberSub    = `{"url":"number","valueString":"AUTH-77"}`
+	reasonSub    = `{"url":"reasonCode","valueCodeableConcept":{"coding":[{"system":"https://codesystem.x12.org/external/886","code":"0V"}]}}`
+	opinionSub   = `{"url":"secondSurgicalOpinionFlag","valueBoolean":true}`
+	// rowNet is the request item's net a row supplies.
+	rowNet = `{"value":250.75,"currency":"USD"}`
+)
+
+func eobAdjudicationsRaw(t *testing.T, raw []byte) []json.RawMessage {
 	t.Helper()
 	var eob struct {
 		Item []struct {
-			Adjudication []map[string]any `json:"adjudication"`
+			Adjudication []json.RawMessage `json:"adjudication"`
 		} `json:"item"`
 	}
 	if err := json.Unmarshal(raw, &eob); err != nil {
@@ -25,220 +59,199 @@ func eobAdjudications(t *testing.T, raw []byte) []map[string]any {
 	return eob.Item[0].Adjudication
 }
 
-func coding(system, code, display string) map[string]any {
-	c := map[string]any{"system": system, "code": code}
-	if display != "" {
-		c["display"] = display
+func rawOrNil(s string) json.RawMessage {
+	if s == "" {
+		return nil
 	}
-	return c
+	return json.RawMessage(s)
 }
 
-// amountSlice is the adjudication an EOB carries the payer's decision on:
-// the amount-type slice with the 0 USD placeholder, and the reviewAction
-// extension when rv is non-nil.
-func amountSlice(rv map[string]any) map[string]any {
-	a := map[string]any{
-		"category": map[string]any{"coding": []any{coding("http://terminology.hl7.org/CodeSystem/adjudication", "submitted", "Submitted Amount")}},
-		"amount":   map[string]any{"value": float64(0), "currency": "USD"},
-	}
-	if rv != nil {
-		a["extension"] = []any{rv}
-	}
-	return a
-}
-
-func reviewActionExt(code map[string]any, reasons ...map[string]any) map[string]any {
-	subs := []any{map[string]any{
-		"url":                  "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewActionCode",
-		"valueCodeableConcept": map[string]any{"coding": []any{code}},
-	}}
-	for _, r := range reasons {
-		subs = append(subs, map[string]any{"url": "reasonCode", "valueCodeableConcept": map[string]any{"coding": []any{r}}})
-	}
-	return map[string]any{"extension": subs, "url": "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewAction"}
-}
-
-func denialReasonSlice(reason map[string]any) map[string]any {
-	return map[string]any{
-		"category": map[string]any{"coding": []any{map[string]any{
-			"system": "http://hl7.org/fhir/us/davinci-pdex/CodeSystem/PDexAdjudicationDiscriminator", "code": "denialreason"}}},
-		"reason": map[string]any{"coding": []any{reason}},
-	}
-}
-
-// TestBuildPADecisionEOB_DenialReasonOnlyFromThePayer: when the caller states
-// the payer's decision detail (ReviewAction or DenialReasons, even empty), a
-// denied EOB carries a denialreason adjudication only for each adjustment
-// reason code the payer supplied, exactly as supplied, and otherwise carries
-// the payer's decision as the reviewAction extension on the amount-type
-// adjudication with the 0 USD placeholder approvals use. No reason code is
-// added.
-func TestBuildPADecisionEOB_DenialReasonOnlyFromThePayer(t *testing.T) {
-	notCertified := coding(X12ReviewDecisionSystem, "A3", "Not Certified")
-	payerA3 := coding(X12ReviewDecisionSystem, "A3", "Denied per plan terms")
-	reason886 := coding(X12ReviewDecisionReasonSystem, "0V", "Requested information not received")
-	carc := coding(CARCSystem, "197", "Precertification/authorization absent")
-	rarc := coding(RARCSystem, "N54", "")
-	rows := []struct {
-		name string
-		p    func(*PADecisionEOBParams)
-		want []any
+// TestBuildPADecisionEOB_CarriesThePayersAdjudication: the payer's own
+// item.adjudication entries are carried with their category, amount (only
+// where stated) and reason byte for byte, and their PAS review action
+// re-expressed in the EOB's own extension with every value unchanged — the
+// reference payer's amountless submitted entry with its A3, an approval's A1,
+// an A6, a number, review reasons, the second-opinion flag, a denial's
+// reason codes. No amount, review action or reason code is ever added. The
+// request's net is added as "submitted" only when the payer stated no
+// submitted entry.
+func TestBuildPADecisionEOB_CarriesThePayersAdjudication(t *testing.T) {
+	submittedNet := `{"category":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/adjudication","code":"submitted","display":"Submitted Amount"}]},"amount":` + rowNet + `}`
+	entry := func(ra string, more string) string { return `{"extension":[` + ra + `],` + submittedCat + more + `}` }
+	for _, r := range []struct {
+		name  string
+		payer []string
+		net   string
+		want  []string
 	}{
-		{"payer review action with its reason, no adjustment code",
-			func(p *PADecisionEOBParams) {
-				p.ReviewAction = &PASReviewAction{
-					Code:    PASCoding{System: X12ReviewDecisionSystem, Code: "A3", Display: "Denied per plan terms"},
-					Reasons: []PASCoding{{System: X12ReviewDecisionReasonSystem, Code: "0V", Display: "Requested information not received"}},
-				}
-			},
-			[]any{amountSlice(reviewActionExt(payerA3, reason886))}},
-		{"no detail stated: the denial as its X12 decision code",
-			func(p *PADecisionEOBParams) { p.DenialReasons = []PASCoding{} },
-			[]any{amountSlice(reviewActionExt(notCertified))}},
-		{"payer adjustment codes, each its own denialreason",
-			func(p *PADecisionEOBParams) {
-				p.DenialReasons = []PASCoding{
-					{System: CARCSystem, Code: "197", Display: "Precertification/authorization absent"},
-					{System: RARCSystem, Code: "N54"},
-				}
-			},
-			[]any{amountSlice(reviewActionExt(notCertified)), denialReasonSlice(carc), denialReasonSlice(rarc)}},
-	}
-	for _, r := range rows {
+		{"real payer denial: amountless submitted with A3",
+			[]string{entry(payerReviewAction("A3", "Not Required"), "")}, "",
+			[]string{entry(pdexReviewAction("A3", "Not Required"), "")}},
+		{"the payer's submitted entry stands alone beside the request's net",
+			[]string{entry(payerReviewAction("A3", "Not Certified"), "")}, rowNet,
+			[]string{entry(pdexReviewAction("A3", "Not Certified"), "")}},
+		{"approval with A1 and its number",
+			[]string{entry(payerReviewAction("A1", "Certified in total", numberSub), "")}, "",
+			[]string{entry(pdexReviewAction("A1", "Certified in total", numberSub), "")}},
+		{"modified approval A6 with reasons and the second-opinion flag, on the payer's amount",
+			[]string{entry(payerReviewAction("A6", "Modified", reasonSub, opinionSub), `,"amount":{"value":10.50,"currency":"USD"}`)}, "",
+			[]string{entry(pdexReviewAction("A6", "Modified", reasonSub, opinionSub), `,"amount":{"value":10.50,"currency":"USD"}`)}},
+		{"denial with the payer's reasons",
+			[]string{entry(payerReviewAction("A3", "Not Certified"), ""), reasonEntry}, "",
+			[]string{entry(pdexReviewAction("A3", "Not Certified"), ""), reasonEntry}},
+		{"reasons only: the request's net added as submitted",
+			[]string{reasonEntry}, rowNet, []string{submittedNet, reasonEntry}},
+		{"nothing stated: no adjudication", nil, "", nil},
+	} {
 		t.Run(r.name, func(t *testing.T) {
-			p := eobNotesParams(PADecisionDenied, []PASProcessNote{})
-			r.p(&p)
-			raw, err := BuildPADecisionEOB(p)
+			p := eobNotesParams(nil)
+			for _, a := range r.payer {
+				p.Adjudications = append(p.Adjudications, json.RawMessage(a))
+			}
+			p.SubmittedAmount = rawOrNil(r.net)
+			raw, err := BuildPADecisionEOBExact(p)
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := eobAdjudications(t, raw)
-			var gotAny []any
-			for _, a := range got {
-				gotAny = append(gotAny, a)
+			var gotS []string
+			for _, g := range eobAdjudicationsRaw(t, raw) {
+				gotS = append(gotS, string(g))
 			}
-			if !reflect.DeepEqual(gotAny, r.want) {
-				gj, _ := json.Marshal(gotAny)
-				wj, _ := json.Marshal(r.want)
-				t.Fatalf("adjudication:\n got %s\nwant %s", gj, wj)
+			if !reflect.DeepEqual(gotS, r.want) {
+				t.Fatalf("adjudication:\n got %q\nwant %q", gotS, r.want)
 			}
-			if bytes.Contains(raw, []byte(`"50"`)) {
-				t.Fatalf("EOB carries a reason code the payer never supplied: %s", raw)
-			}
-			if _, ok := eobProcessNotes(t, raw); ok {
-				t.Fatal("no processNote was supplied")
+			for _, minted := range []string{`"value":0`, pasRA, pasRAC, `"meta"`, "pdex-priorauthorization"} {
+				if bytes.Contains(raw, []byte(minted)) {
+					t.Fatalf("EOB carries %s: %s", minted, raw)
+				}
 			}
 		})
 	}
+	p := eobNotesParams(nil)
+	p.Adjudications = []json.RawMessage{json.RawMessage(`["not an object"]`)}
+	if _, err := BuildPADecisionEOBExact(p); err == nil {
+		t.Fatal("an adjudication that is not a JSON object must be refused, never rewritten")
+	}
 }
 
-// TestBuildPADecisionEOB_ApprovalWithPayerDetail: an approval keeps its
-// amount-type adjudication and preAuthRef, carries the payer's review action
-// when stated and the payer's typed notes, and adds none of its own.
-func TestBuildPADecisionEOB_ApprovalWithPayerDetail(t *testing.T) {
-	notes := []PASProcessNote{{Type: "display", Text: "Approved for 6 visits."}, {Type: "printoper", Text: "Ref 12"}}
-	p := eobNotesParams(PADecisionApproved, notes)
-	p.AuthNumber = "AUTH-9"
-	p.ReviewAction = &PASReviewAction{Code: PASCoding{System: X12ReviewDecisionSystem, Code: "A1", Display: "Certified in total"}}
-	raw, err := BuildPADecisionEOB(p)
+// TestBuildPADecisionEOB_UnmappedReviewActionSubExtension: a payer review
+// action sub-extension the EOB's extension has no counterpart for writes no
+// EOB, naming it; it is never dropped.
+func TestBuildPADecisionEOB_UnmappedReviewActionSubExtension(t *testing.T) {
+	p := eobNotesParams(nil)
+	p.Adjudications = []json.RawMessage{json.RawMessage(`{"extension":[` + payerReviewAction("A3", "Not Certified", `{"url":"http://payer.example/x","valueString":"y"}`) + `],` + submittedCat + `}`)}
+	out, err := BuildPADecisionEOBExact(p)
+	var unmapped *PADecisionEOBUnmappedError
+	if !errors.As(err, &unmapped) || unmapped.URL != "http://payer.example/x" || unmapped.Position != 2 || out != nil {
+		t.Fatalf("got %s, %v; want PADecisionEOBUnmappedError{http://payer.example/x}", out, err)
+	}
+}
+
+// TestReviewActionTranscriptionTable is the hermetic tripwire over the
+// registered PAS → PDex review action table: every PAS sub-extension it maps
+// and its PDex counterpart (PAS 2.0.1/2.1.0/2.2.1 and PDex 2.1.0 define the
+// same four). Changing an entry is a change to what the EOB states.
+func TestReviewActionTranscriptionTable(t *testing.T) {
+	want := map[string]string{
+		pasRAC:                      pdxRAC,
+		"number":                    "number",
+		"reasonCode":                "reasonCode",
+		"secondSurgicalOpinionFlag": "secondSurgicalOpinionFlag",
+	}
+	if !reflect.DeepEqual(reviewActionSubExtensionPDex, want) {
+		t.Fatalf("review action table = %v, want %v", reviewActionSubExtensionPDex, want)
+	}
+	if pasReviewActionURL != pasRA || pdexReviewActionURL != pdxRA {
+		t.Fatalf("review action extensions = %s -> %s", pasReviewActionURL, pdexReviewActionURL)
+	}
+}
+
+// TestBuildPADecisionEOB_PreAuthRefsAsStated: the EOB carries the payer's own
+// authorization numbers exactly as stated, in order, each once, and none
+// when the payer stated none.
+func TestBuildPADecisionEOB_PreAuthRefsAsStated(t *testing.T) {
+	notes := []PASProcessNote{{Number: 1, Type: "display", Text: "Approved for 6 visits."}, {Number: 2, Type: "printoper", Text: "Ref 12"}}
+	p := eobNotesParams(notes)
+	p.PreAuthRefs = []string{"AUTH-9", "AUTH-77", "AUTH-9", ""}
+	raw, err := BuildPADecisionEOBExact(p)
 	if err != nil {
 		t.Fatal(err)
-	}
-	want := []any{amountSlice(reviewActionExt(coding(X12ReviewDecisionSystem, "A1", "Certified in total")))}
-	var got []any
-	for _, a := range eobAdjudications(t, raw) {
-		got = append(got, a)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("adjudication = %v", got)
 	}
 	gotNotes, _ := eobProcessNotes(t, raw)
 	wantNotes := []map[string]any{
 		{"number": float64(1), "type": "display", "text": notes[0].Text},
 		{"number": float64(2), "type": "printoper", "text": notes[1].Text},
 	}
-	if !reflect.DeepEqual(gotNotes, wantNotes) || !bytes.Contains(raw, []byte(`"preAuthRef":["AUTH-9"]`)) {
+	if !reflect.DeepEqual(gotNotes, wantNotes) || !bytes.Contains(raw, []byte(`"preAuthRef":["AUTH-9","AUTH-77"]`)) {
 		t.Fatalf("notes %v / %s", gotNotes, raw)
 	}
+	p.PreAuthRefs = nil
+	if raw, _ = BuildPADecisionEOBExact(p); bytes.Contains(raw, []byte("preAuthRef")) {
+		t.Fatalf("an EOB carries an authorization number the payer did not state: %s", raw)
+	}
+}
 
-	// Without a stated review action the approval is unchanged.
-	p.ReviewAction, p.DenialReasons = nil, []PASCoding{}
-	stated, err := BuildPADecisionEOB(p)
+// TestBuildPADecisionEOB_CarriesSourcesAsWritten: type, created, insurer,
+// provider, insurance, outcome and item.sequence are written exactly as the
+// caller's sources state them; a reference with an identifier is stated by
+// it, else by its literal reference.
+func TestBuildPADecisionEOB_CarriesSourcesAsWritten(t *testing.T) {
+	p := eobBaseParams()
+	focal, other := true, false
+	p.ClaimType = json.RawMessage(`{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"institutional"}]}`)
+	p.Created = "2026-09-30T08:15:00-05:00"
+	p.Insurer = PADecisionEOBReference{Identifier: json.RawMessage(`{"system":"http://hl7.org/fhir/sid/us-npi","value":"1972532007"}`), Reference: "Organization/ignored", Display: "Payer"}
+	p.Provider = PADecisionEOBReference{Reference: "PractitionerRole/role-1", Display: "Dr. Lee"}
+	p.Insurance = []PADecisionEOBInsurance{
+		{Focal: &focal, Coverage: PADecisionEOBReference{Identifier: json.RawMessage(`{"system":"http://payer.test/member","value":"M-1"}`)}},
+		{Focal: &other, Coverage: PADecisionEOBReference{Reference: "Coverage/second"}},
+	}
+	p.Outcome, p.ItemSequence = "partial", 4
+	raw, err := BuildPADecisionEOBExact(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.DenialReasons = nil
-	plain, err := BuildPADecisionEOB(p)
-	if err != nil || !bytes.Equal(stated, plain) {
-		t.Fatalf("approval differs when no detail is stated:\n%s\n%s (%v)", stated, plain, err)
-	}
-}
-
-// TestBuildPADecisionEOB_DefaultPathUnchanged: without ReviewAction and
-// DenialReasons a denied EOB keeps the deprecated CARC 50 denialreason (and,
-// with ProcessNotes nil, the fixed appeal note), byte for byte as before.
-func TestBuildPADecisionEOB_DefaultPathUnchanged(t *testing.T) {
-	const legacyAdjudication = `"adjudication":[{"category":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-pdex/CodeSystem/PDexAdjudicationDiscriminator","code":"denialreason"}]},` +
-		`"reason":{"coding":[{"system":"https://x12.org/codes/claim-adjustment-reason-codes","code":"50","display":"These are non-covered services because this is not deemed a 'medical necessity' by the payer"}]}}]`
-	for name, notes := range map[string][]PASProcessNote{"nil notes": nil, "payer notes": {{Text: "Appeal in 45 days."}}} {
-		raw, err := BuildPADecisionEOB(eobNotesParams(PADecisionDenied, notes))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(raw), legacyAdjudication) || bytes.Contains(raw, []byte("reviewAction")) {
-			t.Fatalf("%s: %s", name, raw)
-		}
-	}
-}
-
-// TestBuildPADecisionEOB_DecisionDetailGuards: a stated detail the EOB
-// profile cannot carry is refused, never rewritten.
-func TestBuildPADecisionEOB_DecisionDetailGuards(t *testing.T) {
-	valid := func() PADecisionEOBParams {
-		p := eobNotesParams(PADecisionDenied, []PASProcessNote{})
-		p.ReviewAction = &PASReviewAction{
-			Code:    PASCoding{System: X12ReviewDecisionSystem, Code: "A3"},
-			Reasons: []PASCoding{{System: X12ReviewDecisionReasonSystem, Code: "0V"}},
-		}
-		p.DenialReasons = []PASCoding{{System: CARCSystem, Code: "197"}}
-		return p
-	}
-	if _, err := BuildPADecisionEOB(valid()); err != nil {
-		t.Fatalf("valid: %v", err)
-	}
-	for name, mutate := range map[string]func(*PADecisionEOBParams){
-		"adjustment reason on an approval":    func(p *PADecisionEOBParams) { p.Decision = PADecisionApproved },
-		"adjustment reason in another system": func(p *PADecisionEOBParams) { p.DenialReasons[0].System = "http://example.org/reasons" },
-		"adjustment reason without a system":  func(p *PADecisionEOBParams) { p.DenialReasons[0].System = "" },
-		"adjustment reason without a code":    func(p *PADecisionEOBParams) { p.DenialReasons[0].Code = "" },
-		"review action in another system":     func(p *PADecisionEOBParams) { p.ReviewAction.Code.System = "http://example.org/306" },
-		"review action without a code":        func(p *PADecisionEOBParams) { p.ReviewAction.Code.Code = "" },
-		"review action is a pend":             func(p *PADecisionEOBParams) { p.ReviewAction.Code.Code = "A4" },
-		"review reason in another system":     func(p *PADecisionEOBParams) { p.ReviewAction.Reasons[0].System = CARCSystem },
-		"review reason without a code":        func(p *PADecisionEOBParams) { p.ReviewAction.Reasons[0].Code = "" },
-		"certified in total on a denial":      func(p *PADecisionEOBParams) { p.ReviewAction.Code.Code = "A1" },
-		"certified with changes on a denial":  func(p *PADecisionEOBParams) { p.ReviewAction.Code.Code = "A6" },
-		"not certified on an approval": func(p *PADecisionEOBParams) {
-			p.Decision, p.DenialReasons = PADecisionApproved, nil
-		},
+	for _, want := range []string{
+		`"type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"institutional"}]}`,
+		`"created":"2026-09-30T08:15:00-05:00"`,
+		`"insurer":{"identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1972532007"},"display":"Payer"}`,
+		`"provider":{"reference":"PractitionerRole/role-1","display":"Dr. Lee"}`,
+		`"insurance":[{"focal":true,"coverage":{"identifier":{"system":"http://payer.test/member","value":"M-1"}}},{"focal":false,"coverage":{"reference":"Coverage/second"}}]`,
+		`"outcome":"partial"`, `"sequence":4`,
 	} {
-		p := valid()
-		mutate(&p)
-		if out, err := BuildPADecisionEOB(p); err == nil {
-			t.Errorf("%s: want an error, got %s", name, out)
+		if !bytes.Contains(raw, []byte(want)) {
+			t.Errorf("EOB does not carry %s:\n%s", want, raw)
 		}
+	}
+	if bytes.Contains(raw, []byte("Organization/ignored")) {
+		t.Errorf("a reference stated by its identifier also carries the literal: %s", raw)
 	}
 }
 
-// TestBuildPADecisionEOB_PartialCertificationOnEitherDecision: A2 (certified,
-// partial) is carried on an approval (a partial certification) and on a
-// denial (the Da Vinci reference payer denies with A2), as the payer sent it.
-func TestBuildPADecisionEOB_PartialCertificationOnEitherDecision(t *testing.T) {
-	for _, dec := range []PADecision{PADecisionApproved, PADecisionDenied} {
-		p := eobNotesParams(dec, []PASProcessNote{})
-		p.ReviewAction = &PASReviewAction{Code: PASCoding{System: X12ReviewDecisionSystem, Code: "A2"}}
-		if raw, err := BuildPADecisionEOB(p); err != nil || !bytes.Contains(raw, []byte(`"code":"A2"`)) {
-			t.Fatalf("decision %d: %s %v", dec, raw, err)
+// TestBuildPADecisionEOB_RequiredElementsAbsent: each element the EOB
+// requires, absent, refuses the build with PADecisionEOBAbsentError naming
+// it; nothing is filled in.
+func TestBuildPADecisionEOB_RequiredElementsAbsent(t *testing.T) {
+	for element, mutate := range map[string]func(*PADecisionEOBExactParams){
+		"type":    func(p *PADecisionEOBExactParams) { p.ClaimType = nil },
+		"created": func(p *PADecisionEOBExactParams) { p.Created = "" },
+		"insurer": func(p *PADecisionEOBExactParams) { p.Insurer = PADecisionEOBReference{Display: "only a display"} },
+		"provider": func(p *PADecisionEOBExactParams) {
+			p.Provider = PADecisionEOBReference{Identifier: json.RawMessage("null")}
+		},
+		"insurance":          func(p *PADecisionEOBExactParams) { p.Insurance = nil },
+		"insurance.focal":    func(p *PADecisionEOBExactParams) { p.Insurance[0].Focal = nil },
+		"insurance.coverage": func(p *PADecisionEOBExactParams) { p.Insurance[0].Coverage = PADecisionEOBReference{} },
+		"outcome":            func(p *PADecisionEOBExactParams) { p.Outcome = "" },
+		"item.sequence":      func(p *PADecisionEOBExactParams) { p.ItemSequence = 0 },
+	} {
+		p := eobBaseParams()
+		p.Insurance = append([]PADecisionEOBInsurance(nil), p.Insurance...)
+		mutate(&p)
+		out, err := BuildPADecisionEOBExact(p)
+		var absent *PADecisionEOBAbsentError
+		if !errors.As(err, &absent) || absent.Element != element || out != nil {
+			t.Errorf("%s absent: got %s, %v; want PADecisionEOBAbsentError{%s}", element, out, err, element)
 		}
 	}
 }

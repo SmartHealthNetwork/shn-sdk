@@ -203,6 +203,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	for _, p := range personas {
 		h := payerFor[p.MemberID]
 		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames}
+		payer.Identity = personaPayerIdentity(p, h)
 		covered, _, err := devID.RunEligibility(ctx, c, ep, payer, "", p.MemberID, p.DOB, p.Family)
 		if err != nil {
 			return fail(exitNetworkHealth, "%s: eligibility round-trip failed: %v", p.MemberID, err)
@@ -232,7 +233,14 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		h := payerFor[p.MemberID]
 		payer := shnsdk.Payer{ID: h.ID, EncPub: payerEnc[h.ID], AuthzPub: authzPub, MessageFrames: h.MessageFrames, RequestFrames: h.RequestFrames}
+		payer.Identity = personaPayerIdentity(p, h)
+		// The claim's own facts, from the persona's order as advertised.
+		facts, err := personaClaimFacts(p.Order, noClaimFactFlags())
+		if err != nil {
+			return fail(exitOutcome, "priorauth %s: %v", p.MemberID, err)
+		}
 		paReq, err := withTestPersonaRecords(shnsdk.PriorAuthRequest{
+			ClaimFacts:       facts,
 			Member:           p.MemberID,
 			DOB:              p.DOB,
 			Family:           p.Family,
@@ -290,20 +298,23 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 
 		// Resume stage (pended→amend): if the persona advertises a post-amend outcome,
-		// the pended result must carry needed items + a resume handle; resume with a
-		// supplemental report attributed to the SAME order the persona pended on
-		// (never a fixed/hardcoded family — a persona's amend evidence must match the
-		// order it is evidence for) and assert the post-amend outcome.
+		// the pended result must carry needed items + a resume handle; resume with the
+		// supplemental report the persona's own synthetic system holds, as the network
+		// states it (never one doctor builds: a report's date, category and content are
+		// the holding system's facts) and assert the post-amend outcome. A network that
+		// states no report gets no amend stage: doctor has no evidence of its own to send.
 		if p.ExpectedAfterAmend == "" {
 			continue
 		}
 		if res.Outcome != "pended" || len(res.NeededItems) == 0 || res.Resume == nil {
 			return fail(exitOutcome, "priorauth %s: expected a pended result with needed items + resume handle, got %+v", p.MemberID, res)
 		}
+		if len(p.SupplementalReport) == 0 {
+			fmt.Fprintf(stdout, "⚠ priorauth %s: pended; the network states no supplemental report for this persona, so no amendment is sent\n", p.MemberID)
+			continue
+		}
 		supp := shnsdk.SupplementalReport{
-			ReportID:        "dr-" + p.MemberID + "-operative",
-			CPT:             p.Order.Code,
-			Display:         p.Order.Display,
+			Report:          p.SupplementalReport,
 			ProvenanceAgent: shnsdk.ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: devID.HolderID},
 		}
 		amended, err := devID.ResumePriorAuth(ctx, c, ep, payer, *res.Resume, supp)
@@ -349,6 +360,22 @@ func advertisesPriorAuthInquiry(disc shnsdk.Discovery) bool {
 		}
 	}
 	return false
+}
+
+// personaPayerIdentity is the payer identifier the persona's eligibility
+// request names as its insurer: the persona's own Coverage payor (its payerId),
+// or, for a network that predates persona payerIds, the single identifier the
+// resolved payer attests on the network. With neither (or with several attested
+// identifiers to choose among), it is empty, and the request is refused rather
+// than name a placeholder payer.
+func personaPayerIdentity(p shnsdk.DiscoveryPersona, h holderEntry) shnsdk.PayerIdentifier {
+	if p.PayerID != nil {
+		return *p.PayerID
+	}
+	if len(h.PayerIDs) == 1 {
+		return h.PayerIDs[0]
+	}
+	return shnsdk.PayerIdentifier{}
 }
 
 // holderEntry is one row of the registrar /holders feed (subset doctor needs).

@@ -3,6 +3,8 @@ package shnsdk
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -13,13 +15,12 @@ import (
 // request's ServiceRequest), NOT a hardcoded persona string. Guards against a
 // regression to the old fixed "MRI lumbar spine w/o contrast" literal.
 func TestBuildPADecisionEOB_DisplayFromParam(t *testing.T) {
-	b, err := BuildPADecisionEOB(PADecisionEOBParams{
-		ID: "e1", PatientRef: "Patient/p", CoverageRef: "Coverage/p",
-		CPTCode: "29881", CPTDisplay: "Arthroscopy, knee, surgical, with meniscectomy",
-		Decision: PADecisionApproved, AuthNumber: "A1", Created: time.Unix(0, 0).UTC(),
-	})
+	p := eobBaseParams()
+	p.CPTCode, p.CPTDisplay = "29881", "Arthroscopy, knee, surgical, with meniscectomy"
+	p.PreAuthRefs = []string{"A1"}
+	b, err := BuildPADecisionEOBExact(p)
 	if err != nil {
-		t.Fatalf("BuildPADecisionEOB: %v", err)
+		t.Fatalf("BuildPADecisionEOBExact: %v", err)
 	}
 	if bytes.Contains(b, []byte("MRI lumbar spine w/o contrast")) {
 		t.Fatal("DEF-14 regression: builder still emits the hardcoded lumbar display")
@@ -35,9 +36,9 @@ func TestBuildPADecisionEOB_DisplayFromParam(t *testing.T) {
 // guard; wire-interop with the substrate parser is proven in test/sdkparity.
 func TestBuildEligibilityRequest_Shape(t *testing.T) {
 	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
-	b, err := BuildEligibilityRequest("MBR-COVERED", "9999999999", now)
+	b, err := BuildEligibilityRequestExact("MBR-COVERED", "9999999999", PayerIdentifier{System: CMSPayerIdentity.System, Value: "00402"}, now)
 	if err != nil {
-		t.Fatalf("BuildEligibilityRequest: %v", err)
+		t.Fatalf("BuildEligibilityRequestExact: %v", err)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
@@ -59,6 +60,91 @@ func TestBuildEligibilityRequest_Shape(t *testing.T) {
 	prov, _ := m["provider"].(map[string]any)
 	if prov["reference"] != "Practitioner/9999999999" {
 		t.Errorf("provider.reference = %v, want Practitioner/9999999999", prov["reference"])
+	}
+	// The insurer is the payer the member's coverage names, as given, and never
+	// a placeholder reference.
+	if got, _ := json.Marshal(m["insurer"]); string(got) != `{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00402"}}` {
+		t.Errorf("insurer = %s, want the payer's identifier", got)
+	}
+}
+
+// An eligibility request without the payer's identifier is refused, and nothing
+// is built: it never names a placeholder payer.
+func TestBuildEligibilityRequest_RefusesWithoutThePayer(t *testing.T) {
+	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+	for name, payer := range map[string]PayerIdentifier{
+		"none":      {},
+		"no value":  {System: CMSPayerIdentity.System},
+		"no system": {Value: CMSPayerIdentity.Value},
+	} {
+		b, err := BuildEligibilityRequestExact("MBR-COVERED", "9999999999", payer, now)
+		if !errors.Is(err, ErrPayerRecordAbsent) || b != nil {
+			t.Errorf("%s: err=%v built=%s, want ErrPayerRecordAbsent and nothing built", name, err, b)
+		}
+	}
+}
+
+// ParseEligibilityRequestInsurer returns the insurer a request names, exactly
+// as written and in whatever form, and nothing from a request that names none.
+func TestParseEligibilityRequestInsurer(t *testing.T) {
+	payer := PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00402"}
+	req, err := BuildEligibilityRequestExact("MBR-COVERED", "9999999999", payer, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ParseEligibilityRequestInsurer(req); !ok || string(got) != `{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00402"}}` {
+		t.Fatalf("insurer = %s, %v; want the request's identifier", got, ok)
+	}
+	for name, tc := range map[string]struct{ body, want string }{
+		"an earlier release's literal reference": {`{"resourceType":"CoverageEligibilityRequest","insurer":{"reference":"Organization/payer"}}`, `{"reference":"Organization/payer"}`},
+		"half an identifier, as sent":            {`{"resourceType":"CoverageEligibilityRequest","insurer":{"identifier":{"value":"00001"}}}`, `{"identifier":{"value":"00001"}}`},
+	} {
+		if got, ok := ParseEligibilityRequestInsurer([]byte(tc.body)); !ok || string(got) != tc.want {
+			t.Errorf("%s: read %s, %v; want %s", name, got, ok, tc.want)
+		}
+	}
+	for name, body := range map[string]string{
+		"no insurer":       `{"resourceType":"CoverageEligibilityRequest"}`,
+		"a null insurer":   `{"resourceType":"CoverageEligibilityRequest","insurer":null}`,
+		"an empty insurer": `{"resourceType":"CoverageEligibilityRequest","insurer":{}}`,
+		"another resource": `{"resourceType":"Claim","insurer":{"identifier":{"system":"s","value":"v"}}}`,
+	} {
+		if got, ok := ParseEligibilityRequestInsurer([]byte(body)); ok {
+			t.Errorf("%s: read %s, want nothing", name, got)
+		}
+	}
+}
+
+// BuildEligibilityAnswer restates the request's insurer as written, a literal
+// reference as much as an identifier, and refuses an answer whose request
+// names none rather than name a payer of its own.
+func TestBuildEligibilityAnswer_RestatesTheRequestsInsurer(t *testing.T) {
+	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
+	for _, insurer := range []string{
+		`{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00402"}}`,
+		`{"reference":"Organization/payer"}`,
+		`{"reference":"https://payer.example/fhir/Organization/acme","display":"Acme Health Plan"}`,
+		// Members the FHIR model has no field for are carried too: a
+		// primitive's extension, and a member it does not know.
+		`{"reference":"Organization/p","_reference":{"extension":[{"url":"http://example.org/x","valueString":"y"}]}}`,
+		`{"display":"Acme","_display":{"id":"d1"},"identifier":{"system":"s","value":"v","_value":{"extension":[{"url":"http://example.org/z","valueCode":"c"}]}}}`,
+		`{"identifier":{"use":"not-a-code","system":"s","value":"v"},"futureMember":1}`,
+	} {
+		b, err := BuildEligibilityAnswer("corr-1", "Patient/MBR-1", true, "", json.RawMessage(insurer), t0)
+		if err != nil {
+			t.Fatalf("%s: %v", insurer, err)
+		}
+		var m struct {
+			Insurer json.RawMessage `json:"insurer"`
+		}
+		if err := json.Unmarshal(b, &m); err != nil || !jsonEqual(t, m.Insurer, []byte(insurer)) {
+			t.Errorf("answer insurer %s, want the request's %s", m.Insurer, insurer)
+		}
+	}
+	for _, insurer := range []string{``, `null`, `{}`, `"Organization/payer"`, `[]`} {
+		if b, err := BuildEligibilityAnswer("corr-1", "Patient/MBR-1", true, "", json.RawMessage(insurer), t0); !errors.Is(err, ErrPayerRecordAbsent) || b != nil {
+			t.Errorf("insurer %q: err=%v built=%s, want ErrPayerRecordAbsent and nothing built", insurer, err, b)
+		}
 	}
 }
 
@@ -96,7 +182,7 @@ func TestParseEligibilityResponse_Branches(t *testing.T) {
 
 // TestEligibilityRoundTrip is the hermetic build→parse seam: a covered/not-covered
 // pair built by the SDK helper-shaped resources parses back consistently. (The
-// substrate's BuildEligibilityResponse is the real producer; this asserts the SDK
+// substrate's BuildEligibilityResponseExact is the real producer; this asserts the SDK
 // parser is self-consistent with the shape the parity test pins.)
 func TestEligibilityRoundTrip(t *testing.T) {
 	// CER round-trips through the SDK parser-of-record only on the response side;
@@ -120,16 +206,16 @@ func TestEligibilityRoundTrip(t *testing.T) {
 }
 
 // TestParseEligibilityRequestMember checks the payer-side parser: round-trips the
-// member out of the SDK's own BuildEligibilityRequest output, rejects a wrong
+// member out of the SDK's own BuildEligibilityRequestExact output, rejects a wrong
 // resourceType, and rejects a CoverageEligibilityRequest missing patient.reference.
 // Wire-interop with the substrate builder is proven in test/sdkparity.
 func TestParseEligibilityRequestMember(t *testing.T) {
 	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
 
 	// Round-trip: SDK-built CER → ParseEligibilityRequestMember → member.
-	cerBytes, err := BuildEligibilityRequest("MBR-ROUNDTRIP", "1234567890", now)
+	cerBytes, err := BuildEligibilityRequestExact("MBR-ROUNDTRIP", "1234567890", CMSPayerIdentity, now)
 	if err != nil {
-		t.Fatalf("BuildEligibilityRequest: %v", err)
+		t.Fatalf("BuildEligibilityRequestExact: %v", err)
 	}
 	member, err := ParseEligibilityRequestMember(cerBytes)
 	if err != nil {
@@ -159,9 +245,9 @@ func TestBuildEligibilityResponse(t *testing.T) {
 	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
 
 	// covered=true round-trip.
-	b, err := BuildEligibilityResponse("corr-1", "Patient/MBR-1", true, "", PayerIdentifier{}, t0)
+	b, err := BuildEligibilityResponseExact("corr-1", "Patient/MBR-1", true, "", CMSPayerIdentity, t0)
 	if err != nil {
-		t.Fatalf("BuildEligibilityResponse(covered): %v", err)
+		t.Fatalf("BuildEligibilityResponseExact(covered): %v", err)
 	}
 	gotCovered, gotReason, err := ParseEligibilityResponse(b)
 	if err != nil {
@@ -172,9 +258,9 @@ func TestBuildEligibilityResponse(t *testing.T) {
 	}
 
 	// covered=false with reason round-trip.
-	b2, err := BuildEligibilityResponse("corr-2", "Patient/MBR-2", false, "not a member", PayerIdentifier{}, t0)
+	b2, err := BuildEligibilityResponseExact("corr-2", "Patient/MBR-2", false, "not a member", CMSPayerIdentity, t0)
 	if err != nil {
-		t.Fatalf("BuildEligibilityResponse(not-covered): %v", err)
+		t.Fatalf("BuildEligibilityResponseExact(not-covered): %v", err)
 	}
 	gotCovered2, gotReason2, err := ParseEligibilityResponse(b2)
 	if err != nil {
@@ -188,13 +274,13 @@ func TestBuildEligibilityResponse(t *testing.T) {
 	}
 
 	// Determinism: two calls with same args → byte-identical output.
-	b3, err := BuildEligibilityResponse("corr-det", "Patient/MBR-DET", true, "", PayerIdentifier{}, t0)
+	b3, err := BuildEligibilityResponseExact("corr-det", "Patient/MBR-DET", true, "", CMSPayerIdentity, t0)
 	if err != nil {
-		t.Fatalf("BuildEligibilityResponse(det-1): %v", err)
+		t.Fatalf("BuildEligibilityResponseExact(det-1): %v", err)
 	}
-	b4, err := BuildEligibilityResponse("corr-det", "Patient/MBR-DET", true, "", PayerIdentifier{}, t0)
+	b4, err := BuildEligibilityResponseExact("corr-det", "Patient/MBR-DET", true, "", CMSPayerIdentity, t0)
 	if err != nil {
-		t.Fatalf("BuildEligibilityResponse(det-2): %v", err)
+		t.Fatalf("BuildEligibilityResponseExact(det-2): %v", err)
 	}
 	if string(b3) != string(b4) {
 		t.Errorf("non-deterministic output:\n  call1=%s\n  call2=%s", b3, b4)
@@ -211,11 +297,11 @@ func TestBuildEligibilityResponse(t *testing.T) {
 // is an invalid FHIR primitive ("Attribute value must not be empty") that a real
 // $validate egress gate rejects. This is the copy production payer-gw actually
 // calls (the promoted gateway/engine/inbound.go handleEligibilityInbound ->
-// shnsdk.BuildEligibilityResponse directly), so this guard — not the substrate
+// shnsdk.BuildEligibilityResponseExact directly), so this guard — not the substrate
 // twin's — is the one that matters live.
 func TestBuildEligibilityResponse_NoReasonOmitsDisposition(t *testing.T) {
 	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
-	b, err := BuildEligibilityResponse("c1", "Patient/MBR-UC08", false, "", PayerIdentifier{}, t0)
+	b, err := BuildEligibilityResponseExact("c1", "Patient/MBR-UC08", false, "", CMSPayerIdentity, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,30 +324,24 @@ func TestBuildEligibilityResponse_NoReasonOmitsDisposition(t *testing.T) {
 	}
 }
 
-// TestBuildEligibilityResponse_InsurerParitySafety is the explicit parity-safety
-// assertion the breaking insurer parameter requires: a zero-value
-// insurer must marshal EXACTLY today's hardcoded Reference{Reference:
-// "Organization/payer"} — byte-identical output for callers not yet threading a
-// real Coverage-derived identity (e.g. sdk/responder.go's standalone Responder,
-// which has no Coverage/SoR of its own) — while a real (system,value) insurer
-// marshals as a logical reference (Reference.identifier), never the literal.
-func TestBuildEligibilityResponse_InsurerParitySafety(t *testing.T) {
+// TestBuildEligibilityResponse_InsurerIsThePayers: the answer names the payer
+// by its identifier (Reference.identifier), and an answer given no payer is
+// refused and not built: it never names the placeholder Organization/payer.
+func TestBuildEligibilityResponse_InsurerIsThePayers(t *testing.T) {
 	t0 := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
 
-	zero, err := BuildEligibilityResponse("corr-1", "Patient/MBR-1", true, "", PayerIdentifier{}, t0)
-	if err != nil {
-		t.Fatalf("BuildEligibilityResponse(zero-value insurer): %v", err)
-	}
-	if !strings.Contains(string(zero), `"insurer":{"reference":"Organization/payer"}`) {
-		t.Fatalf("zero-value insurer = %s, want the literal Organization/payer reference", zero)
+	for name, payer := range map[string]PayerIdentifier{"none": {}, "no value": {System: CMSPayerIdentity.System}} {
+		if b, err := BuildEligibilityResponseExact("corr-1", "Patient/MBR-1", true, "", payer, t0); !errors.Is(err, ErrPayerRecordAbsent) || b != nil {
+			t.Fatalf("%s insurer: err=%v built=%s, want ErrPayerRecordAbsent and nothing built", name, err, b)
+		}
 	}
 
-	derived, err := BuildEligibilityResponse("corr-1", "Patient/MBR-1", true, "", CMSPayerIdentity, t0)
+	derived, err := BuildEligibilityResponseExact("corr-1", "Patient/MBR-1", true, "", CMSPayerIdentity, t0)
 	if err != nil {
-		t.Fatalf("BuildEligibilityResponse(derived insurer): %v", err)
+		t.Fatalf("BuildEligibilityResponseExact(derived insurer): %v", err)
 	}
 	if strings.Contains(string(derived), "Organization/payer") {
-		t.Fatalf("Coverage-derived insurer must not carry the deleted literal: %s", derived)
+		t.Fatalf("the insurer must not carry the placeholder: %s", derived)
 	}
 	var m struct {
 		Insurer struct {
@@ -281,14 +361,14 @@ func TestBuildEligibilityResponse_InsurerParitySafety(t *testing.T) {
 
 // TestBuildPatientAccessCapabilityStatement_Shape verifies the SDK-promoted
 // CMS-0057 CapabilityStatement has the required FHIR shape (FR-37): kind=instance,
-// status=active, at least one rest.resource of type ExplanationOfBenefit with a
-// supportedProfile and both read+search interactions. Wire-identity with the
+// status=active, at least one rest.resource of type ExplanationOfBenefit with
+// both read+search interactions and no supportedProfile. Wire-identity with the
 // internal/fhirmap shim is proven in test/sdkparity/capabilitystatement_parity_test.go.
 func TestBuildPatientAccessCapabilityStatement_Shape(t *testing.T) {
 	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
-	b, err := BuildPatientAccessCapabilityStatement(at, SupportedContractVersions())
+	b, err := BuildPatientAccessCapabilityStatementExact(at, SupportedContractVersions())
 	if err != nil {
-		t.Fatalf("BuildPatientAccessCapabilityStatement: %v", err)
+		t.Fatalf("BuildPatientAccessCapabilityStatementExact: %v", err)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
@@ -319,53 +399,60 @@ func TestBuildPatientAccessCapabilityStatement_Shape(t *testing.T) {
 	if res0["type"] != "ExplanationOfBenefit" {
 		t.Errorf("rest[0].resource[0].type = %v, want ExplanationOfBenefit", res0["type"])
 	}
-	profiles, _ := res0["supportedProfile"].([]any)
-	if len(profiles) == 0 {
-		t.Error("rest[0].resource[0].supportedProfile is empty")
+	// The decision EOB claims no profile: PDex pdex-priorauthorization's
+	// closed adjudication slicing needs an amount, a reason or units on every
+	// adjudication, so it cannot carry a payer's amountless decision without
+	// an amount the payer never stated.
+	if bytes.Contains(b, []byte("pdex-priorauthorization")) || bytes.Contains(b, []byte("davinci-pdex")) {
+		t.Errorf("the Patient Access CapabilityStatement advertises pdex-priorauthorization: re-adding that claim requires every decision EOB variant to validate against PDex (test/conformance TestPADecisionEOBGoldensValidate): %s", b)
+	}
+	if _, ok := res0["supportedProfile"]; ok {
+		t.Errorf("rest[0].resource[0] claims a supportedProfile the decision EOB does not meet: %v", res0["supportedProfile"])
 	}
 	interactions, _ := res0["interaction"].([]any)
 	if len(interactions) != 2 {
 		t.Errorf("want 2 interactions (read+search-type), got %d", len(interactions))
 	}
-	// FR-37 + versioned IG canonicals: the statement names the IG generation
-	// it conforms to — a versioned canonical, the machine-readable sibling of
-	// the versioned supportedProfile it already carries.
-	igs, _ := m["implementationGuide"].([]any)
-	if len(igs) != 1 || igs[0] != "http://hl7.org/fhir/us/davinci-pdex/ImplementationGuide/hl7.fhir.us.davinci-pdex|2.1.0" {
-		t.Fatalf("implementationGuide = %v, want the versioned PDex 2.1.0 canonical", igs)
+	// It names no implementation guide either: the decision EOBs do not meet
+	// PDex, so claiming the IG would claim what they cannot do.
+	if _, ok := m["implementationGuide"]; ok {
+		t.Fatalf("the Patient Access CapabilityStatement claims an implementationGuide the decision EOBs do not meet: re-adding it requires every decision EOB variant to validate against it: %v", m["implementationGuide"])
 	}
 	// Determinism: same input → byte-identical output.
-	b2, _ := BuildPatientAccessCapabilityStatement(at, SupportedContractVersions())
+	b2, _ := BuildPatientAccessCapabilityStatementExact(at, SupportedContractVersions())
 	if string(b) != string(b2) {
-		t.Error("BuildPatientAccessCapabilityStatement is non-deterministic")
+		t.Error("BuildPatientAccessCapabilityStatementExact is non-deterministic")
 	}
 }
 
-// TestBuildPatientAccessCapabilityStatement_DeclaredSet (declared-set driven): the
-// implementationGuide list is declared-set-driven — an unrecognized pa.pdex line is
-// tolerated (skipped, never fabricated), and a declared set with no pa.pdex token at
-// all yields no implementationGuide entries (never a silent hardcoded fallback).
+// TestBuildPatientAccessCapabilityStatement_DeclaredSet: no declared set makes
+// the statement name an implementation guide — not a pa.pdex token at any line
+// (the retired ContractPAPDex21 included: a caller still holding it gets no PDex
+// claim), and not a set with no pa.pdex token at all (never a silent hardcoded
+// fallback).
 func TestBuildPatientAccessCapabilityStatement_DeclaredSet(t *testing.T) {
 	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 
-	// Unrecognized pa.pdex line -> skipped, no error, no fabricated canonical.
-	b, err := BuildPatientAccessCapabilityStatement(at, []string{"pa.pdex@9.9"})
-	if err != nil {
-		t.Fatalf("BuildPatientAccessCapabilityStatement(unrecognized pdex line): %v", err)
-	}
 	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if _, has := m["implementationGuide"]; has {
-		t.Fatalf("implementationGuide = %v, want absent (no recognized pa.pdex line declared)", m["implementationGuide"])
+	for _, declared := range [][]string{{"pa.pdex@9.9"}, {ContractPAPDex21}} {
+		b, err := BuildPatientAccessCapabilityStatementExact(at, declared)
+		if err != nil {
+			t.Fatalf("BuildPatientAccessCapabilityStatementExact(%v): %v", declared, err)
+		}
+		m = map[string]any{}
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if _, has := m["implementationGuide"]; has || bytes.Contains(b, []byte("pdex")) {
+			t.Fatalf("%v: the statement claims PDex: %s", declared, b)
+		}
 	}
 
 	// No pa.pdex token at all (e.g. a declared set naming only unrelated contracts) ->
 	// no implementationGuide entries.
-	b, err = BuildPatientAccessCapabilityStatement(at, []string{"pa.crd@2.0"})
+	b, err := BuildPatientAccessCapabilityStatementExact(at, []string{"pa.crd@2.0"})
 	if err != nil {
-		t.Fatalf("BuildPatientAccessCapabilityStatement(no pdex token): %v", err)
+		t.Fatalf("BuildPatientAccessCapabilityStatementExact(no pdex token): %v", err)
 	}
 	m = map[string]any{} // reset — json.Unmarshal into a non-nil map merges, never clears stale keys
 	if err := json.Unmarshal(b, &m); err != nil {
@@ -545,14 +632,11 @@ func TestBuildHubCapabilityStatement_Shape(t *testing.T) {
 // TestBuildPADecisionEOB_ProcedureSystem (DEF-14): the EOB's
 // item[].productOrService.coding[].system must carry the order's ACTUAL procedure
 // system (HCPCS, CPT, etc.) rather than being hardcoded to CPT. An empty
-// ProcedureSystem defaults to CPT for backward-compatibility.
+// ProcedureSystem is never defaulted: the coding carries no system.
 func TestBuildPADecisionEOB_ProcedureSystem(t *testing.T) {
-	created := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
-	base := PADecisionEOBParams{
-		ID: "eob-x", PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED",
-		CPTCode: "L8000", CPTDisplay: "Breast prosthesis, mastectomy bra",
-		Decision: PADecisionApproved, AuthNumber: "PA-1", Created: created,
-	}
+	base := eobBaseParams()
+	base.ID, base.CPTCode, base.CPTDisplay = "eob-x", "L8000", "Breast prosthesis, mastectomy bra"
+	base.PreAuthRefs = []string{"PA-1"}
 
 	t.Run("explicit HCPCS system flows to productOrService.coding.system", func(t *testing.T) {
 		p := base
@@ -562,20 +646,20 @@ func TestBuildPADecisionEOB_ProcedureSystem(t *testing.T) {
 			t.Fatalf("EOB procedure system = %q, want HCPCS", got)
 		}
 	})
-	t.Run("empty ProcedureSystem defaults to CPT (backward-compatible)", func(t *testing.T) {
+	t.Run("empty ProcedureSystem writes no system", func(t *testing.T) {
 		got := eobProcedureSystem(t, base) // ProcedureSystem unset
-		if got != "http://www.ama-assn.org/go/cpt" {
-			t.Fatalf("EOB procedure system = %q, want CPT default", got)
+		if got != "" {
+			t.Fatalf("EOB procedure system = %q, want none (never a default)", got)
 		}
 	})
 }
 
 // eobProcedureSystem builds the EOB and returns item[0].productOrService.coding[0].system.
-func eobProcedureSystem(t *testing.T, p PADecisionEOBParams) string {
+func eobProcedureSystem(t *testing.T, p PADecisionEOBExactParams) string {
 	t.Helper()
-	raw, err := BuildPADecisionEOB(p)
+	raw, err := BuildPADecisionEOBExact(p)
 	if err != nil {
-		t.Fatalf("BuildPADecisionEOB: %v", err)
+		t.Fatalf("BuildPADecisionEOBExact: %v", err)
 	}
 	var eob struct {
 		Item []struct {
@@ -593,4 +677,35 @@ func eobProcedureSystem(t *testing.T, p PADecisionEOBParams) string {
 		t.Fatalf("EOB has no productOrService coding: %s", raw)
 	}
 	return eob.Item[0].ProductOrService.Coding[0].System
+}
+
+// The standalone Responder's eligibility answer names the payer the request
+// named as its insurer; a request that names none is refused, never answered
+// under a placeholder payer.
+func TestResponderEligibility_InsurerIsTheRequests(t *testing.T) {
+	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+	r := &Responder{cfg: ResponderConfig{Adjudicator: &paTestAdjudicator{now: now}}}
+	req, err := BuildEligibilityRequestExact("MBR-COVERED", "9999999999", PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00402"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := r.handleEligibility(req, "corr-1", now)
+	if res.appStatus != 0 || !bytes.Contains(res.payload, []byte(`"insurer":{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00402"}}`)) {
+		t.Fatalf("answer %d %q %s, want the request's insurer", res.appStatus, res.errMsg, res.payload)
+	}
+	// An earlier release's originator names its payer by a literal reference:
+	// valid R4, and answered with that reference as written.
+	res = r.handleEligibility([]byte(`{"resourceType":"CoverageEligibilityRequest","patient":{"reference":"Patient/MBR-COVERED"},"insurer":{"reference":"Organization/payer"}}`), "corr-2", now)
+	if res.appStatus != 0 || !bytes.Contains(res.payload, []byte(`"insurer":{"reference":"Organization/payer"}`)) {
+		t.Fatalf("a literal-reference insurer: %d %q %s, want it restated", res.appStatus, res.errMsg, res.payload)
+	}
+	for _, body := range []string{
+		`{"resourceType":"CoverageEligibilityRequest","patient":{"reference":"Patient/MBR-COVERED"}}`,
+		`{"resourceType":"CoverageEligibilityRequest","patient":{"reference":"Patient/MBR-COVERED"},"insurer":{}}`,
+	} {
+		res = r.handleEligibility([]byte(body), "corr-3", now)
+		if res.appStatus != http.StatusBadRequest || res.payload != nil {
+			t.Fatalf("no insurer (%s): %d %s, want 400 and no answer", body, res.appStatus, res.payload)
+		}
+	}
 }

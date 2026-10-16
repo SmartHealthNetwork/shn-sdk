@@ -116,7 +116,7 @@ func TestRunEligibility_NeverFramed(t *testing.T) {
 	covered, _, err := id.RunEligibility(
 		context.Background(), authzSrv.Client(),
 		Endpoints{HubURL: hubSrv.URL, AuthzURL: authzSrv.URL},
-		Payer{ID: "payer", EncPub: payerPub, AuthzPub: signPub, RequestFrames: []string{RequestFrameV1}},
+		Payer{ID: "payer", Identity: CMSPayerIdentity, EncPub: payerPub, AuthzPub: signPub, RequestFrames: []string{RequestFrameV1}},
 		"9999999999", "MBR-COVERED", "1975-04-02", "Johansson",
 	)
 	if err != nil {

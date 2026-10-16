@@ -363,17 +363,16 @@ func TestVectorAssertionVerify(t *testing.T) {
 
 func bytesEqual(a, b []byte) bool { return string(a) == string(b) }
 
-// TestVectorDiagnosticReportReproduce: the operative DiagnosticReport is deterministic
-// (fixed effectiveDate), so the SDK's BuildDiagnosticReport must REPRODUCE it.
-func TestVectorDiagnosticReportReproduce(t *testing.T) {
+// TestVectorDiagnosticReportInput: the operative DiagnosticReport is an INPUT vector, the
+// report a participant's own system holds for MBR-UC04. The SDK builds none; ResumePriorAuth
+// takes it as SupplementalReport.Report, checks it names the authorization's patient, and
+// carries it.
+func TestVectorDiagnosticReportInput(t *testing.T) {
 	dir := vectorsDir(t)
-	want := readVector(t, dir, "diagnosticreport-uc04.json")
-	got, err := BuildDiagnosticReport("dr-uc04-operative", "Patient/MBR-UC04", "72148", "MRI lumbar spine w/o contrast")
-	if err != nil {
-		t.Fatalf("BuildDiagnosticReport: %v", err)
-	}
-	if !bytesEqual(want, got) {
-		t.Fatalf("DiagnosticReport vector drift:\n want: %s\n got:  %s", want, got)
+	report := readVector(t, dir, "diagnosticreport-uc04.json")
+	id, err := SupplementalReport{Report: report}.reportID("Patient/MBR-UC04")
+	if err != nil || id != "dr-uc04-operative" {
+		t.Fatalf("the vector is not a report ResumePriorAuth carries for Patient/MBR-UC04: id %q, err %v", id, err)
 	}
 }
 

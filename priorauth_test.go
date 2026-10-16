@@ -361,6 +361,7 @@ func signPubOf(priv ed25519.PrivateKey) ed25519.PublicKey {
 func demoPARequest() PriorAuthRequest {
 	cpt, display, icd10 := demoLumbarOrder()
 	return PriorAuthRequest{
+		ClaimFacts:       testClaimFacts(),
 		Member:           "MBR-COVERED",
 		DOB:              "1975-04-02",
 		Family:           "Johansson",
@@ -435,13 +436,14 @@ func TestRunPriorAuth_Approved(t *testing.T) {
 // wire must carry the code system the caller set (a mirrored HCPCS family, for instance),
 // and an unset ProcedureSystem must default to CPT — same two rows
 // TestBuildPADecisionEOB_ProcedureSystem already pins for the pre-existing
-// PADecisionEOBParams.ProcedureSystem, applied to the new field. Reproduces (and closes) the
+// PADecisionEOBExactParams.ProcedureSystem, applied to the new field. Reproduces (and closes) the
 // review's mutation: forcing ProcedureSystem to be ignored left every existing test green,
 // because none of them inspected the wire bytes this test now does.
 func TestRunPriorAuth_ProcedureSystem(t *testing.T) {
 	t.Run("explicit HCPCS system flows to the built ServiceRequest", func(t *testing.T) {
 		system := crdRequestOrderSystem(t, PriorAuthRequest{
-			Member: "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
+			ClaimFacts: testClaimFacts(),
+			Member:     "MBR-COVERED", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
 			Provider:         testRequestingProvider(),
 			Patient:          testMemberPatient("MBR-COVERED"),
 			Coverage:         testMemberCoverageSearch("MBR-COVERED"),
@@ -586,9 +588,48 @@ func TestRunPriorAuth_LegAttributedError(t *testing.T) {
 }
 
 func TestDemoSupplementalReportFixture(t *testing.T) {
-	r := demoSupplementalReport()
-	if r.ReportID == "" || r.CPT == "" || r.ProvenanceAgent.Value == "" {
-		t.Fatalf("demoSupplementalReport incomplete: %+v", r)
+	r := demoSupplementalReport("Patient/MBR-UC04")
+	if id, err := r.reportID("Patient/MBR-UC04"); err != nil || id != "dr-uc04-operative" || r.ProvenanceAgent.Value == "" {
+		t.Fatalf("demoSupplementalReport incomplete: id %q, err %v, %+v", id, err, r.ProvenanceAgent)
+	}
+}
+
+// ResumePriorAuth carries the caller's own report and builds none: a report that is
+// absent, not a DiagnosticReport, or about another patient than the authorization (its
+// subject would point at nothing in the bundle) is refused before anything is sealed (no
+// client, no endpoints: a wire call would fail differently).
+func TestResumePriorAuth_RefusesAReportItCannotCarry(t *testing.T) {
+	id := Identity{HolderID: "provider"}
+	resume := PriorAuthResume{
+		OriginalCorrelationID: "corr",
+		PatientRef:            "Patient/MBR-UC04",
+		CoverageRef:           "Coverage/MBR-UC04",
+		SubjectPCI:            "pci:abc",
+		QRJSON:                []byte(`{"resourceType":"QuestionnaireResponse"}`),
+		SRJSON:                []byte(`{"resourceType":"ServiceRequest"}`),
+	}
+	agent := ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "provider"}
+	for _, c := range []struct {
+		name, report, want string
+	}{
+		{"no report", "", "SupplementalReport.Report is required"},
+		{"whitespace", "  \n", "SupplementalReport.Report is required"},
+		{"not JSON", "<DiagnosticReport/>", "is not a JSON object"},
+		{"null", "null", "is not a JSON object"},
+		{"an array", `[{"resourceType":"DiagnosticReport"}]`, "is not a JSON object"},
+		{"another resource", `{"resourceType":"Observation","id":"o","subject":{"reference":"Patient/MBR-UC04"}}`, `is not a DiagnosticReport (resourceType "Observation")`},
+		{"no resourceType", `{"id":"o","subject":{"reference":"Patient/MBR-UC04"}}`, "is not a DiagnosticReport (resourceType )"},
+		{"an id that is not a string", `{"resourceType":"DiagnosticReport","id":7,"subject":{"reference":"Patient/MBR-UC04"}}`, "id is not a string: 7"},
+		{"no subject", `{"resourceType":"DiagnosticReport","id":"dr"}`, `names no subject.reference; it must be the authorization's patient "Patient/MBR-UC04"`},
+		{"a subject that is not an object", `{"resourceType":"DiagnosticReport","id":"dr","subject":"Patient/MBR-UC04"}`, "names no subject.reference"},
+		{"another patient", `{"resourceType":"DiagnosticReport","id":"dr","subject":{"reference":"Patient/MBR-OTHER"}}`, `is about "Patient/MBR-OTHER", not the authorization's patient "Patient/MBR-UC04": re-point its subject.reference`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := id.ResumePriorAuth(context.Background(), nil, Endpoints{}, Payer{}, resume, SupplementalReport{Report: []byte(c.report), ProvenanceAgent: agent})
+			if err == nil || !strings.Contains(err.Error(), c.want) || !strings.HasPrefix(err.Error(), "pas-update-submit: ") {
+				t.Fatalf("err %v, want a pas-update-submit refusal naming %q", err, c.want)
+			}
+		})
 	}
 }
 
@@ -602,7 +643,7 @@ func TestResumePriorAuth_RequiresProvenance(t *testing.T) {
 		QRJSON:                []byte(`{"resourceType":"QuestionnaireResponse"}`),
 		SRJSON:                []byte(`{"resourceType":"ServiceRequest"}`),
 	}
-	bad := SupplementalReport{ReportID: "dr-x", CPT: "72148", Display: "MRI", ProvenanceAgent: ProvenanceIdentifier{}}
+	bad := SupplementalReport{Report: testOwnReport("dr-x", "Patient/MBR-UC04"), ProvenanceAgent: ProvenanceIdentifier{}}
 	_, err := id.ResumePriorAuth(context.Background(), nil, Endpoints{}, Payer{}, resume, bad)
 	if err == nil {
 		t.Fatal("ResumePriorAuth with empty ProvenanceAgent: want a fail-loud error before sealing")

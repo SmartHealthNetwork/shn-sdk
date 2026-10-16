@@ -102,7 +102,7 @@ func buildConformantClaim(t *testing.T, member, corr string, qrJSON []byte, now 
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
+	bundle, err := BuildConformantClaimBundleExact(ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: MemberSystem,
 		QR:             qrJSON,
@@ -116,7 +116,7 @@ func buildConformantClaim(t *testing.T, member, corr string, qrJSON []byte, now 
 		PayerOrgEntry:  true,
 	})
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 	return bundle
 }
@@ -132,7 +132,7 @@ func buildConformantClaimAbsolute(t *testing.T, member, corr string, qrJSON []by
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	bundle, err := BuildConformantClaimBundle(ConformantClaimInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
+	bundle, err := BuildConformantClaimBundleExact(ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: MemberSystem,
 		QR:             qrJSON,
@@ -147,7 +147,7 @@ func buildConformantClaimAbsolute(t *testing.T, member, corr string, qrJSON []by
 		Payer:          CMSPayerIdentity,
 	})
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle(absolute): %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact(absolute): %v", err)
 	}
 	return bundle
 }
@@ -480,16 +480,13 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 	patientRef := "Patient/" + member
 	coverageRef := "Coverage/" + member
 	srJSON, _ := BuildServiceRequest("72148", "MRI lumbar spine without contrast", "M54.16", patientRef)
-	drJSON, err := BuildDiagnosticReport("dr-"+member, patientRef, "72148", "operative report")
-	if err != nil {
-		t.Fatalf("BuildDiagnosticReport: %v", err)
-	}
+	drJSON := testOwnReport("dr-"+member, patientRef)
 	// Provenance target is rewritten by the builder to the bundle-local DR id; pass a placeholder.
 	provJSON, err := BuildProvenanceWithIdentifier("DiagnosticReport/dr-"+member, ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "provider"}, now)
 	if err != nil {
 		t.Fatalf("BuildProvenance: %v", err)
 	}
-	bundle, err := BuildConformantClaimUpdateBundle(ConformantClaimUpdateInputs{Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
+	bundle, err := BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: json.RawMessage(testCertTypeJSON), PriorClaim: testPriorClaim(t), Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
 		Provider:         testRequestingProvider(),
 		MemberIDSystem:   MemberSystem,
 		QR:               qrJSON,
@@ -506,7 +503,7 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 		PayerOrgEntry:    true,
 	})
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact: %v", err)
 	}
 	return bundle
 }
@@ -914,5 +911,96 @@ func TestResponderPended_TaskFactsAndTraceEcho(t *testing.T) {
 	}
 	if !bytes.Contains(cr, []byte(`"value":"echo-1.1"`)) {
 		t.Errorf("trace number not echoed: %s", cr)
+	}
+}
+
+// TestResponderPAS_AnswersRestateTheRequest: each of the Responder's answers,
+// approved, denied and pended, restates the request Claim's own type as sent,
+// and names the request's own insurer (the operation response then states it
+// as the request's reference, resolved against the request). A request Claim
+// that states no type is refused 400, and no answer is built. The request
+// states a type no builder default matches, so an answer that wrote its own
+// would fail. A Claim with no insurer is refused the same way.
+func TestResponderPAS_AnswersRestateTheRequest(t *testing.T) {
+	const statedType = `{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"institutional"}],"text":"inpatient"}`
+	mutate := func(t *testing.T, bundle []byte, edit func(claim map[string]json.RawMessage)) []byte {
+		t.Helper()
+		var b map[string]json.RawMessage
+		var entries []map[string]json.RawMessage
+		if json.Unmarshal(bundle, &b) != nil || json.Unmarshal(b["entry"], &entries) != nil {
+			t.Fatal("request bundle does not parse")
+		}
+		for i, e := range entries {
+			var claim map[string]json.RawMessage
+			if json.Unmarshal(e["resource"], &claim) == nil && string(claim["resourceType"]) == `"Claim"` {
+				edit(claim)
+				entries[i]["resource"], _ = json.Marshal(claim)
+				b["entry"], _ = json.Marshal(entries)
+				out, _ := json.Marshal(b)
+				return out
+			}
+		}
+		t.Fatal("request bundle carries no Claim")
+		return nil
+	}
+	stated := func(claim map[string]json.RawMessage) { claim["type"] = json.RawMessage(statedType) }
+	for _, tc := range []struct {
+		name string
+		dec  PASDecision
+	}{
+		{"approved", PASDecision{Outcome: PASApproved, PreAuthRef: "AUTH-7", ValidUntil: "2026-12-31"}},
+		{"denied", PASDecision{Outcome: PASDenied, DenyReason: "not covered"}},
+		{"pended", testPendedDecision()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, responderIdent, _ := newPAHarness(t)
+			qr := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 8}, h.now)
+			base := buildConformantClaim(t, "MBR-001", "restate-"+tc.name, qr, h.now)
+
+			_, srv := h.makeResponderSrv(t, responderIdent, &scriptedPAAdjudicator{decisions: []PASDecision{tc.dec}})
+			st, ans, body := paExchange(t, h, srv, "pas-claim", "pas-submit", "restate-"+tc.name, mutate(t, base, stated))
+			if st != http.StatusOK {
+				t.Fatalf("answered %d: %s", st, body)
+			}
+			var cr map[string]json.RawMessage
+			var bundle struct {
+				Entry []struct {
+					Resource map[string]json.RawMessage `json:"resource"`
+				} `json:"entry"`
+			}
+			if err := json.Unmarshal(ans, &bundle); err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range bundle.Entry {
+				if string(e.Resource["resourceType"]) == `"ClaimResponse"` {
+					cr = e.Resource
+				}
+			}
+			var reqRef, ansRef struct {
+				Reference string `json:"reference"`
+			}
+			var claimInsurer json.RawMessage
+			mutate(t, base, func(c map[string]json.RawMessage) { claimInsurer = c["insurer"] })
+			if json.Unmarshal(claimInsurer, &reqRef) != nil || json.Unmarshal(cr["insurer"], &ansRef) != nil || reqRef.Reference == "" ||
+				!strings.HasSuffix(ansRef.Reference, reqRef.Reference) {
+				t.Fatalf("answer insurer %s, want the request's own %s", cr["insurer"], claimInsurer)
+			}
+			if !jsonEqual(t, cr["type"], []byte(statedType)) {
+				t.Fatalf("answer type %s, want the request's own %s", cr["type"], statedType)
+			}
+
+			for absent, edit := range map[string]func(map[string]json.RawMessage){
+				"no type":       func(c map[string]json.RawMessage) { delete(c, "type") },
+				"a null type":   func(c map[string]json.RawMessage) { c["type"] = json.RawMessage("null") },
+				"an empty type": func(c map[string]json.RawMessage) { c["type"] = json.RawMessage("{}") },
+				"no insurer":    func(c map[string]json.RawMessage) { delete(c, "insurer") },
+			} {
+				_, srv := h.makeResponderSrv(t, responderIdent, &scriptedPAAdjudicator{decisions: []PASDecision{tc.dec}})
+				st, ans, body := paExchange(t, h, srv, "pas-claim", "pas-submit", "restate-"+tc.name+"-refused", mutate(t, base, edit))
+				if st != http.StatusBadRequest || ans != nil || !bytes.Contains(body, []byte("states no type or insurer")) {
+					t.Errorf("%s: answered %d %s, want 400 naming the absent value and no answer", absent, st, body)
+				}
+			}
+		})
 	}
 }

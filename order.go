@@ -95,26 +95,35 @@ func BuildServiceRequest(cptCode, display, dxCode, patientRef string) ([]byte, e
 	return BuildServiceRequestCoded(systemCPT, cptCode, display, dxCode, patientRef)
 }
 
-// BuildCoverage builds a valid R4 Coverage conforming to us-core-coverage (US Core
+// BuildCoverageExact builds a valid R4 Coverage conforming to us-core-coverage (US Core
 // 6.1.0): status "active", the given beneficiary (Patient) reference, a single payor
-// referencing the payer Organization, a "self" subscriber relationship (min=1), and
-// a member-number identifier (v2-0203 "MB" type, system urn:shn:coverage) carrying
+// naming the given payer by its identifier (a logical reference), a "self"
+// subscriber relationship (min=1), and a member-number identifier (v2-0203 "MB" type, system urn:shn:coverage) carrying
 // memberID — the member's BARE member number, which is what an MB identifier means
 // (satisfies the us-core-15 invariant). memberID is NOT a "Coverage/<id>" reference:
 // nothing derives a resource reference from this identifier (a reader that needs one
 // uses Coverage.id), and a prefixed value is refused rather than stamped, because the
 // signature cannot express the change (both spellings are a string). meta.profile pins
-// the US Core profile. Reimplements internal/fhirmap.BuildCoverage standalone;
-// test/sdkparity asserts byte-identity.
-func BuildCoverage(patientRef, memberID string) ([]byte, error) {
+// the US Core profile. Its v0.61.1 form, the Deprecated BuildCoverage, is the one
+// test/sdkparity fences against internal/fhirmap; this builder names the payer
+// by identifier.
+//
+// payer is the payer the member's coverage is with, named by its identifier as a
+// logical reference (Reference.identifier). Without one the builder refuses
+// (ErrPayerRecordAbsent): through shn-sdk v0.61.x the payor was the placeholder
+// Organization/payer, which named no resource and no participant's record.
+func BuildCoverageExact(patientRef, memberID string, payer PayerIdentifier) ([]byte, error) {
 	if err := requireBareMemberID(memberID); err != nil {
 		return nil, err
+	}
+	if !payer.named() {
+		return nil, fmt.Errorf("shnsdk: coverage payor: %w", ErrPayerRecordAbsent)
 	}
 	cov := fhir.Coverage{
 		Meta:        &fhir.Meta{Profile: []string{profileUSCoreCoverage}},
 		Status:      fhir.FinancialResourceStatusCodesActive,
 		Beneficiary: fhir.Reference{Reference: strPtr(patientRef)},
-		Payor:       []fhir.Reference{{Reference: strPtr("Organization/payer")}},
+		Payor:       []fhir.Reference{payer.reference()},
 		Relationship: &fhir.CodeableConcept{
 			Coding: []fhir.Coding{{
 				System: strPtr(systemSubscriberRelationship),

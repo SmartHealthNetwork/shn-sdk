@@ -80,7 +80,8 @@ func newInquiryPair(t *testing.T, decisions ...PASDecision) *inquiryPair {
 		ep:    Endpoints{HubURL: hubSrv.URL, AuthzURL: h.authzSrv.URL},
 		payer: Payer{ID: h.responderID, EncPub: h.responderEnc, AuthzPub: h.authzPub},
 		req: PriorAuthRequest{
-			Member: "MBR-001", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
+			ClaimFacts: testClaimFacts(),
+			Member:     "MBR-001", DOB: "1975-04-02", Family: "Johansson", NPI: "9999999999",
 			Provider:       testRequestingProvider(),
 			Patient:        testMemberPatient("MBR-001"),
 			Coverage:       testMemberCoverageSearch("MBR-001"),

@@ -128,6 +128,12 @@ func withResourceID(resourceJSON []byte, id string) ([]byte, error) {
 // string). This is the additive conformant variant of BuildCoverage (which is
 // byte-parity-locked); a production-conformant CRD (CMS-0057) names the payer Organization,
 // and the contained Org $validates clean. Deterministic.
+//
+// Deprecated: it makes up most of the Coverage it returns (the id "c1", the status, the
+// relationship, and a contained payer Organization named "Centers for Medicare and Medicaid
+// Services"); only the beneficiary, the member identifier and the payer identifier are the
+// caller's. A member's Coverage is a record in your own system: read it from there and pass
+// those bytes. It is kept for API stability and is not used on any SHN product path.
 func BuildCoverageWithPayer(patientRef, memberID string, payer PayerIdentifier) ([]byte, error) {
 	if err := requireBareMemberID(memberID); err != nil {
 		return nil, err
