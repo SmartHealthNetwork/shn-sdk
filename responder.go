@@ -638,6 +638,11 @@ func responseOp(txType string) string {
 	}
 }
 
+// eligibilityBatchNotAnswered is a payer gateway's answer to a batch of
+// coverage eligibility requests when it answers from the payer's records one
+// request at a time; the Responder answers a batch with the same text.
+const eligibilityBatchNotAnswered = "this payer answers coverage eligibility from its records one request at a time, so it does not answer a batch of requests: this is the payer's answer, not a network refusal"
+
 // handleEligibility implements the coverage-eligibility handler. Returns a
 // handlerResult with payload on success, or {appStatus,errMsg} on an app error.
 //
@@ -660,16 +665,32 @@ func responseOp(txType string) string {
 // fhir parity), so a conformant resource is what this code produces — it is
 // just not re-validated per request here.
 func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Time) handlerResult {
-	member, err := ParseEligibilityRequestMember(plaintext)
-	if err != nil {
+	// The input is read one way only, in any of the operation's forms, as a
+	// payer's Smart Gateway reads it: an input that can be read two ways, or a
+	// batch too large to record, is refused with that gateway's text.
+	subs, err := ParseEligibilitySubmission(plaintext)
+	var refusal *EligibilityRequestRefusal
+	var tooLarge *EligibilityBatchTooLarge
+	switch {
+	case errors.As(err, &refusal):
+		return handlerResult{appStatus: http.StatusBadRequest, errMsg: refusal.Error()}
+	case errors.As(err, &tooLarge):
+		return handlerResult{appStatus: http.StatusRequestEntityTooLarge, errMsg: tooLarge.Error()}
+	case err != nil:
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse member failed"}
 	}
+	// It answers one request at a time, as a payer gateway answering from the
+	// payer's records does, with that gateway's text for a batch.
+	if len(subs) > 1 {
+		return handlerResult{appStatus: http.StatusNotImplemented, errMsg: eligibilityBatchNotAnswered}
+	}
+	member, request := subs[0].Member, subs[0].Request
 
 	// This standalone Responder keeps no Coverage of its own to read its payer
 	// identity from, so its answer restates the insurer the request named, as
 	// written (a literal reference or an identifier). A request that names none
 	// is refused: the answer would otherwise name a placeholder.
-	insurer, ok := ParseEligibilityRequestInsurer(plaintext)
+	insurer, ok := ParseEligibilityRequestInsurer(request)
 	if !ok {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "the request names no insurer"}
 	}
@@ -732,7 +753,7 @@ func (r *Responder) questionnairePackage(canonical string) handlerResult {
 }
 
 // ---- FR-16/FR-27 attestation conformance fence (R8 re-home; parity with the
-// substrate gateway's gateway/engine/attestfence.go) ----
+// substrate gateway's gateway/engine/workstream_pa_conformance_attest.go) ----
 //
 // A QuestionnaireResponse item carrying the FR-17 source-attribution extension
 // (informationOriginExt, source="manual") is either clinician-entered
@@ -814,7 +835,7 @@ func fenceAttestedItems(bundleJSON []byte) (string, bool) {
 // firstQuestionnaireResponseEntry: fenceAttestedItems must walk every QR
 // entry, not only the first, or a hand-built bundle can smuggle a second,
 // unfenced entry straight past the FR-16/FR-27 gate. Parity with the
-// substrate gateway's identical rename (gateway/engine/attestfence.go).
+// substrate gateway's identical rename (gateway/engine/workstream_pa_conformance_attest.go).
 func allQuestionnaireResponseEntries(bundleJSON []byte) (resources [][]byte, found bool) {
 	var probe struct {
 		Entry []struct {

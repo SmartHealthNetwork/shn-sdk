@@ -82,8 +82,8 @@ type PASDecision struct {
 // PASProcessNote is one ClaimResponse.processNote the partner supplies.
 type PASProcessNote struct {
 	// Number is the note's number as the payer stated it (ClaimResponse
-	// processNote.number); 0 when it stated none. A decision EOB carries it
-	// as stated and never numbers a note itself.
+	// processNote.number); 0 when it stated none. It is carried as stated;
+	// nothing numbers a note itself.
 	Number int
 	// Type is the FHIR note-type code: "display", "print" or "printoper".
 	// Empty omits processNote.type.

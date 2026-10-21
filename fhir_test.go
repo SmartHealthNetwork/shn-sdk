@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
 
 // TestBuildPADecisionEOB_DisplayFromParam (DEF-14, FR-28): the EOB's
@@ -511,6 +513,40 @@ func TestBuildProviderIngressCapabilityStatement_Shape(t *testing.T) {
 	b2, err := BuildProviderIngressCapabilityStatement(at, SupportedContractVersions())
 	if err != nil || !bytes.Equal(b, b2) {
 		t.Fatal("BuildProviderIngressCapabilityStatement is not deterministic")
+	}
+}
+
+// TestBuildProviderIngressCapabilityStatement_Eligibility pins the coverage
+// eligibility operation the ingress serves: CoverageEligibilityRequest/$submit
+// by the base R4 OperationDefinition, whatever lines are declared, documented
+// as answered one request at a time unless the payer's own endpoint answers a
+// batch. The statement claims no batch interaction.
+func TestBuildProviderIngressCapabilityStatement_Eligibility(t *testing.T) {
+	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	for _, declared := range [][]string{SupportedContractVersions(), nil} {
+		b, err := BuildProviderIngressCapabilityStatement(at, declared)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cs fhir.CapabilityStatement
+		if err := json.Unmarshal(b, &cs); err != nil {
+			t.Fatal(err)
+		}
+		var ops []fhir.CapabilityStatementRestResourceOperation
+		for _, r := range cs.Rest[0].Resource {
+			if r.Type == fhir.ResourceTypeCoverageEligibilityRequest {
+				ops = append(ops, r.Operation...)
+			}
+		}
+		if len(ops) != 1 || ops[0].Name != "submit" || ops[0].Definition != "http://hl7.org/fhir/OperationDefinition/CoverageEligibilityRequest-submit" {
+			t.Fatalf("declared %v: CoverageEligibilityRequest operations = %+v, want $submit alone", declared, ops)
+		}
+		if ops[0].Documentation == nil || !strings.Contains(*ops[0].Documentation, "501") {
+			t.Fatalf("declared %v: $submit documentation %v does not say how a batch is answered", declared, ops[0].Documentation)
+		}
+		if len(cs.Rest[0].Interaction) != 0 {
+			t.Fatalf("declared %v: the statement claims interactions %+v", declared, cs.Rest[0].Interaction)
+		}
 	}
 }
 

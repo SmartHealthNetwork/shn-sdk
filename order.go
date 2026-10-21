@@ -200,13 +200,13 @@ func ParseServiceRequestProcedure(data []byte) (code, display string, err error)
 
 // ParseServiceRequestProductCoding extracts the {system, code, display} of the
 // order's procedure coding from a ServiceRequest JSON — the first code.coding[]
-// whose system is one of the two known procedure systems (AMA-CPT or HCPCS Level II).
-// It returns that coding's system so the PA-decision EOB's productOrService coding
-// is the ACTUAL ordered system (a HCPCS order yields a HCPCS-system EOB, not a
-// CPT-locked one). display is "" when the coding carries none. It errors if the
-// resourceType is not ServiceRequest or no {CPT,HCPCS} coding is present — an
-// unrecognized system is an honest no-coding (FR-36 allowlist), never a wrong EOB.
-// This is the EOB de-personalization source (FR-28); ParseServiceRequestProcedure
+// whose system is one of the two known procedure systems (AMA-CPT or HCPCS Level
+// II). It returns that coding's system, so a caller (the gateway reading the
+// order it routes and claims on, through ParseOrderProductCoding) works with the
+// ACTUAL ordered system, never a CPT-locked one. display is "" when the coding
+// carries none. It errors if the resourceType is not ServiceRequest or no
+// {CPT,HCPCS} coding is present — an unrecognized system is an honest no-coding
+// (FR-36 allowlist), never a wrong system. ParseServiceRequestProcedure
 // (CPT-only {code,display}) and ParseServiceRequestCPT (CPT-only code) remain the
 // distinct CPT-specific tools.
 func ParseServiceRequestProductCoding(data []byte) (system, code, display string, err error) {

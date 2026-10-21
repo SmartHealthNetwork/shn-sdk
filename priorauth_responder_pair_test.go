@@ -156,6 +156,20 @@ func (b pairBundle) resourceOfType(t *testing.T, want string) (map[string]any, s
 	return nil, ""
 }
 
+// countOfType counts the bundle's entries of the given resourceType.
+func (b pairBundle) countOfType(want string) int {
+	n := 0
+	for _, e := range b.Entry {
+		var probe struct {
+			ResourceType string `json:"resourceType"`
+		}
+		if json.Unmarshal(e.Resource, &probe) == nil && probe.ResourceType == want {
+			n++
+		}
+	}
+	return n
+}
+
 // fullUrls returns every entry fullUrl in the bundle — the set a payer resolves an absolute
 // bundle-internal reference against.
 func (b pairBundle) fullUrls() map[string]bool {
@@ -341,22 +355,25 @@ func TestPriorAuthClientIntoResponder_PendedThenResumed(t *testing.T) {
 
 		claim, _ := b.resourceOfType(t, "Claim")
 
-		// A real payer finds the authorization being amended through
-		// Claim.related[].claim.reference, and requires that prior Claim to be present in the
-		// bundle — otherwise 400 "The prior Claim referenced in Claim.related.claim must be
-		// included in the Bundle".
+		// The resume amends at PAS 2.0, whose request Bundle allows one Claim: the update
+		// names the authorization it amends by the submission's correlation identifier in
+		// Claim.related[0].claim, and the payer looks it up in its own records. No prior
+		// Claim is carried, and nothing names one.
 		related, _ := claim["related"].([]any)
 		if len(related) == 0 {
 			t.Fatal("amended Claim carries no related[] — the payer cannot find the authorization being amended")
 		}
 		rel0, _ := related[0].(map[string]any)
 		relClaim, _ := rel0["claim"].(map[string]any)
-		priorRef, _ := relClaim["reference"].(string)
-		if priorRef == "" {
-			t.Fatal("Claim.related[0].claim carries no reference — an identifier alone does not resolve for a payer that reads .reference")
+		if ref, ok := relClaim["reference"]; ok {
+			t.Errorf("Claim.related[0].claim.reference = %v, want none: PAS 2.0 names the prior by identifier; entries are %v", ref, keysOf(urls))
 		}
-		if !urls[priorRef] {
-			t.Errorf("Claim.related[0].claim.reference = %q resolves to no bundle entry; entries are %v", priorRef, keysOf(urls))
+		relID, _ := relClaim["identifier"].(map[string]any)
+		if relID["system"] != "urn:shn:correlation" || relID["value"] != res.Resume.OriginalCorrelationID {
+			t.Errorf("Claim.related[0].claim.identifier = %v, want urn:shn:correlation|%s, the submission's", relID, res.Resume.OriginalCorrelationID)
+		}
+		if n := b.countOfType("Claim"); n != 1 {
+			t.Errorf("the amendment carries %d Claims, want the update alone", n)
 		}
 
 		// The infoChanged marker is derived from the submission, item by item:
@@ -694,8 +711,8 @@ func TestPriorAuthClientIntoResponder_RePendedResumesAgain(t *testing.T) {
 	// Every amendment continues the original submission, as a Smart Gateway's own
 	// amendment chain does (each amendment names the submit's correlation as the one
 	// it amends): the re-pended handle keeps the submission record and the original
-	// correlation, and the second amendment's prior Claim restates the submit, not
-	// the first amendment.
+	// correlation, and the second amendment names the submit, not the first
+	// amendment.
 	if !reflect.DeepEqual(again.Resume.Submission, res.Resume.Submission) || again.Resume.OriginalCorrelationID != res.Resume.OriginalCorrelationID {
 		t.Errorf("re-pended handle does not continue the original submission: submission %+v, correlation %q; want %+v, %q",
 			again.Resume.Submission, again.Resume.OriginalCorrelationID, res.Resume.Submission, res.Resume.OriginalCorrelationID)
@@ -708,22 +725,8 @@ func TestPriorAuthClientIntoResponder_RePendedResumesAgain(t *testing.T) {
 	}
 	rel0, _ := related[0].(map[string]any)
 	relClaim, _ := rel0["claim"].(map[string]any)
-	priorRef, _ := relClaim["reference"].(string)
-	var prior struct {
-		Identifier []struct{ System, Value string } `json:"identifier"`
-		Created    string                           `json:"created"`
-	}
-	for _, e := range second.Entry {
-		if e.FullUrl == priorRef {
-			if err := json.Unmarshal(e.Resource, &prior); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if len(prior.Identifier) == 0 || prior.Identifier[0].Value != res.Resume.OriginalCorrelationID {
-		t.Errorf("the second amendment's prior Claim %q is identified as %+v, want the submit's correlation %q", priorRef, prior.Identifier, res.Resume.OriginalCorrelationID)
-	}
-	if prior.Created != res.Resume.Submission.Created {
-		t.Errorf("the second amendment's prior Claim was created %q, want the submit's %q", prior.Created, res.Resume.Submission.Created)
+	relID, _ := relClaim["identifier"].(map[string]any)
+	if relID["system"] != "urn:shn:correlation" || relID["value"] != res.Resume.OriginalCorrelationID {
+		t.Errorf("the second amendment names %v, want the submit's correlation %q", relID, res.Resume.OriginalCorrelationID)
 	}
 }

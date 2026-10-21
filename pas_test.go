@@ -422,12 +422,10 @@ func TestConformantClaimBundleCarriesEachMembersOwnCoverage(t *testing.T) {
 // testdata/golden/conformant/pas-submit-request.json — demo persona, no br-payer
 // foreign seed.
 func TestBuildConformantClaimBundle_MatchesGolden(t *testing.T) {
-	// The registered golden is the v0.61.1 request: the deprecated builder
-	// still writes it byte for byte, the claim facts it ignores included.
 	want := readConformantGolden(t, "pas-submit-request.json")
-	got, err := BuildConformantClaimBundle(conformantSubmitInputs(t))
+	got, err := BuildConformantClaimBundleExact(conformantSubmitInputs(t))
 	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
+		t.Fatalf("BuildConformantClaimBundleExact: %v", err)
 	}
 	if !jsonEqual(t, got, want) {
 		t.Fatalf("conformant $submit drift:\n got: %s\nwant: %s", got, want)
@@ -1271,13 +1269,10 @@ func conformantUpdateInputsFromGolden(t *testing.T) ConformantClaimUpdateInputs 
 // testdata/golden/conformant/pas-update-request.json — demo persona, no br-payer
 // foreign seed.
 func TestBuildConformantClaimUpdateBundle_MatchesGolden(t *testing.T) {
-	// The registered golden is the v0.61.1 amendment: the deprecated builder
-	// still writes it byte for byte, the facts and prior Claim it ignores
-	// included.
 	want := readConformantGolden(t, "pas-update-request.json")
-	got, err := BuildConformantClaimUpdateBundle(conformantUpdateInputsFromGolden(t))
+	got, err := BuildConformantClaimUpdateBundleExact(conformantUpdateInputsFromGolden(t))
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleExact: %v", err)
 	}
 	if !jsonEqual(t, got, want) {
 		t.Fatalf("conformant update bundle drift:\n got: %s\nwant: %s", got, want)
@@ -1644,27 +1639,29 @@ func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 	}
 }
 
-// TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable proves the reference-payer lane
-// lane (PayerOrgEntry:true) makes the amended re-POST a CONFORMANT Da Vinci PAS Claim Update that
-// real br-payer ACCEPTS. br-payer's resolvePriorClaim (PasSubmitService.java:379-403) reads
-// Claim.related[0].claim.REFERENCE and requires that prior Claim to be a BUNDLE ENTRY — an
-// identifier-only related (no reference, no entry) → empty reference → findInBundle null → HTTP 400
-// "The prior Claim referenced in Claim.related.claim must be included in the Bundle" (E2 live-captured
-// vs br-payer a8bece4). It also re-evaluates the item only when it carries the infoChanged extension
-// (hasInfoChanged, PasSubmitService.java:316/449). The included prior Claim's identifier
-// (urn:shn:correlation|OriginalCorr) matches the stored initial-submit Claim so the server-side
-// identifier search resolves it. SHN-native path (PayerOrgEntry:false) carries NONE of this — locked
-// byte-identical by TestBuildConformantClaimUpdateBundle_MatchesGolden.
+// TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable proves that at PAS 2.1
+// and 2.2 (PASDef.UpdateCarriesPriorClaim) the reference-payer lane (PayerOrgEntry:true) makes the amended
+// re-POST carry the prior Claim it names, as the IG requires: Claim.related[0].claim.reference
+// resolves to the prior Claim as a BUNDLE ENTRY, whose identifier (urn:shn:correlation|OriginalCorr)
+// matches the stored initial-submit Claim. It also re-evaluates the item only when it carries the
+// infoChanged extension (hasInfoChanged, PasSubmitService.java:316/449). PAS 2.0's shape, one Claim
+// naming its prior by identifier, is TestBuildConformantClaimUpdateBundle_PAS201NamesItsPriorByIdentifier.
 func TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable(t *testing.T) {
+	for _, line := range []string{"2.1", "2.2"} {
+		t.Run(line, func(t *testing.T) { testPriorClaimResolvableAt(t, line) })
+	}
+}
+
+func testPriorClaimResolvableAt(t *testing.T, line string) {
 	in := conformantUpdateInputsFromGolden(t)
 	in.ContainedInsurer = true
 	in.AbsoluteRefs = true
 	in.PayerOrgEntry = true
 	in.Insurer = testPayerOrganization(CMSPayerIdentity)
 
-	got, err := BuildConformantClaimUpdateBundleExact(in)
+	got, err := BuildConformantClaimUpdateBundleAtLineExact(line, in)
 	if err != nil {
-		t.Fatalf("BuildConformantClaimUpdateBundleExact(PayerOrgEntry:true): %v", err)
+		t.Fatalf("BuildConformantClaimUpdateBundleAtLineExact(%s, PayerOrgEntry:true): %v", line, err)
 	}
 
 	var bundle struct {
@@ -1768,6 +1765,47 @@ func TestBuildConformantClaimUpdateBundle_PayerOrgEntry_PriorClaimResolvable(t *
 	}
 	if !hasInfoChanged {
 		t.Errorf("update Claim item has no infoChanged extension (%s, valueCode changed) — br-payer carries-forward instead of re-evaluating", infoChangedURL)
+	}
+}
+
+// TestBuildConformantClaimUpdateBundle_PAS201NamesItsPriorByIdentifier pins PAS 2.0's update: PAS
+// 2.0.1's request Bundle allows one Claim (entry:Claim 1..1), so the update carries no prior Claim
+// entry, and Claim.related[0].claim names the prior by the original submit's correlation identifier
+// alone, with no reference. The Da Vinci reference payer looks that prior up in its own records.
+func TestBuildConformantClaimUpdateBundle_PAS201NamesItsPriorByIdentifier(t *testing.T) {
+	in := conformantUpdateInputsFromGolden(t)
+	in.ContainedInsurer = true
+	in.AbsoluteRefs = true
+	in.PayerOrgEntry = true
+	in.Insurer = testPayerOrganization(CMSPayerIdentity)
+	for _, build := range []struct {
+		name string
+		f    func() ([]byte, error)
+	}{
+		{"Exact", func() ([]byte, error) { return BuildConformantClaimUpdateBundleExact(in) }},
+		{"AtLineExact 2.0", func() ([]byte, error) { return BuildConformantClaimUpdateBundleAtLineExact("2.0", in) }},
+	} {
+		got, err := build.f()
+		if err != nil {
+			t.Fatalf("%s: %v", build.name, err)
+		}
+		claims := bundleClaims(t, got)
+		if len(claims) != 1 {
+			t.Fatalf("%s: %d Claims, want the update alone (PAS 2.0.1's entry:Claim is 1..1)", build.name, len(claims))
+		}
+		var related []struct {
+			Claim map[string]json.RawMessage `json:"claim"`
+		}
+		if err := json.Unmarshal(claims[0]["related"], &related); err != nil || len(related) != 1 {
+			t.Fatalf("%s: related = %s (%v), want one", build.name, claims[0]["related"], err)
+		}
+		if ref, ok := related[0].Claim["reference"]; ok {
+			t.Errorf("%s: related[0].claim.reference = %s, want none: the prior is named by identifier", build.name, ref)
+		}
+		var id struct{ System, Value string }
+		if err := json.Unmarshal(related[0].Claim["identifier"], &id); err != nil || id.System != "urn:shn:correlation" || id.Value != in.OriginalCorr {
+			t.Errorf("%s: related[0].claim.identifier = %s (%v), want urn:shn:correlation|%s", build.name, related[0].Claim["identifier"], err, in.OriginalCorr)
+		}
 	}
 }
 

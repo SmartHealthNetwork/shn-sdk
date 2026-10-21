@@ -38,10 +38,10 @@ var providerDataFS embed.FS
 // member MBR-PD-UC02-PB) — it exists solely so a partner (or the SHN provider-data FHIR tenant)
 // can seed a genuinely multi-payer SoR for the coverage-derived payer-routing proof (FR-G40); it
 // carries NO NPI, so the R-8 contracted-NPI honesty fence is vacuously satisfied. It is NOT driven
-// by any live UC scenario (no console/scenario wiring reads MBR-PD-UC02-PB) — the hermetic
-// two-payer routing proof is a separate, engine-local hermetic routing fixture and does not
-// depend on this bundle at all; this one is for a REAL FHIR-SoR-backed multi-payer
-// demonstration (multi-payer partner onboarding), seeded but otherwise inert today.
+// by any of the eight UC scenarios (only the /scenario/uc02-payerb routing lane reads
+// MBR-PD-UC02-PB) — the hermetic two-payer routing proof is a separate, engine-local hermetic
+// routing fixture and does not depend on this bundle at all; this one is for a REAL FHIR-SoR-backed multi-payer
+// demonstration (multi-payer partner onboarding), seeded, and read by that lane alone.
 // pending is the PEND persona: a seeded E0424 (stationary oxygen system) DeviceRequest —
 // the one conditional-coverage family the Da Vinci reference payer pends on a first
 // $submit rather than approving or denying outright. It exists so the prior-authorization

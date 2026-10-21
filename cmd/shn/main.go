@@ -7,6 +7,8 @@
 //	shn eligibility  — run a coverage-eligibility round-trip through the Hub
 //	shn priorauth    — run a prior-authorization (CRD→DTR→PAS) through the Hub
 //	shn login        — authenticate the CLI to the Accounts service (browser PKCE; --no-browser for headless copy-paste)
+//	shn scenario-key — create a provider gateway's /scenario caller: its key and its callers-file entry
+//	shn scenario-sign — print the assertion that signs one /scenario request
 package main
 
 import (
@@ -64,6 +66,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdDoctor(rest, stdout, stderr)
 	case "send-test":
 		return cmdSendTest(rest, stdout, stderr)
+	case "scenario-key":
+		return cmdScenarioKey(rest, stdout, stderr)
+	case "scenario-sign":
+		return cmdScenarioSign(rest, stdout, stderr)
 	case "-h", "--help", "help":
 		usage(stdout)
 		return 0
@@ -106,7 +112,9 @@ commands:
   rotate        rotate a holder's keys against the registrar (holder-self); re-declares request frames (--request-frames, as for register)
                 and contract versions: --contract-versions, else the set the registrar holds now (it refuses if that cannot be read)
   doctor        self-validate against the network: discovery + eligibility (wire-correctness)
-  send-test     drive a provider gateway's 8 /scenario UCs and tabulate pass/fail
+  send-test     drive a provider gateway's 8 /scenario UCs and tabulate pass/fail (--scenario-key signs them; exit 0 pass, 1 fail, 2 misuse, 3 still pended)
+  scenario-key  create a /scenario caller: its key (0600) and its entry in the gateway's callers file
+  scenario-sign print the X-Holder-Assertion that signs one /scenario request, for any HTTP client
 `)
 }
 

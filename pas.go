@@ -1485,9 +1485,10 @@ func buildPASUpdateClaim(patientRef, coverageRef, providerRef, correlationID, or
 }
 
 // setPriorClaimReference repoints Claim.related[0].claim.reference at the prior Claim BUNDLE
-// ENTRY every amendment carries (see the call site in buildConformantClaimUpdateBundle). br-payer's
-// resolvePriorClaim (PasSubmitService.java:379-403) reads .reference, NOT .identifier, and 400s
-// "The prior Claim referenced in Claim.related.claim must be included in the Bundle" without it.
+// ENTRY an amendment carries from PAS 2.1 (see the call site in buildConformantClaimUpdateBundle;
+// PASDef.UpdateCarriesPriorClaim). The upstream reference payer's resolvePriorClaim reads
+// .reference, NOT .identifier, and 400s "The prior Claim referenced in Claim.related.claim must
+// be included in the Bundle" without it.
 // The existing .identifier is preserved. infoChanged is a SEPARATE concern, derived per item from
 // the recorded submission (pasInfoChangedMarks, applyInfoChangedMarks); this function used to fold
 // both together as setPriorClaimReferenceAndInfoChanged, which forced infoChanged to share a lane
@@ -1610,8 +1611,8 @@ func appendInfoChangedToClaimItemsMap(claim map[string]interface{}) error {
 	return nil
 }
 
-// buildPriorClaimEntry restates the prior Claim every amendment carries as a resolvable bundle
-// ENTRY (see setPriorClaimReference). It stands for the original submit's claim:
+// buildPriorClaimEntry restates the prior Claim an amendment carries from PAS 2.1 as a resolvable
+// bundle ENTRY (see setPriorClaimReference). It stands for the original submit's claim:
 // br-payer's resolvePriorClaim finds it via related[0].claim.reference, then searches the stored
 // authorization by its FIRST identifier — so it carries urn:shn:correlation|OriginalCorr (the
 // initial submit's stored Claim identifier). The bundle is SHN-produced, so this entry must be a
@@ -1891,9 +1892,10 @@ func applyInfoChangedMarks(claimJSON []byte, marks map[int]string) ([]byte, erro
 // foreign seed.
 //
 // From shn-sdk v0.59.0, as for ConformantClaimInputs, Insurer is required on every call and
-// the amendment names only that payer, and every amendment carries a synthesized restatement
-// of the prior Claim as a resolvable entry (earlier releases did so only when PayerOrgEntry
-// was set). That restatement is not the requester's original Claim: see buildPriorClaimEntry.
+// the amendment names only that payer. At PAS 2.1 and 2.2 every amendment carries a
+// synthesized restatement of the prior Claim as a resolvable entry (that restatement is not
+// the requester's original Claim: see buildPriorClaimEntry). At PAS 2.0 it carries none: the
+// update names its prior by identifier alone (PASDef.UpdateCarriesPriorClaim).
 //
 // AbsoluteRefs: same semantics as ConformantClaimInputs.AbsoluteRefs — set true for the
 // reference-payer lane so update bundle internal refs are absolute. Out-of-bundle refs (e.g.
@@ -1956,9 +1958,10 @@ type ConformantClaimUpdateInputs struct {
 	// without it; at 2.0 (0..1 on Claim.item) carried when stated and omitted
 	// when absent.
 	CertificationType json.RawMessage
-	// PriorClaim is the recorded submission (PASPriorClaimOf): the prior-Claim
-	// entry restates its type, priority and created as sent, and the builder
-	// derives the PAS infoChanged marker from its items — no caller states it.
+	// PriorClaim is the recorded submission (PASPriorClaimOf): from PAS 2.1 the
+	// prior-Claim entry restates its type, priority and created as sent (PAS 2.0
+	// carries no prior entry), and at every line the builder derives the PAS
+	// infoChanged marker from its items — no caller states it.
 	// An item of this amendment whose sequence the submission had no item for
 	// carries infoChanged "added"; one that differs from the submitted item in
 	// any member or value carries "changed"; one sent before exactly as now
@@ -1988,11 +1991,16 @@ type ConformantClaimUpdateInputs struct {
 // BuildConformantClaimUpdateBundleExact assembles a LEAN, generic, demo-persona-derived CONFORMANT
 // Da Vinci amended re-POST Claim Bundle — the conformant update sibling of BuildConformantClaimBundleExact
 // (which stays untouched). It carries the conformant $submit lean shape PLUS:
-//   - Claim.related[prior] referencing the original submit correlation (FR-21)
+//   - Claim.related[0].claim naming the prior by the original submit's correlation
+//     identifier (FR-21)
+//   - at PAS 2.1 and 2.2, the prior Claim as a second Claim entry that related[0].claim
+//     also references; at PAS 2.0 none, since PAS 2.0.1's request Bundle allows one Claim
+//     (PASDef.UpdateCarriesPriorClaim)
 //   - a Provenance entry (FR-32 — REQUIRED)
 //   - an optional DiagnosticReport entry (present when DiagnosticReport != nil)
 //
-// Entry order: Claim, Patient, Coverage, ServiceRequest, QuestionnaireResponse,
+// Entry order: Claim, Patient, Coverage, ServiceRequest, QuestionnaireResponse, the
+// requesting provider, the payer Organization, the prior Claim (2.1 and 2.2 only),
 // DiagnosticReport (when present), Provenance.
 //
 // meta.profile: NO meta.profile on any entry (identical to BuildConformantClaimBundleExact).
@@ -2143,15 +2151,16 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
-	// Repoint Claim.related[0].claim.reference at the prior Claim ENTRY added to the bundle
-	// below. br-payer's resolvePriorClaim (PasSubmitService.java:379-403) reads .reference (NOT
-	// .identifier) and requires the prior Claim in-bundle (else HTTP 400 "The prior Claim
-	// referenced in Claim.related.claim must be included in the Bundle"). The relative ref is
-	// absolutized to the entry's fullUrl by absolutizeBundleRefs (AbsoluteRefs) — what
-	// findInBundle keys on. The existing .identifier is kept.
-	claimJSON, err = setPriorClaimReference(claimJSON, "Claim/"+conformantPASClaimID)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant update: prior-claim ref: %w", err)
+	// From PAS 2.1, repoint Claim.related[0].claim.reference at the prior Claim ENTRY added to
+	// the bundle below: the update Bundle carries the prior it names. The relative ref is
+	// absolutized to the entry's fullUrl by absolutizeBundleRefs (AbsoluteRefs). The existing
+	// .identifier is kept. At PAS 2.0 the related claim stays the identifier alone, and the
+	// reference payer looks the prior up in its own records by it.
+	if def.UpdateCarriesPriorClaim {
+		claimJSON, err = setPriorClaimReference(claimJSON, "Claim/"+conformantPASClaimID)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: prior-claim ref: %w", err)
+		}
 	}
 
 	// --- Coverage: identical to the submit builder — the member's OWN Coverage
@@ -2242,14 +2251,17 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 		return nil, fmt.Errorf("shnsdk: conformant update: the requesting provider and the payer organization are the same bundle entry (%s)", providerRef)
 	}
 	baseResources = append(baseResources, payerOrg.raw)
-	// The prior Claim as a resolvable bundle ENTRY (NOT first → not profile-validated by
-	// PasBundleValidator; carries urn:shn:correlation|OriginalCorr, what br-payer searches the
-	// stored authorization on). The operative update Claim's related.reference resolves to it.
-	priorClaimJSON, err := buildPriorClaimEntry(in.PatientRef, coverageRef, providerRef, payerOrg.id, in.OriginalCorr, in.PriorClaim)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant update: build prior claim entry: %w", err)
+	// From PAS 2.1, the prior Claim as a resolvable bundle ENTRY (NOT first; carries
+	// urn:shn:correlation|OriginalCorr, what a payer searches the stored authorization on).
+	// The operative update Claim's related.reference resolves to it. Not at PAS 2.0, whose
+	// request Bundle allows one Claim.
+	if def.UpdateCarriesPriorClaim {
+		priorClaimJSON, err := buildPriorClaimEntry(in.PatientRef, coverageRef, providerRef, payerOrg.id, in.OriginalCorr, in.PriorClaim)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: build prior claim entry: %w", err)
+		}
+		baseResources = append(baseResources, priorClaimJSON)
 	}
-	baseResources = append(baseResources, priorClaimJSON)
 	for _, rj := range baseResources {
 		e, err := entryFor(rj)
 		if err != nil {

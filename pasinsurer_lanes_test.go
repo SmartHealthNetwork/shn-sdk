@@ -180,7 +180,7 @@ func assertNamesOnlyTheOwnPayer(t *testing.T, bundle, record []byte, id string) 
 // v0.59.0 PayerOrgEntry and ContainedInsurer are no-ops. Whatever they are
 // set to, a submission and an amendment are byte for byte the request built
 // with both unset — the payer as the caller's own entry and, on an amendment,
-// the prior Claim as the entry its related claim names.
+// the prior named by identifier.
 func TestConformantClaimBuilders_DeprecatedLaneFlagsChangeNothing(t *testing.T) {
 	for _, update := range []bool{false, true} {
 		for _, absolute := range []bool{false, true} {
@@ -201,53 +201,34 @@ func TestConformantClaimBuilders_DeprecatedLaneFlagsChangeNothing(t *testing.T) 
 				}
 			}
 			if update {
-				assertAmendsItsPriorClaim(t, base)
+				assertAmendsItsPriorByIdentifier(t, base)
 			}
 		}
 	}
 }
 
-// assertAmendsItsPriorClaim checks an amendment carries two Claims: the
-// operative one first, whose related claim names the second, the prior Claim.
-func assertAmendsItsPriorClaim(t *testing.T, bundle []byte) {
+// assertAmendsItsPriorByIdentifier checks a PAS 2.0 amendment (the line the
+// lanes build at) carries one Claim, the operative one, whose related claim
+// names the prior by the original submission's correlation identifier alone:
+// PAS 2.0.1's request Bundle allows one Claim, so the prior is not carried.
+func assertAmendsItsPriorByIdentifier(t *testing.T, bundle []byte) {
 	t.Helper()
-	var b struct {
-		Entry []struct {
-			FullURL  string          `json:"fullUrl"`
-			Resource json.RawMessage `json:"resource"`
-		} `json:"entry"`
+	claims := bundleClaims(t, bundle)
+	if len(claims) != 1 {
+		t.Fatalf("the amendment carries %d Claims, want the operative Claim alone: %s", len(claims), bundle)
 	}
-	if err := json.Unmarshal(bundle, &b); err != nil {
-		t.Fatal(err)
+	var related []struct {
+		Claim map[string]json.RawMessage `json:"claim"`
 	}
-	type claim struct {
-		url, id, related string
+	if err := json.Unmarshal(claims[0]["related"], &related); err != nil || len(related) == 0 {
+		t.Fatalf("the operative Claim names no prior: related=%s (%v)", claims[0]["related"], err)
 	}
-	var claims []claim
-	for _, e := range b.Entry {
-		var r struct {
-			ResourceType string `json:"resourceType"`
-			ID           string `json:"id"`
-			Related      []struct {
-				Claim struct {
-					Reference string `json:"reference"`
-				} `json:"claim"`
-			} `json:"related"`
-		}
-		if json.Unmarshal(e.Resource, &r) != nil || r.ResourceType != "Claim" {
-			continue
-		}
-		c := claim{url: e.FullURL, id: r.ID}
-		if len(r.Related) > 0 {
-			c.related = r.Related[0].Claim.Reference
-		}
-		claims = append(claims, c)
+	if ref, ok := related[0].Claim["reference"]; ok {
+		t.Errorf("the operative Claim's related claim carries reference %s, want the identifier alone", ref)
 	}
-	if len(claims) != 2 {
-		t.Fatalf("the amendment carries %d Claims, want the operative Claim and the prior Claim it amends: %s", len(claims), bundle)
-	}
-	if prior := claims[1]; claims[0].related != prior.url && claims[0].related != "Claim/"+prior.id {
-		t.Errorf("the operative Claim's related claim is %q, not the prior Claim entry %q", claims[0].related, prior.url)
+	var id struct{ System, Value string }
+	if err := json.Unmarshal(related[0].Claim["identifier"], &id); err != nil || id.System != "urn:shn:correlation" || id.Value == "" {
+		t.Errorf("the operative Claim's related claim identifier is %s (%v), want the submission's correlation", related[0].Claim["identifier"], err)
 	}
 }
 

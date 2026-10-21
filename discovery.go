@@ -10,10 +10,15 @@ import "encoding/json"
 // from /pubkey). No keys are embedded (no drift).
 // MUST stay wire-identical to the substrate's accountsvc.Discovery (test/sdkparity).
 type Discovery struct {
-	Demo                bool              `json:"demo"`
-	SyntheticDataOnly   bool              `json:"syntheticDataOnly"`
-	WireProtocolVersion string            `json:"wireProtocolVersion"`
-	IGVersions          map[string]string `json:"igVersions"`
+	Demo                bool   `json:"demo"`
+	SyntheticDataOnly   bool   `json:"syntheticDataOnly"`
+	WireProtocolVersion string `json:"wireProtocolVersion"`
+	// WireProtocolVersionsAccepted lists the wire protocol versions the
+	// network accepts beside WireProtocolVersion, while it moves from one
+	// version to the next. Additive; absent means only WireProtocolVersion.
+	// Producer: internal/accountsvc/discovery.go.
+	WireProtocolVersionsAccepted []string          `json:"wireProtocolVersionsAccepted,omitempty"`
+	IGVersions                   map[string]string `json:"igVersions"`
 	// ContractVersions is LEGACY and no longer populated (2026-08-13): what any
 	// participant declares — including SHN-operated test participants — is participant
 	// truth (registrar feed §2.3 / directory §3), not a network property. The field
@@ -101,9 +106,12 @@ type PublishedVersions struct {
 }
 
 type DiscoveryEndpoints struct {
-	Hub           string `json:"hub"`
-	Authz         string `json:"authz"`
-	Registrar     string `json:"registrar"`
+	Hub       string `json:"hub"`
+	Authz     string `json:"authz"`
+	Registrar string `json:"registrar"`
+	// PatientAccess is always empty: the network names no Patient Access
+	// API. The key stays on the wire, always present, until the discovery
+	// protocol is versioned.
 	PatientAccess string `json:"patientAccess"`
 	Accounts      string `json:"accounts"`
 	Consent       string `json:"consent,omitempty"`

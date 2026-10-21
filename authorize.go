@@ -29,7 +29,7 @@ type Token struct {
 	// PayloadHash is sha256hex(envelope ciphertext) — the per-leg binding of THIS
 	// authorization to THIS payload (AI-2). NOT omitempty (field order + presence is
 	// load-bearing for signing-payload parity with internal/authz.Token). Empty only
-	// for non-envelope tokens (patient-access-read).
+	// for a non-envelope token (a direct read; the network authorizes none today).
 	PayloadHash string    `json:"payloadHash"`
 	Expiry      time.Time `json:"expiry"`
 	// Involvement marks a token minted for another patient a leg involves
@@ -49,7 +49,8 @@ type AuthorizeRequest struct {
 	CorrelationID string `json:"correlationId"`
 	// PayloadHash is sha256hex(envelope ciphertext): the participant seals the
 	// payload FIRST, then authorizes against that ciphertext so the minted token
-	// binds THIS payload (AI-2). Empty for non-envelope ops (patient-access-read).
+	// binds THIS payload (AI-2). Empty only for a non-envelope op (a direct read;
+	// the network authorizes none today).
 	PayloadHash string `json:"payloadHash,omitempty"`
 	// Involvement, when set, asks for a token for another patient this leg
 	// involves (an Involvement* value), carried in Metadata.Involved; the token
@@ -190,14 +191,15 @@ func VerifyBound(t Token, authzPub ed25519.PublicKey, now time.Time, wantFrame, 
 	return nil
 }
 
-// VerifyBoundNoPayload is the verifier for the ONE non-envelope operation
-// (patient-access-read): a direct REST bearer read that rides no sealed envelope
-// and therefore carries NO payload hash (the OPA policy forbids one on that op).
+// VerifyBoundNoPayload is the verifier for a non-envelope operation: a direct
+// REST bearer read that rides no sealed envelope and therefore carries NO payload
+// hash (the OPA policy forbids one on such an op). The network authorizes no such
+// operation today.
 // It performs every binding check VerifyBound does EXCEPT the payload-hash check,
 // and instead asserts the token carries NO hash — so an envelope-bound token (which
 // always carries a hash) can never be replayed onto the bearer read path (AI-2).
 // Use VerifyBound (strict payload) for every sealed-envelope leg; use this ONLY for
-// patient-access-read. Ported from internal/authz.VerifyBoundNoPayload.
+// a direct read. Ported from internal/authz.VerifyBoundNoPayload.
 func VerifyBoundNoPayload(t Token, pub ed25519.PublicKey, now time.Time, wantFrame, wantOp, wantCorr, wantHolder, wantSubject string) error {
 	if t.PayloadHash != "" {
 		return errors.New("shnsdk: payload hash present on non-envelope token")

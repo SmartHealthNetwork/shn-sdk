@@ -46,7 +46,7 @@ Everything else in this document is an elaboration of these five ideas.
 | **Smart Gateway** | The holder-side service that terminates the wire contract. It is the only thing a holder's internal systems touch. It does all sealing, validation, token acquisition, and verification. |
 | **Hub** | The central, payload-blind message router. |
 | **Authorization Framework** | The central token-issuing service. Policy-evaluates every requested operation (default-deny) and mints signed, scope-bound tokens. Verification of those tokens is decentralized — every party checks them locally. |
-| **Frame** | The legal basis under which an operation occurs. Five frames are defined: `provider-tpo` (provider treatment/payment/operations), `payer-coverage` (payer coverage decisions), `facility-disclosure` (a facility disclosing records in answer to a federated query), `patient-access` (the patient reading their own data), and `patient-authorship` (the patient authoring data). Patient consent for a federated query is modeled as a *gating conjunct* on the provider's `provider-tpo` query — confirmed against the Consent service at token issuance — not as a frame of its own; and the patient-reading and patient-authoring frames are deliberately kept distinct and never collapsed into one "patient access" concept. |
+| **Frame** | The legal basis under which an operation occurs. Five frames are defined: `provider-tpo` (provider treatment/payment/operations), `payer-coverage` (payer coverage decisions), `facility-disclosure` (a facility disclosing records in answer to a federated query), `patient-access` (the patient reading their own data; kept for a future relay of a payer's own Patient Access API, which no Smart Gateway from shn-gateway v0.63.0 serves), and `patient-authorship` (the patient authoring data). Patient consent for a federated query is modeled as a *gating conjunct* on the provider's `provider-tpo` query — confirmed against the Consent service at token issuance — not as a frame of its own; and the patient-reading and patient-authoring frames are deliberately kept distinct and never collapsed into one "patient access" concept. |
 | **Leg** | One direction of one exchange (request or response). The unit of authorization and of audit: every leg gets its own token and its own audit record. |
 | **PCI** | The network-level patient identifier — a `pci:`-prefixed opaque value; how it is produced is internal and may change. Member IDs, MRNs, and other real-world identifiers cross the network **only inside sealed payloads**; all routing metadata and all audit records carry the PCI instead. |
 | **Envelope** | The wire unit: cleartext routing metadata (sender, recipient, transaction type, frame, correlation ID, authorization token, timestamp, and, where they apply, a consent reference and the tokens for other patients the leg involves) plus an opaque ciphertext sealed to the recipient's public key. |
@@ -130,12 +130,14 @@ Key properties of every leg:
   system is not `$validate`d, and a payer's answer relayed verbatim is not re-validated on
   egress. A payload a gateway itself translated between IG lines is validated and refused at
   every level.
-- **Replay is bounded.** The Hub refuses an envelope it has already routed within a two-hour
-  window, keyed on the correlation ID and the hash of the ciphertext, so exactly a
-  byte-identical envelope is refused; a retry seals new ciphertext and is routed. Envelope
-  timestamps must fall within a small clock-skew window. Holder assertions carry JTIs that the
-  Authorization Framework and the Registrar accept once; the Hub verifies an assertion's
-  signature, audience and expiry, and relies on the envelope guard instead.
+- **Replay is refused.** The Hub refuses an envelope it has already routed while its request
+  token lives, keyed on the correlation ID and the hash of the ciphertext, so exactly a
+  byte-identical envelope is refused; a retry seals new ciphertext and is routed. The record is
+  one the Hub keeps for all its instances, so a restart or a deploy does not forget it, and a
+  Hub that cannot reach it refuses the leg rather than route it unguarded. Envelope timestamps
+  must fall within a small clock-skew window, and the Hub routes a request token no more than 5
+  minutes after its mint. Holder assertions carry JTIs that the Authorization Framework, the
+  Registrar and the Hub each accept once.
 
 Exchanges are synchronous request/response today, but each leg is an independently authorized
 and audited envelope tied together only by the correlation ID — so asynchronous delivery is a
@@ -178,9 +180,9 @@ The holder-side termination point, run once per holder with a configured role:
   and implement the wire protocol natively with the public SDK's standalone
   `shnsdk.Responder` and its `Adjudicator` (a separate HTTP service, not something injected
   into the gateway); the gateway's in-process decision seam is internal and not for partner
-  use. Additionally serves a conventional RESTful
-  **Patient Access API** (a published CapabilityStatement plus `ExplanationOfBenefit`
-  read/search) gated by per-operation patient-access tokens.
+  use. Before shn-gateway v0.63.0 it built and stored an `ExplanationOfBenefit` for each
+  prior-authorization decision; from shn-gateway v0.63.0 it records the decision on its pend
+  ledger and builds none.
 - **Facility** — responds to consent-gated federated record queries, re-checking consent
   itself before disclosing anything (a deliberate second gate beyond the central one).
 - **PHG gateway** — the sealed responder for patient-authored content: it builds the
@@ -204,8 +206,9 @@ holder's backend sit a few narrow, well-defined **seams**:
   reports or facility records for a federated query.
 - A **write seam** (the holder's store): persist and retrieve authorization numbers, track
   in-flight claim state (the pended-claim ledger, with an atomic test-and-set so concurrent or
-  replayed updates can't double-process), and record the `ExplanationOfBenefit` documents the
-  Patient Access API serves.
+  replayed updates can't double-process). Before shn-gateway v0.63.0 it also recorded the
+  decision `ExplanationOfBenefit` documents a payer gateway built; from shn-gateway v0.63.0
+  no gateway builds one.
 - A **decisioning seam** (payer side): the holder's coverage and medical-necessity policy,
   supplied by delegating outward to its own Da Vinci payer system (above).
 
@@ -267,7 +270,9 @@ a malformed request) is answered without an audit record.
 The SHN-operated Global Person Consent store, run under the consent standards set by the SHDT.
 It answers a precise four-facet question — may
 *recipient* receive data held by *custodian* about *patient (PCI)* for *purpose*? — returning a
-permit decision and a FHIR Consent reference. It gates federated-query token issuance
+permit decision and a FHIR Consent reference, from the consents valid at the moment it is
+asked. Only the Trust issues, modifies or revokes a consent: its admin surface accepts only
+the Trust's own consent-admin key, which no participant holds, and no load balancer routes it. It gates federated-query token issuance
 centrally, and facilities re-check it locally before disclosure. Returned records carry a
 Provenance whose policy cites the Consent, so disclosures stay attributable to their legal
 basis.
@@ -281,10 +286,12 @@ The system's memory, designed so it can be trusted more than any single operator
   reference, the patient's PCI, and the hash of the (still-encrypted) payload. Never content,
   never member IDs.
 - **Authenticated writes.** The append endpoint only accepts records signed by an authorized
-  network key (the Hub, the Authorization Framework, the Registrar, the Accounts service, and
-  the network's own reference payer holder for its patient-access reads); the signature covers
+  network key (the Hub, the Authorization Framework, the Registrar and the Accounts service);
+  the signature covers
   the record content. A partner-role holder may append records that name itself as sender,
-  signed with its own key.
+  signed with its own key. Before shn-gateway v0.63.0 the network's own reference payer
+  gateway also appended its Patient Access read records, signed with its holder key; the
+  Audit Plane no longer accepts that key.
 - **Durable and immutable.** In a deployed network, persisted in a store whose schema forbids
   update, delete, and truncate.
 - **Truncation-evident.** A dedicated checkpoint key periodically signs a high-water mark
@@ -315,10 +322,8 @@ them.
 through, at request time, to a canonical source:
 
 - **Activity / transparency** — the patient projection of the audit chain.
-- **Prior-authorization decisions** — approved and denied determinations read from the payer's
-  Patient Access API. For each read, the PHG mints a fresh, subject-bound, consume-once
-  patient-access token; denial cards render the payer's machine-readable reason and appeal
-  rights in plain language.
+- **Prior-authorization decisions** — not shown. The network runs no Patient Access API of
+  its own, no Smart Gateway from shn-gateway v0.63.0 serves one, and the PHG reads nothing from the payer.
 - **Questionnaire / attestation** — when a prior authorization is pending on
   patient-reported information, the patient completes and attests it in-app. The PHG acts as a
   stateless proxy to the provider's two-phase API; resume tokens stay server-side, and the
@@ -371,8 +376,8 @@ Supporting mechanisms:
   public key, openable only with the recipient's private key.
 - **Holder assertions** — short-lived (at most an hour), audience-scoped Ed25519 assertions —
   authenticate every call a holder makes to the Hub, the Authorization Framework, and the
-  Registrar. The Authorization Framework and the Registrar accept each assertion's JTI once;
-  the Hub verifies the assertion and guards replay on the envelope instead.
+  Registrar. Each of them accepts an assertion's JTI once; the Hub also guards replay on the
+  envelope.
 - **One provisioning root.** A single provisioning step generates every holder keypair, every
   service key, and the registry manifest, so identity and trust roots are consistent across
   every deployment of the same network. In cloud deployments, secret material is split per
@@ -387,11 +392,11 @@ Supporting mechanisms:
 
 | Question | Mechanism |
 |---|---|
-| Who is the sender? | A signed, audience-scoped, expiring **holder assertion** (Ed25519), verified against the registry's signing key for that holder. The Authorization Framework and the Registrar accept each JTI once; the Hub relies on its envelope replay guard. |
+| Who is the sender? | A signed, audience-scoped, expiring **holder assertion** (Ed25519), verified against the registry's signing key for that holder. The Authorization Framework, the Registrar and the Hub each accept a JTI once. |
 | May they do this? | Default-deny policy in the Authorization Framework: role→frame→operation gated, minimum-necessary scope minted per operation. |
 | Is this token for *this* exchange? | Strict binding verification — frame, operation, correlation ID, holder, patient subject, and ciphertext hash must all match — checked independently by the Hub, the recipient, and the sender (response leg). |
-| Is this a replay? | The Hub refuses an envelope it has already routed within two hours (keyed on the correlation ID and the ciphertext hash), plus a tight envelope-timestamp window. |
-| Is the payload about the right patient? | The recipient resolves the decrypted payload's patient by its own system. On eligibility answered from the payer's own records, federated query and patient-authored DTR it requires that patient to equal the token's subject. An eligibility answer a payer's own eligibility endpoint gives about another patient is relayed below `strict`, recorded at `observe` and `structural`, and refused at `strict`. On the Da Vinci CRD, DTR and PAS legs the payer handles the patient the request names as it would directly, and files everything it records about the exchange under its own binding of that patient, never under the token's. |
+| Is this a replay? | The Hub refuses an envelope it has already routed while its request token lives (keyed on the correlation ID and the ciphertext hash), in one record shared by all its instances, and refuses the leg if it cannot reach that record; it uses each holder assertion once, routes a request token no more than 5 minutes after its mint, and keeps a tight envelope-timestamp window. |
+| Is the payload about the right patient? | The recipient resolves the decrypted payload's patient by its own system. From shn-gateway v0.62.0: on federated query and patient-authored DTR it requires that patient to equal the token's subject, and refuses a patient it does not hold with the same answer, so the refusal does not say which. On eligibility a difference is carried and recorded, as on the CRD, DTR and PAS legs. An eligibility answer a payer's own eligibility endpoint gives about another patient is relayed below `strict`, recorded at `observe` and `structural`, and refused at `strict`. On eligibility and the Da Vinci CRD, DTR and PAS legs the payer handles the patient the request names as it would directly, and files everything it records about the exchange under its own binding of that patient, never under the token's. |
 | Can anyone read it in transit? | Payloads are sealed to the recipient's X25519 key; only the recipient can open them. The Hub has no key. |
 | Did it really happen / was history edited? | Hub-signed, hash-chained, append-only audit with externally anchored signed checkpoints; the whole chain is independently re-verifiable. |
 | Is the data well-formed? | Real FHIR `$validate` at gateway crossings, egress and ingress, on what each leg's check covers, at the gateway's chosen level: not at `none`, recorded at `observe`, broken structure refused at `structural`, any defect refused at `strict`; terminology validated against curated value sets. |
@@ -426,8 +431,10 @@ and the implemented domain is **prior authorization**, end to end:
      claim-update on the same rails for re-adjudication. The payer's pended-claim ledger uses
      an atomic test-and-set so concurrent or replayed updates can't double-process.
    - **Denied** — a `ClaimResponse` carrying the machine-readable review action and denial
-     code, the payer's own rationale and any appeal rights it supplies (in process notes), and
-     a corresponding `ExplanationOfBenefit` recorded payer-side for the patient to read.
+     code, the payer's own rationale and any appeal rights it supplies (in process notes).
+     Before shn-gateway v0.63.0 a corresponding `ExplanationOfBenefit` was recorded
+     payer-side; from shn-gateway v0.63.0 the payer gateway records the decision on its pend
+     ledger and builds none.
 5. **Federated query.** When required evidence lives at a *third* organization, the provider
    issues a narrow, consent-gated query routed through the Hub to the facility. It rides as a
    Da Vinci CDex data-request `Task` (named patient, named resource type, bounded scope — no
@@ -441,8 +448,8 @@ and the implemented domain is **prior authorization**, end to end:
 6. **Patient attestation.** When adjudication needs patient-reported information, the patient
    answers in their Smart Health account; the signed, patient-attributed answer travels back
    over a sealed `patient-authorship` leg and completes the claim.
-7. **Patient access.** Patients read their determinations (and appeal information) through the
-   PHG from the payer's Patient Access API, each read individually tokenized and audited.
+7. **Patient access.** Not part of the flow: the PHG does not read the payer's
+   determinations.
 
 ---
 
@@ -457,8 +464,9 @@ and the implemented domain is **prior authorization**, end to end:
   request carried from the provider's own system is not, nor is a payer's answer relayed
   verbatim (a provider gateway checks the payer's DTR and PAS answers at its own level).
 - **Profile conformance.** Separately from the runtime gate, the prior-auth surface (PAS
-  request/update Bundles, Claim, ClaimResponse, DTR QuestionnaireResponses, the PDex
-  ExplanationOfBenefit, and the Da Vinci CDex data-request Tasks that carry federated queries)
+  request/update Bundles, Claim, ClaimResponse, DTR QuestionnaireResponses and the Da Vinci
+  CDex data-request Tasks that carry federated queries, and before shn-gateway v0.63.0 the PDex
+  decision ExplanationOfBenefit)
   is conformance-tested as a dedicated **pre-deployment gate** that drives profile-directed
   `$validate` against an IG-loaded validator, with a documented allowlist for licensed
   terminology an offline validator cannot expand. The network speaks three Da Vinci IG lines,
@@ -466,26 +474,25 @@ and the implemented domain is **prior authorization**, end to end:
 
   | Line | CRD | DTR | PAS | US Core | PDex |
   |---|---|---|---|---|---|
-  | 2.0 | 2.0.1 | 2.0.1 | 2.0.1 | 6.1.0 | 2.1.0 |
-  | 2.1 | 2.1.0 | 2.1.0 | 2.1.0 | 7.0.0 | 2.1.0 |
-  | 2.2 | 2.2.1 | 2.2.0 | 2.2.1 | 7.0.0 | 2.1.0 |
+  | 2.0 | 2.0.1 | 2.0.1 | 2.0.1 | 6.1.0 | none; 2.1.0 before shn-gateway v0.63.0 |
+  | 2.1 | 2.1.0 | 2.1.0 | 2.1.0 | 7.0.0 | none; 2.1.0 before shn-gateway v0.63.0 |
+  | 2.2 | 2.2.1 | 2.2.0 | 2.2.1 | 7.0.0 | none; 2.1.0 before shn-gateway v0.63.0 |
 
   Each gateway validates a line against that line's own IG packages, and the discovery
   document advertises the versions per line, so a participant validates against exactly
   what the network does.
-- **Published surface.** The payer publishes a Patient Access `CapabilityStatement`,
-  conformance-tested against what is actually served.
 - **Terminology.** LOINC, ICD-10-CM, CPT, HCPCS Level II, and X12 codes come from curated value
   sets and are validator-checked — never free-generated. Procedures carry their native coding
-  system end to end: a HCPCS-coded order produces a HCPCS-coded determination and
-  patient-readable `ExplanationOfBenefit`, never silently rewritten to CPT.
+  system end to end: a HCPCS-coded order produces a HCPCS-coded determination (and, before
+  shn-gateway v0.63.0, a HCPCS-coded decision `ExplanationOfBenefit`), never silently
+  rewritten to CPT.
 - **Delegated conformance.** A payer gateway forwards the CRD, DTR and PAS legs to the payer's
   own Da Vinci system, and that system is the conformance authority for the resources it
   authors. The network still applies its full security fence to every such leg (sealing,
   per-operation authority, patient-binding, and tamper-evident audit). The payer gateway
-  relays those answers without re-validating them against its own profiles; it does check the
-  decision `ExplanationOfBenefit`s it builds from them, and a provider gateway checks the
-  payer's DTR and PAS answers at its own conformance level.
+  relays those answers without re-validating them against its own profiles (before
+  shn-gateway v0.63.0 it checked the decision `ExplanationOfBenefit`s it built from them), and
+  a provider gateway checks the payer's DTR and PAS answers at its own conformance level.
 
 ---
 

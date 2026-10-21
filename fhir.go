@@ -28,21 +28,21 @@ const (
 	docRefDateUC05 = "2026-05-15T00:00:00Z"
 
 	// X12ReviewDecisionSystem is the X12 306 review decision code system (for
-	// example A1 Certified in total, A3 Not Certified) a payer's review action
-	// is coded in, in PAS and in the PDex prior authorization EOB.
+	// example A1 Certified in total, A3 Not Certified) a payer's PAS review
+	// action is coded in (PASReviewAction).
 	X12ReviewDecisionSystem = "https://codesystem.x12.org/005010/306"
 	// X12ReviewDecisionReasonSystem is the X12 886 review decision reason code
 	// system a review action's reasons are coded in.
 	X12ReviewDecisionReasonSystem = "https://codesystem.x12.org/external/886"
 	// CARCSystem is the X12 Claim Adjustment Reason Code system and
-	// RARCSystem the CMS Remittance Advice Remark Code system: the codes a PDex
-	// prior authorization EOB's denial reason adjudication may carry.
+	// RARCSystem the CMS Remittance Advice Remark Code system: the codes a
+	// payer's PAS item adjudication may carry as its denial reasons
+	// (PriorAuthResult.DenialReasons).
 	CARCSystem = "https://x12.org/codes/claim-adjustment-reason-codes"
 	RARCSystem = "https://x12.org/codes/remittance-advice-remark-codes"
 
 	// systemAdjudication is the standard FHIR adjudication codesystem; its
 	// "submitted" code carries the request item's net on a decision EOB.
-	// Mirrors internal/fhirmap.systemAdjudication (eob.go).
 	systemAdjudication = "http://terminology.hl7.org/CodeSystem/adjudication"
 )
 
@@ -215,12 +215,24 @@ func isJSONObjectWithMembers(raw json.RawMessage) bool {
 }
 
 // ParseEligibilityRequestMember extracts the member ID from a
-// CoverageEligibilityRequest's patient.reference, stripping the leading "Patient/"
-// prefix. It errors if the resource is not a CoverageEligibilityRequest or the
-// patient reference is missing. PORTED standalone from
-// internal/fhirmap.ParseEligibilityRequestMember; the parity test proves it agrees
-// with the substrate on both SDK-built and substrate-built requests
-// (test/sdkparity/fhir_parity_test.go).
+// CoverageEligibilityRequest's patient.reference literally, stripping a leading
+// "Patient/" prefix and keeping the rest. It errors if the resource is not a
+// CoverageEligibilityRequest or the patient reference is missing.
+//
+// It is not a payer's Smart Gateway's reading of the request, which is
+// ParseEligibilityRequestMemberExact: a Responder answers with that one, and a
+// payer reading an inbound request should too. This function differs from it in
+// two ways:
+//   - it reads the reference as written: an absolute reference is kept whole, a
+//     versioned one is kept as "<id>/_history/<version>", and a "#id" reference
+//     is kept as "#id", where the exact reader resolves each to the member;
+//   - it reads leniently, as encoding/json does: a member name matches in any
+//     case, and the last of a repeated name wins, where the exact reader refuses
+//     a request that can be read two ways (a repeated member name, or its type,
+//     patient or reference named only in another case).
+//
+// For a request naming its patient by an unversioned relative reference and
+// read one way only, the two bind the same member.
 func ParseEligibilityRequestMember(data []byte) (memberID string, err error) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
@@ -300,7 +312,6 @@ func BuildDocumentReference(id, patientRef, drRef string) ([]byte, error) {
 // 2.1.0 both define code, number, reasonCode and secondSurgicalOpinionFlag).
 // A payer sub-extension the table does not map writes no EOB
 // (PADecisionEOBUnmappedError): it is never dropped.
-// Mirrors internal/fhirmap.reviewActionSubExtensionPDex (eob.go).
 const (
 	pasReviewActionURL  = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction"
 	pdexReviewActionURL = "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewAction"
@@ -319,6 +330,10 @@ var reviewActionSubExtensionPDex = map[string]string{
 // Position is the sub-extension's 1-based place in the review action. The
 // error text names the position only, never the payer's URL, so a finding or
 // log line built from it carries no payload value.
+//
+// Deprecated: it is an error of BuildPADecisionEOBExact, which no Smart Gateway
+// calls from shn-gateway v0.63.0, and nothing replaces it. A later SDK
+// release removes it, named in that release's notes.
 type PADecisionEOBUnmappedError struct {
 	URL      string
 	Position int
@@ -470,7 +485,6 @@ func transcribeReviewAction(adj json.RawMessage) (json.RawMessage, error) {
 
 // eobJSON and its supporting types are package-local structs for the decision
 // ExplanationOfBenefit wire shape (base FHIR R4; no profile is claimed).
-// Promoted verbatim from internal/fhirmap/eob.go.
 type eobJSON struct {
 	ResourceType string            `json:"resourceType"`
 	Id           string            `json:"id"`
@@ -544,6 +558,10 @@ type eobSubmittedAmount struct {
 // Reference as written. Display is carried when the source reference has one.
 // Nothing here is minted: a reference with neither a Reference nor an
 // Identifier is absent.
+//
+// Deprecated: it is an input to BuildPADecisionEOBExact, which no Smart Gateway
+// calls from shn-gateway v0.63.0, and nothing replaces it. A later SDK
+// release removes it, named in that release's notes.
 type PADecisionEOBReference struct {
 	Reference  string
 	Identifier json.RawMessage
@@ -563,6 +581,10 @@ func (r PADecisionEOBReference) wire() eobReference {
 
 // PADecisionEOBInsurance is one of the request Claim's insurance entries:
 // its focal flag and its coverage, as written.
+//
+// Deprecated: it is an input to BuildPADecisionEOBExact, which no Smart Gateway
+// calls from shn-gateway v0.63.0, and nothing replaces it. A later SDK
+// release removes it, named in that release's notes.
 type PADecisionEOBInsurance struct {
 	Focal    *bool
 	Coverage PADecisionEOBReference
@@ -571,6 +593,10 @@ type PADecisionEOBInsurance struct {
 // PADecisionEOBAbsentError reports an element the decision EOB requires
 // whose source supplied no value: the EOB is not built, and nothing is
 // filled in for it. Element names the EOB element.
+//
+// Deprecated: it is an error of BuildPADecisionEOBExact, which no Smart Gateway
+// calls from shn-gateway v0.63.0, and nothing replaces it. A later SDK
+// release removes it, named in that release's notes.
 type PADecisionEOBAbsentError struct{ Element string }
 
 func (e *PADecisionEOBAbsentError) Error() string {
@@ -606,6 +632,10 @@ func adjudicationStatesSubmitted(raw json.RawMessage) bool {
 
 // PADecisionEOBExactParams groups the inputs to BuildPADecisionEOBExact; always
 // construct it with keyed fields.
+//
+// Deprecated: it is the input to BuildPADecisionEOBExact, which no Smart Gateway
+// calls from shn-gateway v0.63.0, and nothing replaces it. A later SDK
+// release removes it, named in that release's notes.
 type PADecisionEOBExactParams struct {
 	ID         string
 	PatientRef string
@@ -688,7 +718,8 @@ func davinciIGCanonical(ig, pkgVersion string) string {
 const pasProfileClaimBase = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim"
 
 // BuildPatientAccessCapabilityStatementExact returns the CMS-0057 Patient Access
-// CapabilityStatement the payer serves at GET /metadata (FR-37): a kind=instance
+// CapabilityStatement a payer gateway served at GET /metadata before shn-gateway
+// v0.63.0 (FR-37): a kind=instance
 // server statement declaring the ExplanationOfBenefit read+search surface, gated
 // by the per-operation patient-access token (AI-11). It mirrors the real payer
 // routes (GET /ExplanationOfBenefit?patient= and /ExplanationOfBenefit/{id}) and
@@ -704,8 +735,11 @@ const pasProfileClaimBase = "http://hl7.org/fhir/us/davinci-pas/StructureDefinit
 // pa.pdex line either (ContractPAPDex21), so neither the statement nor the
 // declaration claims PDex.
 //
-// Its v0.61.1 form, the Deprecated BuildPatientAccessCapabilityStatement, is
-// the one internal/fhirmap delegates to. fhircodes-clean — no value-set references; dependency-light.
+// fhircodes-clean — no value-set references; dependency-light.
+//
+// Deprecated: no Smart Gateway serves a Patient Access API from
+// shn-gateway v0.63.0, and nothing replaces it. A later SDK release
+// removes it, named in that release's notes.
 func BuildPatientAccessCapabilityStatementExact(created time.Time, declared []string) ([]byte, error) {
 	doc := "Patient Access to prior-authorization decisions. Each request carries a per-operation patient-access authority token bound to the patient (AI-11) — no blanket access."
 	sec := "Per-operation patient-access bearer token (substrate Authorization Framework); subject-bound, signature-covered."
@@ -744,7 +778,7 @@ func BuildPatientAccessCapabilityStatementExact(created time.Time, declared []st
 // Da Vinci ingress CapabilityStatement, served at GET /metadata on the
 // ingress edge (FR-37 per-role statements). It
 // declares the CRD/DTR/PAS generation(s) the deployment DECLARES (not merely
-// natively builds) via versioned IG canonicals, and the two FHIR operations the
+// natively builds) via versioned IG canonicals, and the FHIR operations the
 // ingress serves. CRD is CDS Hooks, not FHIR REST — it is named in documentation
 // and implementationGuide only; its discovery document lives at /cds-services.
 //
@@ -760,7 +794,8 @@ func BuildPatientAccessCapabilityStatementExact(created time.Time, declared []st
 // per declared PAS line). A declared token for an unrelated contract (a future
 // workstream's) is ignored — this statement is CRD/DTR/PAS-only.
 func BuildProviderIngressCapabilityStatement(created time.Time, declared []string) ([]byte, error) {
-	doc := "Da Vinci ingress for foreign EHR/CDS clients: PAS Claim/$submit and Claim/$inquire, DTR $questionnaire-package (FHIR operations below), and CRD CDS Hooks discovered at /cds-services. Version-specific endpoint codes are published at /.well-known/davinci-configuration (HRex 1.2.0)."
+	doc := "Da Vinci ingress for foreign EHR/CDS clients: PAS Claim/$submit and Claim/$inquire, DTR $questionnaire-package and coverage eligibility CoverageEligibilityRequest/$submit (FHIR operations below), and CRD CDS Hooks discovered at /cds-services. Version-specific endpoint codes are published at /.well-known/davinci-configuration (HRex 1.2.0)."
+	eligibilityDoc := "Carries the input to the payer its request names, exactly as sent, and relays the payer's answer exactly: a CoverageEligibilityRequest, a Bundle of one request with the resources it references, or a Parameters whose one resource parameter holds either. A batch Bundle of at most 17 requests is carried too, but answered only by a payer whose own endpoint answers batches: a payer gateway answering from the payer's records answers one request at a time and refuses a batch 501."
 	sec := "SMART Backend Services (client_credentials, private_key_jwt); configuration at /.well-known/smart-configuration."
 	var igs, pasProfiles []string
 	seenIG, seenProfile := map[string]bool{}, map[string]bool{}
@@ -831,6 +866,14 @@ func BuildProviderIngressCapabilityStatement(created time.Time, declared []strin
 						{Name: "questionnaire-package", Definition: "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/questionnaire-package"},
 					},
 				},
+				{
+					// Not tied to a declared line: the base R4 operation
+					// (IHE FAIS ITI-124) is served whatever lines are declared.
+					Type: fhir.ResourceTypeCoverageEligibilityRequest,
+					Operation: []fhir.CapabilityStatementRestResourceOperation{
+						{Name: "submit", Definition: "http://hl7.org/fhir/OperationDefinition/CoverageEligibilityRequest-submit", Documentation: &eligibilityDoc},
+					},
+				},
 			},
 		}},
 	}
@@ -894,9 +937,9 @@ func BuildHubCapabilityStatement(created time.Time) ([]byte, error) {
 // sub-extension the EOB's extension has no counterpart for with
 // *PADecisionEOBUnmappedError: the EOB is not built.
 //
-// Its v0.61.1 form, the Deprecated BuildPADecisionEOB, is the one
-// test/sdkparity fences against internal/fhirmap; this builder is not that
-// shape.
+// Deprecated: no Smart Gateway builds a decision EOB from shn-gateway
+// v0.63.0, and nothing replaces it. A later SDK release
+// removes it, named in that release's notes.
 func BuildPADecisionEOBExact(p PADecisionEOBExactParams) ([]byte, error) {
 	absent := func(element string) ([]byte, error) { return nil, &PADecisionEOBAbsentError{Element: element} }
 	switch {

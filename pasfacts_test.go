@@ -519,6 +519,14 @@ func TestPASUpdate_PriorClaimRestatesTheRecordedSubmission(t *testing.T) {
 			t.Fatal(err)
 		}
 		claims := bundleClaims(t, out)
+		if def, _ := PASLineDef(line); !def.UpdateCarriesPriorClaim {
+			// PAS 2.0.1's request Bundle allows one Claim: the update names its prior by
+			// identifier and restates nothing.
+			if len(claims) != 1 {
+				t.Fatalf("%s: %d Claims, want the update alone", line, len(claims))
+			}
+			continue
+		}
 		if len(claims) != 2 {
 			t.Fatalf("%s: %d Claims, want the update and the prior-Claim restatement", line, len(claims))
 		}

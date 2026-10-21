@@ -434,9 +434,7 @@ func TestRunPriorAuth_Approved(t *testing.T) {
 // TestRunPriorAuth_ProcedureSystem is the plumb-through test PriorAuthRequest.
 // ProcedureSystem shipped without: the ServiceRequest RunPriorAuth actually puts on the
 // wire must carry the code system the caller set (a mirrored HCPCS family, for instance),
-// and an unset ProcedureSystem must default to CPT — same two rows
-// TestBuildPADecisionEOB_ProcedureSystem already pins for the pre-existing
-// PADecisionEOBExactParams.ProcedureSystem, applied to the new field. Reproduces (and closes) the
+// and an unset ProcedureSystem must default to CPT. Reproduces (and closes) the
 // review's mutation: forcing ProcedureSystem to be ignored left every existing test green,
 // because none of them inspected the wire bytes this test now does.
 func TestRunPriorAuth_ProcedureSystem(t *testing.T) {

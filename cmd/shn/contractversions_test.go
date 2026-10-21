@@ -86,14 +86,14 @@ func seedHolder(t *testing.T, id string) string {
 	return keys
 }
 
-var lines22 = []string{shnsdk.ContractPACRD22, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS22, shnsdk.ContractPAPDex21}
+var lines22 = []string{shnsdk.ContractPACRD22, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS22}
 
 // TestContractVersionsFlag: the flag takes what the gateway's own parser
 // takes, and refuses an empty list, a token this build cannot build, a
 // malformed token and a second use.
 func TestContractVersionsFlag(t *testing.T) {
 	var f contractVersionsFlag
-	if err := f.Set("pa.crd@2.2, pa.dtr@2.2,pa.pas@2.2,pa.pdex@2.1"); err != nil {
+	if err := f.Set("pa.crd@2.2, pa.dtr@2.2,pa.pas@2.2"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := f.forRegister(); !slices.Equal(got, lines22) {
@@ -108,6 +108,18 @@ func TestContractVersionsFlag(t *testing.T) {
 		if err := b.Set(bad); err == nil {
 			t.Errorf("Set(%q) accepted", bad)
 		}
+	}
+	// pa.pdex@2.1 is declared by no gateway: the flag refuses it with the
+	// parser's reason (remove it), never the hint to use a newer shn.
+	for _, pdex := range []string{"pa.pdex@2.1", "pa.crd@2.2, pa.dtr@2.2,pa.pas@2.2,pa.pdex@2.1"} {
+		var p contractVersionsFlag
+		err := p.Set(pdex)
+		if err == nil || !strings.Contains(err.Error(), `"pa.pdex@2.1" is declared by no Smart Gateway`) || strings.Contains(err.Error(), "newer shn") {
+			t.Errorf("Set(%q) = %v, want the PDex refusal without the newer-shn hint", pdex, err)
+		}
+	}
+	if err := (&contractVersionsFlag{}).Set("pa.crd@9.9"); err == nil || !strings.Contains(err.Error(), "use a newer shn") {
+		t.Errorf("Set(pa.crd@9.9) = %v, want the newer-shn hint", err)
 	}
 	var unset contractVersionsFlag
 	if got, source := unset.forRegister(); !slices.Equal(got, shnsdk.SupportedContractVersions()) || !strings.Contains(source, "default") {
@@ -176,10 +188,11 @@ func TestRegisterAccounts_ContractVersions(t *testing.T) {
 }
 
 // Rotate without the flag re-declares what the registrar holds, so a held set
-// that is not this build's default survives the rotation, and a holder that
-// declares none stays silent.
+// that is not this build's default survives the rotation, one naming a line
+// this build no longer accepts (pa.pdex@2.1, held from an earlier
+// registration) included, and a holder that declares none stays silent.
 func TestRotate_ReDeclaresTheHeldSet(t *testing.T) {
-	for _, held := range [][]string{lines22, nil} {
+	for _, held := range [][]string{lines22, append(slices.Clone(lines22), "pa.pdex@2.1"), nil} {
 		keys := seedHolder(t, "acme-7f3a")
 		f, srv := newFakeRegistrar(t, map[string][]string{"acme-7f3a": held})
 		stdout, stderr, code := runCLI2("rotate", "acme-7f3a", "--registrar", srv.URL, "-out", keys)
@@ -253,7 +266,7 @@ func TestRotate_FlagOverridesTheHeldSet(t *testing.T) {
 // A bad --contract-versions is a usage error on every command: nothing is
 // generated or sent.
 func TestContractVersionsOption_RefusedBeforeAnyRequest(t *testing.T) {
-	for _, bad := range []string{"", "\r", ",\n,", "pa.crd@9.9", "pa.crd", "pa.crd@2.2,pa.crd@2.2"} {
+	for _, bad := range []string{"", "\r", ",\n,", "pa.crd@9.9", "pa.crd", "pa.crd@2.2,pa.crd@2.2", "pa.pdex@2.1"} {
 		f, srv := newFakeRegistrar(t, map[string][]string{"acme-7f3a": lines22})
 		keys := t.TempDir()
 		if _, _, code := runCLI("register", "--role", "payer", "--name", "ext-payer",

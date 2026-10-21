@@ -13,31 +13,38 @@ import (
 // Registrar admission validates token SHAPE only (the grammar is open to future
 // contracts/lines); membership meaning arrives with version-aware routing.
 const (
-	ContractPACRD20  = "pa.crd@2.0"  // Da Vinci CRD 2.0.x surface
-	ContractPACRD21  = "pa.crd@2.1"  // Da Vinci CRD 2.1.x surface
-	ContractPACRD22  = "pa.crd@2.2"  // Da Vinci CRD 2.2.x surface
-	ContractPADTR20  = "pa.dtr@2.0"  // Da Vinci DTR 2.0.x surface
-	ContractPADTR21  = "pa.dtr@2.1"  // Da Vinci DTR 2.1.x surface
-	ContractPADTR22  = "pa.dtr@2.2"  // Da Vinci DTR 2.2.x surface
-	ContractPAPAS20  = "pa.pas@2.0"  // Da Vinci PAS 2.0.x surface
-	ContractPAPAS21  = "pa.pas@2.1"  // Da Vinci PAS 2.1.x surface
-	ContractPAPAS22  = "pa.pas@2.2"  // Da Vinci PAS 2.2.x surface
-	ContractPAPDex21 = "pa.pdex@2.1" // Da Vinci PDex 2.1.x surface
+	ContractPACRD20 = "pa.crd@2.0" // Da Vinci CRD 2.0.x surface
+	ContractPACRD21 = "pa.crd@2.1" // Da Vinci CRD 2.1.x surface
+	ContractPACRD22 = "pa.crd@2.2" // Da Vinci CRD 2.2.x surface
+	ContractPADTR20 = "pa.dtr@2.0" // Da Vinci DTR 2.0.x surface
+	ContractPADTR21 = "pa.dtr@2.1" // Da Vinci DTR 2.1.x surface
+	ContractPADTR22 = "pa.dtr@2.2" // Da Vinci DTR 2.2.x surface
+	ContractPAPAS20 = "pa.pas@2.0" // Da Vinci PAS 2.0.x surface
+	ContractPAPAS21 = "pa.pas@2.1" // Da Vinci PAS 2.1.x surface
+	ContractPAPAS22 = "pa.pas@2.2" // Da Vinci PAS 2.2.x surface
 )
 
+// ContractPAPDex21 names the Da Vinci PDex 2.1.x surface. No Smart Gateway
+// declares it from shn-gateway v0.62.0: none builds a PDex resource. It is in
+// neither NativeContractVersions nor SupportedContractVersions, and
+// ParseDeclaredContractVersions refuses a set naming it.
+//
+// Deprecated: no gateway declares this line and this library no longer
+// declares or accepts it; nothing replaces it. A later release removes it.
+const ContractPAPDex21 = "pa.pdex@2.1"
+
 // NativeContractVersions returns EVERY contract-version token this library can
-// BUILD natively (capability) — the tri-line CRD/DTR/PAS set plus PDex,
-// mirroring tools/contracts/manifest.json's lines. This is a superset of
+// BUILD natively (capability) — the tri-line CRD/DTR/PAS set, mirroring
+// tools/contracts/manifest.json's lines. This is a superset of
 // SupportedContractVersions: a deployment's declared set need not equal its
 // full native capability (e.g. a holder may build 2.0/2.1/2.2 but choose to
 // declare only 2.0 while a partner catches up). Stable order: contract, then
-// line (crd*, dtr*, pas*, pdex*).
+// line (crd*, dtr*, pas*).
 func NativeContractVersions() []string {
 	return []string{
 		ContractPACRD20, ContractPACRD21, ContractPACRD22,
 		ContractPADTR20, ContractPADTR21, ContractPADTR22,
 		ContractPAPAS20, ContractPAPAS21, ContractPAPAS22,
-		ContractPAPDex21,
 	}
 }
 
@@ -48,7 +55,7 @@ func NativeContractVersions() []string {
 // NativeContractVersions: capability (what the library can build) and
 // declaration (what a deployment advertises it speaks) are separate axes.
 func SupportedContractVersions() []string {
-	return []string{ContractPACRD20, ContractPADTR20, ContractPAPAS20, ContractPAPDex21}
+	return []string{ContractPACRD20, ContractPADTR20, ContractPAPAS20}
 }
 
 // ParseDeclaredContractVersions resolves a deployment's DECLARED contract-version
@@ -62,7 +69,9 @@ func SupportedContractVersions() []string {
 // Otherwise every token must (1) parse as "<contract>@<line>" and (2) be a member
 // of NativeContractVersions() — declaring a line this build cannot BUILD is a
 // configuration error, not a routing outcome, so it fails closed at boot rather
-// than producing a peer-visible declaration the build cannot honor.
+// than producing a peer-visible declaration the build cannot honor. A set naming
+// pa.pdex@2.1 (ContractPAPDex21) is refused with its own reason: no gateway
+// declares it, so the remedy is to remove it, not to use a newer build.
 func ParseDeclaredContractVersions(csv string) ([]string, error) {
 	if strings.TrimSpace(csv) == "" {
 		return SupportedContractVersions(), nil
@@ -80,6 +89,9 @@ func ParseDeclaredContractVersions(csv string) ([]string, error) {
 		contract, line, ok := strings.Cut(tok, "@")
 		if !ok || contract == "" || line == "" {
 			return nil, fmt.Errorf("contract-version token %q is malformed: want \"<contract>@<line>\" (e.g. pa.pas@2.0)", tok)
+		}
+		if tok == ContractPAPDex21 {
+			return nil, fmt.Errorf("contract-version token %q is declared by no Smart Gateway from shn-gateway v0.62.0 (no gateway builds a PDex resource), so this library no longer declares it: remove it from the declared set", tok)
 		}
 		if !native[tok] {
 			return nil, fmt.Errorf("contract-version token %q is not natively buildable by this build (native set: %s)", tok, strings.Join(NativeContractVersions(), ","))

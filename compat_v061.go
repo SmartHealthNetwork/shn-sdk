@@ -8,9 +8,9 @@ package shnsdk
 // V061, so these builders write exactly the bytes v0.61.1 writes. They write values the
 // caller never stated: Claim.type professional, priority normal, the item
 // category, location and request type, an amendment's certificationType I
-// and infoChanged marker, the payer Organization/payer, and the decision
-// EOB's fixed shapes. Every one is Deprecated, and the next release removes
-// this file. Use the Exact builder each one names.
+// and infoChanged marker, and the payer Organization/payer. Every one is
+// Deprecated, and a later SDK release, named in that release's notes, removes this file. Use the Exact builder
+// each one names.
 
 import (
 	"encoding/json"
@@ -23,136 +23,6 @@ import (
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
 
-type eobItemV061 struct {
-	Sequence         int                `json:"sequence"`
-	ProductOrService eobCodeableConcept `json:"productOrService"`
-	Adjudication     []eobAdjudication  `json:"adjudication"`
-}
-
-type eobMoney struct {
-	Value    json.Number `json:"value"`
-	Currency string      `json:"currency"`
-}
-
-type eobProcessNoteV061 struct {
-	Number int    `json:"number"`
-	Type   string `json:"type,omitempty"`
-	Text   string `json:"text"`
-}
-
-type eobJSONV061 struct {
-	ResourceType string               `json:"resourceType"`
-	Id           string               `json:"id"`
-	Status       string               `json:"status"`
-	Type         eobCodeableConcept   `json:"type"`
-	Use          string               `json:"use"`
-	Patient      eobReferenceV061     `json:"patient"`
-	PreAuthRef   []string             `json:"preAuthRef,omitempty"`
-	Created      string               `json:"created"`
-	Insurer      eobReferenceV061     `json:"insurer"`
-	Provider     eobReferenceV061     `json:"provider"`
-	Outcome      string               `json:"outcome"`
-	Insurance    []eobInsuranceV061   `json:"insurance"`
-	Item         []eobItemV061        `json:"item"`
-	ProcessNote  []eobProcessNoteV061 `json:"processNote,omitempty"`
-}
-
-// Deprecated: it writes values the caller never stated. Use
-// PADecisionEOBExactParams, which carries only the payer's own notes. The next
-// release removes it.
-const EOBAppealNote = "Appeal window: 30 days from the date of this determination. " +
-	"A peer-to-peer review with the medical director may be requested before filing a formal appeal."
-
-const pdexReviewActionCodeURL = "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewActionCode"
-
-// Deprecated: it writes values the caller never stated. Use
-// BuildPADecisionEOBExact, whose PADecisionEOBExactParams state the payer's own
-// decision. The next release removes it.
-type PADecision int
-
-type eobReferenceV061 struct {
-	Reference string `json:"reference,omitempty"`
-}
-
-const systemPAProcedureCPT = systemCPT
-
-type eobExtension struct {
-	Extension            []eobExtension      `json:"extension,omitempty"`
-	URL                  string              `json:"url"`
-	ValueCodeableConcept *eobCodeableConcept `json:"valueCodeableConcept,omitempty"`
-}
-
-const systemPDexAdjudication = "http://hl7.org/fhir/us/davinci-pdex/CodeSystem/PDexAdjudicationDiscriminator"
-
-type eobAdjudication struct {
-	Extension []eobExtension      `json:"extension,omitempty"`
-	Category  eobCodeableConcept  `json:"category"`
-	Reason    *eobCodeableConcept `json:"reason,omitempty"`
-	Amount    *eobMoney           `json:"amount,omitempty"`
-}
-
-const pdexReviewActionURLV061 = "http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewAction"
-
-type eobInsuranceV061 struct {
-	Focal    bool             `json:"focal"`
-	Coverage eobReferenceV061 `json:"coverage"`
-}
-
-// Deprecated: it writes values the caller never stated. Use
-// PADecisionEOBExactParams and BuildPADecisionEOBExact. The next release
-// removes it.
-type PADecisionEOBParams struct {
-	ID          string
-	PatientRef  string
-	CoverageRef string
-	CPTCode     string
-	CPTDisplay  string
-	// ProcedureSystem is the system URI of item[].productOrService.coding (FR-28).
-	// Empty defaults to AMA-CPT (systemPAProcedureCPT) — so existing keyed callers are
-	// byte-identical. Set it (from ParseServiceRequestProductCoding) to carry the order's
-	// ACTUAL system (e.g. HCPCS) so a HCPCS order yields a HCPCS-system EOB, not a CPT-locked one.
-	ProcedureSystem string
-	Decision        PADecision
-	AuthNumber      string
-	Created         time.Time
-	// ProcessNotes are the payer's own notes (for example its appeal window),
-	// written as EOB.processNote in order and numbered from 1, on either
-	// decision. A note without text, or with a type other than "display",
-	// "print" or "printoper", is refused. A non-nil empty slice writes no
-	// processNote.
-	//
-	// Nil keeps the deprecated default: a denied EOB carries the fixed
-	// EOBAppealNote and an approved EOB carries none. That default will be
-	// removed in a later release; pass the payer's notes (or an empty slice).
-	ProcessNotes []PASProcessNote
-
-	// ReviewAction is the payer's own review decision (PriorAuthResult
-	// .ReviewAction): its X12 306 code (X12ReviewDecisionSystem; never A4,
-	// never A1 or A6 on a denial, never A3 on an approval)
-	// and any X12 886 reasons (X12ReviewDecisionReasonSystem). It is written
-	// as the reviewAction extension of the item's amount adjudication.
-	ReviewAction *PASReviewAction
-	// DenialReasons are the payer's own claim adjustment reason (CARCSystem)
-	// or remittance advice remark (RARCSystem) codes for a denial
-	// (PriorAuthResult.DenialReasons). Each is written as one denialreason
-	// adjudication, exactly as given; they are refused on an approval.
-	//
-	// Setting ReviewAction or DenialReasons (a non-nil empty slice included)
-	// states the payer's decision detail. A denied EOB then carries a
-	// denialreason only for the codes given, and always carries the decision
-	// as a review action on the amount adjudication (0 USD, the placeholder an
-	// approval uses): the payer's ReviewAction, or, when none is given, A3
-	// Not Certified, the X12 code of the denial itself. Setting neither keeps
-	// the deprecated default: a denied EOB carries the fixed denialreason CARC
-	// 50, which the payer never stated. That default will be removed in a
-	// later release.
-	DenialReasons []PASCoding
-}
-
-const systemCARC = "https://x12.org/codes/claim-adjustment-reason-codes"
-
-var pdexPackageVersionByLine = map[string]string{"2.1": "2.1.0"}
-
 // BuildEligibilityRequest constructs a FHIR R4 CoverageEligibilityRequest for the
 // member, ordering NPI, and date of service (now). Returns FHIR JSON. PORTED
 // standalone from internal/fhirmap.BuildEligibilityRequest with the SAME field
@@ -162,7 +32,7 @@ var pdexPackageVersionByLine = map[string]string{"2.1": "2.1.0"}
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildEligibilityRequestExact, which names the payer by the identifier the
-// member's Coverage states. The next release removes it.
+// member's Coverage states. A later SDK release removes it, named in that release's notes.
 func BuildEligibilityRequest(memberID, npi string, now time.Time) ([]byte, error) {
 	created := now.UTC().Format(time.RFC3339)
 	patientRef := "Patient/" + memberID
@@ -200,7 +70,7 @@ func BuildEligibilityRequest(memberID, npi string, now time.Time) ([]byte, error
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildEligibilityAnswer, which restates the insurer the request names, or
-// BuildEligibilityResponseExact. The next release removes it.
+// BuildEligibilityResponseExact. A later SDK release removes it, named in that release's notes.
 func BuildEligibilityResponse(correlationID, patientRef string, covered bool, reason string, insurer PayerIdentifier, created time.Time) ([]byte, error) {
 	member := strings.TrimPrefix(patientRef, "Patient/")
 	insurerRef := fhir.Reference{Reference: strPtr("Organization/payer")}
@@ -227,240 +97,6 @@ func BuildEligibilityResponse(correlationID, patientRef string, covered bool, re
 	return json.Marshal(resp)
 }
 
-// Deprecated: use BuildPADecisionEOBExact. The next release removes them.
-const (
-	PADecisionApproved PADecision = iota
-	PADecisionDenied
-)
-
-// eobReviewAction renders a review action as the PDex reviewAction
-// extension, refusing a value the profile's bindings exclude.
-func eobReviewAction(ra PASReviewAction) (eobExtension, error) {
-	c := ra.Code
-	switch {
-	case c.Code == "" || c.System != X12ReviewDecisionSystem:
-		return eobExtension{}, fmt.Errorf("shnsdk: review action code must be an X12 306 code (%s)", X12ReviewDecisionSystem)
-	case c.Code == "A4":
-		return eobExtension{}, fmt.Errorf("shnsdk: review action A4 (pended) is not a decision")
-	}
-	ext := eobExtension{URL: pdexReviewActionURLV061, Extension: []eobExtension{{
-		URL:                  pdexReviewActionCodeURL,
-		ValueCodeableConcept: &eobCodeableConcept{Coding: []eobCoding{{System: c.System, Code: c.Code, Display: c.Display}}},
-	}}}
-	for i, r := range ra.Reasons {
-		if r.Code == "" || r.System != X12ReviewDecisionReasonSystem {
-			return eobExtension{}, fmt.Errorf("shnsdk: review action reason %d must be an X12 886 code (%s)", i+1, X12ReviewDecisionReasonSystem)
-		}
-		ext.Extension = append(ext.Extension, eobExtension{
-			URL:                  "reasonCode",
-			ValueCodeableConcept: &eobCodeableConcept{Coding: []eobCoding{{System: r.System, Code: r.Code, Display: r.Display}}},
-		})
-	}
-	return ext, nil
-}
-
-// eobReviewActionContradicts reports whether an X12 306 code states the
-// opposite of the decision: a certification (A1 in total, A6 with changes)
-// on a denial, or A3 (not certified) on an approval. A2 (certified, partial)
-// is carried on either: a partial certification is an approval, and the Da
-// Vinci reference payer denies with A2.
-func eobReviewActionContradicts(decision PADecision, code string) bool {
-	if decision == PADecisionDenied {
-		return code == "A1" || code == "A6"
-	}
-	return code == "A3"
-}
-
-// eobAmountAdjudication is the amount-type adjudication slice with the 0 USD
-// placeholder: a prior authorization carries no adjudicated dollar figure,
-// and the slice requires the amount.
-func eobAmountAdjudication() eobAdjudication {
-	return eobAdjudication{
-		Category: eobCodeableConcept{Coding: []eobCoding{{System: systemAdjudication, Code: "submitted", Display: "Submitted Amount"}}},
-		Amount:   &eobMoney{Value: "0", Currency: "USD"},
-	}
-}
-
-// BuildPatientAccessCapabilityStatement returns the CMS-0057/PDex Patient Access
-// CapabilityStatement the payer serves at GET /metadata (FR-37): a kind=instance
-// server statement declaring the ExplanationOfBenefit read+search surface (PDex PA
-// EOB profile), gated by the per-operation patient-access token (AI-11). It mirrors
-// the real payer routes (GET /ExplanationOfBenefit?patient= and /ExplanationOfBenefit/{id})
-// and validates as a base FHIR CapabilityStatement (0 errors).
-//
-// declared is the deployment's declared contract-version token set — the gateway
-// passes Gateway.declaredContractVersions() (SHN_CONTRACT_VERSIONS, D1a); an SDK
-// caller with no declared-set config passes SupportedContractVersions(), whose
-// output is byte-identical to the pre-declared-set hardcoded PDex 2.1.0 canonical. The
-// statement's implementationGuide
-// carries one versioned canonical per declared pa.pdex@<line> token, resolved via
-// pdexPackageVersionByLine; a declared line this build cannot resolve is silently
-// skipped (the declared set may legitimately name lines/contracts this statement
-// does not speak — never a fabricated canonical, never a build error over foreign
-// evidence). Tokens for other contracts (pa.crd/pa.dtr/pa.pas) are ignored — the
-// Patient Access API is PDex-only.
-//
-// Promoted verbatim from internal/fhirmap.BuildPatientAccessCapabilityStatement.
-// fhircodes-clean — no value-set references; dependency-light.
-//
-// Deprecated: it claims PDex conformance for the decision EOB, which
-// BuildPADecisionEOBExact builds as base FHIR R4. Use
-// BuildPatientAccessCapabilityStatementExact, which claims none. The next
-// release removes it.
-func BuildPatientAccessCapabilityStatement(created time.Time, declared []string) ([]byte, error) {
-	doc := "Patient Access to prior-authorization decisions. Each request carries a per-operation patient-access authority token bound to the patient (AI-11) — no blanket access."
-	sec := "Per-operation patient-access bearer token (substrate Authorization Framework); subject-bound, signature-covered."
-	var igs []string
-	seen := map[string]bool{}
-	for _, tok := range declared {
-		contract, line, ok := strings.Cut(tok, "@")
-		if !ok || contract != "pa.pdex" {
-			continue
-		}
-		pkgVer, ok := pdexPackageVersionByLine[line]
-		if !ok {
-			continue
-		}
-		if ig := davinciIGCanonical("davinci-pdex", pkgVer); !seen[ig] {
-			igs = append(igs, ig)
-			seen[ig] = true
-		}
-	}
-	cs := fhir.CapabilityStatement{
-		Status:      fhir.PublicationStatusActive,
-		Date:        created.UTC().Format(time.RFC3339),
-		Kind:        fhir.CapabilityStatementKindInstance,
-		FhirVersion: fhir.FHIRVersion4_0_1,
-
-		ImplementationGuide: igs,
-		Format:              []string{"json"},
-		Software:            &fhir.CapabilityStatementSoftware{Name: "SHN Payer Patient Access API"},
-		Implementation: &fhir.CapabilityStatementImplementation{
-			Description: "SHN CMS-0057 Patient Access API (Da Vinci PDex Prior Authorization ExplanationOfBenefit).",
-		},
-		Rest: []fhir.CapabilityStatementRest{{
-			Mode:          fhir.RestfulCapabilityModeServer,
-			Documentation: &doc,
-			Security:      &fhir.CapabilityStatementRestSecurity{Description: &sec},
-			Resource: []fhir.CapabilityStatementRestResource{{
-				Type:             fhir.ResourceTypeExplanationOfBenefit,
-				SupportedProfile: []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-priorauthorization"},
-				Interaction: []fhir.CapabilityStatementRestResourceInteraction{
-					{Code: fhir.TypeRestfulInteractionRead},
-					{Code: fhir.TypeRestfulInteractionSearchType},
-				},
-				SearchParam: []fhir.CapabilityStatementRestResourceSearchParam{
-					{Name: "_id", Type: fhir.SearchParamTypeToken},
-					{Name: "patient", Type: fhir.SearchParamTypeReference},
-				},
-			}},
-		}},
-	}
-	return json.Marshal(cs)
-}
-
-// Deprecated: it writes values the caller never stated. Use
-// BuildPADecisionEOBExact. The next release removes it.
-func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
-	id, patientRef, coverageRef, cptCode, cptDisplay, decision, authNumber, created :=
-		p.ID, p.PatientRef, p.CoverageRef, p.CPTCode, p.CPTDisplay, p.Decision, p.AuthNumber, p.Created
-	procedureSystem := p.ProcedureSystem
-	if procedureSystem == "" {
-		procedureSystem = systemPAProcedureCPT
-	}
-	supplied, err := pasDeniedNotes(p.ProcessNotes)
-	if err != nil {
-		return nil, err
-	}
-	detailed := p.ReviewAction != nil || p.DenialReasons != nil
-	var review *eobExtension
-	if p.ReviewAction != nil {
-		ext, err := eobReviewAction(*p.ReviewAction)
-		if err != nil {
-			return nil, err
-		}
-		if eobReviewActionContradicts(decision, p.ReviewAction.Code.Code) {
-			return nil, fmt.Errorf("shnsdk: review action %s contradicts the decision", p.ReviewAction.Code.Code)
-		}
-		review = &ext
-	}
-	if len(p.DenialReasons) > 0 && decision != PADecisionDenied {
-		return nil, fmt.Errorf("shnsdk: denial reasons on a decision that is not a denial")
-	}
-	var denialReasons []eobAdjudication
-	for i, r := range p.DenialReasons {
-		if r.Code == "" || (r.System != CARCSystem && r.System != RARCSystem) {
-			return nil, fmt.Errorf("shnsdk: denial reason %d must be a CARC (%s) or RARC (%s) code", i+1, CARCSystem, RARCSystem)
-		}
-		denialReasons = append(denialReasons, eobAdjudication{
-			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemPDexAdjudication, Code: "denialreason"}}},
-			Reason:   &eobCodeableConcept{Coding: []eobCoding{{System: r.System, Code: r.Code, Display: r.Display}}},
-		})
-	}
-	eob := eobJSONV061{
-		ResourceType: "ExplanationOfBenefit",
-		Id:           id,
-		Status:       "active",
-		Type:         eobCodeableConcept{Coding: []eobCoding{{System: "http://terminology.hl7.org/CodeSystem/claim-type", Code: "professional"}}},
-		Use:          "preauthorization",
-		Patient:      eobReferenceV061{Reference: patientRef},
-		Created:      created.UTC().Format(time.RFC3339),
-		Insurer:      eobReferenceV061{Reference: "Organization/payer"},
-		Provider:     eobReferenceV061{Reference: "Practitioner/reviewer-uc08"},
-		Outcome:      "complete",
-		Insurance:    []eobInsuranceV061{{Focal: true, Coverage: eobReferenceV061{Reference: coverageRef}}},
-		Item: []eobItemV061{{
-			Sequence:         1,
-			ProductOrService: eobCodeableConcept{Coding: []eobCoding{{System: procedureSystem, Code: cptCode, Display: cptDisplay}}},
-		}},
-	}
-	switch decision {
-	case PADecisionApproved:
-
-		amount := eobAmountAdjudication()
-		if review != nil {
-			amount.Extension = []eobExtension{*review}
-		}
-		eob.Item[0].Adjudication = []eobAdjudication{amount}
-
-		if authNumber != "" {
-			eob.PreAuthRef = []string{authNumber}
-		}
-	default:
-		if detailed {
-
-			if review == nil {
-				ext, err := eobReviewAction(PASReviewAction{Code: PASCoding{System: X12ReviewDecisionSystem, Code: "A3", Display: "Not Certified"}})
-				if err != nil {
-					return nil, err
-				}
-				review = &ext
-			}
-			amount := eobAmountAdjudication()
-			amount.Extension = []eobExtension{*review}
-			eob.Item[0].Adjudication = append([]eobAdjudication{amount}, denialReasons...)
-			break
-		}
-
-		eob.Item[0].Adjudication = []eobAdjudication{{
-			Category: eobCodeableConcept{Coding: []eobCoding{{System: systemPDexAdjudication, Code: "denialreason"}}},
-			Reason:   &eobCodeableConcept{Coding: []eobCoding{{System: systemCARC, Code: "50", Display: "These are non-covered services because this is not deemed a 'medical necessity' by the payer"}}},
-		}}
-		if p.ProcessNotes == nil {
-
-			eob.ProcessNote = []eobProcessNoteV061{{Number: 1, Type: "print", Text: EOBAppealNote}}
-		}
-	}
-
-	if p.ProcessNotes != nil {
-		eob.ProcessNote = nil
-		for _, n := range supplied {
-			eob.ProcessNote = append(eob.ProcessNote, eobProcessNoteV061(n))
-		}
-	}
-	return json.Marshal(eob)
-}
-
 // BuildCoverage builds a valid R4 Coverage conforming to us-core-coverage (US Core
 // 6.1.0): status "active", the given beneficiary (Patient) reference, a single payor
 // referencing the payer Organization, a "self" subscriber relationship (min=1), and
@@ -475,7 +111,7 @@ func BuildPADecisionEOB(p PADecisionEOBParams) ([]byte, error) {
 //
 // Deprecated: it writes values the caller never stated. Use BuildCoverageExact,
 // which names the payer by its identifier; a member's Coverage is a record in
-// your own system, to be read from there. The next release removes it.
+// your own system, to be read from there. A later SDK release removes it, named in that release's notes.
 func BuildCoverage(patientRef, memberID string) ([]byte, error) {
 	if err := requireBareMemberID(memberID); err != nil {
 		return nil, err
@@ -667,7 +303,7 @@ func addPASLineItemDetailV061(claimJSON []byte, def PASDef) ([]byte, error) {
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildConformantClaimBundleExact, which carries the claim facts you state
-// (PASClaimFacts) and writes no default. The next release removes it.
+// (PASClaimFacts) and writes no default. A later SDK release removes it, named in that release's notes.
 func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
 	def, _ := PASLineDef("2.0")
 	return buildConformantClaimBundleV061(def, in)
@@ -680,7 +316,7 @@ func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildConformantClaimBundleAtLineExact, which carries the claim facts you
-// state (PASClaimFacts) and writes no default. The next release removes it.
+// state (PASClaimFacts) and writes no default. A later SDK release removes it, named in that release's notes.
 func BuildConformantClaimBundleAtLine(line string, in ConformantClaimInputs) ([]byte, error) {
 	def, ok := PASLineDef(line)
 	if !ok {
@@ -1142,7 +778,7 @@ func buildPriorClaimEntryV061(patientRef, coverageRef, providerRef, payerOrgID, 
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildConformantClaimUpdateBundleExact, which carries the claim facts,
-// certification type and prior Claim you state. The next release removes it.
+// certification type and prior Claim you state. A later SDK release removes it, named in that release's notes.
 func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, error) {
 	def, _ := PASLineDef("2.0")
 	return buildConformantClaimUpdateBundleV061(def, in)
@@ -1153,7 +789,7 @@ func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, e
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildConformantClaimUpdateBundleAtLineExact, which carries the claim facts,
-// certification type and prior Claim you state. The next release removes it.
+// certification type and prior Claim you state. A later SDK release removes it, named in that release's notes.
 func BuildConformantClaimUpdateBundleAtLine(line string, in ConformantClaimUpdateInputs) ([]byte, error) {
 	def, ok := PASLineDef(line)
 	if !ok {
@@ -1423,7 +1059,7 @@ type pasDeniedCRV061 struct {
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildClaimResponseExact, which restates the request Claim's own type and
-// insurer (PASAnswerRequest). The next release removes it.
+// insurer (PASAnswerRequest). A later SDK release removes it, named in that release's notes.
 func BuildClaimResponse(preAuthRef, validUntil, patientRef, correlationID string, created time.Time) ([]byte, error) {
 	def, _ := PASLineDef("2.0")
 	return buildClaimResponseV061(def, preAuthRef, validUntil, patientRef, correlationID, created)
@@ -1434,7 +1070,7 @@ func BuildClaimResponse(preAuthRef, validUntil, patientRef, correlationID string
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildClaimResponseAtLineExact, which restates the request Claim's own type
-// and insurer (PASAnswerRequest). The next release removes it.
+// and insurer (PASAnswerRequest). A later SDK release removes it, named in that release's notes.
 func BuildClaimResponseAtLine(line, preAuthRef, validUntil, patientRef, correlationID string, created time.Time) ([]byte, error) {
 	def, ok := PASLineDef(line)
 	if !ok {
@@ -1493,7 +1129,7 @@ func buildClaimResponseV061(def PASDef, preAuthRef, validUntil, patientRef, corr
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildPendedClaimResponseAtLineExact, which restates the request Claim's own
-// type and insurer (PendedResponseInputs.Request). The next release removes it.
+// type and insurer (PendedResponseInputs.Request). A later SDK release removes it, named in that release's notes.
 func BuildPendedClaimResponseAtLine(line string, in PendedResponseInputs) ([]byte, error) {
 	def, ok := PASLineDef(line)
 	if !ok {
@@ -1624,7 +1260,7 @@ func buildPendedResponseV061(def PASDef, in PendedResponseInputs, tasks [][]byte
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildDeniedResponseExact, which restates the request Claim's own type and
-// insurer (PASAnswerRequest). The next release removes it.
+// insurer (PASAnswerRequest). A later SDK release removes it, named in that release's notes.
 func BuildDeniedResponse(patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
 	def, _ := PASLineDef("2.0")
 	return buildDeniedResponseV061(def, patientRef, correlationID, rationale, nil, created)
@@ -1635,7 +1271,7 @@ func BuildDeniedResponse(patientRef, correlationID, rationale string, created ti
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildDeniedResponseAtLineExact, which restates the request Claim's own type
-// and insurer (PASAnswerRequest). The next release removes it.
+// and insurer (PASAnswerRequest). A later SDK release removes it, named in that release's notes.
 func BuildDeniedResponseAtLine(line, patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
 	return BuildDeniedResponseWithNotesAtLine(line, patientRef, correlationID, rationale, nil, created)
 }
@@ -1647,7 +1283,7 @@ func BuildDeniedResponseAtLine(line, patientRef, correlationID, rationale string
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildDeniedResponseWithNotesAtLineExact, which restates the request Claim's
-// own type and insurer (PASAnswerRequest). The next release removes it.
+// own type and insurer (PASAnswerRequest). A later SDK release removes it, named in that release's notes.
 func BuildDeniedResponseWithNotesAtLine(line, patientRef, correlationID, rationale string, notes []PASProcessNote, created time.Time) ([]byte, error) {
 	def, ok := PASLineDef(line)
 	if !ok {

@@ -45,7 +45,7 @@ type AnswerCoding struct{ System, Code, Display string }
 // "Practitioner/1234567890"). It is required: dtrx-1 mandates an author sub-extension
 // when source="manual". An empty author returns an error. NOTE: source="manual" alone
 // is not FR-16-conformant for a clinician/patient author — the fence
-// (gateway/engine/attestfence.go) additionally requires a COMPLETE attestation
+// (gateway/engine/workstream_pa_conformance_attest.go) additionally requires a COMPLETE attestation
 // extension (shnsdk.BuildManualAttestedItem / BuildPatientAttestedItem) whenever
 // author names a Practitioner/Patient; this generic filler does not add one, so a
 // genuinely clinician/patient-authored fill needs its own attestation step layered on

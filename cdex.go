@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/SmartHealthNetwork/shn-sdk/internal/splice"
 )
 
 const (
@@ -129,6 +131,17 @@ var allowedQueryParams = map[string]bool{"patient": true, "date": true}
 // encoding evasion. Any violation is an error (the facility returns 403). Replaces the bespoke
 // ParseQuery. FR-24 two named types ⇒ two Tasks/legs (one per type); this parser enforces cdex-9
 // (one data-query per Task) so a Task with multiple data-query inputs is rejected.
+//
+// Task.for and the query's patient parameter may name the patient in any well-formed form, as a
+// Smart Gateway reads them: a relative ("Patient/<id>") or absolute ("<base>/Patient/<id>")
+// reference, either with "/_history/<version>", is read as "Patient/<id>"; a "#<id>" reference
+// naming the one contained Patient is read as "Patient/<member>", its member identifier, when
+// that identifier is in a FHIR id's shape. So the two are compared as one patient however each
+// was written, and PatientRef is that relative form. Any other reference is read as written,
+// before the query is unescaped. A Task that can be read two ways (a repeated member name, a
+// member read here named only in another case, or a body that is not one well-formed JSON
+// document within the strict reader's bounds), or whose contained resources are no list, has its
+// references read as written, so only the relative form names its patient.
 func ParseCDexTaskDataRequest(data []byte) (ParsedCDexRequest, error) {
 	var task struct {
 		ResourceType string `json:"resourceType"`
@@ -145,6 +158,22 @@ func ParseCDexTaskDataRequest(data []byte) (ParsedCDexRequest, error) {
 	}
 	if err := json.Unmarshal(data, &task); err != nil {
 		return ParsedCDexRequest{}, fmt.Errorf("cdex: parse: %w", err)
+	}
+	if relative, ok := cdexRelativeReferences(data); ok {
+		task.For.Reference = relative(task.For.Reference)
+		for i, in := range task.Input {
+			path, params, found := strings.Cut(in.ValueString, "?")
+			if !found {
+				continue
+			}
+			pairs := strings.Split(params, "&")
+			for j, pair := range pairs {
+				if v, isPatient := strings.CutPrefix(pair, "patient="); isPatient {
+					pairs[j] = "patient=" + relative(v)
+				}
+			}
+			task.Input[i].ValueString = path + "?" + strings.Join(pairs, "&")
+		}
 	}
 	if task.ResourceType != "Task" {
 		return ParsedCDexRequest{}, fmt.Errorf("cdex: expected Task, got %q", task.ResourceType)
@@ -361,4 +390,87 @@ func BuildCDexFulfillment(requestTaskJSON, recordsBundle []byte) (CDexFulfillmen
 // scanned strictly first (see BuildCDexFulfillment).
 func ExtractCDexEvidence(taskJSON []byte) (drJSON, provJSON []byte, err error) {
 	return extractCDexEvidence(taskJSON)
+}
+
+// cdexRelativeReferences returns, for a Task that reads one way only, the reading of a patient
+// reference in the relative form: a well-formed reference whose member is in a FHIR id's shape
+// is "Patient/<member>", and anything else is left as written, for the narrowness check to
+// refuse. The query's patient is rewritten before it is unescaped, so an escaped reference is
+// left as written too. ok is false for a Task that can be read two ways (cdexReadsOneWay), or
+// whose contained resources are no list: its references are read as written.
+func cdexRelativeReferences(data []byte) (relative func(string) string, ok bool) {
+	if !cdexReadsOneWay(data) {
+		return nil, false
+	}
+	var holder struct {
+		Contained []any `json:"contained"`
+	}
+	if json.Unmarshal(data, &holder) != nil {
+		return nil, false
+	}
+	contained := containedObjects(holder.Contained)
+	return func(ref string) string {
+		if member, ok := patientRefMember(ref, contained); ok && fhirIDShape.MatchString(member) {
+			return "Patient/" + member
+		}
+		return ref
+	}, true
+}
+
+// cdexTaskNames are the member names ParseCDexTaskDataRequest reads, object by object.
+var cdexTaskNames = cdexNames{
+	"resourceType": nil,
+	"code":         {"coding": cdexCodingNames},
+	"for":          {"reference": nil},
+	"input":        {"type": {"coding": cdexCodingNames}, "valueString": nil},
+	"contained":    nil,
+}
+
+var cdexCodingNames = cdexNames{"system": nil, "code": nil}
+
+// cdexNames is the members an object is read through, each with the names read in its value
+// (an object, or each object of a list), or nil when none are.
+type cdexNames map[string]cdexNames
+
+// cdexReadsOneWay reports whether a Task reads one way only: the strict JSON reader reads it
+// (one well-formed document, within its bounds, repeating no member name, exactly or in another
+// case), and no member it is read through is named only in another case.
+func cdexReadsOneWay(data []byte) bool {
+	if _, err := splice.Scan(data, splice.DefaultLimits()); err != nil {
+		return false
+	}
+	return cdexNamedExactly(data, cdexTaskNames)
+}
+
+// cdexNamedExactly reports whether raw, an object or a list of them, names each member names
+// reads it through exactly, as far down as names reads.
+func cdexNamedExactly(raw json.RawMessage, names cdexNames) bool {
+	var list []json.RawMessage
+	if json.Unmarshal(raw, &list) == nil {
+		for _, item := range list {
+			if !cdexNamedExactly(item, names) {
+				return false
+			}
+		}
+		return true
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return true
+	}
+	for member, value := range obj {
+		inner, exact := names[member]
+		if !exact {
+			for field := range names {
+				if strings.EqualFold(member, field) {
+					return false
+				}
+			}
+			continue
+		}
+		if inner != nil && !cdexNamedExactly(value, inner) {
+			return false
+		}
+	}
+	return true
 }

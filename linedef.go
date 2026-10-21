@@ -93,6 +93,14 @@ type PASDef struct {
 	// amendment links its attached answer to an item through that slice only
 	// where the line does not require a report type no source states.
 	SupportingInfoDocumentInformationRequired bool
+	// UpdateCarriesPriorClaim: from PAS 2.1.0 an update Bundle carries the prior Claim it
+	// names, as a second Claim entry Claim.related[0].claim resolves to (2.1.0's
+	// profile-claim-update: the prior "SHALL be included in the update Bundle"; 2.2.1's
+	// spec-65; profile-pas-request-bundle's entry:Claim slice is 1..2 at both). PAS 2.0.1's
+	// request Bundle allows exactly one Claim (entry:Claim 1..1): its update names the prior
+	// through Claim.related[0].claim by identifier and does not carry it. The Da Vinci
+	// reference payer looks such a prior up in its own records.
+	UpdateCarriesPriorClaim bool
 	// extended as package diffs dictate — additive fields only
 }
 
@@ -108,6 +116,7 @@ var pasLineDefs = map[string]PASDef{
 		ResponseBundleIdentifierRequired: false,
 		ClaimItemLineDetailRequired:      false,
 		ClaimRelatedRelationshipRequired: false,
+		UpdateCarriesPriorClaim:          false,
 	},
 	"2.1": {
 		Line:                             "2.1",
@@ -118,6 +127,7 @@ var pasLineDefs = map[string]PASDef{
 		ResponseBundleIdentifierRequired: false,
 		ClaimItemLineDetailRequired:      true,
 		ClaimRelatedRelationshipRequired: true,
+		UpdateCarriesPriorClaim:          true,
 	},
 	"2.2": {
 		Line:                             "2.2",
@@ -128,6 +138,7 @@ var pasLineDefs = map[string]PASDef{
 		ResponseBundleIdentifierRequired: true,
 		ClaimItemLineDetailRequired:      true,
 		ClaimRelatedRelationshipRequired: true,
+		UpdateCarriesPriorClaim:          true,
 
 		SupportingInfoDocumentInformationRequired: true,
 	},

@@ -948,13 +948,15 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 		// A Da Vinci PAS amended re-POST is not merely "the submit bundle again": the
 		// payer has to be able to find the authorization being amended, and to be told
 		// that the amendment carries NEW information rather than restating the old.
-		// Those are Claim.related[0].claim.reference resolving to the prior Claim as an
-		// in-bundle entry, and the PAS infoChanged item extension. Without them a real
-		// payer either refuses the update outright (the prior Claim is unresolvable) or
-		// carries the prior decision forward unchanged, so a genuinely-answered
-		// amendment comes back still pended — the documented resume flow would never
-		// reach a determination. The builder carries both on every call; absolute
-		// references make them resolve against the entries the payer was handed.
+		// Those are Claim.related[0].claim, which at PAS 2.0 (the line this resume
+		// builds at) names the prior by the submission's correlation identifier, the
+		// payer looking it up in its own records, and the PAS infoChanged item
+		// extension, derived from the recorded submission. Without them a real payer
+		// either refuses the update outright or carries the prior decision forward
+		// unchanged, so a genuinely-answered amendment comes back still pended — the
+		// documented resume flow would never reach a determination. Absolute references
+		// make the Bundle's own references resolve against the entries the payer was
+		// handed.
 		AbsoluteRefs: true,
 		Payer:        payerIdentity,
 	})

@@ -218,8 +218,10 @@ Per direction, and per sub-case where the contract distinguishes them:
 
 ## pa.pdex
 
-PDex runs on a **single native line** — no cross-version steps exist or are needed, so it has
-no rows in this matrix and none in the compatibility manifest.
+PDex has no rows in this matrix and none in the compatibility manifest. From shn-gateway
+v0.62.0 no gateway declares a PDex contract line, and from shn-gateway v0.63.0 no gateway
+builds an ExplanationOfBenefit or any other PDex resource. Before v0.62.0, PDex ran on a
+single native line.
 
 ## Composed spans
 
@@ -236,7 +238,7 @@ line. The suite also pins that a composed chain equals sequential application of
 Read that coverage precisely, in three respects.
 
 **What the lanes check.** The PAS artifacts carry a `meta.profile` and are validated against
-it. The 2.0 lane loads the DTR 2.0.1, CRD 2.0.1, PDex 2.1.0 and SDC 3.0.0 packages
+it. The 2.0 lane loads the DTR 2.0.1, CRD 2.0.1 and SDC 3.0.0 packages
 beside PAS 2.0.1 (since 2026-09), so a DTR artifact targeting 2.0 is profile-validated
 there by the profile-conformance gate. The authored downcast control additionally receives
 explicit standard Questionnaire and package profile checks on all three lines.

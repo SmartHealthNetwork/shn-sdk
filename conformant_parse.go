@@ -175,7 +175,13 @@ func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg strin
 	if !cs.haveOrder {
 		return 400, "PAS bundle missing order (ServiceRequest or DeviceRequest)"
 	}
-	if !cs.haveCoverage || cs.covBeneficiary == "" {
+	// No Coverage at all, and a Coverage without a beneficiary, are told
+	// apart, so a sender is not sent looking for a beneficiary on a Coverage it
+	// never sent.
+	if !cs.haveCoverage {
+		return 400, "PAS bundle carries no Coverage"
+	}
+	if cs.covBeneficiary == "" {
 		return 400, "PAS bundle missing Coverage.beneficiary"
 	}
 	member := pasMemberFromRef(cs.claimPatient)

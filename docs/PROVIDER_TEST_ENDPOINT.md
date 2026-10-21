@@ -49,6 +49,7 @@ without deploying anything of your own.
 | `POST /Questionnaire/$questionnaire-package` | yes | DTR — fetch a questionnaire package |
 | `POST /Claim/$submit` | yes | PAS — submit a prior-authorization request |
 | `POST /Claim/$inquire` | yes | PAS — ask the payer for the decision it holds on a submission (§1.6) |
+| `POST /CoverageEligibilityRequest/$submit` | yes | Coverage eligibility (IHE FAIS ITI-124) — ask the payer about a member's coverage (§1.7) |
 | `GET /healthz` | no | Liveness |
 
 **Not offered on this endpoint:**
@@ -63,7 +64,11 @@ without deploying anything of your own.
 
 **Two aliases, so you can test as you are configured today.** A `POST` to a path that
 is not in the table but ends in one of its operations — `/$submit` without `Claim/`, or
-`/fhir/Claim/$submit` — is served as that operation (`POST /Claim/$submit`). A
+`/fhir/Claim/$submit` — is served as that operation (`POST /Claim/$submit`), under a base
+or version segment too (`/fhir/R4/$submit`). A path that names a resource type is served as
+that type's operation (`/fhir/CoverageEligibilityRequest/$submit` as
+`POST /CoverageEligibilityRequest/$submit`), and one naming a resource type other than the
+operation's (`/fhir/ExplanationOfBenefit/$submit`) is not served. A
 `POST /cds-services/{id}` with an id this endpoint does not advertise, whose body `hook`
 is one an advertised service carries — `order-sign-crd` with `"hook":"order-sign"` — is
 served by that service (`shn-order-sign`). An aliased answer is the payer's answer
@@ -228,13 +233,16 @@ of the same 2.0-line reference payer. It answers every call in §6 identically, 
 `00300` instead.
 
 The endpoint declares both the 2.0 and the 2.2 lines for CRD, DTR and PAS, and pairs with
-each payer on a line they share. A request that cannot be carried to the payer's line
-unchanged is refused rather than silently rewritten (§8). A payer that shares no line with
-the endpoint, with no bridge to its line, is refused `422 no shared contract line for
-<transaction> (leg <leg>): this gateway speaks <lines>; recipient "<payer>" declares <lines> —
-no bridge available`, sometimes followed by a reason in parentheses. Send your SHN contact the
-`X-Correlation-Id` (§8.5). When it reads `declares (contract not declared)`, the payer takes
-the transaction on no line, and it is the payer's to fix.
+each payer on a line they share. A request is never silently rewritten (§8). From
+shn-gateway v0.62.0, a payer that shares no line with the endpoint, with no bridge to its
+line, is sent your request at the endpoint's own line, exactly as your system would send it
+directly, and its answer is relayed; a request whose walk to the payer's line would change
+it is sent as it is. Before v0.62.0 the endpoint refused such a payer `422 no shared
+contract line for <transaction> (leg <leg>): this gateway speaks <lines>; recipient
+"<payer>" declares <lines> — no bridge available`, sometimes followed by a reason in
+parentheses (send your SHN contact the `X-Correlation-Id`, §8.5; when it reads `declares
+(contract not declared)`, the payer takes the transaction on no line, and it is the payer's
+to fix), and refused a request the walk would change.
 
 ### 1.6 Inquiry
 
@@ -272,6 +280,30 @@ A pend that asked for documentation stays pended: its later answer is not pushed
 inquiry keeps returning the pend. CDex `$submit-attachment`, which would carry documentation
 for it, is not offered here (§1.1). A new submission that carries the documentation is decided
 on its own and leaves the pend as it was (§10.4).
+
+### 1.7 Coverage eligibility
+
+`POST /CoverageEligibilityRequest/$submit` is the base FHIR R4 operation, which IHE FAIS
+profiles as ITI-124. Send the `CoverageEligibilityRequest` as the body, with the token from
+§3, as on the other routes. Name the payer by the request's `insurer` (a payer identifier, as
+§1.5 lists them), or by the payor of a Coverage the request carries and names in
+`insurance`. Your request is carried to that payer
+as you sent it, and the payer's answer is relayed as it sent it.
+
+Both routes in §1.5 answer from the payer's own records. For the published test member
+`MBR-COVERED`, with `insurer` naming the route's payer identifier, both answer `HTTP 200` and a
+`CoverageEligibilityResponse`: `outcome` `complete`, and one `insurance` entry with `inforce`
+`true`.
+
+The operation's other inputs, a `Bundle` carrying the request with the resources it
+references (IHE FAIS's CoverageEligibilityRequest Bundle), a batch of requests, or a
+`Parameters` holding either, are carried the same way, and what a payer answers to them is the
+payer's own. A batch carries at most 17 requests; send a larger set as several batches. A
+batch of more is refused `413` before it is sent. A payer gateway before shn-gateway v0.63.0 reads the request on its own only,
+and answers the `Parameters` form and a FAIS Bundle `400 parse member failed`. The payers
+behind `00300` and `00301` run such a gateway, so send them the `CoverageEligibilityRequest`
+itself. A request that names no payer the endpoint can route to is
+refused `422` with what is missing, as in §8.1.
 
 ---
 
@@ -810,14 +842,16 @@ curl -s "https://pa-test.shn-preview.org/Questionnaire/\$questionnaire-package" 
   -d @dtr-00300.json
 ```
 
-Expect `HTTP 200` and a `Parameters` resource whose `packagebundle` carries the real
-`PriorAuthRequired` `Questionnaire` and a `QuestionnaireResponse`.
+Expect `HTTP 200` and a `Parameters` resource whose `PackageBundle` carries the real
+`PriorAuthRequired` `Questionnaire` and a `QuestionnaireResponse`. This payer names the package
+`PackageBundle`, the DTR 2.0.1 and 2.1.0 name. The endpoint carries the answer as sent, so a
+client that reads only the DTR 2.2.0 name, `packagebundle`, finds no package.
 
 **What this route's package carries.** The payer looks the member up in its own records by the
 Coverage `subscriberId` or `beneficiary.identifier`; the Coverage in the example above
 carries neither, and the payer's records do not hold `MBR-COVERED` for this operation even
 when they are supplied. The package therefore comes back with a `QuestionnaireResponse` whose
-id names `__unresolved-member` rather than the test member, and the `outcome` parameter
+id is `PriorAuthRequired-unresolved-member` rather than one naming the test member, and the `outcome` parameter
 carries the same demographic-prepopulation warning quoted in §5.2. Separately, the static
 `PriorAuthRequired` form this payer publishes carries **no prepopulation logic** (no Library,
 no prepopulation extensions or expressions), so no member-specific answers are prepopulated
@@ -932,7 +966,16 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
   names none, the order's subject) names a member it does not hold is carried with the
   member id and the Patient your request carries for it, so you can drive the hook from a
   patient in your own test environment. Send the same Patient, unchanged, on every leg of
-  one exchange. Three consequences: the endpoint holds no records for such a member, so
+  one exchange. From shn-gateway v0.63.0, a Patient that a coverage names as its subscriber,
+  policyholder or payor (a
+  parent who holds or pays for a dependent's coverage), by reference or by an identifier, is
+  another person and is never taken for the member, even when it carries the member's
+  number; a request that carries no Patient for the member, with a birth date and
+  name, and carries such a person under the member's number is refused `400 cannot identify
+  the patient: …`, since the number is shared. Send FHIR names in their exact case, and name a
+  contained resource only by its `#id`: where readers could resolve a request's references
+  differently, the gateway ties no Patient to the member, so beside such a person the request
+  is refused the same way. Three consequences: the endpoint holds no records for such a member, so
   leave out `coverage` prefetch and the request is refused (next bullet) unless the endpoint
   can read it through your `fhirServer`, while any other key you leave out is left out of
   what the payer receives; the payer handles the member as it would directly; and the payer
@@ -1010,15 +1053,16 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
 A `502` from this endpoint means a message could not be carried faithfully, so it was not
 carried at all. These cases are always refused:
 
-- the request cannot be carried to the payer's IG line without changing it;
+- before shn-gateway v0.62.0, the request cannot be carried to the payer's IG line without
+  changing it (from v0.62.0 it is sent as it is);
 - the payer does not accept the framed DTR operation;
-- the payer's answer repeats a JSON member name, so it could be read two ways:
-  `{"error":"payer CRD response is not a valid CDS Hooks response: response.json"}` on CRD,
-  and on PAS `{"error":"engine: invalid native PAS response Bundle: invalid or incomplete PAS
-  response graph; the payer's system received and answered this request: check its outcome
-  before resending"}` (the payer's system has answered and may have acted, so check the
-  outcome with `$inquire`), and on `$inquire` `{"error":"engine: invalid prior-authorization
-  inquiry answer"}`.
+- the payer's answer repeats a JSON member name, so it could be read two ways. From
+  shn-gateway v0.62.0 the text names the member and the object that repeats it, for example on CRD
+  `{"error":"payer CRD response repeats the JSON member \"cards\" in the top-level object: it
+  can be read two ways, so it is not carried"}`, on `$inquire` `payer inquiry answer repeats …`,
+  and on PAS `payer PAS response repeats …` followed by `; the payer's system received and
+  answered this request: check its outcome before resending` (the payer's system has answered
+  and may have acted, so check the outcome with `$inquire`).
 
 The cases below are carried as the payer sent them, unless the payer has chosen to have them
 refused; you then see a `502`:
@@ -1028,8 +1072,9 @@ refused; you then see a `502`:
 - the payer's PAS decision cannot be stated as sent — for example a decision that denies
   while also naming an authorization number, or decision detail outside the code systems the
   decision record binds;
-- the payer's PAS response Bundle names a resource it does not carry. The body says which:
-  `{"error":"engine: invalid native PAS response Bundle: PAS response graph: entry 6
+- the payer's PAS response Bundle names a resource it does not carry. The body says which
+  (from shn-gateway v0.62.0 without the `engine: ` prefix that earlier releases put first):
+  `{"error":"invalid native PAS response Bundle: PAS response graph: entry 6
   (ServiceRequest/1810) /subject references Patient \"https://…/Patient/MBR-COVERED\",
   which is no entry of the Bundle; the payer's system received and answered this request:
   check its outcome before resending"}` — the entry that made the reference, the element,
@@ -1071,15 +1116,16 @@ payer's system; the payer's system did not receive it"}`. These `504`s and bodie
 as they are.
 
 A `502` is a failed exchange, not a payer verdict, and a `504` a failure with its cause
-named. Most texts for a failure after the payer received the request say so: `may have
-received`, `received this request`, or `received and answered`, as does the endpoint's own
-failure, `500 {"error":"the provider test endpoint failed on this call; the payer may have
-received the request: check its outcome before resending"}`. A few do not, yet the payer
-may still have acted:
+named. From shn-gateway v0.62.0, most texts for a failure after the payer received the
+request say so: `may have
+received`, `received this request`, `received and answered`, `may have acted`, or `check its
+outcome before resending`, as does the endpoint's own failure, `500 {"error":"the provider
+test endpoint failed on this call; the payer may have received the request: check its outcome
+before resending"}`. A few do not, yet the payer may still have acted:
 
-- `502 response contract version mismatch …`, which comes after the payer answered;
-- `502 engine: invalid native PAS response Bundle: …` without its `the payer's system
-  received and answered this request` suffix;
+- `502 invalid native PAS response Bundle: …` (before shn-gateway v0.62.0, `502 engine:
+  invalid native PAS response Bundle: …`) without its `the payer's system received and
+  answered this request` suffix;
 - the endpoint's own plain-text `502 upstream unavailable`, `504 upstream timeout` and
   `504 upstream timeout at the per-call limit`;
 - a load balancer's HTML `504`.
@@ -1113,7 +1159,7 @@ only that the endpoint could not reach the network's routing service.
 | Requests per client | 60 per minute | `429` |
 | Concurrent requests in flight, across every caller of the endpoint | 8 | `503` |
 | Request body | 5 MiB | `400` |
-| One forwarded call (CRD, DTR, PAS), from its arrival | 90 seconds | `408`, `504`, or the connection is closed |
+| One forwarded call (CRD, DTR, PAS, coverage eligibility), from its arrival | 90 seconds | `408`, `504`, or the connection is closed |
 | Calls from one network address straight to a payer's host on the network, not through this endpoint | 2,000 per 5 minutes (about 6.7 a second) | `403` |
 
 A body over the cap is refused before any of it is forwarded, with
@@ -1151,7 +1197,7 @@ the load balancer's plain response, not one of this endpoint's JSON errors.
 
 ### 8.5 When something fails, quote `X-Correlation-Id`
 
-Every answer to a CRD, DTR or PAS call carries an `X-Correlation-Id` header: the id the
+Every answer to a CRD, DTR, PAS or coverage eligibility call carries an `X-Correlation-Id` header: the id the
 exchange is recorded under on our side. If a call does not do what you expect, send us
 that value and the time of the call, and we can find the call and the legs it ran. It is
 on refusals as much as on successes, including the endpoint's own `4xx` and `5xx` answers.
@@ -1175,9 +1221,27 @@ A PAS submission is different in one way. If its Claim names its own correlation
 the authorization, and the answer's `X-Correlation-Id` reports it. So is an
 `X-Correlation-Id` you send that equals one of the Claim's own identifiers: an amendment
 that names that identifier in `Claim.related` finds the authorization. A resend of the same
-submission lands on the same authorization. A different patient's submission under a
-Claim correlation another patient's authorization already holds is refused with `409`
-before the payer is asked, so give each authorization its own Claim correlation.
+submission lands on the same authorization. From shn-gateway v0.63.0 a different
+patient's submission under a Claim correlation another patient's authorization already
+holds is carried to the payer and answered like any other: the payer's gateway keys each
+authorization by its patient as well, so the two share nothing. Before v0.63.0 it was
+refused with `409` before the payer was asked.
+
+Count your Claim's identifiers. At PAS 2.0.1 a Claim carries exactly one
+(`Claim.identifier` 1..1), and the payer echoes your Claim into its answer, so a second one
+makes both your request and the payer's answer non-conformant. At 2.0.1, either make
+`urn:shn:correlation` the Claim's one identifier, or keep your own identifier and send its
+value as `X-Correlation-Id`. At PAS 2.1.0 and 2.2.1 a Claim may carry two, so the
+correlation may sit beside your own.
+
+Count your Claims too, when you amend. At PAS 2.0.1 a request Bundle carries one Claim
+(`Bundle.entry:Claim` 1..1): send the update alone, a `profile-claim-update` Claim whose
+`related[0].claim` names your submission by its identifier, and do not include the prior
+Claim. The PAS 2.0.1 payers behind routes `00001` and `00300` look the prior up in their own
+records. From PAS 2.1.0 include the prior Claim, named by `related` with relationship
+`prior`, as the IG requires: the payer behind route `00301` (PAS 2.2.1) refuses an update
+whose prior Claim the Bundle does not carry. The SDK's update builder sends each line's shape
+from shn-sdk v0.63.0.
 
 ---
 

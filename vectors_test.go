@@ -54,13 +54,13 @@ func readB64Vector(t *testing.T, dir, name string) []byte {
 }
 
 // TestVectorCERReproduce: the CER is byte-deterministic under the fixed clock, so the
-// SDK's BuildEligibilityRequest must REPRODUCE the vector byte-for-byte.
+// SDK's BuildEligibilityRequestExact must REPRODUCE the vector byte-for-byte.
 func TestVectorCERReproduce(t *testing.T) {
 	dir := vectorsDir(t)
 	want := readVector(t, dir, "cer.json")
-	got, err := BuildEligibilityRequest("MBR-COVERED", "1234567890", vecClock)
+	got, err := BuildEligibilityRequestExact("MBR-COVERED", "1234567890", CMSPayerIdentity, vecClock)
 	if err != nil {
-		t.Fatalf("BuildEligibilityRequest: %v", err)
+		t.Fatalf("BuildEligibilityRequestExact: %v", err)
 	}
 	if string(got) != string(want) {
 		t.Errorf("CER not reproduced byte-for-byte:\n got=%s\nwant=%s", got, want)

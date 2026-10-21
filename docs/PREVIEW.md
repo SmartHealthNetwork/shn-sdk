@@ -80,7 +80,7 @@ curl https://accounts.shn-preview.org/discovery
     "hub": "https://hub.shn-preview.org",
     "authz": "https://authz.shn-preview.org",
     "registrar": "https://registrar.shn-preview.org",
-    "patientAccess": "https://fhir.shn-preview.org"
+    "patientAccess": ""
   },
   "authzPublicKeyURL": "https://authz.shn-preview.org/pubkey",
   "hubTransportKeyURL": "https://hub.shn-preview.org/transport-key",
@@ -104,7 +104,8 @@ Fields this walkthrough does not need are omitted above — among them each pers
 endpoints, and its IG-version, operation, request-frame and published-version lists. See
 `docs/PARTICIPANT_PROTOCOL.md` §1a for the full field contract (how to resolve the
 payer's `encPub` from `/holders` by matching `payerId`, and the authz pub from
-`/pubkey`).
+`/pubkey`). `endpoints.patientAccess` is always present and always empty: the network
+runs no Patient Access API of its own and no Smart Gateway from shn-gateway v0.63.0 serves one, so read nothing from it.
 
 **`conformance-payer` answers for every demo persona above (payer identifier `00001`).**
 It is a payer Smart Gateway that splits the work the way a real payer's gateway would.
@@ -137,7 +138,7 @@ shn login --accounts https://accounts.shn-preview.org
 # keys are written to -out.
 shn register --accounts https://accounts.shn-preview.org \
   --role provider --name acme --base-url https://your-org.example.com -out ./keys
-# → shn register: declaring contract versions pa.crd@2.0,pa.dtr@2.0,pa.pas@2.0,pa.pdex@2.1 (this build's default; pass --contract-versions to declare your gateway's set)
+# → shn register: declaring contract versions pa.crd@2.0,pa.dtr@2.0,pa.pas@2.0 (this build's default; pass --contract-versions to declare your gateway's set)
 # → Registered acme-7f3a. Keys in ./keys.
 ```
 
