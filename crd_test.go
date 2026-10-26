@@ -42,22 +42,6 @@ func jsonEqual(t *testing.T, got, want []byte) bool {
 	return reflect.DeepEqual(g, w)
 }
 
-// TestParseOrderSelectRequest_Rejects verifies the two invalid inputs are rejected.
-func TestParseOrderSelectRequest_Rejects(t *testing.T) {
-	// Empty draft orders.
-	if _, err := ParseOrderSelectRequest([]byte(`{"hook":"order-select","context":{"patientId":"p","draftOrders":[]},"prefetch":{"coverage":{}}}`)); err == nil {
-		t.Error("ParseOrderSelectRequest should reject empty draftOrders")
-	}
-	// Garbage JSON.
-	if _, err := ParseOrderSelectRequest([]byte(`not json`)); err == nil {
-		t.Error("ParseOrderSelectRequest should reject garbage JSON")
-	}
-	// Wrong hook.
-	if _, err := ParseOrderSelectRequest([]byte(`{"hook":"appointment-book","context":{"patientId":"p","draftOrders":[{}]},"prefetch":{"coverage":{}}}`)); err == nil {
-		t.Error("ParseOrderSelectRequest should reject wrong hook")
-	}
-}
-
 // crdAnswerFromCoverage is the conformant answer carrying cov on a
 // ServiceRequest, built by BuildCRDResponse.
 func crdAnswerFromCoverage(t *testing.T, cov CardCoverage) []byte {

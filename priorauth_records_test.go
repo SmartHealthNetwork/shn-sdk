@@ -73,9 +73,10 @@ func TestRunPriorAuth_OrderSignFromCallerRecords(t *testing.T) {
 			t.Fatalf("request carries %s", callback)
 		}
 	}
+	want := collectionEntryFullURL(sent.HookInstance+"/draftOrders", 0, "sr-"+req.Member)
 	if !strings.Contains(string(sent.Context.DraftOrders), `"subject":{"reference":"Patient/`+req.Member+`"}`) ||
-		!strings.Contains(string(sent.Context.DraftOrders), `"fullUrl":"ServiceRequest/sr-`+req.Member+`"`) {
-		t.Fatalf("draft orders %s", sent.Context.DraftOrders)
+		!strings.Contains(string(sent.Context.DraftOrders), `"fullUrl":"`+want+`"`) || !strings.HasPrefix(want, "urn:uuid:") {
+		t.Fatalf("draft orders %s, want fullUrl %s", sent.Context.DraftOrders, want)
 	}
 }
 

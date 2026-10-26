@@ -89,8 +89,8 @@ func cmdPriorAuth(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "shn priorauth: network discovery unreachable/malformed: %v\n", err)
 		return 1
 	}
-	if disc.WireProtocolVersion != shnsdk.WireProtocolVersion {
-		fmt.Fprintf(stderr, "shn priorauth: network speaks wire %q; this CLI speaks %q — upgrade your SDK/CLI\n", disc.WireProtocolVersion, shnsdk.WireProtocolVersion)
+	if !disc.SharesWireProtocol(shnsdk.WireProtocolVersions()) {
+		fmt.Fprintf(stderr, "shn priorauth: network speaks wire %q%s; this CLI speaks %q — upgrade your SDK/CLI\n", disc.WireProtocolVersion, acceptedNote(disc), shnsdk.WireProtocolVersions())
 		return 1
 	}
 
@@ -240,8 +240,8 @@ func cmdPriorAuthResume(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "shn priorauth resume: network discovery unreachable/malformed: %v\n", err)
 		return 1
 	}
-	if disc.WireProtocolVersion != shnsdk.WireProtocolVersion {
-		fmt.Fprintf(stderr, "shn priorauth resume: network speaks wire %q; this CLI speaks %q — upgrade your SDK/CLI\n", disc.WireProtocolVersion, shnsdk.WireProtocolVersion)
+	if !disc.SharesWireProtocol(shnsdk.WireProtocolVersions()) {
+		fmt.Fprintf(stderr, "shn priorauth resume: network speaks wire %q%s; this CLI speaks %q — upgrade your SDK/CLI\n", disc.WireProtocolVersion, acceptedNote(disc), shnsdk.WireProtocolVersions())
 		return 1
 	}
 

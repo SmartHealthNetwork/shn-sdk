@@ -455,12 +455,13 @@ and the implemented domain is **prior authorization**, end to end:
 
 ## FHIR conformance
 
-- **Runtime gate.** At `observe` (the default), `structural` and `strict`, a gateway validates
+- **Runtime gate.** At `observe`, `structural` and `strict`, a gateway validates
   each leg's covered resources via FHIR `$validate` against a real, IG-enabled validation
   service (FHIR R4 + US Core; key resources pin their `meta.profile`), in both directions, in
   the message path — not as an offline afterthought. A defect is recorded at `observe`;
   `structural` refuses a message whose structure is broken and records the rest; `strict`
-  refuses any defect. At `none` no payload check runs. Not everything is `$validate`d: a PAS
+  refuses any defect. At `none`, the default when the level is unset (from shn-gateway v1.0.0;
+  `observe` before), no payload check runs. Not everything is `$validate`d: a PAS
   request carried from the provider's own system is not, nor is a payer's answer relayed
   verbatim (a provider gateway checks the payer's DTR and PAS answers at its own level).
 - **Profile conformance.** Separately from the runtime gate, the prior-auth surface (PAS

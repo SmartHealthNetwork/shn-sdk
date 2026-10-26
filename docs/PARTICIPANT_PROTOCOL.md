@@ -90,7 +90,13 @@ Returns (the Accounts service, `accounts.<apex>`):
     { "memberId": "MBR-D-UC01-NC", "dob": "1972-03-14", "family": "Larsen-Terminated", "expectedEligibility": "not-covered", "expectedPriorAuth": "", "expectedAfterAmend": "", "payerId": { "system": "urn:oid:2.16.840.1.113883.6.300", "value": "00001" } },
     …
   ],
-  "docs": "https://github.com/SmartHealthNetwork/shn-sdk/blob/main/docs/PREVIEW.md"
+  "docs": "https://github.com/SmartHealthNetwork/shn-sdk/blob/main/docs/PREVIEW.md",
+  "workstreams": [
+    { "name": "pa", "taxonomyVersion": 1,
+      "legs": [ { "transactionType": "pa.coverage-eligibility", "request": { "frame": "provider-tpo", "operation": "eligibility-inquiry" }, "response": { "frame": "payer-coverage", "operation": "eligibility-response" }, "advertised": true }, … ],
+      "lines": ["pa.crd@2.0", "pa.crd@2.1", "pa.crd@2.2", "pa.dtr@2.0", "pa.dtr@2.1", "pa.dtr@2.2", "pa.pas@2.0", "pa.pas@2.1", "pa.pas@2.2"] },
+    { "name": "fqs", "taxonomyVersion": 1, "legs": [ { "transactionType": "fqs.federated-query", … } ] }
+  ]
 }
 ```
 
@@ -112,7 +118,7 @@ table below).
 | `demo` | Always `true` on the preview network's descriptor. |
 | `syntheticDataOnly` | Always `true` — **synthetic personas only, never production PHI**. |
 | `wireProtocolVersion` | The wire-protocol version the network speaks (see below). A consumer rejects a descriptor whose version it does not support **before** running any leg. |
-| `wireProtocolVersionsAccepted` | The wire-protocol versions the network accepts, `wireProtocolVersion` among them, while it moves from one version to the next (today `["1.1.0"]`). Additive: absent means `wireProtocolVersion` alone. |
+| `wireProtocolVersionsAccepted` | The wire-protocol versions the network accepts, `wireProtocolVersion` among them, while it moves from one version to the next: `["1.1.0"]`, and `["1.1.0", "2.0.0"]` once the network's Audit Plane accepts what a `2.0.0` gateway writes (below). Additive: absent means `wireProtocolVersion` alone. |
 | `requestFrames` | The sealed request-frame versions the network's holders accept (today `["v1", "v1op"]`; §6.3). Additive field. |
 | `igVersions` | Pinned IG versions the network validates against (server-side gate). |
 | `contractVersions` | Legacy — no longer populated in the network descriptor: participant declarations are participant truth, carried per-participant in the registrar feed (§2.3) and the participant directory (below). Field retained for wire compatibility. |
@@ -128,6 +134,7 @@ table below).
 | `hubTransportKeyURL` | Where to fetch the Hub's Ed25519 transport verifying key (`{hub}/transport-key` → `{"pubkey": "<base64 ed25519>"}`). Responders use this key to verify `X-Hub-Assertion` on every inbound forward (§6.2a). |
 | `demoResponders[]` | Responder-hint fallback (`role` + `holderId`) for a consumer whose descriptor parser predates `demoPersonas[].payerId`. Every persona in the current descriptor carries a `payerId`, so a current consumer resolves the test counterparty from the directory (`demoPersonas[].payerId` → operator-attested `payerIds`, §2.3) and never needs this field; it stays populated for that older path. Do not build new consumers against it. |
 | `operations[]` | The advertised `(frame, operation, transactionType)` triples the network authorizes. |
+| `workstreams[]` | The network's workstreams, in the order it publishes their legs (§4.3). Each has its `name` (the prefix of its legs' names), its `taxonomyVersion`, its `legs` (each leg's prefixed `transactionType`, its `request` and, where it has one, `response` side as `{frame, operation}`, and whether it is `advertised` among `operations[]`), and the contract `lines` its messages are built to (absent for a workstream with none). It is read from the same leg table as `operations[]`, so the two cannot disagree. Additive field: the network serves it, and from shn-sdk v1.0.0 the SDK's `Discovery` decodes it. |
 | `demoPersonas[]` | The seeded synthetic patients and their `expectedEligibility` (`"covered"` \| `"not-covered"`) — the inputs + expected outcomes `shn doctor` asserts. Each persona also carries `payerId` — the seeded member's Coverage payor identity; resolve your test counterparty by matching it against operator-attested `payerIds` in `/holders` (§2.3). A persona that also carries `expectedPriorAuth` additionally names its own prior-auth `order` (system/code/display/diagnosis) — the order a payer verdict is a function of. |
 | `docs` | Getting-started URL (`docs/PREVIEW.md`). |
 
@@ -150,9 +157,21 @@ different version should refuse to proceed and prompt an upgrade rather than sen
 the network may reject (`shn doctor` exits code `20` here).
 
 While the network moves from one wire-protocol version to the next, it also lists the
-versions it accepts in `wireProtocolVersionsAccepted`. Today that is `["1.1.0"]`, the
-version it speaks; a field the descriptor adds this way never changes what a consumer of
-the current version sends.
+versions it accepts in `wireProtocolVersionsAccepted`. That is `["1.1.0"]`, the version
+it speaks, until the network's Audit Plane accepts the version 2 audit records a `2.0.0`
+gateway writes. From then the network accepts `2.0.0` beside it, `["1.1.0", "2.0.0"]`,
+and still speaks `1.1.0`. Each network moves on its own, so one may list `2.0.0` before
+another. A field the descriptor adds this way never changes what a consumer of the
+current version sends. From shn-sdk v1.0.0, `shn doctor` and `shn priorauth` go on
+when the network speaks or accepts a version the SDK speaks, and refuse only when it
+shares none.
+
+From shn-gateway v1.0.0, a Smart Gateway sends wire protocol `2.0.0`'s leg names, and it starts
+only on a network whose descriptor accepts `2.0.0`: `wireProtocolVersionsAccepted` contains
+it, or, with the field absent, `wireProtocolVersion` is `2.0.0`. Otherwise it refuses to
+start, naming the network's accepted list and the remedy, and it never falls back to the
+names of `1.1.0`. A descriptor it cannot fetch or read refuses too: the gateway cannot
+confirm what the network accepts. A gateway before v1.0.0 makes no such check.
 
 ### Participant directory
 
@@ -314,6 +333,16 @@ PUT    /register/{id}             — holder-initiated key-rotation (§2.4)
 PUT    /register/{id}/payer-ids   — Trust-admin-gated payer-identity update (§2.4)
 ```
 
+**Signing keys are kept.** The registrar keeps every signing key (`signPub`) it
+gives a holder, after a rotation, a revocation or a deregistration too, so the
+network can still authenticate the audit records a holder signed with a key it
+has since replaced. A key the Trust operator marks compromised is the exception:
+it stops authenticating the holder's records, apart from those the network had
+already sealed, and no holder may register or rotate to it. Two refusals follow
+from this, on `POST /register` and on `PUT /register/{id}` (the tables below):
+an id that was registered before cannot be registered again, and a compromised
+key cannot be registered or rotated to.
+
 **`POST /register`** — admit a new holder.
 
 Header: `X-Holder-Assertion: base64(json(assertion))` — a standard holder assertion
@@ -391,6 +420,8 @@ Rejection cases:
 | `id` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
 | `payerIds` present on a non-`payer` role | 400 (`"payerIds are only valid for role=payer"`) |
 | `id` already dynamically registered, or a `payerIds` entry already bound to another holder | 409 (`"id or payer-id already registered"`) |
+| `id` was registered before: its signing keys are kept, and a new holder under it would be authenticated as the old one | 409 (`"holder id has key history"`) |
+| `signPub` is marked compromised, for this holder or any other | 409 (`"signing key is marked compromised"`) |
 | Registrar store unavailable | 502 (`"store error"`) |
 | Lifecycle audit append failed (the registration is rolled back, fail-closed) | 502 (`"registration audit failed"`) |
 
@@ -518,6 +549,12 @@ Body (JSON):
 ```json
 { "id": "external-payer" }
 ```
+
+The holder's signing key is kept as a retired key, and the id cannot be
+registered again (§2.3). With `"compromised": true` the Trust operator also
+states that the key is compromised: it stops authenticating the holder's
+records, apart from those the network had already sealed, and no holder may
+register or rotate to it.
 
 Rejection cases:
 
@@ -659,6 +696,7 @@ Rejection cases (checks are ordered):
 | New `encPub` / `signPub` malformed (not valid base64 / wrong length) | 400 (`"malformed encPub/signPub"`) |
 | `pop` absent or malformed (not valid base64 / empty) | 400 (`"missing registration proof-of-possession"`) |
 | `pop` does not verify against the **new** `signPub` | 401 (`"registration proof-of-possession failed"`) |
+| New `signPub` is marked compromised, for this holder or any other | 409 (`"signing key is marked compromised"`) |
 | Registrar store update unavailable | 502 (`"store error"`) |
 | Lifecycle audit append failed (keys rolled back, fail-closed) | 502 (`"lifecycle audit failed"`) |
 | Success | 200 (OK) |
@@ -819,6 +857,31 @@ plugs into (FROST multi-party / external witness over the same `signatures[]` sl
   A DDL-capable truncation that masquerades as a legitimate reset by minting a fresh
   chain generation — an **unauthenticated generation declaration** — is mitigated by the versioned per-generation anchors above plus a live
   `/verify` probe (steady-state and post-reset) run in the deploy pipeline.
+
+#### 2.5.2 Record versions
+
+The network's own writers (the Hub, the Authorization Framework, the Registrar and
+Accounts) write each audit record at version 1 or version 2. A network moves its writers
+to version 2 only once its Audit Plane admits version 2 records, so its chain can hold
+records of both versions. What a holder reading its own audit records (§5.1) sees change
+in a version 2 record:
+
+- **`version`** is `2` (absent at version 1).
+- **`transactionType`** names an exchange leg by its workstream-prefixed name,
+  `pa.pas-claim` for `pas-claim`, `fqs.federated-query` for `federated-query` and so on
+  (the §4.3 legs); a version 1 record names it flat. A decision (`authz-decision:<op>`),
+  lifecycle or grant record's type is the same at both versions.
+- **`correlationId`** is on every exchange and decision record: the `correlationId` the
+  leg's token was minted for (the leg's id), the Hub's `denied` record of a payload that
+  does not match its token included. It is kept as sent when it is at most 64 letters,
+  digits, `.`, `_` and `-`, or already `sha256:` and 64 lowercase hex digits; otherwise it
+  is `sha256:` and the hex SHA-256 digest of it. It is absent at version 1, and on
+  lifecycle and grant records.
+- **`involvement`** is `request-named`, `responder-held` or `responder-derived`; version 1
+  says `payer-held` and `payer-derived` for the last two.
+
+Every other member, and how each record is signed and chained, is the same at both
+versions.
 
 ---
 
@@ -1073,7 +1136,7 @@ in one direction for one correlation.
 | `correlationId` | Yes | Must be non-empty; binds the minted token to one leg |
 | `custodian` | For `federated-query-submit` only | The facility holder ID; used to resolve patient consent at the Global Person Consent service |
 | `payloadHash` | Yes (every operation rides an envelope) | `sha256hex` (64 lowercase hex) of the envelope **ciphertext**. **Seal the payload FIRST, then authorize** against the ciphertext (seal-then-authorize) so the minted token binds THIS payload |
-| `involvement` | Only for an involved patient's token | Asks for a token for **another patient this leg involves**, carried in the envelope's `involved` (§5.1): `request-named` (another patient your request names), or, on a payer's answer, `payer-held` / `payer-derived` (your own binding of the member the request names, when it differs from the leg token's patient, from a member your records hold or one they do not). Every other field is the leg's own, with `subjectPCI` that patient. The decision is recorded with it, so a refused one still appears in that patient's record. Absent for the leg's own token |
+| `involvement` | Only for an involved patient's token | Asks for a token for **another patient this leg involves**, carried in the envelope's `involved` (§5.1): `request-named` (another patient your request names), or, on a payer's answer, `payer-held` / `payer-derived` (your own binding of the member the request names, when it differs from the leg token's patient, from a member your records hold or one they do not). While the network moves to wire protocol 2.0.0 it also accepts their neutral names, `responder-held` / `responder-derived`, and the token carries the value as you state it. Every other field is the leg's own, with `subjectPCI` that patient. The decision is recorded with the value, so a refused one still appears in that patient's record: a version 1 record says `payer-held` / `payer-derived`, a version 2 record `responder-held` / `responder-derived`, whichever you stated (§2.5.2). Absent for the leg's own token |
 
 **Rejection cases** (in the order they are checked):
 
@@ -1089,7 +1152,13 @@ in one direction for one correlation.
 - Body is not valid JSON → 400 `{"error":"bad request"}`
 - `subjectPCI` absent or not prefixed `"pci:"` → 400 `{"error":"invalid subject"}`
 - `correlationId` absent → 400 `{"error":"missing correlationId"}`
-- `involvement` present and not one of the three values above → 400
+- `operation` empty, or not lower-case ASCII letters, digits and hyphens starting with a letter or
+  digit, at most 64 characters (`^[a-z0-9][a-z0-9-]{0,63}$`) → 400
+  `{"error":"invalid operation"}`. Such an operation names no leg's authority, and its
+  decision could not be recorded, so it is refused before any decision and nothing is
+  recorded. A well-formed operation the policy does not know is still denied 403 below,
+  and recorded
+- `involvement` present and not a value of either vocabulary above → 400
   `{"error":"invalid involvement"}`
 - `federated-query-submit` only: the consent service cannot be reached → 502
   `{"error":"consent check failed"}`
@@ -1207,6 +1276,21 @@ authorization policy enforce it, the discovery descriptor's operations derive
 from it, and a new transaction type is added there. Each transaction type belongs to
 one workstream: `federated-query` to Federated Query Services (`fqs`), the others to
 Prior Authorization (`pa`).
+
+Each transaction type has a second name: its workstream's prefix, a dot, and the name
+the table lists (`pa.pas-claim`, `fqs.federated-query`). Wire protocol 2.0.0 names a leg
+that way. The network's Hub already reads either name as the same leg: it forwards a request
+under the name the table lists, and returns the answer under the name the requester used.
+This does not wait for the descriptor, whose `wireProtocolVersionsAccepted` lists `2.0.0`
+only once the network accepts the rest of wire protocol 2.0.0. From shn-gateway v1.0.0, a Smart
+Gateway sends every leg under its prefixed name, reads a request under either name, and
+answers under the prefixed name. A gateway before v1.0.0 sends and answers the names the table
+lists. From shn-sdk v1.0.0, the SDK's originators (`RunEligibility`, `RunPriorAuth`,
+`ResumePriorAuth`, `Inquire`) send every leg under its prefixed name, and its `Responder`
+answers under the name the request used. The token's `operation` is the same whichever
+name the envelope uses.
+
+Under the Smart Gateway's stability promise (shn-gateway `STABILITY.md`), the `coverage-eligibility`, `patient-dtr` and `federated-query` legs are evolving at shn-gateway v1.0, while this protocol's own versioning still governs their names.
 
 | `transactionType` (envelope) | Request `operation` | Response `operation` |
 |---|---|---|
@@ -1326,7 +1410,10 @@ own token in `involved`.
 `involved` in `hubAccepts` (§1a); otherwise send none. A requester names each
 other patient its request names (`request-named`). A payer, on its answer, names its own binding of the
 member the request names when it differs from the leg token's patient
-(`payer-held`, or `payer-derived` for a member its records do not hold). This is
+(`payer-held`, or `payer-derived` for a member its records do not hold; while the
+network moves to wire protocol 2.0.0 it also accepts the neutral `responder-held` and
+`responder-derived`; a version 1 record names either form as `payer-held` and
+`payer-derived`, a version 2 record as `responder-held` and `responder-derived`, §2.5.2). This is
 recording only: an involved patient whose token `/authorize` refuses or fails to
 mint, or whose minted token does not carry the `involvement` requested, is left
 out of `involved` (a refused decision is itself recorded), and the leg is sent as
@@ -1362,7 +1449,10 @@ The Hub enforces:
 - `timestamp` must parse as RFC 3339 and be within ±5 minutes of Hub clock (400 otherwise).
 - `involved`, when present, must decode as a list of at most 16 entries, each with
   one of the involvement values its leg allows (`request-named` on a request;
-  `payer-held` or `payer-derived` on an answer) and a token that verifies exactly
+  `payer-held` or `payer-derived` on an answer, or, while the network moves to wire
+  protocol 2.0.0, `responder-held` or `responder-derived`; either form is recorded as
+  `payer-held` and `payer-derived` in a version 1 record and as `responder-held` and
+  `responder-derived` in a version 2 one, §2.5.2) and a token that verifies exactly
   as `authzToken` does — signature, expiry, frame, operation, `correlationId`,
   holder (the sender) and payload hash — minted with that same `involvement`,
   whose subject is a `pci:` identifier different from the leg token's and from
@@ -1652,7 +1742,7 @@ leg from the network, on the provider's side and the payer's, naming the leg's i
 the caller's own trace value (gateway `CONFIGURATION.md`, "Access lines"). The
 Hub's audit records for the leg are found through the hashes those lines carry
 (`requestCiphertextHash`, `responseCiphertextHash`), which equal each record's
-`payloadBundleHash`; the Hub's record itself is unchanged. A payer's gateway
+`payloadBundleHash`; a version 2 record also carries the leg's id as `correlationId` (§2.5.2). A payer's gateway
 sends `X-Correlation-Id` with the leg's id on each operation it forwards to the
 payer's own system (CRD, DTR, PAS submit, update and inquiry, coverage
 eligibility; not the CDS service listing or connectivity probes) when
@@ -1668,7 +1758,7 @@ system validates that header its own way sets
 Every origination leg your gateway attempts ends in exactly one of five
 outcomes. They are the vocabulary of the gateway's leg metric
 (`LegOutcome{outcome, role}`, emitted behind the gateway's `METRICS_SERVICE`
-opt-in — the `LegMetric` seam in the gateway's `STABILITY.md`) and of what your
+opt-in — the `LegOutcome` metric in the gateway's `STABILITY.md`) and of what your
 caller gets back from the route that started the exchange. A leg is
 `routed` when it is attempted, then one of the four terminal outcomes follows.
 
@@ -1742,7 +1832,9 @@ The endpoint must:
 6. Construct a response `Metadata` with:
    - `sender` set to **your** holder ID
    - `recipient` set to the request envelope's `sender`
-   - `transactionType` set to the **same** `transactionType` as the request
+   - `transactionType` set to the **same** `transactionType` as the request (from
+     shn-gateway v1.0.0 the gateway answers under the leg's prefixed name instead, which
+     the Hub reads as the same leg; either name is accepted)
    - `authorityFrame` set to the response frame (e.g. `"payer-coverage"`)
    - `authzToken` set to a JSON-encoded token minted for the **response** operation
    - `correlationId` set to the **same** `correlationId` as the request
@@ -2164,15 +2256,11 @@ whose own input is the frame body:
   - **Reference participants provisioned with the network** declare `"v1"`
     and `"v1op"`; their Smart Gateways accept framed DTR operations.
   - **Hosted gateways** declare what their pinned Smart Gateway release
-    serves: `"v1"` and `"v1op"` from v0.44.0, `"v1"` only from v0.34.0, and
-    no request frames on an earlier release or an image whose release cannot
-    be told from its tag. An image tagged with a 40-hex source commit declares
-    every request frame the network's own build supports (`"v1"` and `"v1op"`
-    today) when that commit is the one the network's control plane was built
-    from, and none otherwise. Changing the release re-declares the frames: a
-    withdrawal is published before the older release is rolled out, and the
-    rollout waits until the network has confirmed it; an addition is
-    published once the newer release is running.
+    serves. A hosted gateway runs only a published release, and every release
+    it may run serves `"v1"` and `"v1op"`, so each declares both. Changing the
+    release re-declares the frames: a withdrawal is published before the older
+    release is rolled out, and the rollout waits until the network has
+    confirmed it; an addition is published once the newer release is running.
   - **Self-registered participants** declare exactly what their registration
     (or last rotation) declared; the network never adds a capability for
     them. A registration built with an SDK earlier than v0.50.1 declares only
@@ -2423,7 +2511,8 @@ ciphertext here this would be a distinct 64-hex value, e.g.
 Also assert:
 - `respEnv.metadata.sender == "acme-payer"` (the holder we routed to)
 - `respEnv.metadata.recipient == "my-provider"`
-- `respEnv.metadata.transactionType == "coverage-eligibility"` (same as request)
+- `respEnv.metadata.transactionType` names the request's leg: `coverage-eligibility`,
+  or, from shn-gateway v1.0.0, `pa.coverage-eligibility` from a requester that sent that name (§4.3)
 - `respEnv.metadata.correlationId == "8f3d9a1c4b7e2d5f..."`
 
 **Step 7 — Decrypt and parse the response payload**
@@ -2593,15 +2682,18 @@ Coverage and the payor Organization it holds.
 type legSender func(transactionType, requestOp, responseOp, correlationID, operation string, body []byte) ([]byte, error)
 
 func manualPriorAuth(send legSender, payer shnsdk.Payer, member, memberIDSystem, orderingNPI, hookInstance, claimCorrelation string,
-	orderID string, orderJSON, patientJSON, coverageJSON, memberCoverageJSON, payerOrgJSON, providerJSON []byte,
+	orderID, entryUUID string, orderJSON, patientJSON, coverageJSON, memberCoverageJSON, payerOrgJSON, providerJSON []byte,
 	clinical shnsdk.ClinicalContext, facts shnsdk.PASClaimFacts, now time.Time) (shnsdk.PriorAuthResult, error) {
 	patientRef := "Patient/" + member
 	coverageRef := "Coverage/" + member
 
 	// LEG 1 — CRD. orderJSON is your ServiceRequest for the order, held under orderID
-	// (for example BuildServiceRequestCoded's output, stored with an id).
+	// (for example BuildServiceRequestCoded's output, stored with an id). The entry's
+	// fullUrl is absolute, as FHIR R4 requires: entryUUID is a UUID you mint for the
+	// entry, never the order's id (a payer that parses with HAPI would take
+	// urn:uuid:<the order's id> as the order's id).
 	draftOrders, err := json.Marshal(map[string]any{"resourceType": "Bundle", "type": "collection",
-		"entry": []map[string]any{{"fullUrl": "ServiceRequest/" + orderID, "resource": json.RawMessage(orderJSON)}}})
+		"entry": []map[string]any{{"fullUrl": "urn:uuid:" + entryUUID, "resource": json.RawMessage(orderJSON)}}})
 	if err != nil {
 		return shnsdk.PriorAuthResult{}, err
 	}
@@ -2790,9 +2882,15 @@ supplies cards for a person to read, each with a `source.label` and `source.topi
 `CheckCDSHooksResponse(body, line)` certifies any CDS Hooks response against the CDS
 Hooks 2.0 response rules and the CRD card rules for the line, and lists every
 violation; `CDSHooksRules()` is its rule table with the specification text each rule
-enforces. Payer gateways relay the requested hook and a Coverage search result as sent
-from gateway v0.44.0, so a payer reached with a request `BuildCRDRequest` builds needs its
-gateway at v0.44.0 or later.
+enforces. From shn-sdk v1.0.0, `CheckCDSHooksRequest(body, line)` does the same for a
+CDS Hooks request: the CDS Hooks 2.0 request rules, the order-select, order-sign and
+order-dispatch contexts, and at line `"2.2"` CRD 2.2.1's request model (CRD 2.0.1 and
+2.1.0 publish none). A request `BuildCRDRequest` builds from FHIR resources passes it
+at every line apart from the `fhirServer` and `fhirAuthorization` that model requires,
+which it reports at `"2.2"`; `CDSHooksRequestRules()` is its rule table. Payer gateways
+relay the requested hook and a Coverage search result as sent from gateway v0.44.0, so a
+payer reached with a request `BuildCRDRequest` builds needs its gateway at v0.44.0 or
+later.
 
 ### 7a.4 What the network changes in a CRD or DTR message
 
@@ -3474,8 +3572,9 @@ applicable IG profiles. The network enforces a **two-gate** posture:
      builds from its participant's records is validated: the Bundle for base R4
      shape, and its QuestionnaireResponse attachments against the DTR profile.
    - From shn-gateway v0.55.0, a payer's answer to a leg a provider's gateway
-     originates itself on its `ORIGINATION_PROFILE` lane (every provider gateway
-     has one; unset means `demo`), not to a request relayed through its Da Vinci
+     originates itself on its `ORIGINATION_PROFILE` lane (a provider gateway
+     that declares one; before shn-gateway v1.0.0, unset meant `demo`), not to a
+     request relayed through its Da Vinci
      ingress — the DTR `$questionnaire-package` and `$next-question` answers and
      the PAS ClaimResponse answer to a submit or update — is validated by the
      provider's gateway on ingress, at that gateway's level, against the IG
@@ -3483,13 +3582,23 @@ applicable IG profiles. The network enforces a **two-gate** posture:
      the line the leg was sent at (the payer's declared line, or the gateway's
      own line when the payer declared none), then the lines the answer's
      versioned `meta.profile` names, then the lines its structural markers
-     point to, then 2.2, 2.1 and 2.0. The answer is valid if it conforms to any
-     of them and is refused only when it conforms to none; the finding records
+     claim, then 2.2, 2.1 and 2.0. What the answer claims is read as claims,
+     each a set of lines met when any one of them is judged: a versioned
+     `meta.profile` claims its line, and a structural marker (`qr-context`,
+     `qr-coverage`, `extension-certificationType` or
+     `extension-serviceItemRequestType`) claims the lines whose IG packages
+     define it where it sits. From shn-gateway v1.0.0, `qr-coverage` claims 2.2
+     and the other three claim every line, so they decide nothing on their own;
+     no other extension claims a line. The answer is valid if it conforms to any
+     line (from shn-gateway v1.0.0, not while the line the leg was sent at, or
+     a claim none of whose lines was judged, has a default validator lane that
+     has not qualified yet: the check is then unavailable) and is refused only
+     when it conforms to none; the finding records
      the line the leg was sent at and each line tried with its verdict, and a
      finding that the answer was valid only on another line is not a defect. If
-     no line is valid and the line the leg was sent at, or a line the answer
-     itself names, could not be checked (its validator was unavailable, or the
-     gateway has none for it), the check is unavailable rather than a refusal
+     no line is valid and the line the leg was sent at could not be checked, or
+     a claim the answer makes was met by none of its lines (its validator was
+     unavailable, or the gateway has none for any of them), the check is unavailable rather than a refusal
      for structure: recorded at `observe` and `structural`, refused at `strict`.
      Each line beyond the one the leg was sent at gets at most 2 seconds; one
      that does not answer in time is recorded as unavailable for that line. An
@@ -3497,17 +3606,24 @@ applicable IG profiles. The network enforces a **two-gate** posture:
      recorded rather than refused at `structural`, because that line could not
      be checked. When the gateway has no validator for the line the leg was sent
      at, the first line it actually checks gets the same 2-second bound. At `strict`, an answer whose check cannot run (the validator
-     is unavailable) is refused like any other such check. The exception is
-     SHN's reference payers, identified by the payer identity the member's
-     Coverage names (`urn:oid:2.16.840.1.113883.6.300` `00001`, `00300` and
-     `00301`, and SHN's two bridging-demo payers under `urn:shn:demo-payer`,
-     which front `00001`), answering a provider gateway that relays their bytes
-     (`ORIGINATION_PROFILE` `provider-data` or `demo`): their answers are not
-     validated, because their packages do not yet conform (the 2.0 reference
-     payer's DTR package fails DTR 2.0.1). Judging a payer's confirmed line
-     alone, more strictly, may be introduced later. Before shn-gateway v0.55.0,
-     a provider gateway on the `provider-data` or `demo` lane validates none of
-     these answers.
+     is unavailable) is refused like any other such check. Judging a payer's
+     confirmed line alone, more strictly, may be introduced later. From
+     shn-gateway v1.0.0 no payer is exempt. A gateway that lists in
+     `CONFORMANCE_TOLERATE_PEERS` every payer an exchange was routed by records
+     a defect this check finds in that exchange's answer that its level would
+     refuse, marked `tolerated: true`, and carries the answer. Only this check
+     is tolerated: a check that cannot run is still refused `500` at `strict`,
+     and the content rules are not tolerated.
+     The list covers the answers the gateway relays through its Da Vinci ingress
+     (below) as well. Before shn-gateway v1.0.0, SHN's reference payers were
+     exempt, identified by the payer identity the member's Coverage names
+     (`urn:oid:2.16.840.1.113883.6.300` `00001`, `00300` and `00301`, and SHN's
+     two bridging-demo payers under `urn:shn:demo-payer`, which front `00001`),
+     answering a provider gateway that relays their bytes (`ORIGINATION_PROFILE`
+     `provider-data` or `demo`): their answers were not validated, because
+     their packages did not yet conform (the 2.0 reference payer's DTR package
+     fails DTR 2.0.1). Before shn-gateway v0.55.0, a provider gateway on the
+     `provider-data` or `demo` lane validated none of these answers.
    - From shn-gateway v0.63.0, a payer's answer that a provider's gateway relays
      to a PAS submission, amendment or `$inquire` its participant's own system
      sent through its Da Vinci ingress is validated at the gateway's level,
@@ -3517,11 +3633,22 @@ applicable IG profiles. The network enforces a **two-gate** posture:
      cannot run is refused `500` at `strict`. Before shn-gateway v0.63.0 such an
      answer was checked only by the content rules (its answer graph and its
      patient linkage).
+   - From shn-gateway v1.0.0, a payer's answer to a DTR `$questionnaire-package`
+     request that a provider's gateway relays for its own participant's system
+     through its Da Vinci ingress is validated at the gateway's level too, for
+     every payer. It is judged at the lines its parameter names claim (a line of
+     each family when it uses both families' names, every line when it uses
+     neither; §7a.4 maps the names to lines), and is valid when it is valid at
+     one of them (at each family, when it uses both). Before shn-gateway v1.0.0
+     it was relayed as received at every level, unless the gateway carried it
+     into its own DTR line's names (from shn-gateway v0.62.0; from v0.63.0 only
+     with `TRANSLATE_IG_LINES=true`, §7a.4). That
+     carried it when it was valid at a line of its names, and otherwise judged
+     it at one of them (the routed line when it is one of them, else the first
+     of them: 2.0, or 2.2 for `packagebundle`).
    - No release of a provider's gateway validates, at its level, an `$inquire`
      answer on a leg it originates (it is checked for its shape, not against a
-     profile), or a questionnaire package it relays to a request its
-     participant's own system sent through its Da Vinci ingress, which is
-     relayed as received. At `observe` and above, a relayed PAS or inquiry
+     profile). At `observe` and above, a relayed PAS or inquiry
      answer may also be sent to the validator as certification evidence (the
      gateway's `certify:` log lines); nothing is decided from that. Each line's
      verdict there is `valid`, `invalid`, `unavailable` or `expired`, and only a
@@ -3545,8 +3672,9 @@ applicable IG profiles. The network enforces a **two-gate** posture:
 
    Whether those checks run, and what an invalid result *does*, is each gateway's
    own configured choice (`CONFORMANCE_ENFORCEMENT`), not something the network
-   imposes. At `none` no payload conformance check runs and no finding is
-   recorded; at `observe` — the default when the value is unset — every check
+   imposes. At `none` (from shn-gateway v1.0.0, the default when the value is
+   unset) no payload conformance check runs and no finding is recorded; at
+   `observe` (the default when unset before shn-gateway v1.0.0) every check
    runs, each defect is recorded as a conformance finding and the message is
    carried as sent, apart from the gateway's registered edits (§7a.4). From
    shn-gateway v0.60.0, a check at `observe` that can only record does not hold the
@@ -3931,9 +4059,8 @@ whose worst step is `carry` or `gated`); the leg refuses at selection instead,
 legibly, rather than strip the carried content to look clean. A chain whose every
 step is `full` (lossless both ways) still reaches a gated peer normally — the
 overlay gates *lossy* legs, not translation itself. **No peer is gated today:** no
-registry entry carries the overlay, and `PAYER_DAVINCI_STRICT_EXTENSIONS` (the
-gateway's `docs/CONFIGURATION.md`) is accepted but has no routing effect, so a
-deployed gateway does not give the `gated overlay` refusal below.
+registry entry carries the overlay and no setting turns it on, so a deployed
+gateway does not give the `gated overlay` refusal below.
 
 **Refusal grammar, verbatim.** A no-bridge outcome to a registered recipient is
 the same legible `422` as above, ending in a parenthetical that names the missing
@@ -3960,7 +4087,7 @@ named earlier in the same message:
 still a legible 422 (§8.6's earlier "native capability vs. declared set"
 rules) until its own transform module pair ships — chained translation runs
 egress-only today. See the gateway's `docs/CONFIGURATION.md` for
-the operator-facing lane and gated-overlay configuration.
+the operator-facing lane configuration.
 
 ### 8.7 Extension preservation (carry survivability)
 
@@ -3997,6 +4124,184 @@ property. Until then, build to the rule: preserve what you do not recognise.
 ## 9. Status and roadmap
 
 ### Changelog
+
+- **2026-10-24 — From shn-gateway v1.0.0, a Smart Gateway starts only on a network that accepts wire protocol `2.0.0` (§1a).**
+  It reads the descriptor once at start, and refuses to start unless
+  `wireProtocolVersionsAccepted` contains `2.0.0` (with the field absent, unless
+  `wireProtocolVersion` is `2.0.0`), or when it cannot read the descriptor. The refusal names the
+  network's accepted list and the remedy. A gateway before v1.0.0 makes no such check.
+
+- **2026-10-24 — The eligibility, patient-DTR and federated query legs are evolving under the Smart Gateway's promise (§4.3).**
+  shn-gateway's `STABILITY.md` puts the `coverage-eligibility`, `patient-dtr` and
+  `federated-query` legs in its evolving tier at v1.0: a minor gateway release may change
+  how the gateway carries them. This protocol's own versioning still governs their names;
+  nothing on the wire changes.
+
+- **2026-10-23 — A network accepts wire protocol `2.0.0` once its Audit Plane accepts what a `2.0.0` gateway writes (§1a).**
+  Its descriptor's `wireProtocolVersionsAccepted` becomes `["1.1.0", "2.0.0"]` when the
+  Audit Plane the descriptor names (`endpoints.audit`) accepts version 2 audit records;
+  until then it stays `["1.1.0"]`. `wireProtocolVersion` stays `1.1.0`, so a gateway or
+  CLI on `1.1.0` goes on exactly as before. Each network lists `2.0.0` on its own.
+
+- **2026-10-23 — From shn-sdk v1.0.0, the SDK declares wire protocol `2.0.0` and speaks `1.1.0` beside it (§1a).**
+  `WireProtocolVersion` is `2.0.0` and `WireProtocolVersions()` is `["1.1.0", "2.0.0"]`, so
+  `shn doctor` and `shn priorauth` go on against a network that speaks or accepts either.
+  The SDK sends no involvement value; a gateway does. Its CLI reads a `2.0.0` descriptor,
+  which leaves out `endpoints.patientAccess`, `contractVersions` and `demoResponders`: it
+  finds the test payer by the persona's `payerId`, and a persona or handle without one
+  refuses and says why. The SDK deprecates `Discovery.DemoResponders`,
+  `Discovery.ContractVersions` and `DiscoveryEndpoints.PatientAccess`; a network on `1.1.0`
+  still states `demoResponders` and `endpoints.patientAccess`.
+
+- **2026-10-23 — The discovery descriptor lists the network's workstreams (§1a).**
+  The new `workstreams` field names each workstream the network carries, with its legs
+  (prefixed names, request and response frame and operation, whether advertised) and the
+  contract lines its messages are built to, read from the same leg table as
+  `operations`. It is additive: no wire protocol version change, and every other field
+  is unchanged. From shn-sdk v1.0.0, `shnsdk.Discovery.Workstreams` decodes it.
+
+- **2026-10-23 — From shn-sdk v1.0.0, the SDK's originators name each leg with its workstream's prefix (§4.3).**
+  `RunEligibility`, `RunPriorAuth`, `ResumePriorAuth` and `Inquire` send every leg under
+  its prefixed name (`pa.pas-claim`). The Hub forwards the flat name to the payer and
+  returns each answer under the prefixed one, which the SDK reads as the same leg. The
+  `Responder` still answers under the name the request used.
+
+- **2026-10-23 — From shn-gateway v1.0.0, a gateway that states no conformance level runs at `none` (§8.1).**
+  From shn-gateway v1.0.0, a gateway that leaves `CONFORMANCE_ENFORCEMENT` unset runs no
+  payload conformance check, records no finding and needs no validator, exactly as at
+  `none`. Before v1.0.0 an unset level was `observe`, which checked every payload and
+  recorded each defect. Payload conformance is each participant's opt-in: a gateway that
+  wants its payloads checked sets `observe`, `structural` or `strict`. Nothing is newly
+  refused: the network rules and the check of a payload a gateway translated between IG
+  lines refuse at every level, as before. A gateway that sets its level sees no change.
+
+- **2026-10-22 — From shn-gateway v1.0.0, no payer is exempt from a provider gateway's answer checks; a participant tolerates the payers it lists (`CONFORMANCE_TOLERATE_PEERS`) (§7a.4, §8.1).**
+  Before, a provider gateway on the `provider-data` or `demo` origination lane did not
+  check the network's reference payers' answers to the legs it originated (00001, 00300,
+  00301 and the two SHN bridging-demo payers): no validator call, no finding, the answer
+  relayed at every level. From shn-gateway v1.0.0 every payer's answer is checked at the
+  gateway's level, on every lane. A participant that tolerates a payer's known defects
+  lists it in `CONFORMANCE_TOLERATE_PEERS` (`<system>|<value>` payer identities, the
+  identity the exchange was routed by): a defect the FHIR profile check of that payer's
+  DTR or PAS answer would refuse is then recorded and the answer carried, the finding
+  marked `tolerated: true`. The same rule applies to the answers a provider's gateway
+  carries for its own system through its Da Vinci ingress. Only that check is tolerated:
+  the content rules on an answer (`answer.shape`, `patient.answer`) and the CDS Hooks
+  answer check refuse as ever, as do network rules; a check that could not run is never
+  tolerated. Unset, the list tolerates no one. A provider at `structural` or `strict`
+  that originates to a reference payer now sees that payer's non-conformant answers
+  refused unless it lists the payer; at `none` and `observe` nothing changes but the
+  findings `observe` now records. SHN's own provider gateways list the reference payers.
+
+- **2026-10-22 — From shn-gateway v1.0.0, a provider's gateway validates a payer's questionnaire package answer it relays to its own system (§7a.4).**
+  From shn-gateway v1.0.0, the payer's answer to a DTR `$questionnaire-package` request that
+  a provider's gateway carries for its own system through its Da Vinci ingress is validated
+  at the gateway's level against the operation's output Parameters profile, as the PAS
+  answers it carries are, for every payer, and whether or not the gateway then carries it
+  into its own DTR line's names (E-08): `none` does not check, `observe` records,
+  `structural` refuses a structural issue, `strict` refuses any issue (`502`) and a check
+  that cannot run (`500`). An empty answer (a `204`, or a `2xx` with no body) has no
+  package to judge and is carried as sent. The answer is judged at the lines whose profile constrains the
+  parameter names it uses, the routed line first when it is one of them: `PackageBundle`
+  and `operationOutcome` at DTR 2.0.1 and 2.1.0, `packagebundle` at 2.2.0, a line of each
+  when it uses both, and every line when it uses neither. It is valid when it is valid at
+  one of them (at each family, for both); a line whose profile leaves its names in an open
+  slice does not judge them. One valid only at a line after the first is carried with a
+  finding naming the lines it failed and the line it passed. Before, an answer that
+  conformed to none of those lines was relayed at every level unless the gateway carried
+  it into its own DTR line's names (from shn-gateway v0.62.0; from v0.63.0 only with
+  `TRANSLATE_IG_LINES=true`), which judged it at one
+  line of its names (the routed line when it is one of them, else the first of them: 2.0,
+  or 2.2 for `packagebundle`). A provider at `structural` or `strict`
+  paired with a payer whose package answers conform to none of their lines now sees them
+  refused. For the answers that check judged, four things change:
+  - from shn-gateway v1.0.0, a refusal is `502` with the OperationOutcome issue code
+    `processing` and the diagnostics `ingress validation failed`, as for the carried PAS
+    answers, where it was `422` with the code `not-supported` and the validator's issues
+    (the issues are to be restored to the refusal);
+  - from shn-gateway v1.0.0, an answer is classified by its best verdict across the lines of
+    its names, as a PAS answer is across its lines: one with a structural issue at the line
+    that check judged and only a deeper issue at the other is recorded at `structural`,
+    where it was refused;
+  - from shn-gateway v1.0.0, a claim the answer makes (a versioned profile claims its line;
+    a structural marker claims the lines whose packages define it where it sits, every line
+    for `qr-context`) decides when none of its lines can be judged (no validator lane, or a
+    validator that does not answer): the check is unavailable, recorded at `structural` and
+    refused `500` at `strict`, where the line that check judged decided (`422`);
+  - from shn-gateway v1.0.0, a line of its names that is neither the routed line nor needed
+    to meet a claim never decides when it cannot be judged: where that check judged such a
+    line and could not (unavailable, carried at `structural`, `500` at `strict`), the answer
+    is now decided by the other line's verdict, refused `502` at `structural` and `strict`
+    when that line refuses.
+  The provider's own DTR fetch (module 1) now judges a payer's package answer at the lines
+  of its names by the same rule, against the profiles the answer declares, as before. A
+  line outside them, the routed line or a claimed line included, no longer judges it at
+  all: it neither passes it, nor makes the check unavailable when it cannot be judged, nor
+  gives the best verdict. So an answer such a line passed, left unavailable (carried at
+  `structural`, `500` at `strict`) or found only a deeper issue in (recorded at
+  `structural`) is now decided by the lines of its names, refused at `structural` for a
+  structural issue there. With no lane for any of them the check is unavailable (`500` at
+  `strict`), where the routed line judged it.
+
+- **2026-10-22 — The registrar keeps every signing key it gives a holder (§2.3, §2.4).**
+  A holder's signing key is kept after a rotation, a revocation or a deregistration,
+  so the network can still authenticate the audit records the holder signed with it.
+  Two new refusals follow: `POST /register` with an id that was registered before
+  answers `409 holder id has key history`, and `POST /register` or
+  `PUT /register/{id}` with a signing key the Trust operator marked compromised
+  answers `409 signing key is marked compromised`. `POST /revoke` accepts
+  `"compromised": true`. Nothing else you send changes.
+
+- **2026-10-22 — From shn-gateway v1.0.0, a Smart Gateway names each leg with its workstream's prefix (§4.3).**
+  A v1.0.0 gateway sends every leg's envelope under its prefixed name (`pa.pas-claim`),
+  reads a request under either name, and answers under the prefixed name. The network's
+  Hub forwards each request under the flat name and returns each answer under the name its
+  requester used, whatever the descriptor's `wireProtocolVersionsAccepted` lists (today
+  `["1.1.0"]`), so a gateway before v1.0.0
+  sends, receives and is answered under the flat names as before. The token's operations
+  do not change.
+
+- **2026-10-22 — The network's writers can write version 2 audit records (§2.5.2).**
+  A network whose Audit Plane admits version 2 records can switch its writers to
+  version 2: each record then carries `version: 2`, an exchange leg's workstream-prefixed
+  name (`pa.pas-claim`), the leg's id as `correlationId`, and the neutral involvement values
+  `responder-held` and `responder-derived`. Each network switches on its own, and nothing you
+  send changes.
+
+- **2026-10-21 — `POST /authorize` refuses an operation outside the record shape (§4.1).**
+  An `operation` that is empty, or is not lower-case ASCII letters, digits and hyphens starting with
+  a letter or digit and at most 64 characters, is refused `400 invalid operation` before any
+  decision, and nothing is recorded: its decision could not be recorded as one. Before, the
+  policy denied it `403 forbidden` and the denial was recorded. Every operation §4.3 lists
+  fits the shape, and a well-formed operation the policy does not know is still denied `403`
+  and recorded. Nothing a Smart Gateway or the SDK sends today changes.
+
+- **2026-10-21 — From shn-gateway v1.0.0 and shn-sdk v1.0.0, a CRD request's Bundle entries carry absolute fullUrls (§7a).**
+  The `draftOrders` Bundle a provider's Smart Gateway builds for an `order-sign` or `order-select`
+  request names each entry by an absolute `urn:uuid:` fullUrl, as FHIR R4 requires of a Bundle
+  entry, instead of the order's relative `Type/id`. So does the `deviceHistory` prefetch Bundle it
+  builds for an `order-dispatch` request when your system's own search is left out. The UUID is
+  derived from the request's `hookInstance` and the entry's place, never the order's own id. The
+  SDK's `RunPriorAuth` builds its `draftOrders` the same way. `selections` and `dispatchedOrders`
+  still name orders as `Type/id`, the order inside is carried as sent, and nothing is refused.
+
+- **2026-10-21 — From shn-sdk v1.0.0, `CheckCDSHooksRequest` certifies a CDS Hooks request (§7a).**
+  `CheckCDSHooksRequest(body, line)` and `CDSHooksRequestRules()` are new, the request twins of
+  `CheckCDSHooksResponse` and `CDSHooksRules`: the CDS Hooks 2.0 request rules, the order-select,
+  order-sign and order-dispatch contexts, and at line `"2.2"` CRD 2.2.1's request model. It only
+  observes, and no gateway runs it. For a request `BuildCRDRequest` builds from FHIR resources it
+  reports exactly `crd.fhirServer` and `crd.fhirAuthorization` at `"2.2"`, the members the network
+  omits by design.
+
+- **2026-10-21 — The network accepts the neutral involvement values on an answer (§4.1, §5.1).**
+  While the network moves to wire protocol 2.0.0, a payer's answer may name its own binding
+  of the member as `responder-held` or `responder-derived`, the names wire protocol 2.0.0
+  uses, as well as `payer-held` or `payer-derived`. `POST /authorize` mints a token carrying
+  the value you state, and the Hub accepts it on an answer entry whose token carries the same
+  value. Every record keeps today's vocabulary: the Authorization Framework's decision and the
+  Hub's paired record say `payer-held` or `payer-derived`. A request still names only
+  `request-named`, and a value of neither vocabulary is refused `400 invalid involvement`, as
+  before. Nothing you send today changes.
 
 - **2026-10-20 — The authorization policy no longer authorizes `patient-access-read` (§4.1, §4.3).**
   The non-envelope `patient-access-read` operation, which no Smart Gateway served, has left
@@ -4358,7 +4663,6 @@ property. Until then, build to the rule: preserve what you do not recognise.
   payer sent it. A gateway declaring several DTR lines (the provider test endpoint declares 2.0
   and 2.2) still carries the answer exactly.
 - **2026-10-10 — From shn-sdk v0.62.0 and shn-gateway v0.62.0, no eligibility request, Coverage or prior-authorization answer names a placeholder payer. Breaking.**
-  shn-gateway v0.62.0 is the next gateway release, not yet published.
   Through shn-sdk v0.61.x, the SDK's eligibility request and answer, its
   Coverage builder and its prior-authorization answers named the payer
   `Organization/payer`, a reference to no resource and no participant's record, and the
@@ -4380,7 +4684,6 @@ property. Until then, build to the rule: preserve what you do not recognise.
   keep their shn-sdk v0.61.1 output, Deprecated, and a later SDK release removes them,
   named in that release's notes. The exact API changes are in the SDK's release notes.
 - **2026-10-10 — From shn-gateway v0.62.0 and shn-sdk v0.62.0, an amendment carries the caller's own supplemental report, and the SDK builds none (§7b.2). Breaking.**
-  shn-gateway v0.62.0 is the next gateway release, not yet published.
   `ResumePriorAuth` used to build the
   amendment's DiagnosticReport from a report id, a CPT code and a display, writing an
   effective date and a category no participant's system stated. `SupplementalReport.Report`
@@ -4393,7 +4696,6 @@ property. Until then, build to the rule: preserve what you do not recognise.
   persona's report (`supplementalReport`), which `shn doctor` sends; with none stated,
   doctor sends no amendment.
 - **2026-10-06 — From shn-sdk v0.62.0 and shn-gateway v0.62.0, a prior-authorization Claim states the requester's own request facts (§7a.3, §7b.2). Breaking.**
-  shn-gateway v0.62.0 is the next gateway release, not yet published.
   From shn-sdk v0.62.0, the PAS request builders named with `Exact`
   (`BuildConformantClaimBundleExact`, `BuildConformantClaimUpdateBundleExact` and their
   `AtLine` forms) and `RunPriorAuth` (`PriorAuthRequest.ClaimFacts`) take the Claim's facts
@@ -4419,7 +4721,6 @@ property. Until then, build to the rule: preserve what you do not recognise.
   facts in their request body (`claimFacts`, `certificationType`, with the `member` and the
   `order` they are stated for) and refuse a missing one with 422 before any leg.
 - **2026-10-06 — From shn-sdk v0.62.0 and shn-gateway v0.62.0, an amendment's `infoChanged` marker is derived, and its attached answer is linked to the item the payer asked about (§7b.2).**
-  shn-gateway v0.62.0 is the next gateway release, not yet published.
   An amendment used to carry the PAS `infoChanged` item extension (`changed`) on
   every item. From shn-sdk v0.62.0, an amendment that `ResumePriorAuth` or
   `BuildConformantClaimUpdateBundleExact` (and its `AtLine` form) builds carries it only on
@@ -4434,7 +4735,6 @@ property. Until then, build to the rule: preserve what you do not recognise.
   A payer that re-evaluates only marked items answers an unmarked amendment with the
   decision it already holds.
 - **2026-10-06 — From shn-gateway v0.62.0 and shn-sdk v0.62.0, a decision ExplanationOfBenefit states only what the payer's answer and the request supply (§8.4).**
-  shn-gateway v0.62.0 is the next gateway release, not yet published.
   The payer gateway's Patient Access
   decision EOB reads every element from the request Claim or the payer's ClaimResponse:
   its item adjudication is the payer's own for the request item that codes the order, and
@@ -4450,32 +4750,32 @@ property. Until then, build to the rule: preserve what you do not recognise.
   where `PADecisionEOBParams` holds `Decision`, `AuthNumber`, `ReviewAction` and
   `DenialReasons`. `BuildPADecisionEOB`, `PADecisionEOBParams`, `PADecision` (with
   `PADecisionApproved` and `PADecisionDenied`) and `EOBAppealNote` keep their shn-sdk
-  v0.61.1 behaviour, Deprecated, and are removed in the SDK release after v0.62.0.
+  v0.61.1 behaviour, Deprecated, and are removed in shn-sdk v0.63.0.
 - **2026-10-06 — From shn-gateway v0.62.0, no gateway declares `pa.pdex@2.1` (§2.3, §8.4, §8.6).**
-  shn-gateway v0.62.0 is the next gateway release, not yet published. The payer gateway's
+  The payer gateway's
   Patient Access decision ExplanationOfBenefit carries exactly what the payer stated, as
   base FHIR R4, and the Patient Access CapabilityStatement claims no PDex, so the
   `pa.pdex@2.1` contract line no longer describes anything a gateway does. It leaves the
   gateway's native set and build default (discovery's `bridgedContractVersions` keeps
-  naming it until the SDK release after v0.62.0, which drops it); a payer that derives its declaration from its system's versions declares only
+  naming it until shn-sdk v0.63.0, which drops it); a payer that derives its declaration from its system's versions declares only
   that system's CRD, DTR and PAS lines. **Breaking (configuration):** a gateway whose
   `SHN_CONTRACT_VERSIONS` still names `pa.pdex@2.1` refuses to boot, saying to remove it;
   remove it before upgrading (the set without it boots on earlier releases too).
   shn-sdk v0.62.0 still names `pa.pdex@2.1` in `shnsdk.NativeContractVersions()` and its
-  default set, and `shn register` / `shn rotate --contract-versions` still accept it; the
-  SDK release after it drops it the same way. Patient Access is not a network leg, so no
+  default set, and `shn register` / `shn rotate --contract-versions` still accept it;
+  shn-sdk v0.63.0 drops it from both sets and refuses a declared set that names it. Patient Access is not a network leg, so no
   exchange, route or line selection changes. A peer's own PDex publication is still read
   by the connectivity checks; it is not version drift.
 - **2026-10-02 — From shn-gateway v0.62.0, a PAS answer is read at its IG line, at the answer's candidate lines (§8.1).**
-  shn-gateway v0.62.0 is the next gateway release, not yet published. A payer's PAS `$submit` or amendment answer is read by the graph rule of its IG line, as
+  A payer's PAS `$submit` or amendment answer is read by the graph rule of its IG line, as
   each line's specification states it: at PAS 2.0.1 every reference the answer makes resolves
   in the Bundle, the request Claim's included (as before); at 2.1.0 the answer need carry only
   its ClaimResponse and what the decision made or changed, so `ClaimResponse.request` must name
   the request Claim, by a reference to a Claim or by an identifier, and no reference need resolve; at 2.2.1
   `ClaimResponse.request` must name the request Claim, a reference to that Claim need not
   resolve, and every other reference must. An answer is read at its candidate lines, in the
-  order its FHIR profile is certified at (the routed line, then the lines the answer claims,
-  then 2.2, 2.1 and 2.0), at the routed line and the lines the gateway has a validator lane
+  order its FHIR profile is certified at (the routed line, then the lines the answer's claims
+  name where they are narrower than every line, then 2.2, 2.1 and 2.0), at the routed line and the lines the gateway has a validator lane
   for (a validator serving several lines judges an answer once, at the first of them): valid
   on any line is valid, and an answer read at a line
   after the first is recorded at that line. So a gateway with a 2.1 validator lane carries any

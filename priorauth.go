@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -421,9 +423,6 @@ func priorAuthCRDRequest(req PriorAuthRequest, srJSON []byte, patientRef string)
 	if err != nil {
 		return nil, fmt.Errorf("build order: %w", err)
 	}
-	draft := append(append([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":`),
-		cdexJSONString("ServiceRequest/"+priorAuthOrderID(req.Member))...), `,"resource":`...)
-	draft = append(append(draft, order...), "}]}"...)
 	var instance [16]byte
 	if _, err := rand.Read(instance[:]); err != nil {
 		return nil, fmt.Errorf("generate hook instance: %w", err)
@@ -431,9 +430,13 @@ func priorAuthCRDRequest(req PriorAuthRequest, srJSON []byte, patientRef string)
 	instance[6] = instance[6]&0x0f | 0x40
 	instance[8] = instance[8]&0x3f | 0x80
 	h := hex.EncodeToString(instance[:])
+	hookInstance := h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
+	draft := append(append([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":`),
+		cdexJSONString(collectionEntryFullURL(hookInstance+"/draftOrders", 0, priorAuthOrderID(req.Member)))...), `,"resource":`...)
+	draft = append(append(draft, order...), "}]}"...)
 	in := CRDRequestInputs{
 		Hook:         hook,
-		HookInstance: h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:],
+		HookInstance: hookInstance,
 		UserID:       "Practitioner/" + req.NPI,
 		DraftOrders:  draft,
 		Patient:      req.Patient,
@@ -588,7 +591,8 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 // frame is always "provider-tpo"; the response frame is always "payer-coverage" (the
 // payer-side frame the substrate's hubsvc.responseOp pins).
 //
-//	txType  — envelope TransactionType (e.g. "crd-order-select", "pas-claim")
+//	txType  — the leg's flat name (e.g. "crd-order-select", "pas-claim"); the envelope
+//	          carries its prefixed name (e.g. "pa.crd-order-select")
 //	reqOp   — request-leg authz operation (e.g. "crd-order-select", "pas-submit")
 //	respOp  — response-leg authz operation (e.g. "crd-cards", "pas-response")
 func (id Identity) runLeg(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, pci, txType, reqOp, respOp string, payload []byte) ([]byte, error) {
@@ -680,11 +684,19 @@ func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoint
 		payload = framed
 	}
 
+	// The envelope names the leg by its workstream-prefixed name, which every
+	// network's Hub reads (PARTICIPANT_PROTOCOL.md §4.3); the Hub forwards the
+	// flat name to the payer and returns the answer under this one.
+	wireName, ok := PrefixedTransactionType(txType)
+	if !ok {
+		return nil, fmt.Errorf("%q names no leg", txType)
+	}
+
 	// Seal FIRST so the ciphertext exists (AI-2: seal-then-authorize).
 	meta := Metadata{
 		Sender:          id.HolderID,
 		Recipient:       payer.ID,
-		TransactionType: txType,
+		TransactionType: wireName,
 		AuthorityFrame:  "provider-tpo",
 		Timestamp:       now.UTC().Format(time.RFC3339),
 		CorrelationID:   correlationID,
@@ -753,7 +765,7 @@ func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoint
 	if respEnv.Metadata.Recipient != id.HolderID {
 		return nil, fmt.Errorf("response recipient %q != our holderID %q", respEnv.Metadata.Recipient, id.HolderID)
 	}
-	if respEnv.Metadata.TransactionType != txType {
+	if !sameLeg(respEnv.Metadata.TransactionType, txType) {
 		return nil, fmt.Errorf("response transactionType %q != %q", respEnv.Metadata.TransactionType, txType)
 	}
 	if respEnv.Metadata.Sender != payer.ID {
@@ -1286,4 +1298,38 @@ func inquiryDecision(answer []byte, cont PriorAuthContinuation) (PriorAuthResult
 	default:
 		return parsePASOutcome(matchResponse)
 	}
+}
+
+// collectionEntryFullURL is the fullUrl of entry i of a collection Bundle the
+// SDK writes, which seed names: an absolute urn:uuid, as FHIR R4 requires of a
+// Bundle entry, holding a name-based (version 5) UUID, so the same seed and
+// entry give the same fullUrl. A payer resolves a context reference by the
+// resource's own Type/id. It never equals the resource's own id: a fullUrl of
+// urn:uuid:<the resource's id> makes a HAPI-based payer replace the
+// resource's id with the fullUrl when it parses the Bundle.
+func collectionEntryFullURL(seed string, i int, resourceID string) string {
+	name := seed + "/" + strconv.Itoa(i)
+	for {
+		u := nameBasedUUID(name)
+		if u != resourceID {
+			return "urn:uuid:" + u
+		}
+		name += "/"
+	}
+}
+
+// uuidNamespaceURL is RFC 4122's name space for URLs.
+var uuidNamespaceURL = [16]byte{0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8}
+
+// nameBasedUUID is the RFC 4122 version 5 UUID of name in uuidNamespaceURL,
+// in its lowercase string form.
+func nameBasedUUID(name string) string {
+	h := sha1.New()
+	h.Write(uuidNamespaceURL[:])
+	h.Write([]byte(name))
+	sum := h.Sum(nil)
+	sum[6] = sum[6]&0x0f | 0x50
+	sum[8] = sum[8]&0x3f | 0x80
+	x := hex.EncodeToString(sum[:16])
+	return x[0:8] + "-" + x[8:12] + "-" + x[12:16] + "-" + x[16:20] + "-" + x[20:32]
 }

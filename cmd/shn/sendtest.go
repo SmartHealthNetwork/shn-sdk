@@ -36,14 +36,32 @@ type sendTestCase struct {
 func strField(m map[string]any, k string) string { s, _ := m[k].(string); return s }
 func boolField(m map[string]any, k string) bool  { b, _ := m[k].(bool); return b }
 
+// falseField is whether m states k as false: an answer that leaves k out states nothing.
+func falseField(m map[string]any, k string) bool { b, ok := m[k].(bool); return ok && !b }
+
+// The attestation answers send-test states with a persona for UC-06 (the clinician's) and UC-07
+// (the patient's) on its lane: free-text functional status for the HomeHealthAssessment. A
+// gateway supplies no answer of its own and refuses an attestation route whose request states
+// none, and the descriptor's personas state none, so the caller states them, as SHN's own drivers
+// do. A run without a descriptor sends what earlier releases sent.
+var sendTestAnswers = map[string]string{
+	"uc06": sendTestClinicianAnswer,
+	"uc07": sendTestPatientAnswer,
+}
+
+const (
+	sendTestClinicianAnswer = "Impaired ambulation and reduced lower-extremity strength limiting independent mobility; skilled physical therapy indicated."
+	sendTestPatientAnswer   = "I have trouble walking and standing without help and need physical therapy to regain my strength and mobility."
+)
+
 // sendTestCases are the 8 prior-auth UCs (both branches for uc01/uc05), asserted against the real
 // /scenario response structs (gateway/engine/originate*.go): covered/paRequired/authNumber/
-// attested/consentDenied/denied. Mirrors gateway/deploy/eval/smoke.sh's provider-data assertions.
+// attested/consentDenied/denied. gateway/deploy/eval/smoke.sh drives its scenarios through them.
 func sendTestCases() []sendTestCase {
 	return []sendTestCase{
 		{"uc01 covered", "uc01", `{"branch":"covered"}`, func(m map[string]any) bool { return boolField(m, "covered") }, "uc01", false},
-		{"uc01 notcovered", "uc01", `{"branch":"notcovered"}`, func(m map[string]any) bool { return !boolField(m, "covered") }, "uc01-notcovered", false},
-		{"uc02", "uc02", `{}`, func(m map[string]any) bool { return !boolField(m, "paRequired") }, "uc02", false},
+		{"uc01 notcovered", "uc01", `{"branch":"notcovered"}`, func(m map[string]any) bool { return falseField(m, "covered") }, "uc01-notcovered", false},
+		{"uc02", "uc02", `{}`, func(m map[string]any) bool { return falseField(m, "paRequired") }, "uc02", false},
 		{"uc03", "uc03", `{}`, func(m map[string]any) bool { return boolField(m, "paRequired") && strField(m, "authNumber") != "" }, "uc03", false},
 		{"uc04", "uc04", `{}`, func(m map[string]any) bool { return strField(m, "authNumber") != "" }, "uc04", true},
 		{"uc05", "uc05", `{}`, func(m map[string]any) bool { return strField(m, "authNumber") != "" }, "uc05", true},
@@ -397,6 +415,9 @@ func sendTestBody(disc shnsdk.Discovery, lane string, c sendTestCase) ([]byte, e
 		return nil, err
 	}
 	body["member"] = p.MemberID
+	if a, ok := sendTestAnswers[c.path]; ok {
+		body["answer"] = a
+	}
 	if p.Order == nil && c.amend {
 		return nil, fmt.Errorf("the descriptor's %s persona %s states no order to amend", c.scenario, p.MemberID)
 	}

@@ -9,6 +9,7 @@
 //	shn login        — authenticate the CLI to the Accounts service (browser PKCE; --no-browser for headless copy-paste)
 //	shn scenario-key — create a provider gateway's /scenario caller: its key and its callers-file entry
 //	shn scenario-sign — print the assertion that signs one /scenario request
+//	shn gateway stats — merge Smart Gateway replicas' /internal/stats into one table by exchange
 package main
 
 import (
@@ -64,6 +65,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdRotate(rest, stdout, stderr)
 	case "doctor":
 		return cmdDoctor(rest, stdout, stderr)
+	case "gateway":
+		if len(rest) > 0 && rest[0] == "stats" {
+			return cmdGatewayStats(rest[1:], stdout, stderr)
+		}
+		fmt.Fprintln(stderr, "shn gateway: the command is shn gateway stats")
+		return 2
 	case "send-test":
 		return cmdSendTest(rest, stdout, stderr)
 	case "scenario-key":
@@ -101,7 +108,7 @@ usage: shn <command> [flags]
 
 commands:
   keygen        generate signing+encryption keys and a public manifest snippet
-  register      register a holder: --accounts (Accounts service) or --registrar (operator); -payer-id system=value (repeatable, role=payer) declares payer identities;
+  register      register a holder: --accounts (Accounts service) or --registrar (operator); with --accounts, -payer-id system=value (repeatable, role=payer) declares payer identities;
                 --request-frames v1 declares only v1 (use it when the Smart Gateway serving --base-url is older than v0.44.0);
                 --contract-versions declares the contract versions your gateway declares (default: this build's)
   eligibility   run a coverage-eligibility round-trip through the Hub
@@ -112,6 +119,7 @@ commands:
   rotate        rotate a holder's keys against the registrar (holder-self); re-declares request frames (--request-frames, as for register)
                 and contract versions: --contract-versions, else the set the registrar holds now (it refuses if that cannot be read)
   doctor        self-validate against the network: discovery + eligibility (wire-correctness)
+  gateway stats read GET /internal/stats from one or more Smart Gateway replicas (--url, repeatable) and merge them into one table by exchange
   send-test     drive a provider gateway's 8 /scenario UCs and tabulate pass/fail (--scenario-key signs them; exit 0 pass, 1 fail, 2 misuse, 3 still pended)
   scenario-key  create a /scenario caller: its key (0600) and its entry in the gateway's callers file
   scenario-sign print the X-Holder-Assertion that signs one /scenario request, for any HTTP client

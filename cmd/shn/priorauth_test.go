@@ -200,6 +200,58 @@ func TestPriorAuthResume_HandleCarriesPayerID(t *testing.T) {
 	}
 }
 
+// TestPriorAuthResume_WithoutTheRetiredFields: a request pended on a 1.1.0
+// network resumes once that network states 2.0.0, whose descriptor leaves out
+// endpoints.patientAccess, contractVersions and demoResponders. A handle that
+// carries the persona's payerId resumes to its outcome with no legacy path; a
+// handle without one has nothing to fall back to and refuses, saying why.
+func TestPriorAuthResume_WithoutTheRetiredFields(t *testing.T) {
+	f, devID, dir := newFakeNetwork(t)
+	f.paPended = true
+	srv := f.start(t)
+	id, err := loadIdentity(dir, devID)
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	f.requesterEnc = id.EncPub
+	resumeOut := filepath.Join(dir, "resume.json")
+	if stdout, stderr, code := runCLI("priorauth", "--member", "MBR-COVERED", "--discovery", srv.URL, "--id", devID, "-keys", dir, "--resume-out", resumeOut); code != exitOK {
+		t.Fatalf("priorauth exit=%d (want %d)\nstdout=%s\nstderr=%s", code, exitOK, stdout, stderr)
+	}
+	f.withoutRetired = true
+	requireWithoutRetired(t, srv.URL+"/discovery")
+	resume := func(handle string) (string, string, int) {
+		return runCLI("priorauth", "resume", "--resume", handle, "--report-file", writeOwnReport(t, dir, handle), "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
+	}
+
+	raw, err := os.ReadFile(resumeOut)
+	if err != nil {
+		t.Fatalf("read resume handle: %v", err)
+	}
+	var h map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &h); err != nil || h["payerId"] == nil {
+		t.Fatalf("the pend's handle carries no payerId (%v): %s", err, raw)
+	}
+	delete(h, "payerId")
+	bare, _ := json.Marshal(h)
+	bareOut := filepath.Join(dir, "resume-without-payerid.json")
+	if err := os.WriteFile(bareOut, bare, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := resume(bareOut)
+	if code == exitOK || !strings.Contains(stdout+stderr, "no persona payerId, no demoResponders") {
+		t.Errorf("a handle without payerId against a descriptor without demoResponders: exit %d, want a refusal saying why\nstdout=%s\nstderr=%s", code, stdout, stderr)
+	}
+
+	stdout, stderr, code = resume(resumeOut)
+	if code != exitOK || !strings.Contains(stdout, "outcome=approved") {
+		t.Fatalf("priorauth resume exit=%d (want %d, approved)\nstdout=%s\nstderr=%s", code, exitOK, stdout, stderr)
+	}
+	if strings.Contains(stderr, "demoResponders") {
+		t.Errorf("resume with a payerId-carrying handle took the legacy path: %s", stderr)
+	}
+}
+
 // TestPriorAuthResume_LegacyHandle (R4 compat): a resume handle written before this
 // migration (no payerId field) still resumes — via the legacy demoResponders path,
 // with the visibility note on stderr.
@@ -331,5 +383,36 @@ func TestPriorAuthResume_ReportFile(t *testing.T) {
 	_, stderr, code = runCLI("priorauth", "resume", "--resume", resumeOut, "--report-file", filepath.Join(dir, "absent.json"), "--discovery", "http://127.0.0.1:1", "--id", "acme", "-keys", dir)
 	if code != 1 || !strings.Contains(stderr, "read report") {
 		t.Fatalf("an unreadable --report-file: exit %d (want 1), stderr %s", code, stderr)
+	}
+}
+
+// TestPriorAuthResume_WireVersionMembership: priorauth resume goes on when the
+// network accepts a wire version this CLI speaks beside its own, and refuses
+// with the upgrade prompt when it shares none.
+func TestPriorAuthResume_WireVersionMembership(t *testing.T) {
+	f, devID, dir := newFakeNetwork(t)
+	f.paPended = true
+	srv := f.start(t)
+	id, err := loadIdentity(dir, devID)
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	f.requesterEnc = id.EncPub
+	resumeOut := filepath.Join(dir, "resume.json")
+	if stdout, stderr, code := runCLI("priorauth", "--member", "MBR-COVERED", "--discovery", srv.URL, "--id", devID, "-keys", dir, "--resume-out", resumeOut); code != exitOK {
+		t.Fatalf("fixture: priorauth exit=%d\nstdout=%s\nstderr=%s", code, stdout, stderr)
+	}
+	resume := func() (string, int) {
+		stdout, stderr, code := runCLI("priorauth", "resume", "--resume", resumeOut, "--report-file", writeOwnReport(t, dir, resumeOut), "--provenance-agent-system", "http://smarthealth.network/ids/holder", "--provenance-agent-value", devID, "--discovery", srv.URL, "--id", devID, "-keys", dir)
+		return stdout + stderr, code
+	}
+
+	f.discWireVersion, f.discAccepted = "9.9.9", []string{"8.8.8"}
+	if out, code := resume(); code != 1 || !strings.Contains(out, "upgrade your SDK/CLI") || !strings.Contains(out, `accepts ["8.8.8"]`) {
+		t.Fatalf("a network sharing no wire version: exit %d, want 1 with the upgrade prompt\n%s", code, out)
+	}
+	f.discAccepted = []string{"9.9.9", shnsdk.WireProtocolVersion}
+	if out, code := resume(); code != exitOK || !strings.Contains(out, "outcome=approved") {
+		t.Fatalf("a network accepting this CLI's wire version: exit %d, want the resume to complete\n%s", code, out)
 	}
 }

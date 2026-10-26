@@ -23,8 +23,9 @@
 
 ## What to expect
 
-This is a preview network and a pre-1.0 SDK: there is no support contract, no
-uptime guarantee and no response-time commitment. Issues are read and answered
+This is a preview network and an SDK whose Go API carries no
+compatibility promise (see [`CONTRIBUTING.md`](CONTRIBUTING.md)): there is no
+support contract, no uptime guarantee and no response-time commitment. Issues are read and answered
 by the people who build the SDK; a confirmed defect becomes an internal change
 with a test and ships in the next version (see
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for how releases work). Questions that turn

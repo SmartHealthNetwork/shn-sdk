@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,12 +40,13 @@ import (
 
 // pairHub is a Hub stand-in that behaves like the real one on the path that matters: it takes
 // the sealed envelope the client POSTs to /route, attaches the transport assertion the
-// Responder requires, forwards the bytes UNCHANGED to the Responder's inbound handler, and
-// relays the answer back verbatim.
+// Responder requires, and forwards it to the Responder's inbound handler with one change, the
+// one the real Hub makes: the leg's name, in either form, goes on as the flat name. It relays
+// the answer back with the name the client stated restored, as the real Hub does.
 //
 // It also keeps a copy of each leg's plaintext, opened with the RESPONDER's own keys. That is
 // not the Hub reading mail it cannot read — the real Hub is payload-blind and this one changes
-// nothing — it is the test standing at the payer's door with the payer's key so it can assert
+// no payload byte — it is the test standing at the payer's door with the payer's key so it can assert
 // on the bytes the payer actually received. Asserting on what the client BUILT instead would
 // let a mutation between build and send pass unnoticed.
 type pairHub struct {
@@ -55,6 +57,9 @@ type pairHub struct {
 	mu          chan struct{} // 1-slot mutex; the client is sequential, this only guards the map
 	byLeg       map[string][]byte
 	legsInOrder []string
+	// stated is each request's transaction type as the client stated it, in
+	// order, before the stand-in resolves it.
+	stated []string
 }
 
 func newPairHub(t *testing.T, h *paTestHarness, responder *httptest.Server, responderIdent Identity) *pairHub {
@@ -76,6 +81,20 @@ func (p *pairHub) route(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "decode", http.StatusBadRequest)
 		return
+	}
+	// As the network's Hub does: resolve the stated name to its leg, forward
+	// the flat name, and return the answer under the name the requester
+	// stated. Envelope metadata is not signed, so the rewrite breaks nothing.
+	stated := env.Metadata.TransactionType
+	<-p.mu
+	p.stated = append(p.stated, stated)
+	p.mu <- struct{}{}
+	if flat, ok := FlatTransactionType(stated); ok {
+		env.Metadata.TransactionType = flat
+		if body, err = EncodeEnvelope(env); err != nil {
+			http.Error(w, "encode", http.StatusInternalServerError)
+			return
+		}
 	}
 	if plain, oerr := Open(env, p.openWith.EncPub, p.openWith.EncPriv); oerr == nil {
 		<-p.mu
@@ -102,6 +121,19 @@ func (p *pairHub) route(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	answer, _ := io.ReadAll(io.LimitReader(resp.Body, MaxRequestBytes))
+	if respEnv, derr := DecodeEnvelope(answer); derr == nil && resp.StatusCode == http.StatusOK {
+		// The real Hub refuses an answer that names another leg than its
+		// request's, before it rewrites the name.
+		if !sameLeg(respEnv.Metadata.TransactionType, stated) {
+			http.Error(w, "response leg transaction-type mismatch", http.StatusBadGateway)
+			return
+		}
+		respEnv.Metadata.TransactionType = stated
+		if answer, err = EncodeEnvelope(respEnv); err != nil {
+			http.Error(w, "encode", http.StatusInternalServerError)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(answer)
@@ -308,6 +340,16 @@ func TestPriorAuthClientIntoResponder_PendedThenResumed(t *testing.T) {
 		}
 		if payer.System == "" || payer.Value == "" {
 			t.Errorf("payer identity is %+v, want both system and value populated", payer)
+		}
+	})
+
+	t.Run("every-leg-is-sent-prefixed", func(t *testing.T) {
+		<-hub.mu
+		got := slices.Clone(hub.stated)
+		hub.mu <- struct{}{}
+		want := []string{"pa.crd-order-select", "pa.dtr-questionnaire-fetch", "pa.pas-claim", "pa.pas-claim-update"}
+		if !slices.Equal(got, want) {
+			t.Errorf("the client sent %v, want %v", got, want)
 		}
 	})
 

@@ -7,10 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,6 +38,7 @@ type fakeNetwork struct {
 
 	// Test knobs.
 	discWireVersion string           // overrides advertised wireProtocolVersion
+	discAccepted    []string         // advertised wireProtocolVersionsAccepted
 	holders         []map[string]any // overrides the /holders feed
 	personas        []shnsdk.DiscoveryPersona
 	forceCovered    *bool // if set, /route returns this coverage regardless of member
@@ -58,6 +61,13 @@ type fakeNetwork struct {
 	// fallback available. Combined with personas carrying no payerId, this drives
 	// resolvePersonaPayer's "no test counterparty" refusal (R3/R4 boundary).
 	emptyResponders bool
+	// withoutRetired serves the descriptor without the fields wire protocol
+	// 2.0.0's descriptor leaves out (signable design §7): endpoints.patientAccess,
+	// contractVersions and demoResponders, the keys absent, not empty, and
+	// states 2.0.0 unless discWireVersion says otherwise. A descriptor stating
+	// 2.0.0 is always served this way, as a 2.0.0 network's will be. Without
+	// either, the descriptor states 1.1.0, the version whose shape it serves.
+	withoutRetired bool
 	// operations is what the descriptor advertises under "operations". Nil is a
 	// network that advertises none — which is what a network built before an
 	// operation existed looks like to a newer CLI.
@@ -135,7 +145,13 @@ func (f *fakeNetwork) routeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	corr := env.Metadata.CorrelationID
-	txType := env.Metadata.TransactionType
+	// As the network's Hub does: read either name as the leg, act on the flat
+	// name, and answer under the name the requester stated.
+	stated := env.Metadata.TransactionType
+	txType := stated
+	if flat, ok := shnsdk.FlatTransactionType(stated); ok {
+		txType = flat
+	}
 	var inTok shnsdk.Token
 	_ = json.Unmarshal([]byte(env.Metadata.AuthzToken), &inTok)
 
@@ -149,7 +165,7 @@ func (f *fakeNetwork) routeHandler(w http.ResponseWriter, r *http.Request) {
 	respMeta := shnsdk.Metadata{
 		Sender:          f.payerID,
 		Recipient:       env.Metadata.Sender,
-		TransactionType: txType,
+		TransactionType: stated,
 		AuthorityFrame:  "payer-coverage",
 		Timestamp:       f.now.UTC().Format(time.RFC3339),
 		CorrelationID:   corr,
@@ -272,19 +288,24 @@ func (f *fakeNetwork) start(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	wire := shnsdk.WireProtocolVersion
-	if f.discWireVersion != "" {
-		wire = f.discWireVersion
-	}
 	mux.HandleFunc("/discovery", func(w http.ResponseWriter, r *http.Request) {
+		wire := "1.1.0"
+		if f.withoutRetired {
+			wire = "2.0.0"
+		}
+		if f.discWireVersion != "" {
+			wire = f.discWireVersion
+		}
+		withoutRetired := f.withoutRetired || wire == "2.0.0"
 		responders := []shnsdk.DiscoveryResponder{{Role: "payer", HolderID: f.payerID}}
 		if f.emptyResponders {
 			responders = nil
 		}
 		disc := shnsdk.Discovery{
-			Demo:                true,
-			SyntheticDataOnly:   true,
-			WireProtocolVersion: wire,
+			Demo:                         true,
+			SyntheticDataOnly:            true,
+			WireProtocolVersion:          wire,
+			WireProtocolVersionsAccepted: f.discAccepted,
 			Endpoints: shnsdk.DiscoveryEndpoints{
 				Hub:       srv.URL,
 				Authz:     srv.URL,
@@ -296,7 +317,19 @@ func (f *fakeNetwork) start(t *testing.T) *httptest.Server {
 			Operations:        f.operations,
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(disc)
+		if !withoutRetired {
+			_ = json.NewEncoder(w).Encode(disc)
+			return
+		}
+		b, _ := json.Marshal(disc)
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		delete(m, "demoResponders")
+		delete(m, "contractVersions")
+		if ep, ok := m["endpoints"].(map[string]any); ok {
+			delete(ep, "patientAccess")
+		}
+		_ = json.NewEncoder(w).Encode(m)
 	})
 	return srv
 }
@@ -809,6 +842,16 @@ func TestDoctor_PendWithContinuationIsAPass(t *testing.T) {
 			want:       "pended, and the answer carries a continuation the network advertises a prior-authorization inquiry for",
 		},
 		{
+			name:       "a network that names the inquiry with its workstream prefix",
+			operations: []shnsdk.DiscoveryOp{{Frame: "provider-tpo", Operation: "pas-inquire", TransactionType: "pa." + advertisedInquiryTransaction}},
+			want:       "pended, and the answer carries a continuation the network advertises a prior-authorization inquiry for",
+		},
+		{
+			name:       "a network that names another workstream's prefix",
+			operations: []shnsdk.DiscoveryOp{{Frame: "provider-tpo", Operation: "pas-inquire", TransactionType: "fqs." + advertisedInquiryTransaction}},
+			want:       "pended, and the answer carries a continuation (this network advertises no prior-authorization inquiry to continue it with)",
+		},
+		{
 			name:       "a network that does not",
 			operations: []shnsdk.DiscoveryOp{{Frame: "provider-tpo", Operation: "pas-submit", TransactionType: "pas-claim"}},
 			want:       "pended, and the answer carries a continuation (this network advertises no prior-authorization inquiry to continue it with)",
@@ -866,6 +909,156 @@ func TestPersonaPayerIdentityIsThePersonasOrTheOneAttested(t *testing.T) {
 	} {
 		if got := personaPayerIdentity(tc.persona, tc.holder); got != tc.want {
 			t.Errorf("%s: %+v, want %+v", name, got, tc.want)
+		}
+	}
+}
+
+// TestCLI_WireVersionMembership: doctor and priorauth go on when the network
+// speaks or accepts a wire version this CLI speaks, and refuse with the
+// upgrade prompt, before any leg, when it shares none.
+func TestCLI_WireVersionMembership(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wire     string
+		accepted []string
+		shared   bool
+	}{
+		{"the network's version", shnsdk.WireProtocolVersion, nil, true},
+		{"a version the network accepts beside its own", "9.9.9", []string{"9.9.9", shnsdk.WireProtocolVersion}, true},
+		{"none shared", "9.9.9", []string{"8.8.8"}, false},
+	} {
+		for _, cmd := range []string{"doctor", "priorauth"} {
+			t.Run(tc.name+"/"+cmd, func(t *testing.T) {
+				f, devID, dir := newFakeNetwork(t)
+				f.discWireVersion, f.discAccepted = tc.wire, tc.accepted
+				srv := f.start(t)
+				id, _ := loadIdentity(dir, devID)
+				f.requesterEnc = id.EncPub
+				args := []string{cmd, "--discovery", srv.URL, "--id", devID, "-keys", dir}
+				if cmd == "priorauth" {
+					args = append(args, "--member", "MBR-COVERED")
+				}
+				stdout, stderr, code := runCLI(args...)
+				refused := strings.Contains(stdout+stderr, "upgrade your SDK/CLI")
+				if tc.shared {
+					if refused || (cmd == "doctor" && code == exitVersionUnsup) {
+						t.Fatalf("%s refused a network sharing a wire version: exit %d\n%s%s", cmd, code, stdout, stderr)
+					}
+					if cmd == "doctor" && !strings.Contains(stdout, fmt.Sprintf("wire protocol %q supported", shnsdk.WireProtocolVersion)) {
+						t.Errorf("doctor does not name the shared version: %s", stdout)
+					}
+					return
+				}
+				if !refused || !strings.Contains(stdout+stderr, `accepts ["8.8.8"]`) {
+					t.Fatalf("%s did not refuse with the upgrade prompt naming what the network accepts: exit %d\n%s%s", cmd, code, stdout, stderr)
+				}
+				if cmd == "doctor" && code != exitVersionUnsup {
+					t.Errorf("doctor exit %d, want %d", code, exitVersionUnsup)
+				}
+				if got := atomic.LoadInt32(&f.routeHits); got != 0 {
+					t.Errorf("%s ran %d legs before refusing", cmd, got)
+				}
+			})
+		}
+	}
+}
+
+// TestCLI_ReadsEachDescriptorShape: doctor and priorauth against each
+// descriptor of the wire protocol 2.0.0 window (signable design §7): 1.1.0's;
+// S2's, which accepts 2.0.0 beside 1.1.0; and 2.0.0's, which states 2.0.0 and
+// leaves out endpoints.patientAccess, contractVersions and demoResponders.
+// Each shares a version with this CLI exactly when one of
+// WireProtocolVersions is the version it states or accepts, and this CLI,
+// which speaks 1.1.0 and 2.0.0, shares one with each. Where it does, both
+// commands complete, the test payer found by the persona's payerId and never
+// by demoResponders. Against a later version it does not speak, both refuse
+// with the upgrade prompt before any leg.
+func TestCLI_ReadsEachDescriptorShape(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wire     string
+		accepted []string
+		retired  bool   // serve without the fields 2.0.0 leaves out
+		window   bool   // a descriptor of the window, which this CLI must share a version with
+		printed  string // the shared version doctor names: the first of WireProtocolVersions it shares
+	}{
+		{"1.1.0", "1.1.0", nil, false, true, "1.1.0"},
+		{"S2: 2.0.0 accepted beside 1.1.0", "1.1.0", []string{"1.1.0", "2.0.0"}, false, true, "1.1.0"},
+		{"2.0.0", "2.0.0", []string{"2.0.0"}, true, true, "2.0.0"},
+		{"2.0.0 stating no accepted list", "2.0.0", nil, false, true, "2.0.0"}, // shaped by its version alone
+		{"a later version this CLI does not speak", "3.0.0", []string{"3.0.0"}, true, false, ""},
+	} {
+		shared := slices.ContainsFunc(shnsdk.WireProtocolVersions(), func(v string) bool {
+			return v == tc.wire || slices.Contains(tc.accepted, v)
+		})
+		if shared != tc.window {
+			t.Fatalf("%s: this CLI speaks %q, sharing a version = %v, want %v", tc.name, shnsdk.WireProtocolVersions(), shared, tc.window)
+		}
+		for _, cmd := range []string{"doctor", "priorauth"} {
+			t.Run(tc.name+"/"+cmd, func(t *testing.T) {
+				f, devID, dir := newFakeNetwork(t)
+				f.discWireVersion, f.discAccepted, f.withoutRetired = tc.wire, tc.accepted, tc.retired
+				srv := f.start(t)
+				if tc.retired || tc.wire == "2.0.0" {
+					requireWithoutRetired(t, srv.URL+"/discovery")
+				}
+				id, _ := loadIdentity(dir, devID)
+				f.requesterEnc = id.EncPub
+				args := []string{cmd, "--discovery", srv.URL, "--id", devID, "-keys", dir}
+				if cmd == "priorauth" {
+					args = append(args, "--member", "MBR-COVERED")
+				}
+				stdout, stderr, code := runCLI(args...)
+				out := stdout + stderr
+				if !shared {
+					if !strings.Contains(out, "upgrade your SDK/CLI") {
+						t.Fatalf("%s did not refuse a descriptor sharing no version: exit %d\n%s", cmd, code, out)
+					}
+					if cmd == "doctor" && code != exitVersionUnsup {
+						t.Errorf("doctor exit %d, want %d", code, exitVersionUnsup)
+					}
+					if got := atomic.LoadInt32(&f.routeHits); got != 0 {
+						t.Errorf("%s ran %d legs before refusing", cmd, got)
+					}
+					return
+				}
+				if code != exitOK || strings.Contains(out, "upgrade your SDK/CLI") {
+					t.Fatalf("%s against the %s descriptor: exit %d, want %d\n%s", cmd, tc.name, code, exitOK, out)
+				}
+				if strings.Contains(out, "demoResponders") || strings.Contains(out, "legacy responders") {
+					t.Errorf("%s found the test payer by demoResponders, not the persona's payerId:\n%s", cmd, out)
+				}
+				if cmd == "doctor" && !strings.Contains(stdout, fmt.Sprintf("wire protocol %q supported", tc.printed)) {
+					t.Errorf("doctor does not name %q as the shared version:\n%s", tc.printed, stdout)
+				}
+				if got := atomic.LoadInt32(&f.routeHits); got == 0 {
+					t.Errorf("%s completed without running a leg", cmd)
+				}
+			})
+		}
+	}
+}
+
+// requireWithoutRetired holds the stand-in to the 2.0.0 descriptor's shape:
+// the keys it leaves out are absent from what discovery serves.
+func requireWithoutRetired(t *testing.T, url string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET discovery: %v", err)
+	}
+	defer resp.Body.Close()
+	var m map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		t.Fatalf("decode discovery: %v", err)
+	}
+	var ep map[string]json.RawMessage
+	_ = json.Unmarshal(m["endpoints"], &ep)
+	for name, present := range map[string]bool{
+		"demoResponders": m["demoResponders"] != nil, "contractVersions": m["contractVersions"] != nil, "endpoints.patientAccess": ep["patientAccess"] != nil,
+	} {
+		if present {
+			t.Fatalf("the stand-in serves %s, which a 2.0.0 descriptor leaves out", name)
 		}
 	}
 }

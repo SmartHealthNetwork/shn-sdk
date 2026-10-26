@@ -91,6 +91,13 @@ type paFakeSubstrate struct {
 	capturedRequestOperation map[string]string
 	// authorizeCalls counts authorization requests.
 	authorizeCalls int
+	// answerName, if set, maps the request's leg (its flat name) to the name
+	// the answer carries; unset, the answer names the leg as the request
+	// stated it, as the network's Hub returns it.
+	answerName func(txType string) string
+	// statedNames is each request's transaction type as the requester stated
+	// it, in order, before the stand-in Hub resolves it to its leg.
+	statedNames []string
 }
 
 // responseOpFor mirrors hubsvc.responseOp: the op the response-leg token is pinned
@@ -231,7 +238,14 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 			return
 		}
 		corr := env.Metadata.CorrelationID
-		txType := env.Metadata.TransactionType
+		// As the network's Hub does: read either name as the leg, act on the
+		// flat name, and answer under the name the requester stated.
+		stated := env.Metadata.TransactionType
+		f.statedNames = append(f.statedNames, stated)
+		txType := stated
+		if flat, ok := FlatTransactionType(stated); ok {
+			txType = flat
+		}
 		var inTok Token
 		_ = json.Unmarshal([]byte(env.Metadata.AuthzToken), &inTok)
 
@@ -295,10 +309,14 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 			payload = framed
 		}
 
+		answerName := stated
+		if f.answerName != nil {
+			answerName = f.answerName(txType)
+		}
 		respMeta := Metadata{
 			Sender:          f.payerID,
 			Recipient:       env.Metadata.Sender,
-			TransactionType: txType,
+			TransactionType: answerName,
 			AuthorityFrame:  "payer-coverage",
 			Timestamp:       f.now.UTC().Format(time.RFC3339),
 			CorrelationID:   corr,
@@ -557,7 +575,7 @@ func TestRunPriorAuth_NoPARequired(t *testing.T) {
 	if res.Outcome != "no-pa-required" {
 		t.Errorf("Outcome = %q, want no-pa-required", res.Outcome)
 	}
-	if len(legTypes) != 1 || legTypes[0] != "crd-order-select" {
+	if len(legTypes) != 1 || legTypes[0] != "pa.crd-order-select" {
 		t.Errorf("no-pa-required must hit ONLY the CRD leg; routed legs = %v", legTypes)
 	}
 }

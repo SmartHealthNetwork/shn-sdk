@@ -78,6 +78,13 @@ The CLI:
 go install github.com/SmartHealthNetwork/shn-sdk/cmd/shn@latest
 ```
 
+From shn-sdk v1.0.0 the stability promise covers the onboarding commands (`keygen`,
+`register`, `login`, `clients`, `revoke`, `rotate`, `doctor`): their flags, exit codes
+and the key files they write. `eligibility`, `priorauth`, `send-test`, `scenario-key`
+and `scenario-sign` are test tooling, outside the promise; the examples below show what
+they do today. `gateway stats` is in the gateway's evolving `monitoring` class. The full
+list is the gateway's `STABILITY.md`, "The `shn` CLI".
+
 ## Preview network
 
 The preview network is live at `shn-preview.org` (synthetic data only). The public surfaces:
@@ -182,7 +189,11 @@ each scenario the payer pended to its decision through the gateway's
 that bound is reported as pended, with its continuation. Its exit status is 0 when
 every scenario passed, 1 when one failed or the run could not start, 2 when the command
 was misused, and 3 when none failed but one was still pended (the run then ends
-`SEND-TEST PENDED`).
+`SEND-TEST PENDED`). From shn-sdk v1.0.0, with the descriptor's personas, send-test also
+states the UC-06 and UC-07 attestation answers (the clinician's and the patient's functional
+status). A provider's gateway from shn-gateway v1.0.0 refuses, with `422`, a
+`/scenario/uc06` or `/scenario/uc07` request, or its `/complete`, that states no attestation
+answer: the answer is the clinician's or the patient's own, and the gateway never supplies one.
 
 A gateway that names its `/scenario` callers (shn-gateway's `SCENARIO_CALLERS_FILE`)
 admits only their signed requests. From shn-sdk v0.63.0, `shn scenario-key --bundle
@@ -193,6 +204,23 @@ to `scenario-callers.json` in the bundle. `shn send-test --scenario-key <key> --
 id (or name it with `--gateway-id`), and `shn scenario-sign` prints the
 `X-Holder-Assertion` header that signs one request, for any HTTP client. The assertion's
 wire format is in [`docs/PARTICIPANT_PROTOCOL.md`](docs/PARTICIPANT_PROTOCOL.md).
+
+From shn-sdk v1.0.0, `shn gateway stats` reads a Smart Gateway's `GET /internal/stats`
+(shn-gateway v1.0.0) from each replica you name and merges the answers into one table by
+exchange: counts, rates, outcomes, and P50, P95, P99 and max latency. Each replica keeps
+its own counts, and quantiles cannot be averaged, so the command adds the replicas'
+latency sketches and reads the quantiles from the sum, as one gateway answering all
+their traffic would. It refuses, naming the replica, an answer it cannot merge exactly:
+a malformed one, sketches bucketed differently, or one replica given twice.
+
+```sh
+shn gateway stats --url https://gw-a.example.org --url https://gw-b.example.org \
+  --token-file ./checks-token --window 5m      # --json for the merged answer as JSON
+```
+
+`--token-file` holds the gateway's `CHECKS_TOKEN`, which the command sends over plain
+`http://` only to this host; without it, a gateway with no token answers only a request
+from its own host. `--window` is `1m`, `5m` (the default) or `1h`.
 
 ## Operator registration
 
@@ -299,7 +327,7 @@ directly if you are building a native integration or test harness.
 | `EncodeEnvelope` / `DecodeEnvelope` | Envelope wire (JSON) codec. |
 | `BuildEligibilityRequestExact` / `ParseEligibilityResponse` | FHIR `CoverageEligibilityRequest` / `…Response` helpers: the request names the payer by the identifier your member's Coverage states (from v0.62.0; the Deprecated `BuildEligibilityRequest` names the placeholder `Organization/payer` and is removed in a later SDK release, named in that release's notes). |
 | `BuildCRDRequest(CRDRequestInputs{…})` / `ParseCRDResponse` | CRD request (a CDS Hooks `order-select`, `order-sign` or `order-dispatch` request) built from your own `Patient`, your Coverage search result (or `null`) and the hook's context, each resource as your exact bytes, with no `fhirServer` or `fhirAuthorization` (CRD 2.2.1's request model marks both 1..1; the network omits them by design — the payer answers from context and prefetch, and the network never hands a payer a route into your system); `ParseCRDResponse` → a `CRDObservation`: every order the payer returned with its coverage information (from `update`/`create` system actions, card suggestions, or the card extension object earlier SDK versions wrote; a card extension object of any other shape is the card author's own and is not read as coverage), every sub-extension exactly as sent, and `.Primary()` → a `CardCoverage` (`Covered`, `PANeeded`, `Questionnaires[]`, `SatisfiedPaID`) with `.PARequired()` / `.NeedsDTR()` helpers. Deprecated: `BuildConformantOrderSelectRequest` / `BuildConformantOrderDispatchRequest` (they take no `Patient`, so from v0.59.0 they build nothing and return an error naming `BuildCRDRequest`; earlier releases sent an id-only Patient) and `ParseCards`. |
-| `BuildCRDResponse(line, CRDResponseInputs{…})` / `CheckCDSHooksResponse(body, line)` | A payer's CRD answer: each order returned in an `update` system action carrying the Da Vinci coverage-information extension with your own `coverage-assertion-id`, and `cards: []` unless you supply cards for a person to read (each with `source.label` and `source.topic`); values the CRD line does not define are refused. `CheckCDSHooksResponse` certifies any CDS Hooks response against the CDS Hooks 2.0 response rules and the line's CRD card rules and returns every `Violation{Rule, Path, Severity}`; `CDSHooksRules()` lists the rules with their specification text. Deprecated: `BuildCards` / `BuildCardsAtLine`, which build nothing and return `ErrBuildCardsReplaced` (a card extension object is not a CRD answer, and a `CardCoverage` names no order). |
+| `BuildCRDResponse(line, CRDResponseInputs{…})` / `CheckCDSHooksResponse(body, line)` | A payer's CRD answer: each order returned in an `update` system action carrying the Da Vinci coverage-information extension with your own `coverage-assertion-id`, and `cards: []` unless you supply cards for a person to read (each with `source.label` and `source.topic`); values the CRD line does not define are refused. `CheckCDSHooksResponse` certifies any CDS Hooks response against the CDS Hooks 2.0 response rules and the line's CRD card rules and returns every `Violation{Rule, Path, Severity}`; `CDSHooksRules()` lists the rules with their specification text. `CheckCDSHooksRequest(body, line)` (from v1.0.0) is its request twin: the CDS Hooks 2.0 request rules, the order-select, order-sign and order-dispatch contexts, and at `"2.2"` CRD 2.2.1's request model, whose `fhirServer` and `fhirAuthorization` a request `BuildCRDRequest` builds omits by design; `CDSHooksRequestRules()` lists its rules. Deprecated: `BuildCards` / `BuildCardsAtLine`, which build nothing and return `ErrBuildCardsReplaced` (a card extension object is not a CRD answer, and a `CardCoverage` names no order). |
 | `BuildQuestionnairePackageParameters(line, QuestionnairePackageInputs{…})` / `ExtractQuestionnaireFromPackage` / `ParseQuestionnaireURL` | DTR `$questionnaire-package` input `Parameters` at a DTR line: your Coverage(s) and the order(s) (after CRD, the payer's updated order from `ParseCRDResponse`) embedded as your exact bytes, the records the payer needs to resolve references in them (`Referenced` — the payor Organization your Coverage names by reference, above all: a payer that maps payer identity at its edge refuses a Coverage whose payor it cannot resolve) as `referenced` parameters, each questionnaire canonical exactly as the payer stated it (a `\|version` kept), and the payer's `coverage-assertion-id` as `context` when you hold one; `.Copied` reports each embedded span. Send it as a framed `questionnaire-package` operation, and only to a payer whose `requestFrames` declares `"v1op"` (`SupportsRequestFrameV1Op`; otherwise refuse: `ErrFramedDTRUnsupported`) — see `docs/PARTICIPANT_PROTOCOL.md` §6.3. The response is a Da Vinci `$questionnaire-package` collection Bundle (Questionnaire + dependent Libraries/ValueSets) — `ExtractQuestionnaireFromPackage` returns the bare `Questionnaire`, then `ParseQuestionnaireURL` reads its canonical url. (`BuildQuestionnairePackage` is the responder-side wrapper; a `Responder` whose `Adjudicator` implements `NextQuestionAdjudicator` also serves `next-question`.) Deprecated: `BuildQuestionnaireFetch` / `BuildQuestionnaireFetchWithCoverage`, the older questionnaire request for a payer that has not declared `"v1op"` (the WithCoverage form carries your Coverage, which a `pa.dtr@2.2` responder needs for its `QuestionnaireResponse` shell's coverage reference). |
 | `FillQuestionnaire(questionnaireJSON, cc, qc)` | Fill the built-in prior-auth DTR questionnaire into a conformant `QuestionnaireResponse` (LOCAL answers + information-origin attribution). Targets only the built-in questionnaire: FAILS LOUDLY on an unrecognized questionnaire (never a half-filled QR). |
 | `FillQuestionnaireFromAnswers(questionnaireJSON, answers, author, qc)` | Fill ANY DTR questionnaire into a conformant `QuestionnaireResponse` from a caller-supplied `map[string]Answer` (keyed by `linkId`; an `Answer` carries a typed value or an `AnswerCoding{System,Code,Display}`), with information-origin attribution — for manually/attestation-sourced answers when the questionnaire isn't the built-in one. |

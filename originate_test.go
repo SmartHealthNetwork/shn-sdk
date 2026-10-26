@@ -43,6 +43,12 @@ type fakeSubstrate struct {
 	// has no contract-version token, so it must always be false regardless of what
 	// the Payer declares.
 	capturedRequestFramed bool
+	// answerName, if set, is the transaction type the answer names in place of
+	// the name the request stated.
+	answerName string
+	// statedName is the transaction type the request stated, before the
+	// stand-in Hub resolves it to its leg.
+	statedName string
 }
 
 // mint signs a Token the way the substrate authz framework does (Signature over
@@ -94,6 +100,13 @@ func (f *fakeSubstrate) routeHandler() http.HandlerFunc {
 			return
 		}
 		f.capturedRequestFramed = IsFramed(reqPlain)
+		// As the network's Hub does: read either name as the leg and refuse a
+		// name of no leg, then answer under the name the requester stated.
+		f.statedName = env.Metadata.TransactionType
+		if leg, ok := FlatTransactionType(f.statedName); !ok || leg != "coverage-eligibility" {
+			http.Error(w, "unknown transaction type", http.StatusBadRequest)
+			return
+		}
 		corr := env.Metadata.CorrelationID
 		var inTok Token
 		_ = json.Unmarshal([]byte(env.Metadata.AuthzToken), &inTok)
@@ -111,10 +124,14 @@ func (f *fakeSubstrate) routeHandler() http.HandlerFunc {
 		// AI-2 (seal-then-bind): seal the response FIRST, then mint the response token
 		// bound to sha256hex(ciphertext) and stamp it into the cleartext metadata.
 		reqEnc := f.requesterEnc
+		answerName := f.statedName
+		if f.answerName != "" {
+			answerName = f.answerName
+		}
 		respMeta := Metadata{
 			Sender:          f.payerID,
 			Recipient:       env.Metadata.Sender,
-			TransactionType: "coverage-eligibility",
+			TransactionType: answerName,
 			AuthorityFrame:  "payer-coverage",
 			Timestamp:       f.now.UTC().Format(time.RFC3339),
 			CorrelationID:   corr,

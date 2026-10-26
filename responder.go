@@ -365,8 +365,10 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// 5. Map TransactionType → expected request op. Unknown types are rejected
-	//    with 400 BEFORE token verification.
-	op, ok := responderReqOp[env.Metadata.TransactionType]
+	//    with 400 BEFORE token verification. Either form of a leg's name (flat,
+	//    or with its workstream prefix) names the leg; leg is its flat name.
+	leg, _ := FlatTransactionType(env.Metadata.TransactionType)
+	op, ok := responderReqOp[leg]
 	if !ok {
 		respondErr(w, http.StatusBadRequest, "unknown transaction type")
 		return
@@ -448,10 +450,10 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	switch {
 	case res.appStatus != 0:
 		// The request frame did not decode: refused above.
-	case claimedOperation != "" && env.Metadata.TransactionType != "dtr-questionnaire-fetch":
+	case claimedOperation != "" && leg != "dtr-questionnaire-fetch":
 		res = handlerResult{appStatus: http.StatusBadRequest, errMsg: "operation header is not defined for this transaction type"}
 	default:
-		switch env.Metadata.TransactionType {
+		switch leg {
 		case "coverage-eligibility":
 			res = r.handleEligibility(plaintext, corr, now)
 		case "crd-order-select":
@@ -524,7 +526,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		// coverage-eligibility, which is never stamped). An app-error frame is
 		// never stamped (mirrors the gateway's respondLegError: it may relay
 		// bytes this build did not produce).
-		stampToken := contractTokenForTxType(env.Metadata.TransactionType)
+		stampToken := contractTokenForTxType(leg)
 		if r.cfg.StampContractVersion && stampToken != "" && st/100 == 2 {
 			headers := map[string]string{FrameHeaderContractVersion: stampToken}
 			if ct != "" {
@@ -549,6 +551,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		respondErr(w, http.StatusBadGateway, "requester key not resolvable")
 		return
 	}
+	// The answer names the leg as the request did.
 	respMeta := Metadata{
 		Sender:          r.cfg.Identity.HolderID,
 		Recipient:       env.Metadata.Sender,
@@ -569,7 +572,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	// 10. AI-2 seal-then-authorize: authorize the response leg bound to
 	//     sha256Hex(ciphertext), then stamp the token into the cleartext metadata.
 	//     The response op is derived from the TransactionType (mirrors payer.go respondLeg).
-	respOp := responseOp(env.Metadata.TransactionType)
+	respOp := responseOp(leg)
 	respTok, err := r.cfg.Identity.Authorize(req.Context(), r.cfg.Client, r.cfg.AuthzURL, AuthorizeRequest{
 		Frame:         "payer-coverage",
 		Operation:     respOp,

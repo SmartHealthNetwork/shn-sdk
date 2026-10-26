@@ -51,6 +51,17 @@ func FlatTransactionType(name string) (string, bool) {
 	return "", false
 }
 
+// sameLeg reports whether two transaction type names, each in either form,
+// name the same leg of the taxonomy.
+func sameLeg(a, b string) bool {
+	fa, ok := FlatTransactionType(a)
+	if !ok {
+		return false
+	}
+	fb, ok := FlatTransactionType(b)
+	return ok && fa == fb
+}
+
 // PrefixedTransactionTypes returns every leg's flat name mapped to its
 // prefixed name. The map is a copy.
 func PrefixedTransactionTypes() map[string]string {

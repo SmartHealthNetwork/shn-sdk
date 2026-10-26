@@ -94,12 +94,12 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	pass("network discovery reachable (%s)", discURL)
 
 	// A2. Wire-version check — FIRST real check, BEFORE any eligibility leg.
-	if disc.WireProtocolVersion != shnsdk.WireProtocolVersion {
+	if !disc.SharesWireProtocol(shnsdk.WireProtocolVersions()) {
 		return fail(exitVersionUnsup,
-			"network speaks wire %q; this shn CLI speaks %q — upgrade your SDK/CLI",
-			disc.WireProtocolVersion, shnsdk.WireProtocolVersion)
+			"network speaks wire %q%s; this shn CLI speaks %q — upgrade your SDK/CLI",
+			disc.WireProtocolVersion, acceptedNote(disc), shnsdk.WireProtocolVersions())
 	}
-	pass("wire protocol %q supported", disc.WireProtocolVersion)
+	pass("wire protocol %q supported", sharedWireVersion(disc))
 
 	// A3. Authz verifying key.
 	authzPub, err := fetchAuthzPub(ctx, c, disc.AuthzPublicKeyURL)
@@ -340,10 +340,11 @@ func doctorNow() time.Time {
 	return time.Now()
 }
 
-// priorAuthInquiryTransaction is the transaction type the prior-authorization
-// inquiry rides under in the network's advertised operations. It is the literal
-// the descriptor carries, pinned here so a rename of the leg is caught by a
-// failing check rather than by a silent "this network has no inquiry".
+// priorAuthInquiryTransaction is the flat name of the transaction type the
+// prior-authorization inquiry rides under in the network's advertised
+// operations, which may name it in either form. It is pinned here so a rename
+// of the leg is caught by a failing check rather than by a silent "this
+// network has no inquiry".
 const priorAuthInquiryTransaction = "pas-claim-inquire"
 
 // advertisesPriorAuthInquiry reports whether this network carries the
@@ -355,11 +356,31 @@ const priorAuthInquiryTransaction = "pas-claim-inquire"
 // is that the pend is correct and its continuation simply cannot be carried yet.
 func advertisesPriorAuthInquiry(disc shnsdk.Discovery) bool {
 	for _, op := range disc.Operations {
-		if op.TransactionType == priorAuthInquiryTransaction {
+		if leg, ok := shnsdk.FlatTransactionType(op.TransactionType); ok && leg == priorAuthInquiryTransaction {
 			return true
 		}
 	}
 	return false
+}
+
+// sharedWireVersion is the first wire protocol version this CLI speaks that the
+// network speaks or accepts, or "".
+func sharedWireVersion(disc shnsdk.Discovery) string {
+	for _, v := range shnsdk.WireProtocolVersions() {
+		if disc.SharesWireProtocol([]string{v}) {
+			return v
+		}
+	}
+	return ""
+}
+
+// acceptedNote names the wire versions a descriptor accepts, for a refusal:
+// " (accepts …)", or "" when it lists none.
+func acceptedNote(disc shnsdk.Discovery) string {
+	if len(disc.WireProtocolVersionsAccepted) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (accepts %q)", disc.WireProtocolVersionsAccepted)
 }
 
 // personaPayerIdentity is the payer identifier the persona's eligibility

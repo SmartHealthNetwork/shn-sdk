@@ -144,6 +144,13 @@ func TestClientInquire_UsesHandleFacts(t *testing.T) {
 		t.Fatalf("Inquire result = %+v", got)
 	}
 
+	<-p.hub.mu
+	lastStated := p.hub.stated[len(p.hub.stated)-1]
+	p.hub.mu <- struct{}{}
+	if lastStated != "pa.pas-claim-inquire" {
+		t.Errorf("Inquire sent %q, want pa.pas-claim-inquire", lastStated)
+	}
+
 	sent := p.hub.leg(t, "pas-claim-inquire")
 	if !bytes.Contains(sent, bytes.TrimSpace(records.Patient)) || !bytes.Contains(sent, records.Coverage) {
 		t.Error("the inquiry does not embed the requester's records exactly")

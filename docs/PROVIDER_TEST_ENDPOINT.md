@@ -792,18 +792,18 @@ Expect `HTTP 200`, an empty `"cards"` array and one `systemActions` update:
   {"url":"coverage","valueReference":{"reference":"Coverage/c1"}},
   {"url":"covered","valueCode":"covered"},
   {"url":"pa-needed","valueCode":"auth-needed"},
-  {"url":"doc-needed","valueCode":"no-doc"},
+  {"url":"doc-needed","valueCode":"admin"},
   {"url":"questionnaire","valueCanonical":"http://example.org/fhir/Questionnaire/PriorAuthRequired"},
   {"url":"date","valueDate":"…"},
   {"url":"coverage-assertion-id","valueString":"prior-auth-…-c1"}]}],"…":"…"}}]}
 ```
 
-**The `doc-needed` code on this route.** This payer answers `no-doc`
-while also naming a `questionnaire` canonical. `no-doc` is not in the CRD 2.0 value set for
-`doc-needed` (`clinical`, `admin`, `both`, `conditional`), and it contradicts the
-questionnaire it supplies. It is the payer's own answer and it is relayed as sent rather
-than corrected. If your client keys its DTR follow-up off `doc-needed`, this route will tell
-it to skip DTR; use route `00301` (§5) to exercise the CRD-to-DTR handoff.
+**The `doc-needed` code on this route.** This payer answers `admin` beside the
+`questionnaire` canonical: the PriorAuthRequired form is an administrative acknowledgment
+(no additional clinical documentation is needed), and `admin` is in every CRD line's value
+set for `doc-needed`. A `$submit` for this order is still certified (`A1`). It is the
+payer's own answer, relayed as sent. Before 2026-10-22 this payer answered `no-doc`, a
+code in no CRD line's value set.
 
 ### 6.2 DTR
 
@@ -924,7 +924,7 @@ and this payer's decision for that order.
 | Member ID | Persona | Payer route | `Coverage.payor` identifier | Expect |
 |---|---|---|---|---|
 | `MBR-COVERED` | Linda Johansson | `00301` (2.2 line) | `urn:oid:2.16.840.1.113883.6.300\|00301` | CRD coverage answer, questionnaire package, and a PAS pend with a `102089-0` `CommunicationRequest` you can relaunch DTR from (§5) |
-| `MBR-COVERED` | Linda Johansson | `00300` (2.0 line) | `urn:oid:2.16.840.1.113883.6.300\|00300` | CRD coverage answer, questionnaire package and a PAS approval, plus a PAS pend with a `Task` for `E1390` (§6.4); the DTR package names an unresolved member, and `doc-needed` is off-value-set (§6) |
+| `MBR-COVERED` | Linda Johansson | `00300` (2.0 line) | `urn:oid:2.16.840.1.113883.6.300\|00300` | CRD coverage answer, questionnaire package and a PAS approval, plus a PAS pend with a `Task` for `E1390` (§6.4); the DTR package names an unresolved member, and `doc-needed` is `admin` (§6) |
 
 These are the published test members. The endpoint holds records for other synthetic members
 of its own too, so use your own patient ids and send `coverage`. In a

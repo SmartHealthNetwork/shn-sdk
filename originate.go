@@ -73,7 +73,7 @@ type Payer struct {
 //
 // Wire values (ported from sampleparticipant, verified against the substrate):
 //
-//	envelope TransactionType: "coverage-eligibility"
+//	envelope TransactionType: "pa.coverage-eligibility" (the leg's prefixed name)
 //	request  frame/op:        "provider-tpo" / "eligibility-inquiry"
 //	response frame/op:        "payer-coverage" / "eligibility-response"
 func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, npi, memberID, birthDate, familyName string) (covered bool, reason string, err error) {
@@ -102,10 +102,17 @@ func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoi
 	// Step 4 — seal the envelope FIRST so the ciphertext exists (AI-2:
 	// seal-then-authorize). AuthzToken is cleartext metadata stamped on AFTER the
 	// token is minted bound to sha256hex(ciphertext).
+	// The envelope names the leg by its workstream-prefixed name, which every
+	// network's Hub reads (PARTICIPANT_PROTOCOL.md §4.3); the Hub forwards the
+	// flat name to the payer and returns the answer under this one.
+	wireName, ok := PrefixedTransactionType("coverage-eligibility")
+	if !ok {
+		return false, "", fmt.Errorf("shnsdk: coverage-eligibility names no leg")
+	}
 	meta := Metadata{
 		Sender:          id.HolderID,
 		Recipient:       payer.ID,
-		TransactionType: "coverage-eligibility",
+		TransactionType: wireName,
 		AuthorityFrame:  "provider-tpo",
 		Timestamp:       now.UTC().Format(time.RFC3339),
 		CorrelationID:   correlationID,
@@ -179,7 +186,7 @@ func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoi
 	if respEnv.Metadata.Recipient != id.HolderID {
 		return false, "", fmt.Errorf("shnsdk: response recipient %q != our holderID %q", respEnv.Metadata.Recipient, id.HolderID)
 	}
-	if respEnv.Metadata.TransactionType != "coverage-eligibility" {
+	if !sameLeg(respEnv.Metadata.TransactionType, "coverage-eligibility") {
 		return false, "", fmt.Errorf("shnsdk: response transactionType %q != %q", respEnv.Metadata.TransactionType, "coverage-eligibility")
 	}
 	if respEnv.Metadata.Sender != payer.ID {

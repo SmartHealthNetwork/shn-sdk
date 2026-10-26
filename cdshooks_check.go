@@ -17,8 +17,8 @@ const (
 	SeverityWarning Severity = "warning"
 )
 
-// Violation is one broken CDS Hooks response rule: the rule id (see
-// CDSHooksRules), the JSON path of the offending member (for example
+// Violation is one broken CDS Hooks rule: the rule id (see CDSHooksRules
+// and CDSHooksRequestRules), the JSON path of the offending member (for example
 // "cards[0].source.label"; "" for the whole body) and its severity.
 type Violation struct {
 	Rule     string
@@ -26,14 +26,15 @@ type Violation struct {
 	Severity Severity
 }
 
-// CDSHooksRule is one row of the response certifier's rule table.
+// CDSHooksRule is one row of a certifier's rule table.
 type CDSHooksRule struct {
 	ID          string
 	Severity    Severity
 	Description string
 	// Citation names the specification text the rule enforces.
 	Citation string
-	// CRDOnly marks a rule that applies only when a CRD line is named.
+	// CRDOnly marks a rule that applies only at a CRD line: any CRD line
+	// named to CheckCDSHooksResponse, and "2.2" to CheckCDSHooksRequest.
 	CRDOnly bool
 }
 

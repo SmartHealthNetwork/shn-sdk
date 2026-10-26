@@ -1,13 +1,17 @@
 package shnsdk
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 // Discovery is the SHN network discovery descriptor (accountsvc GET /discovery): the
 // machine-readable, FR-37 conformance surface for the sealed-envelope protocol. It is
-// SUFFICIENT to drive the loop — endpoints + AuthzPublicKeyURL + persona payerId
-// (legacy descriptors: DemoResponders) resolve the Payer{ID,EncPub,AuthzPub}
-// RunEligibility needs (the holder matched via the registrar /holders feed; AuthzPub
-// from /pubkey). No keys are embedded (no drift).
+// SUFFICIENT to drive the loop — endpoints + AuthzPublicKeyURL + the persona's
+// payerId resolve the Payer{ID,EncPub,AuthzPub} RunEligibility needs (the holder
+// matched via the registrar /holders feed; AuthzPub from /pubkey). No keys are
+// embedded (no drift). A 2.0.0 network's descriptor leaves out the deprecated
+// fields below (ContractVersions, DemoResponders, Endpoints.PatientAccess).
 // MUST stay wire-identical to the substrate's accountsvc.Discovery (test/sdkparity).
 type Discovery struct {
 	Demo                bool   `json:"demo"`
@@ -24,6 +28,9 @@ type Discovery struct {
 	// truth (registrar feed §2.3 / directory §3), not a network property. The field
 	// stays declared for wire compatibility (grow-only); the network's contract
 	// capability surface is BridgedContractVersions. Producer: internal/accountsvc/discovery.go.
+	//
+	// Deprecated: absent from a 2.0.0 network's descriptor; read as empty;
+	// never relied on.
 	ContractVersions []string `json:"contractVersions,omitempty"`
 	// RequestFrames are the sealed REQUEST-frame versions this substrate's
 	// holders accept ("v1" — the request-frame contract). ADDITIVE optional
@@ -45,11 +52,16 @@ type Discovery struct {
 	// zero-config gateway image MUST use this URL so it validates against our
 	// published profiles without any extra env. Empty ⇒ not advertised.
 	// Producer: internal/accountsvc/discovery.go.
-	FHIRValidateURL string               `json:"fhirValidateURL,omitempty"`
-	DemoResponders  []DiscoveryResponder `json:"demoResponders"`
-	Operations      []DiscoveryOp        `json:"operations"`
-	DemoPersonas    []DiscoveryPersona   `json:"demoPersonas"`
-	Docs            string               `json:"docs"`
+	FHIRValidateURL string `json:"fhirValidateURL,omitempty"`
+	// DemoResponders are a 1.1.0 network's test counterparties. The CLI falls
+	// back to them only for a persona or handle that names no payerId.
+	//
+	// Deprecated: absent from a 2.0.0 network's descriptor; read as empty.
+	// Do not rely on it: find the test payer by the persona's payerId.
+	DemoResponders []DiscoveryResponder `json:"demoResponders"`
+	Operations     []DiscoveryOp        `json:"operations"`
+	DemoPersonas   []DiscoveryPersona   `json:"demoPersonas"`
+	Docs           string               `json:"docs"`
 	// PublishedVersions are the live SDK/gateway/kit version pins this network
 	// deployment was built against, derived at image build time from
 	// repo-tracked pins — never hand-set.
@@ -78,6 +90,43 @@ type Discovery struct {
 	// descriptor does not state it yet: until it does, the field is absent and
 	// ScenarioPersona finds no persona.
 	ScenarioPersonas []DiscoveryScenarioPersona `json:"scenarioPersonas,omitempty"`
+	// Workstreams are the network's workstreams, in the order it publishes
+	// their legs: each one's legs and operations, and the contract lines its
+	// messages are built to. ADDITIVE optional field; no wire protocol version
+	// bump.
+	Workstreams []DiscoveryWorkstream `json:"workstreams,omitempty"`
+}
+
+// DiscoveryWorkstream is one workstream the network carries.
+type DiscoveryWorkstream struct {
+	// Name is the workstream's name, the prefix of its legs' transaction types.
+	Name string `json:"name"`
+	// TaxonomyVersion is the version of the workstream's published leg table.
+	TaxonomyVersion int `json:"taxonomyVersion"`
+	// Legs are the workstream's legs, in the order the network publishes them.
+	Legs []DiscoveryWorkstreamLeg `json:"legs"`
+	// Lines are the contract-version tokens ("pa.crd@2.0") the workstream's
+	// messages are built to; absent for a workstream with no contract.
+	Lines []string `json:"lines,omitempty"`
+}
+
+// DiscoveryWorkstreamLeg is one leg of a workstream.
+type DiscoveryWorkstreamLeg struct {
+	// TransactionType is the leg's prefixed name ("pa.pas-claim").
+	TransactionType string `json:"transactionType"`
+	// Request is the leg's request side.
+	Request DiscoveryLegSide `json:"request"`
+	// Response is the leg's response side; absent for a leg that has none.
+	Response *DiscoveryLegSide `json:"response,omitempty"`
+	// Advertised reports whether the leg's operations are among Operations.
+	Advertised bool `json:"advertised"`
+}
+
+// DiscoveryLegSide is one side of a leg: the authority frame its token
+// carries and its operation.
+type DiscoveryLegSide struct {
+	Frame     string `json:"frame"`
+	Operation string `json:"operation"`
 }
 
 // HubAcceptsInvolved is the Discovery.HubAccepts entry for Metadata.Involved:
@@ -110,8 +159,10 @@ type DiscoveryEndpoints struct {
 	Authz     string `json:"authz"`
 	Registrar string `json:"registrar"`
 	// PatientAccess is always empty: the network names no Patient Access
-	// API. The key stays on the wire, always present, until the discovery
-	// protocol is versioned.
+	// API. A 1.1.0 network's descriptor carries the key, always present.
+	//
+	// Deprecated: absent from a 2.0.0 network's descriptor; read as empty;
+	// never relied on.
 	PatientAccess string `json:"patientAccess"`
 	Accounts      string `json:"accounts"`
 	Consent       string `json:"consent,omitempty"`
@@ -258,4 +309,16 @@ func (d Discovery) ScenarioPersona(scenario, lane, personaSet string) (Discovery
 		}
 	}
 	return DiscoveryScenarioPersona{}, false
+}
+
+// SharesWireProtocol reports whether the network this descriptor describes
+// speaks one of versions: its WireProtocolVersion, or a version it lists in
+// WireProtocolVersionsAccepted.
+func (d Discovery) SharesWireProtocol(versions []string) bool {
+	for _, v := range versions {
+		if v != "" && (v == d.WireProtocolVersion || slices.Contains(d.WireProtocolVersionsAccepted, v)) {
+			return true
+		}
+	}
+	return false
 }

@@ -18,12 +18,15 @@ describe the change instead of reviewing a diff.
 
 ## Versioning and stability
 
-`shn-sdk` follows semantic versioning and is currently **pre-1.0 (0.x)**:
+`shn-sdk` follows semantic versioning. From v1.0.0 it is at major version 1:
 
-- **MINOR** versions (0.x.0 → 0.(x+1).0) may carry breaking changes. Each
-  breaking change is called out in the release notes.
-- **PATCH** versions (0.x.y → 0.x.(y+1)) contain backwards-compatible fixes
+- **MINOR** versions (1.x.0 → 1.(x+1).0) may add to the SDK and never break
+  what the compatibility promise below covers. They may change the Go API, which it
+  does not cover; the release notes name each such change.
+- **PATCH** versions (1.x.y → 1.x.(y+1)) contain backwards-compatible fixes
   only.
+- A **MAJOR** version would be the only release that breaks what the promise
+  covers.
 
 A published version tag is **never re-tagged** with different content: the Go
 module proxy caches a tag's tree permanently, so a fix always ships as a new
@@ -32,6 +35,18 @@ rather than deleted. The release history is at
 [github.com/SmartHealthNetwork/shn-sdk/releases](https://github.com/SmartHealthNetwork/shn-sdk/releases).
 `shn-gateway` pins a version of this module; its `go.mod` is the compatibility
 record between the two.
+
+The module's Go API carries **no compatibility promise**: the Smart Gateway
+compiles its builders, and partners use the network through the gateway's
+published binary and the `shn` CLI. A release may change or remove a Go symbol;
+after v1.0.0, within a major, such a change comes in a minor release, never a
+patch, and that release's notes name each incompatible change in their
+"Go API" section.
+From v1.0.0 the compatibility promise covers the `shn` CLI's onboarding
+commands (`keygen`, `register`, `login`, `clients`, `revoke`, `rotate`,
+`doctor`: their flags, exit codes and the key files they write; see the
+[README](README.md)) and the gateway's binary contract (see the gateway's
+`STABILITY.md`), not the Go API.
 
 ## Licensing
 

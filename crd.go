@@ -10,8 +10,7 @@ import (
 )
 
 // OrderSelectContext is the CDS Hooks context for an order-select hook invocation.
-// Ported standalone from internal/crd.OrderSelectContext with the SAME json tags so
-// the marshaled bytes are identical (test/sdkparity/crd_parity_test.go).
+// Ported standalone from internal/crd.OrderSelectContext with the same json tags.
 type OrderSelectContext struct {
 	PatientID   string            `json:"patientId"`
 	DraftOrders []json.RawMessage `json:"draftOrders"`
@@ -190,27 +189,6 @@ func BuildCoverageWithPayer(patientRef, memberID string, payer PayerIdentifier) 
 	}
 	m["contained"] = containedJSON
 	return json.Marshal(m)
-}
-
-// ParseOrderSelectRequest deserializes an order-select CDS Hooks request. It errors if
-// the hook field is not "order-select" or if there are no draft orders. Ported
-// standalone from internal/crd.ParseOrderSelectRequest with identical error semantics
-// (test/sdkparity/crd_parity_test.go).
-//
-// Deprecated: no production callers remain; retained for API stability and slated for
-// removal at the next breaking shn-sdk major. New code should not depend on it.
-func ParseOrderSelectRequest(data []byte) (OrderSelectRequest, error) {
-	var req OrderSelectRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return req, err
-	}
-	if req.Hook != "order-select" {
-		return req, fmt.Errorf("shnsdk: expected hook order-select, got %q", req.Hook)
-	}
-	if len(req.Context.DraftOrders) == 0 {
-		return req, fmt.Errorf("shnsdk: order-select request must contain at least one draft order")
-	}
-	return req, nil
 }
 
 // ErrBuildCardsReplaced is returned by the deprecated BuildCards and

@@ -91,6 +91,28 @@ func TestSendTestReportsFailure(t *testing.T) {
 	}
 }
 
+// A "not covered" or "no PA required" answer must say so: a 200 that leaves the key out
+// states neither and fails, as the evaluation smoke's own checks did.
+func TestSendTestNegativeAnswersMustBeStated(t *testing.T) {
+	for _, c := range sendTestCases() {
+		key := map[string]string{"uc01 notcovered": "covered", "uc02": "paRequired"}[c.label]
+		if key == "" {
+			continue
+		}
+		if c.pred(map[string]any{}) {
+			t.Errorf("%s passed an answer that states no %s", c.label, key)
+		}
+		if !c.pred(map[string]any{key: false}) {
+			t.Errorf("%s failed an answer stating %s false", c.label, key)
+		}
+	}
+	s := fakeGateway(t, map[string]string{"/scenario/uc02": `{}`})
+	var out, errb strings.Builder
+	if code := cmdSendTest([]string{"--gateway", s.URL}, &out, &errb); code != 1 || !strings.Contains(out.String(), "✗ uc02") {
+		t.Fatalf("exit %d, want 1 with uc02 failed; out=%q", code, out.String())
+	}
+}
+
 func TestSendTestNon200IsFailure(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
@@ -271,6 +293,12 @@ func TestSendTestSendsTheDescriptorsPersonas(t *testing.T) {
 		}
 		if strings.Contains(c.body, "branch") && m["branch"] == nil {
 			t.Fatalf("%s lost its own keys: %s", c.label, body)
+		}
+		// The attestation routes state their answer (a gateway supplies none and
+		// refuses the route without one); no other route states one.
+		wantAnswer := map[string]any{"uc06": sendTestClinicianAnswer, "uc07": sendTestPatientAnswer}[c.path]
+		if m["answer"] != wantAnswer {
+			t.Fatalf("%s sent answer %v, want %v", c.label, m["answer"], wantAnswer)
 		}
 	}
 }

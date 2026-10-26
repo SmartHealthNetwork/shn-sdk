@@ -335,11 +335,21 @@ const (
 	// names, from a member its system of record holds, when it differs from the
 	// token's patient. The version 1 value; a version 2 record carries
 	// InvolvementResponderHeld (NeutralInvolvement).
+	//
+	// Deprecated: the version 1 vocabulary. It stays in use through the wire
+	// protocol 2.0.0 window: a version 1 record carries it (LegacyInvolvement),
+	// and a gateway on wire protocol 1.1.0 asks for and sends it. A version 2
+	// record, and a gateway on 2.0.0, carry InvolvementResponderHeld.
 	InvolvementPayerHeld = "payer-held"
 	// InvolvementPayerDerived: the payer's own binding of a member its system of
 	// record does not hold (a derived identifier), when it differs from the
 	// token's patient. The version 1 value; a version 2 record carries
 	// InvolvementResponderDerived (NeutralInvolvement).
+	//
+	// Deprecated: the version 1 vocabulary. It stays in use through the wire
+	// protocol 2.0.0 window: a version 1 record carries it (LegacyInvolvement),
+	// and a gateway on wire protocol 1.1.0 asks for and sends it. A version 2
+	// record, and a gateway on 2.0.0, carry InvolvementResponderDerived.
 	InvolvementPayerDerived = "payer-derived"
 )
 
@@ -357,6 +367,9 @@ const (
 
 // ValidInvolvement reports whether v is one of the version 1 involvement
 // values; it is ValidInvolvementV1.
+//
+// Deprecated: a record's version fixes its vocabulary. Use
+// ValidInvolvementV1 or ValidInvolvementV2 for the record's version.
 func ValidInvolvement(v string) bool { return ValidInvolvementV1(v) }
 
 // ValidInvolvementV1 reports whether v is an involvement value a version 1
