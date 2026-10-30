@@ -14,8 +14,7 @@ import (
 
 // parseConformantOrderSelectSR extracts the first ServiceRequest JSON from a CONFORMANT CDS
 // Hooks order-select request (context.draftOrders a FHIR collection Bundle whose entries carry
-// the resources). Returns the first ServiceRequest found, or (nil, false) if none. Mirrors
-// engine.extractConformantSR / firstServiceRequest's first-SR semantics.
+// the resources). Returns the first ServiceRequest found, or (nil, false) if none.
 //
 // Returning the FIRST ServiceRequest only is by design: the payer-side bind below
 // (parseServiceRequestSubject + Coverage beneficiary + context.patientId three-way) is the
@@ -85,8 +84,8 @@ type conformantClaimSubmit struct {
 
 // parseConformantClaimSubmit does ONE pass over a CONFORMANT PAS Claim Bundle, indexing entries
 // by resourceType (tolerating the Patient / Coverage / payor Organization / Practitioner entries
-// a real Da Vinci $submit carries). It mirrors engine.parseConformantPASSubjects' one-pass index,
-// surfacing the subset the Responder's PriorAuth decision needs: Claim.patient, the QR JSON, and
+// a real Da Vinci $submit carries). It mirrors the Smart Gateway's one-pass index of a conformant
+// PAS Claim Bundle, surfacing the subset the Responder's PriorAuth decision needs: Claim.patient, the QR JSON, and
 // whether a DiagnosticReport is present. Returns (claim, false) if the body is not a Bundle or
 // yields no Claim.patient (→ 400 at the caller).
 func parseConformantClaimSubmit(body []byte) (conformantClaimSubmit, bool) {
@@ -157,7 +156,7 @@ func parseConformantClaimSubmit(body []byte) (conformantClaimSubmit, bool) {
 
 // bindConformantClaimSubject enforces the structural entry set and intra-bundle patient
 // consistency on a parsed conformant Claim Bundle (the SDK Responder's edge fence, the twin of
-// engine.parseConformantPASSubjects' bind for the conformant shape — the twin-fence corpus under
+// the Smart Gateway's bind for the conformant shape — the twin-fence corpus under
 // testdata/twinfence holds the two in lockstep): an order entry (ServiceRequest or DeviceRequest)
 // and a Coverage with a beneficiary are REQUIRED, and the order subject, the Coverage
 // beneficiary, the QuestionnaireResponse subject (when a QR is present — REQUIRED then, a
@@ -228,7 +227,7 @@ func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg strin
 // naming a genuinely different member still mismatches in either spelling, and a non-Patient
 // reference (no "Patient/" segment) is returned verbatim, so it cannot collide with a member id.
 //
-// Identical to the substrate gateway's own pasMemberFromRef (gateway/engine/pas_native.go), which
+// Identical to the Smart Gateway's own pasMemberFromRef (its native PAS bind), which
 // already resolved this for the native lane. The two fences are twins on purpose and must decide
 // the same bundle the same way.
 // A versioned reference names the same patient: Patient/<id>/_history/<version>
@@ -254,8 +253,8 @@ func conformantBundleMember(cs conformantClaimSubmit) string {
 
 // conformantUpdateFacts holds the cross-resource FR-21/FR-32 facts the CONFORMANT
 // amended-re-POST (pas-claim-update) inbound gate enforces against — the fields
-// parseConformantClaimSubmit does NOT surface. Mirrors engine.conformantUpdateFacts
-// (gateway/engine/pas_native.go) for the conformant shape.
+// parseConformantClaimSubmit does NOT surface. Mirrors the Smart Gateway's own
+// conformantUpdateFacts (its native PAS bind) for the conformant shape.
 type conformantUpdateFacts struct {
 	provenanceJSON     []byte   // the Provenance resource bytes, or nil (FR-32: REQUIRED on the update leg)
 	provenanceAgents   []string // Provenance.agent[].who.reference
@@ -270,8 +269,8 @@ type conformantUpdateFacts struct {
 // FR-21/FR-32 cross-resource facts the update gate enforces against (Claim.related[prior], the
 // supplemental DiagnosticReport id, the amended QR id, and the Provenance agents/targets). It
 // tolerates the full conformant entry set (Patient/Coverage/Org/Practitioner are present and
-// ignored). Mirrors engine.parseConformantPASUpdateFacts. Returns (facts, false) on a malformed /
-// non-Bundle body.
+// ignored). Mirrors the Smart Gateway's extraction of the same facts. Returns (facts, false) on a
+// malformed / non-Bundle body.
 func parseConformantUpdateFacts(body []byte) (conformantUpdateFacts, bool) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`

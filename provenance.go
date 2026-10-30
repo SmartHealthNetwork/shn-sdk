@@ -105,8 +105,8 @@ func BuildTransformProvenance(targetRef, agentWho, moduleID, sourceLine, targetL
 }
 
 // RestoreTransformLoss parses a shn-loss-report extension (as produced by
-// BuildTransformProvenance, from this module or the substrate-internal twin
-// — the two are byte-parity partners, test/sdkparity) back into
+// BuildTransformProvenance, from this module or the platform-internal twin
+// — the two are byte-parity partners, pinned by the platform's SDK parity suite) back into
 // []LossReport, exact (RestoreTransformLoss(...) after BuildTransformProvenance
 // returns the original slice — pinned by TestBuildTransformProvenanceLossRoundTrip).
 // Fails loudly — never returns a zero-value success — on a wrong top-level

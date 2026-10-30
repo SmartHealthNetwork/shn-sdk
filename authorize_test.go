@@ -116,7 +116,8 @@ func authorizeReq() AuthorizeRequest {
 func TestAuthorizeSuccess(t *testing.T) {
 	id := newTestIdentity(t)
 	now := time.Unix(1_700_000_000, 0).UTC()
-	want := baseToken(now)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	want := signTestToken(baseToken(now), priv) // the Framework signs every token it mints
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -244,5 +245,102 @@ func TestVerifyBoundRefusesAnInvolvedToken(t *testing.T) {
 	read.Involvement = ""
 	if err := VerifyBoundNoPayload(signTestToken(read, priv), pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123"); err != nil {
 		t.Fatalf("the same token without an involvement must verify: %v", err)
+	}
+}
+
+// A 2xx /authorize answer without a signed token carries no authority:
+// Authorize returns an error, never the zero token or an unsigned one.
+func TestAuthorizeAnswerWithoutASignedTokenIsAnError(t *testing.T) {
+	id := newTestIdentity(t)
+	for name, body := range map[string]string{
+		"no token":                   `{}`,
+		"a null token":               `{"token":null}`,
+		"an unsigned token":          `{"token":{"operation":"eligibility-response","holder":"payer-1"}}`,
+		"another field and no token": `{"rule":"audit"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			tok, err := id.Authorize(context.Background(), srv.Client(), srv.URL, authorizeReq())
+			if err == nil || !strings.Contains(err.Error(), "no signed token") {
+				t.Fatalf("Authorize = %+v, %v; want the no-signed-token error", tok, err)
+			}
+			if tok.Operation != "" || len(tok.Signature) != 0 {
+				t.Fatalf("Authorize returned a token with its error: %+v", tok)
+			}
+		})
+	}
+}
+
+func involvedToken(now time.Time) Token {
+	tok := baseToken(now)
+	tok.Involvement = InvolvementRequestNamed
+	return tok
+}
+
+// VerifyInvolved accepts an involved patient's token bound to exactly this
+// leg and involvement.
+func TestVerifyInvolvedAcceptsValid(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := signTestToken(involvedToken(now), priv)
+	if err := VerifyInvolved(tok, pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, InvolvementRequestNamed); err != nil {
+		t.Fatalf("expected accept, got %v", err)
+	}
+	// An empty want skips that binding, as VerifyBound's do (the Hub reads
+	// an involved token without knowing its patient beforehand).
+	if err := VerifyInvolved(tok, pub, now, "", "", "", "", "", testHash, InvolvementRequestNamed); err != nil {
+		t.Fatalf("expected accept with skipped bindings, got %v", err)
+	}
+}
+
+// VerifyInvolved refuses each binding off by one, as VerifyBound does, and
+// is strict on the payload hash and the involvement: neither is skipped.
+func TestVerifyInvolvedRejects(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, strangerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	good := signTestToken(involvedToken(now), priv)
+	leg := baseToken(now) // a leg's own token: no involvement
+	other := "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+	noHash := involvedToken(now)
+	noHash.PayloadHash = ""
+	tampered := good
+	tampered.Involvement = InvolvementPayerHeld
+
+	tests := []struct {
+		name                                                    string
+		tok                                                     Token
+		key                                                     ed25519.PublicKey
+		when                                                    time.Time
+		frame, op, corr, holder, subject, payloadH, involvement string
+	}{
+		{"signed by another key", signTestToken(involvedToken(now), strangerPriv), pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, InvolvementRequestNamed},
+		{"a bad key", good, ed25519.PublicKey{1, 2, 3}, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, InvolvementRequestNamed},
+		{"involvement changed after signing", tampered, pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, InvolvementPayerHeld},
+		{"expired", good, pub, now.Add(2 * time.Hour), "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, InvolvementRequestNamed},
+		{"wrong frame", good, pub, now, "provider-tpo", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, InvolvementRequestNamed},
+		{"wrong op", good, pub, now, "payer-coverage", "eligibility-inquiry", "corr-1", "payer-1", "pci:abc123", testHash, InvolvementRequestNamed},
+		{"wrong corr", good, pub, now, "payer-coverage", "eligibility-response", "corr-X", "payer-1", "pci:abc123", testHash, InvolvementRequestNamed},
+		{"wrong holder", good, pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-X", "pci:abc123", testHash, InvolvementRequestNamed},
+		{"wrong subject", good, pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:other", testHash, InvolvementRequestNamed},
+		{"wrong payloadHash", good, pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", other, InvolvementRequestNamed},
+		{"empty payloadHash", good, pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", "", InvolvementRequestNamed},
+		{"a token with no payloadHash", signTestToken(noHash, priv), pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, InvolvementRequestNamed},
+		{"wrong involvement", good, pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, InvolvementPayerHeld},
+		{"empty involvement", good, pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, ""},
+		{"a leg's own token", signTestToken(leg, priv), pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, InvolvementRequestNamed},
+		{"a leg's own token, no involvement wanted", signTestToken(leg, priv), pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", testHash, ""},
+		{"a token with no payloadHash, none wanted", signTestToken(noHash, priv), pub, now, "payer-coverage", "eligibility-response", "corr-1", "payer-1", "pci:abc123", "", InvolvementRequestNamed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := VerifyInvolved(tc.tok, tc.key, tc.when, tc.frame, tc.op, tc.corr, tc.holder, tc.subject, tc.payloadH, tc.involvement); err == nil {
+				t.Errorf("%s: expected reject", tc.name)
+			}
+		})
 	}
 }

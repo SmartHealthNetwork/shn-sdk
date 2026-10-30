@@ -11,7 +11,7 @@ import (
 // pas-claim-update), in their CONFORMANT form. The Originator (RunPriorAuth) sends the conformant
 // request shapes — a CDS Hooks order-select request (context.draftOrders a FHIR collection Bundle)
 // and a conformant Da Vinci Claim Bundle — and these handlers parse them via the conformant parsers
-// (conformant_parse.go), mirroring the substrate engine's crd_native.go / pas_native.go binds. The
+// (conformant_parse.go), mirroring the Smart Gateway's own native CRD / PAS binds. The
 // Responder is the published partner payer surface: a partner running RunPriorAuth against an
 // shnsdk.Responder payer exercises this full CRD -> DTR -> PAS round-trip.
 //
@@ -24,7 +24,7 @@ import (
 
 // handleCRD implements the conformant crd-order-select handler. It extracts the ServiceRequest
 // from the conformant CDS Hooks request, runs the three-way member fence (SR subject + Coverage
-// beneficiary + context.patientId — mirrors engine.conformantCRDBind), reads the procedure code,
+// beneficiary + context.patientId), reads the procedure code,
 // asks the Adjudicator whether PA is required and which questionnaire applies, and answers with
 // BuildCRDResponse: the requested order returned in an update system action carrying the
 // coverage information, and no card. The prefetch coverage may be a Coverage or a Bundle of
@@ -322,10 +322,10 @@ func firstClaimFullURL(bundle []byte) (string, bool) {
 	return "", false
 }
 
-// handlePASUpdate implements the conformant pas-claim-update handler (FR-21/FR-32). It mirrors
-// engine.conformantPASUpdateBind's FR-32 enforcement (Provenance present + agent + targets the
-// supplemental resource) and the deleted minimized handler's ledger discipline (begin/release/
-// finalize the pended claim atomically), porting both to the conformant Claim Bundle shape.
+// handlePASUpdate implements the conformant pas-claim-update handler (FR-21/FR-32). It enforces
+// FR-32 (Provenance present + agent + targets the supplemental resource) and the pended-claim
+// ledger discipline (begin/release/finalize the pended claim atomically) on the conformant Claim
+// Bundle shape.
 //
 // Ledger ordering: the decision's ledger step (finalize on approval or denial, release on a
 // re-pend) runs in commit, after seal+authorize succeed; a response-leg failure runs rollback
@@ -401,8 +401,8 @@ func (r *Responder) handlePASUpdate(plaintext []byte, tok Token, corr string, no
 		// because the id differs; and the leading "/" keeps a longer type name (…SomeDiagnostic
 		// Report/<id>) from satisfying the suffix.
 		//
-		// Identical to the substrate gateway's conformantPASUpdateBind
-		// (gateway/engine/pas_native.go), which already carries this tolerance with its own
+		// Identical to the Smart Gateway's conformantPASUpdateBind
+		// (its native PAS bind), which already carries this tolerance with its own
 		// regression guard. The two fences are twins and must decide the same bundle the same
 		// way — this one had been left behind.
 		if ref == wantTarget || strings.HasSuffix(ref, "/"+wantTarget) {

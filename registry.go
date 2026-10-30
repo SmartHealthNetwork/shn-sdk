@@ -21,6 +21,10 @@ type RegistryEntry struct {
 	MessageFrames    []string          // advertised sealed message-frame versions ("v1"); absent ⇒ legacy bare payloads
 	ContractVersions []string          // declared exchange-contract version tokens ("pa.pas@2.0"); absent ⇒ pre-contract build
 	RequestFrames    []string          // declared sealed REQUEST-frame capabilities ("v1", "v1op"); absent ⇒ send this peer BARE requests
+	Legs             []string          // declared legs this peer takes as a recipient (Holder.Legs); nil ⇒ declares no list (predates every marked leg), empty ⇒ takes none
+	// AttachmentMaxBytes is the peer's declared attachment content limit
+	// (Holder.AttachmentMaxBytes); nil ⇒ none declared, apply only the sender's ceiling.
+	AttachmentMaxBytes *int64
 }
 
 // Registry is a concurrency-safe holder registry. It is a value type whose

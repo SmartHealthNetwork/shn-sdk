@@ -1,8 +1,6 @@
-// Package shnsdk fhirvalidate: FHIR $validate client surface, promoted from
-// internal/fhirvalidate. Gateways validate resources on egress and
-// ingress (production-grade, AI-2 means validation lives at the gateways, not
-// the payload-blind Hub). Substrate consumers continue to resolve these symbols
-// via the internal/fhirvalidate delegating shim.
+// Package shnsdk fhirvalidate: the FHIR $validate client surface. Gateways
+// validate resources on egress and ingress (production-grade: validation lives
+// at the gateways, never at the payload-blind Hub).
 package shnsdk
 
 import (

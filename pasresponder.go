@@ -123,9 +123,6 @@ func pasDeniedNotes(notes []PASProcessNote) ([]pasDeniedProcessNote, error) {
 // Custom-marshalled (mirroring the denied A3 path) so the CodeableConcept-valued
 // reviewAction extension serialises cleanly.
 //
-// Its v0.61.1 form, the Deprecated BuildClaimResponse, is the one
-// test/sdkparity fences against internal/pas.BuildClaimResponse.
-//
 // BuildClaimResponseExact speaks PAS line 2.0 — it is BuildClaimResponseAtLineExact("2.0", …),
 // byte-identical. No structural delta was found
 // for profile-claimresponse.json across 2.0.1/2.1.0/2.2.1 (PAS package differential); the
@@ -234,8 +231,7 @@ type PendedResponseInputs struct {
 	// Request is what the answer restates from the request it answers: the
 	// request Claim's type and insurer, as written (PASAnswerRequestOf).
 	// REQUIRED by BuildPendedClaimResponseAtLineExact: without either it refuses
-	// (ErrPASAnswerSourceAbsent). The Deprecated BuildPendedClaimResponseAtLine
-	// ignores it.
+	// (ErrPASAnswerSourceAbsent).
 	Request PASAnswerRequest
 }
 
@@ -376,7 +372,7 @@ func pasPendedOutcome(def PASDef) (fhir.ClaimProcessingCodes, error) {
 	}
 }
 
-// Denied ClaimResponse types — ported standalone from internal/pas.
+// Denied ClaimResponse types — ported standalone from the platform's PAS builders.
 
 // pasDeniedCR is a minimal FHIR R4 ClaimResponse expressing a Da Vinci PAS
 // DENIAL: outcome=complete (the request was processed; denial is a decision,
@@ -385,7 +381,7 @@ func pasPendedOutcome(def PASDef) (fhir.ClaimProcessingCodes, error) {
 // the partner's own processNotes (absent when it gave none). NO preAuthRef — a denial
 // issues no authorization number, so ParseClaimResponse reads it as not-approved.
 //
-// PORTED-standalone: internal/pas.claimResponseDeniedJSON.
+// PORTED-standalone: the platform's denied-ClaimResponse builder.
 type pasDeniedCR struct {
 	ResourceType string                `json:"resourceType"`
 	Meta         *pasClaimResponseMeta `json:"meta,omitempty"`
@@ -478,7 +474,7 @@ type pasClaimResponseMeta struct {
 // carrying the authorization number + expiry. Custom-marshalled (like the denied
 // twin) so the CodeableConcept-valued reviewAction extension serialises cleanly.
 //
-// PORTED-standalone: internal/pas.claimResponseApprovedJSON.
+// PORTED-standalone: the platform's approved-ClaimResponse builder.
 type pasApprovedCR struct {
 	ResourceType string                `json:"resourceType"`
 	Meta         *pasClaimResponseMeta `json:"meta,omitempty"`
@@ -509,7 +505,7 @@ const (
 	// pasSystemX12ReviewAction is the X12 278 review-action code system used by
 	// the Da Vinci PAS reviewAction extension. A1 = "Certified in Total"
 	// (approved), A3 = "Not Certified" (denied).
-	// PORTED-standalone: internal/pas.systemX12ReviewAction.
+	// PORTED-standalone: the platform's PAS builders' X12 review-action system.
 	pasSystemX12ReviewAction = "https://codesystem.x12.org/005010/306"
 	// pasReviewActionExtURL is the Da Vinci PAS reviewAction extension URL.
 	pasReviewActionExtURL = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction"
@@ -524,9 +520,6 @@ const (
 // BuildDeniedResponseWithNotesAtLineExact to add the partner's own notes. No
 // preAuthRef is issued. Outcome is "complete" — denial is a decision, not an
 // error.
-//
-// Its v0.61.1 form, the Deprecated BuildDeniedResponse, is the one
-// test/sdkparity fences against internal/pas.BuildDeniedResponse.
 //
 // BuildDeniedResponseExact speaks PAS line 2.0 — it is BuildDeniedResponseAtLineExact("2.0", …),
 // byte-identical. No structural delta was found

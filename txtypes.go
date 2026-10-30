@@ -4,7 +4,7 @@ package shnsdk
 // ("pas-claim"). Wire protocol 2.0.0 and version 2 audit records name it with
 // its workstream's prefix ("pa.pas-claim"), the prefix plus the flat name.
 // The table holds every leg of the network's taxonomy that has a wire name;
-// test/sdkparity checks it against internal/legtaxonomy.
+// the platform's SDK parity suite checks it against the network's leg taxonomy.
 var prefixedTransactionTypes = map[string]string{
 	"coverage-eligibility":    "pa.coverage-eligibility",
 	"crd-order-select":        "pa.crd-order-select",
@@ -14,7 +14,28 @@ var prefixedTransactionTypes = map[string]string{
 	"pas-claim-update":        "pa.pas-claim-update",
 	"pas-claim-inquire":       "pa.pas-claim-inquire",
 	"patient-dtr":             "pa.patient-dtr",
+	"cdex-attachment-submit":  "pa.cdex-attachment-submit",
 	"federated-query":         "fqs.federated-query",
+}
+
+// transactionTypeSince is the release each leg added after shn-sdk v1.0.0
+// carries, by flat name: the taxonomy row's since. A recipient that declares
+// no legs list (RegistryEntry.Legs absent) predates every leg here, so the
+// network does not route one to it.
+var transactionTypeSince = map[string]string{
+	"cdex-attachment-submit": "1.1.0",
+}
+
+// TransactionTypeSince is the release that brings the leg named, in either
+// form, and whether it is marked: false for a leg shn-sdk v1.0.0 published,
+// which every recipient takes as before, and for a name no leg has.
+func TransactionTypeSince(name string) (string, bool) {
+	flat, ok := FlatTransactionType(name)
+	if !ok {
+		return "", false
+	}
+	since, ok := transactionTypeSince[flat]
+	return since, ok
 }
 
 var flatTransactionTypes = func() map[string]string {

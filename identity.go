@@ -1,8 +1,8 @@
 // Package shnsdk is the public SHN participant SDK. It REIMPLEMENTS the
 // participant protocol standalone (stdlib + golang.org/x/crypto only) and must
-// never import the substrate's internal/ packages — that is the public/private
+// never import the platform's internal packages — that is the public/private
 // IP boundary. Correctness is proven by the cross-module parity tests in the
-// substrate module under test/sdkparity/.
+// platform's own repository.
 package shnsdk
 
 import (
@@ -65,14 +65,14 @@ func GenerateIdentity(holderID string) (Identity, error) {
 
 // pciVersion versions the PCI derivation scheme so consumers can detect a change.
 // v1-demo-sha256 = "pci:" + hex(first 16 bytes of sha256(lowercase
-// memberID|birthDate|familyName)). Kept in lockstep with internal/identity.
+// memberID|birthDate|familyName)). Kept in lockstep with the network's own PCI derivation.
 const pciVersion = "v1-demo-sha256"
 
-// ResolvePCI derives the substrate patient identifier (PCI position) from member
+// ResolvePCI derives the network patient identifier (PCI position) from member
 // demographics. Derivation (pciVersion v1-demo-sha256): sha256 over the lowercased
 // "memberID|birthDate|familyName" key, first 16 bytes hex-encoded, with a "pci:"
-// prefix. This MUST match internal/identity.ResolvePCI byte-for-byte — the
-// test/sdkparity parity test proves it.
+// prefix. This MUST match the network's own PCI derivation byte-for-byte — the
+// platform's SDK parity test proves it.
 //
 // CAVEAT: this deterministic hash is the DEMO approach only. The goal-state PCI is
 // TRUST-ISSUED (AI-5) — minted by the Trust, NOT externally re-derivable. External

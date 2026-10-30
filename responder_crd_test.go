@@ -123,7 +123,7 @@ func TestResponderCRD_AnswersWithCoverageSystemAction(t *testing.T) {
 			t.Fatal(err)
 		}
 		sr = []byte(strings.Replace(string(sr), `{`, `{"id":"sr-9",`, 1))
-		cov, err := BuildCoverageWithPayer("Patient/MBR-001", "MBR-001", CMSPayerIdentity)
+		cov, err := containedPayorCoverage("Patient/MBR-001", "MBR-001", CMSPayerIdentity)
 		if err != nil {
 			t.Fatal(err)
 		}

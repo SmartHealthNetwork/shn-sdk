@@ -71,3 +71,18 @@ func TestParseClaimResponse_DecisionDetail(t *testing.T) {
 		t.Fatalf("bare approval %+v %v", res, err)
 	}
 }
+
+// TestParseClaimResponse_KeepsNoteNumber: the decision parser keeps
+// the payer's own note number (additive), and states none it did not send.
+func TestParseClaimResponse_KeepsNoteNumber(t *testing.T) {
+	cr := `{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1",` +
+		`"processNote":[{"number":3,"type":"display","text":"three"},{"text":"none"}]}`
+	got, err := ParseClaimResponse([]byte(cr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []PASProcessNote{{Number: 3, Type: "display", Text: "three"}, {Text: "none"}}
+	if !reflect.DeepEqual(got.ProcessNotes, want) {
+		t.Fatalf("notes = %+v, want %+v", got.ProcessNotes, want)
+	}
+}

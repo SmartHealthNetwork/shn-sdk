@@ -1,6 +1,6 @@
 // Command shn is the public SHN participant CLI. It drives the standalone
 // participant protocol via the shnsdk package only (stdlib + shnsdk; never the
-// substrate's internal/ packages). Subcommands:
+// platform's internal packages). Subcommands:
 //
 //	shn keygen       — generate signing+encryption keys and a public manifest snippet
 //	shn register     — build a proof-of-possession registration and POST it to a registrar

@@ -58,20 +58,20 @@ type Payer struct {
 	Identity PayerIdentifier
 }
 
-// RunEligibility runs one coverage-eligibility round-trip through the substrate and
-// returns coverage. It is the SDK port of the reference originate flow
-// (tools/sampleparticipant): resolve PCI → build CoverageEligibilityRequest →
+// RunEligibility runs one coverage-eligibility round-trip through the network and
+// returns coverage. It is the SDK port of the reference originate flow (the
+// platform's sample participant): resolve PCI → build CoverageEligibilityRequest →
 // random correlation id → Authorize the request leg → Seal+Encode the envelope →
 // POST {Hub}/route → Decode → assert envelope metadata → VerifyBound the response
 // token → Open → ParseEligibilityResponse.
 //
-// It uses ONLY the SDK's own primitives (no internal/). The clock for the FHIR
+// It uses ONLY the SDK's own primitives (no platform-internal packages). The clock for the FHIR
 // Created, envelope Timestamp, holder assertions, and token-expiry verification is
 // Identity.now() (Identity.Clock, defaulting to time.Now). Tests driving a
 // fixed-clock substrate inject Identity.Clock so assertions/tokens fall inside the
 // substrate's ~5m skew window; real participants leave it nil.
 //
-// Wire values (ported from sampleparticipant, verified against the substrate):
+// Wire values (ported from the platform's sample participant, verified against the network):
 //
 //	envelope TransactionType: "pa.coverage-eligibility" (the leg's prefixed name)
 //	request  frame/op:        "provider-tpo" / "eligibility-inquiry"

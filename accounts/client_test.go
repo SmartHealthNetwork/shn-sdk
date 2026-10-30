@@ -1,10 +1,12 @@
 package accounts
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -124,6 +126,90 @@ func TestClient_SubmitPoP_MessageFrames(t *testing.T) {
 	}
 	if _, present := got["messageFrames"]; present {
 		t.Fatalf("empty MessageFrames must omit the key, got %+v", got)
+	}
+}
+
+// TestClient_SubmitPoP_SendsEveryRegistrationField fails on a RegistrationRequest
+// field SubmitPoP does not send: it builds its body key by key, so a field added
+// to the type would otherwise be dropped with no error. Only the id stays out of
+// the body, because it rides the path.
+func TestClient_SubmitPoP_SendsEveryRegistrationField(t *testing.T) {
+	var got map[string]json.RawMessage
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /clients/client-42/pop", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var reg shnsdk.RegistrationRequest
+	v := reflect.ValueOf(&reg).Elem()
+	for i := range v.NumField() {
+		switch f := v.Field(i); f.Interface().(type) {
+		case string:
+			f.SetString("value-" + v.Type().Field(i).Name)
+		case []string:
+			f.Set(reflect.ValueOf([]string{"value-" + v.Type().Field(i).Name}))
+		default:
+			t.Fatalf("RegistrationRequest.%s is a %s: give it a value here", v.Type().Field(i).Name, f.Type())
+		}
+	}
+	if err := NewClient(srv.URL, "tok-1").SubmitPoP(context.Background(), "client-42", reg); err != nil {
+		t.Fatalf("SubmitPoP: %v", err)
+	}
+
+	for i := range v.NumField() {
+		field := v.Type().Field(i)
+		key, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		sent, present := got[key]
+		if key == "id" {
+			if present {
+				t.Errorf("the id rides the path, but the body sent %s", sent)
+			}
+			continue
+		}
+		want, err := json.Marshal(v.Field(i).Interface())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !present || !bytes.Equal(sent, want) {
+			t.Errorf("RegistrationRequest.%s: body[%q] = %s, want %s", field.Name, key, sent, want)
+		}
+	}
+}
+
+// TestClient_SubmitPoP_Legs verifies nil and empty stay apart on the wire: a nil
+// list omits the key, and an empty one sends it, because the two declare
+// different things.
+func TestClient_SubmitPoP_Legs(t *testing.T) {
+	var got map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /clients/client-42/pop", func(w http.ResponseWriter, r *http.Request) {
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	reg := shnsdk.RegistrationRequest{
+		ID: "client-42", Role: "payer", EncPub: "ENC", SignPub: "SIGN",
+		BaseURL: "https://x.example", Pop: "POP",
+	}
+	submit := func(legs []string) {
+		t.Helper()
+		reg.Legs = legs
+		if err := NewClient(srv.URL, "tok-1").SubmitPoP(context.Background(), "client-42", reg); err != nil {
+			t.Fatalf("SubmitPoP: %v", err)
+		}
+	}
+
+	submit([]string{})
+	if legs, ok := got["legs"].([]any); !ok || len(legs) != 0 {
+		t.Fatalf("an empty list must send the key, got %+v", got)
+	}
+	submit(nil)
+	if _, present := got["legs"]; present {
+		t.Fatalf("a nil list must omit the key, got %+v", got)
 	}
 }
 

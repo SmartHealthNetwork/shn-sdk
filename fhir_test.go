@@ -12,26 +12,6 @@ import (
 	"github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
 
-// TestBuildPADecisionEOB_DisplayFromParam (DEF-14, FR-28): the EOB's
-// productOrService display is whatever CPTDisplay the caller passes (sourced from the
-// request's ServiceRequest), NOT a hardcoded persona string. Guards against a
-// regression to the old fixed "MRI lumbar spine w/o contrast" literal.
-func TestBuildPADecisionEOB_DisplayFromParam(t *testing.T) {
-	p := eobBaseParams()
-	p.CPTCode, p.CPTDisplay = "29881", "Arthroscopy, knee, surgical, with meniscectomy"
-	p.PreAuthRefs = []string{"A1"}
-	b, err := BuildPADecisionEOBExact(p)
-	if err != nil {
-		t.Fatalf("BuildPADecisionEOBExact: %v", err)
-	}
-	if bytes.Contains(b, []byte("MRI lumbar spine w/o contrast")) {
-		t.Fatal("DEF-14 regression: builder still emits the hardcoded lumbar display")
-	}
-	if !bytes.Contains(b, []byte("Arthroscopy, knee, surgical, with meniscectomy")) {
-		t.Fatal("builder must emit the passed CPTDisplay")
-	}
-}
-
 // TestBuildEligibilityRequest_Shape checks the CoverageEligibilityRequest the SDK
 // emits has the field shapes the substrate expects (resourceType, status, purpose,
 // patient/provider/insurer references, created). This is the hermetic structural
@@ -361,110 +341,6 @@ func TestBuildEligibilityResponse_InsurerIsThePayers(t *testing.T) {
 	}
 }
 
-// TestBuildPatientAccessCapabilityStatement_Shape verifies the SDK-promoted
-// CMS-0057 CapabilityStatement has the required FHIR shape (FR-37): kind=instance,
-// status=active, at least one rest.resource of type ExplanationOfBenefit with
-// both read+search interactions and no supportedProfile. Wire-identity with the
-// internal/fhirmap shim is proven in test/sdkparity/capabilitystatement_parity_test.go.
-func TestBuildPatientAccessCapabilityStatement_Shape(t *testing.T) {
-	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
-	b, err := BuildPatientAccessCapabilityStatementExact(at, SupportedContractVersions())
-	if err != nil {
-		t.Fatalf("BuildPatientAccessCapabilityStatementExact: %v", err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if m["resourceType"] != "CapabilityStatement" {
-		t.Errorf("resourceType = %v, want CapabilityStatement", m["resourceType"])
-	}
-	if m["status"] != "active" {
-		t.Errorf("status = %v, want active", m["status"])
-	}
-	if m["kind"] != "instance" {
-		t.Errorf("kind = %v, want instance", m["kind"])
-	}
-	if m["date"] != "2026-06-15T00:00:00Z" {
-		t.Errorf("date = %v, want 2026-06-15T00:00:00Z", m["date"])
-	}
-	rests, _ := m["rest"].([]any)
-	if len(rests) == 0 {
-		t.Fatal("rest array is empty")
-	}
-	rest0, _ := rests[0].(map[string]any)
-	resources, _ := rest0["resource"].([]any)
-	if len(resources) == 0 {
-		t.Fatal("rest[0].resource array is empty")
-	}
-	res0, _ := resources[0].(map[string]any)
-	if res0["type"] != "ExplanationOfBenefit" {
-		t.Errorf("rest[0].resource[0].type = %v, want ExplanationOfBenefit", res0["type"])
-	}
-	// The decision EOB claims no profile: PDex pdex-priorauthorization's
-	// closed adjudication slicing needs an amount, a reason or units on every
-	// adjudication, so it cannot carry a payer's amountless decision without
-	// an amount the payer never stated.
-	if bytes.Contains(b, []byte("pdex-priorauthorization")) || bytes.Contains(b, []byte("davinci-pdex")) {
-		t.Errorf("the Patient Access CapabilityStatement advertises pdex-priorauthorization: re-adding that claim requires every decision EOB variant to validate against PDex (test/conformance TestPADecisionEOBGoldensValidate): %s", b)
-	}
-	if _, ok := res0["supportedProfile"]; ok {
-		t.Errorf("rest[0].resource[0] claims a supportedProfile the decision EOB does not meet: %v", res0["supportedProfile"])
-	}
-	interactions, _ := res0["interaction"].([]any)
-	if len(interactions) != 2 {
-		t.Errorf("want 2 interactions (read+search-type), got %d", len(interactions))
-	}
-	// It names no implementation guide either: the decision EOBs do not meet
-	// PDex, so claiming the IG would claim what they cannot do.
-	if _, ok := m["implementationGuide"]; ok {
-		t.Fatalf("the Patient Access CapabilityStatement claims an implementationGuide the decision EOBs do not meet: re-adding it requires every decision EOB variant to validate against it: %v", m["implementationGuide"])
-	}
-	// Determinism: same input → byte-identical output.
-	b2, _ := BuildPatientAccessCapabilityStatementExact(at, SupportedContractVersions())
-	if string(b) != string(b2) {
-		t.Error("BuildPatientAccessCapabilityStatementExact is non-deterministic")
-	}
-}
-
-// TestBuildPatientAccessCapabilityStatement_DeclaredSet: no declared set makes
-// the statement name an implementation guide — not a pa.pdex token at any line
-// (the retired ContractPAPDex21 included: a caller still holding it gets no PDex
-// claim), and not a set with no pa.pdex token at all (never a silent hardcoded
-// fallback).
-func TestBuildPatientAccessCapabilityStatement_DeclaredSet(t *testing.T) {
-	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
-
-	var m map[string]any
-	for _, declared := range [][]string{{"pa.pdex@9.9"}, {ContractPAPDex21}} {
-		b, err := BuildPatientAccessCapabilityStatementExact(at, declared)
-		if err != nil {
-			t.Fatalf("BuildPatientAccessCapabilityStatementExact(%v): %v", declared, err)
-		}
-		m = map[string]any{}
-		if err := json.Unmarshal(b, &m); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if _, has := m["implementationGuide"]; has || bytes.Contains(b, []byte("pdex")) {
-			t.Fatalf("%v: the statement claims PDex: %s", declared, b)
-		}
-	}
-
-	// No pa.pdex token at all (e.g. a declared set naming only unrelated contracts) ->
-	// no implementationGuide entries.
-	b, err := BuildPatientAccessCapabilityStatementExact(at, []string{"pa.crd@2.0"})
-	if err != nil {
-		t.Fatalf("BuildPatientAccessCapabilityStatementExact(no pdex token): %v", err)
-	}
-	m = map[string]any{} // reset — json.Unmarshal into a non-nil map merges, never clears stale keys
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if _, has := m["implementationGuide"]; has {
-		t.Fatalf("implementationGuide = %v, want absent (declared set carries no pa.pdex token)", m["implementationGuide"])
-	}
-}
-
 // TestBuildProviderIngressCapabilityStatement_Shape pins the provider Da Vinci
 // ingress statement (FR-37 gap closed: per-role CapabilityStatements): the
 // versioned CRD/DTR/PAS 2.0.1 IG canonicals, the two FHIR operations the
@@ -663,56 +539,6 @@ func TestBuildHubCapabilityStatement_Shape(t *testing.T) {
 	if err != nil || !bytes.Equal(b, b2) {
 		t.Fatal("BuildHubCapabilityStatement is not deterministic")
 	}
-}
-
-// TestBuildPADecisionEOB_ProcedureSystem (DEF-14): the EOB's
-// item[].productOrService.coding[].system must carry the order's ACTUAL procedure
-// system (HCPCS, CPT, etc.) rather than being hardcoded to CPT. An empty
-// ProcedureSystem is never defaulted: the coding carries no system.
-func TestBuildPADecisionEOB_ProcedureSystem(t *testing.T) {
-	base := eobBaseParams()
-	base.ID, base.CPTCode, base.CPTDisplay = "eob-x", "L8000", "Breast prosthesis, mastectomy bra"
-	base.PreAuthRefs = []string{"PA-1"}
-
-	t.Run("explicit HCPCS system flows to productOrService.coding.system", func(t *testing.T) {
-		p := base
-		p.ProcedureSystem = "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
-		got := eobProcedureSystem(t, p)
-		if got != "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets" {
-			t.Fatalf("EOB procedure system = %q, want HCPCS", got)
-		}
-	})
-	t.Run("empty ProcedureSystem writes no system", func(t *testing.T) {
-		got := eobProcedureSystem(t, base) // ProcedureSystem unset
-		if got != "" {
-			t.Fatalf("EOB procedure system = %q, want none (never a default)", got)
-		}
-	})
-}
-
-// eobProcedureSystem builds the EOB and returns item[0].productOrService.coding[0].system.
-func eobProcedureSystem(t *testing.T, p PADecisionEOBExactParams) string {
-	t.Helper()
-	raw, err := BuildPADecisionEOBExact(p)
-	if err != nil {
-		t.Fatalf("BuildPADecisionEOBExact: %v", err)
-	}
-	var eob struct {
-		Item []struct {
-			ProductOrService struct {
-				Coding []struct {
-					System string `json:"system"`
-				} `json:"coding"`
-			} `json:"productOrService"`
-		} `json:"item"`
-	}
-	if err := json.Unmarshal(raw, &eob); err != nil {
-		t.Fatalf("unmarshal EOB: %v", err)
-	}
-	if len(eob.Item) == 0 || len(eob.Item[0].ProductOrService.Coding) == 0 {
-		t.Fatalf("EOB has no productOrService coding: %s", raw)
-	}
-	return eob.Item[0].ProductOrService.Coding[0].System
 }
 
 // The standalone Responder's eligibility answer names the payer the request

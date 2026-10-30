@@ -1,6 +1,6 @@
 // Package shnsdk — transport.go: HTTP transport helpers (JSON POST, bounded body
 // decode, status-error typing, a timeout client) shared by the gateway engine and
-// substrate services. Promoted from internal/wire. Envelope codecs live in
+// the network's services. Envelope codecs live in
 // wire.go (EncodeEnvelope/DecodeEnvelope); envelope crypto in envelope.go (Seal/Open).
 package shnsdk
 

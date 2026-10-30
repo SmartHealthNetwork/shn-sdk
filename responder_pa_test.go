@@ -63,9 +63,9 @@ func orderSelectFromRecords(t *testing.T, srJSON []byte, member string) []byte {
 // as the search result the request's coverage prefetch holds.
 func orderSelectCoverage(t *testing.T, member string) []byte {
 	t.Helper()
-	covJSON, err := BuildCoverageWithPayer("Patient/"+member, member, CMSPayerIdentity)
+	covJSON, err := containedPayorCoverage("Patient/"+member, member, CMSPayerIdentity)
 	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
+		t.Fatalf("containedPayorCoverage: %v", err)
 	}
 	return covJSON
 }
@@ -486,7 +486,7 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 	if err != nil {
 		t.Fatalf("BuildProvenance: %v", err)
 	}
-	bundle, err := BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: json.RawMessage(testCertTypeJSON), PriorClaim: testPriorClaim(t), Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
+	in := ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: json.RawMessage(testCertTypeJSON), Insurer: testPayerOrganization(CMSPayerIdentity), Coverage: testMemberCoverage(member),
 		Provider:         testRequestingProvider(),
 		MemberIDSystem:   MemberSystem,
 		QR:               qrJSON,
@@ -501,7 +501,9 @@ func buildConformantUpdate(t *testing.T, member, updateCorr, origCorr string, qr
 		Created:          now,
 		Payer:            CMSPayerIdentity,
 		PayerOrgEntry:    true,
-	})
+	}
+	in.PriorClaim = testSubmissionFor(t, "2.0", in)
+	bundle, err := BuildConformantClaimUpdateBundleExact(in)
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundleExact: %v", err)
 	}

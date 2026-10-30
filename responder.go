@@ -143,8 +143,8 @@ type ResponderConfig struct {
 }
 
 // Responder serves a payer holder's /substrate/inbound with the SAME pipeline
-// and error contract as the substrate's own gateway (PARTICIPANT_PROTOCOL.md
-// §6.2/§6.2a; pinned by test/sdkparity responder vectors): X-Hub-Assertion
+// and error contract as the Smart Gateway (PARTICIPANT_PROTOCOL.md
+// §6.2/§6.2a; pinned by the platform's SDK parity responder vectors): X-Hub-Assertion
 // FIRST (header only, before the body is read), then metadata, recipient,
 // operation pin, bound-token verification (incl. ciphertext hash), open,
 // adjudicate, seal-then-authorize the response leg (AI-2), respond
@@ -159,7 +159,7 @@ type Responder struct {
 
 // responderReqOp pins each TransactionType to the request operation the inbound
 // token must carry. Unknown types → 400 before token work. Mirrors the gateway's PA
-// leg catalog (gateway/engine/workstream_pa.go, paCatalog — the .Op field) for the
+// leg catalog (each leg's request operation) for the
 // six types this Responder serves (pas-claim-inquire is served here ahead of the
 // network: gateways route it from Smart Gateway v0.45.0): federated-query and patient-dtr are facility/PHG
 // roles, not payer, and crd-order-dispatch is a payer leg this Responder does not yet
@@ -195,11 +195,11 @@ func NewResponder(cfg ResponderConfig) (*Responder, error) {
 	if cfg.AuthzURL == "" {
 		return nil, errors.New("shnsdk: ResponderConfig.AuthzURL is empty")
 	}
-	if len(cfg.AuthzPub) == 0 {
-		return nil, errors.New("shnsdk: ResponderConfig.AuthzPub is nil or empty")
+	if len(cfg.AuthzPub) != ed25519.PublicKeySize {
+		return nil, errors.New("shnsdk: ResponderConfig.AuthzPub is not an Ed25519 public key")
 	}
-	if len(cfg.HubTransportPub) == 0 {
-		return nil, errors.New("shnsdk: ResponderConfig.HubTransportPub is nil or empty (per-hop transport auth has no off state)")
+	if len(cfg.HubTransportPub) != ed25519.PublicKeySize {
+		return nil, errors.New("shnsdk: ResponderConfig.HubTransportPub is not an Ed25519 public key (per-hop transport auth has no off state)")
 	}
 	if cfg.ResolveEnc == nil {
 		return nil, errors.New("shnsdk: ResponderConfig.ResolveEnc is nil")
@@ -293,7 +293,7 @@ func sha256Hex(b []byte) string {
 
 // handleInbound is the inbound pipeline, matching the Smart Gateway's
 // handleInbound check order and its error contract for every refusal before
-// the payload is open (pinned by sdkparity vectors):
+// the payload is open (pinned by the platform's SDK parity vectors):
 //
 //  1. hop auth (header only, before body read)
 //  2. body read + decode envelope
@@ -316,7 +316,7 @@ func sha256Hex(b []byte) string {
 // building the response leg (frame encode failed, and steps 9-10).
 func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	// Single clock read for hop-auth / VerifyBound / response building (mirrors
-	// sampleparticipant's single-instant comment).
+	// the platform's sample participant's single instant).
 	now := r.cfg.Clock()
 
 	// 1. Hop auth: verify X-Hub-Assertion FIRST, header only, before the body is
@@ -571,7 +571,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 
 	// 10. AI-2 seal-then-authorize: authorize the response leg bound to
 	//     sha256Hex(ciphertext), then stamp the token into the cleartext metadata.
-	//     The response op is derived from the TransactionType (mirrors payer.go respondLeg).
+	//     The response op is derived from the TransactionType (mirrors the Smart Gateway's respondLeg).
 	respOp := responseOp(leg)
 	respTok, err := r.cfg.Identity.Authorize(req.Context(), r.cfg.Client, r.cfg.AuthzURL, AuthorizeRequest{
 		Frame:         "payer-coverage",
@@ -620,7 +620,7 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 }
 
 // responseOp maps TransactionType → the response-leg operation name (mirrors
-// payer.go respondLeg calls). The TransactionType is also used as the response
+// the Smart Gateway's respondLeg calls). The TransactionType is also used as the response
 // envelope TransactionType (same as the request — the Hub echoes it back).
 func responseOp(txType string) string {
 	switch txType {
@@ -664,8 +664,8 @@ const eligibilityBatchNotAnswered = "this payer answers coverage eligibility fro
 // Runtime conformance is a property of gateways the operator runs
 // (payload-blind Hub ⟹ conformance is enforced at operated edges); a
 // partner-run responder is the partner's edge. The response SHAPE is still
-// parity-pinned byte-for-byte against the substrate builder (test/sdkparity
-// fhir parity), so a conformant resource is what this code produces — it is
+// parity-pinned byte-for-byte against the platform's builder (the platform's
+// SDK parity suite), so a conformant resource is what this code produces — it is
 // just not re-validated per request here.
 func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Time) handlerResult {
 	// The input is read one way only, in any of the operation's forms, as a
@@ -705,8 +705,8 @@ func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Ti
 	return handlerResult{payload: crrJSON, contentType: fhirJSON}
 }
 
-// handleDTR implements the dtr-questionnaire-fetch handler. Mirrors payer.go
-// handleDTRInbound guard order and error strings, minus the $validate divergence.
+// handleDTR implements the dtr-questionnaire-fetch handler. Mirrors the Smart
+// Gateway's handleDTRInbound guard order and error strings, minus the $validate divergence.
 //
 // claimedContract is the inbound request-frame claim (handleInbound step 7,
 // "" when the request arrived bare or unclaimed) — currently unread; see
@@ -745,8 +745,8 @@ func (r *Responder) questionnairePackage(canonical string) handlerResult {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "unknown questionnaire canonical"}
 	}
 	// §6.2: uniform leg shape — wrap the bare Questionnaire into a one-entry
-	// $questionnaire-package collection Bundle (byte-identical to the substrate
-	// gateway's buildQuestionnairePackage; test/sdkparity asserts parity). The
+	// $questionnaire-package collection Bundle (byte-identical to the Smart
+	// Gateway's buildQuestionnairePackage; the platform's SDK parity suite asserts parity). The
 	// consumer (RunPriorAuth) extracts the bare Questionnaire on the far side.
 	pkg, err := BuildQuestionnairePackage(questionnaireJSON)
 	if err != nil {
@@ -756,7 +756,7 @@ func (r *Responder) questionnairePackage(canonical string) handlerResult {
 }
 
 // ---- FR-16/FR-27 attestation conformance fence (R8 re-home; parity with the
-// substrate gateway's gateway/engine/workstream_pa_conformance_attest.go) ----
+// Smart Gateway's own attestation conformance fence) ----
 //
 // A QuestionnaireResponse item carrying the FR-17 source-attribution extension
 // (informationOriginExt, source="manual") is either clinician-entered
@@ -838,7 +838,7 @@ func fenceAttestedItems(bundleJSON []byte) (string, bool) {
 // firstQuestionnaireResponseEntry: fenceAttestedItems must walk every QR
 // entry, not only the first, or a hand-built bundle can smuggle a second,
 // unfenced entry straight past the FR-16/FR-27 gate. Parity with the
-// substrate gateway's identical rename (gateway/engine/workstream_pa_conformance_attest.go).
+// Smart Gateway's identical rename in its attestation conformance fence.
 func allQuestionnaireResponseEntries(bundleJSON []byte) (resources [][]byte, found bool) {
 	var probe struct {
 		Entry []struct {

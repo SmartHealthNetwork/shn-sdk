@@ -261,8 +261,8 @@ func (e *AppAnswerError) Error() string {
 // this leg was routed/built at) AND the 2xx frame carries a non-empty
 // FrameHeaderContractVersion stamp that DIFFERS from it, the answer is rejected —
 // tamper or skew, either way not the payload this leg negotiated. Verbatim
-// semantics of the gateway's response-leg verify (gateway/engine/gateway.go
-// roundTripInner). An ABSENT stamp is always tolerated (the frames-absent-lane
+// semantics of the Smart Gateway's own response-leg verify. An ABSENT stamp is
+// always tolerated (the frames-absent-lane
 // precedent — a pre-version responder, or a responder that never sets
 // ResponderConfig.StampContractVersion), and expectedToken == "" (the caller has no
 // routed-token expectation, e.g. RunEligibility — coverage-eligibility is not a

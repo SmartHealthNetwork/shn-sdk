@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -124,8 +123,7 @@ func TestParseServiceRequestCPT(t *testing.T) {
 
 // TestParseServiceRequestProcedure verifies the code+display sibling recovers BOTH
 // the CPT code and its display, that ParseServiceRequestCPT (which now delegates to
-// it) is unchanged, and that a wrong resourceType is rejected. The display sources
-// the PA-decision EOB's productOrService.display from the ACTUAL service (FR-28).
+// it) is unchanged, and that a wrong resourceType is rejected.
 func TestParseServiceRequestProcedure(t *testing.T) {
 	sr, err := BuildServiceRequest("29881", "Arthroscopy, knee, surgical, with meniscectomy", "M23.2", "Patient/p")
 	if err != nil {
@@ -198,22 +196,6 @@ func TestParseCoverageBeneficiary(t *testing.T) {
 	// Wrong resourceType.
 	if _, err := ParseCoverageBeneficiary([]byte(`{"resourceType":"ServiceRequest","beneficiary":{"reference":"Patient/X"}}`)); err == nil {
 		t.Error("ParseCoverageBeneficiary should reject wrong resourceType")
-	}
-}
-
-// TestBuildCoverageWithPayerRejectsCoveragePrefixedMember is the conformant builder's half of
-// the producer-side rejection row (sibling: TestBuildCoverageRejectsCoveragePrefixedMember in
-// order_test.go). Same identifier-semantics rule, same rationale: the urn:shn:coverage value is
-// the bare member id, and a "Coverage/"-prefixed argument is a pre-v0.42.0 caller that the
-// unchanged signature would otherwise let through silently.
-func TestBuildCoverageWithPayerRejectsCoveragePrefixedMember(t *testing.T) {
-	if _, err := BuildCoverageWithPayer("Patient/p1", "Coverage/MBR-X", CMSPayerIdentity); err == nil {
-		t.Fatal("Coverage/-prefixed member must refuse loudly (signature-compatible semantic break)")
-	} else if !strings.Contains(err.Error(), "must be the bare member id") {
-		t.Fatalf("refusal must name the contract it enforces, got %v", err)
-	}
-	if _, err := BuildCoverageWithPayer("Patient/p1", "MBR-X", CMSPayerIdentity); err != nil {
-		t.Fatalf("bare member id must build: %v", err)
 	}
 }
 

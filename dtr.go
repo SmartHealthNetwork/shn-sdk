@@ -11,9 +11,9 @@ import (
 )
 
 // SupportedQuestionnaireCanonical is the ONE DTR questionnaire FillQuestionnaire
-// recognizes: the demo lumbar-MRI PA questionnaire. It MUST equal the
-// substrate's dtr.LumbarMRICanonical / crd.QuestionnaireCanonicalLumbarMRI so the
-// SDK fills exactly the questionnaire the substrate's demo DTR serves. FillQuestionnaire
+// recognizes: the demo lumbar-MRI PA questionnaire. It MUST equal the canonical
+// the platform's demo DTR and CRD services name, so the SDK fills exactly the
+// questionnaire that demo DTR serves. FillQuestionnaire
 // FAILS LOUDLY on any other canonical (it is fenced to the demo questionnaire, not a general
 // SDC engine).
 const SupportedQuestionnaireCanonical = "http://smarthealth.network/fhir/Questionnaire/pa-lumbar-mri"
@@ -41,7 +41,7 @@ const (
 // dtrBundleBaseURL is the deterministic base for a $questionnaire-package entry
 // fullUrl when embedding a caller-supplied QuestionnaireResponse (DTR line 2.2's
 // DTR-QPackageBundle profile requires one — DTR package differential). Same
-// convention/value as pasBundleBaseURL (sdk/pas.go); kept as its own named constant
+// convention/value as pasBundleBaseURL (pas.go); kept as its own named constant
 // here so dtr.go stays self-contained.
 const dtrBundleBaseURL = "https://shn.example/fhir"
 
@@ -93,7 +93,7 @@ type ClinicalContext struct {
 	// shnsdk.FillQuestionnaire (that filler stays fenced to the lumbar canonical) — they
 	// exist so a caller can independently cross-check an operated-$populate-computed QR
 	// answer against the member's OWN seeded Observation before attributing it Origin="auto"
-	// (gateway/engine's homeOxygenAutoFillEvidence). "" means no seeded Observation for the
+	// (as the Smart Gateway's own home-oxygen auto-fill evidence check does). "" means no seeded Observation for the
 	// member — the honest answer is "unattributed", never fabricated.
 	OxygenSaturationPct string // item 2.2, whole-number percent as a decimal string
 	OxygenSaturationRef string // the seeded Observation's own reference
@@ -113,7 +113,7 @@ type QRContext struct {
 }
 
 // QuestionnaireFetchRequest is the request body for fetching a Questionnaire by
-// canonical URL. Ported standalone from internal/dtr.QuestionnaireFetchRequest.
+// canonical URL. Ported standalone from the platform's DTR questionnaire-fetch request.
 //
 // Coverage is OPTIONAL: when a Da Vinci $questionnaire-package ingress carried a
 // `coverage` parameter (the provider's Coverage resource, e.g. with a contained
@@ -123,15 +123,16 @@ type QRContext struct {
 // otherwise). It is NEVER fabricated at the payer edge — only carried through
 // (non-aggregation). The `omitempty` is load-bearing: when Coverage is nil the marshal
 // is byte-identical to the canonical-only request, so BuildQuestionnaireFetch and the
-// 8-scenario demo originator (which set no coverage) are unaffected (test/sdkparity).
+// 8-scenario demo originator (which set no coverage) are unaffected (the platform's SDK
+// parity suite pins it).
 type QuestionnaireFetchRequest struct {
 	Canonical string          `json:"canonical"`
 	Coverage  json.RawMessage `json:"coverage,omitempty"`
 }
 
 // BuildQuestionnaireFetch builds the DTR questionnaire-fetch request bytes for a
-// canonical. Reimplements the substrate's json.Marshal(dtr.QuestionnaireFetchRequest{...})
-// standalone (byte-identical; test/sdkparity asserts it).
+// canonical. Reimplements the platform's own questionnaire-fetch marshal standalone
+// (byte-identical; the platform's SDK parity suite asserts it).
 //
 // Deprecated: this is the older questionnaire envelope, which carries neither
 // the order nor the payer's assertion id. Use BuildQuestionnairePackageParameters
@@ -165,10 +166,10 @@ func BuildQuestionnaireFetchWithCoverage(canonical string, coverageJSON []byte) 
 // BuildQuestionnairePackage wraps a bare FHIR Questionnaire into a one-entry Da Vinci
 // $questionnaire-package collection Bundle — the SDK responder's UNIFORM DTR-fetch wire
 // shape (§6.2). It is BuildQuestionnairePackageAtLine("2.0", questionnaire, nil),
-// byte-identical (regression-fenced by sdk/dtr_test.go; the pinned wire-shape string is
-// also independently held by the substrate's gateway/engine.buildQuestionnairePackage —
-// gateway/engine/davincimap_test.go — since that function is unexported and cannot be
-// cross-imported). The canonical bytes are json.Marshal of
+// byte-identical (regression-fenced by dtr_test.go; the pinned wire-shape string is
+// also independently held by the Smart Gateway's own questionnaire-package builder and
+// its tests, since that function is unexported and cannot be cross-imported). The
+// canonical bytes are json.Marshal of
 // map[string]any{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":<url>,
 // "resource":<questionnaire>}]} (Go sorts map keys, so the wire is
 // {"entry":[{"fullUrl":<url>,"resource":<q>}],"resourceType":"Bundle","type":"collection"}).
@@ -234,10 +235,9 @@ func buildQuestionnairePackage(def DTRDef, questionnaire, questionnaireResponse 
 // response shape, which the gateway relays VERBATIM on ingress): the collection Bundle
 // then lives at parameter[name=="packagebundle"].resource. unwrapPackageParameters
 // normalises the Parameters wrapper to its inner Bundle bytes before the walk below,
-// so both shapes are handled by the ONE bundle-walk. Mirrors
-// gateway/engine/davincimap.go's unwrapQuestionnairePackage and
-// gateway/scenariodriver/brprovider.go's packageBundleResource — same shape, no third
-// unwrap variant.
+// so both shapes are handled by the ONE bundle-walk. Mirrors the Smart Gateway's
+// own questionnaire-package unwrap and its scenario driver's package-bundle read —
+// same shape, no third unwrap variant.
 func ExtractQuestionnaireFromPackage(data []byte) ([]byte, error) {
 	data, err := unwrapPackageParameters(data)
 	if err != nil {
@@ -272,9 +272,8 @@ func ExtractQuestionnaireFromPackage(data []byte) ([]byte, error) {
 // package Bundle parameter (isPackageBundleParameter) and is returned in its place. A Parameters
 // wrapper with no packagebundle parameter errors legibly rather than falling through to
 // the bundle-walk's generic "no Questionnaire" message. Malformed JSON is left for the
-// caller's own json.Unmarshal to surface. Mirrors
-// gateway/engine/davincimap.go's unwrapQuestionnairePackage and
-// gateway/scenariodriver/brprovider.go's packageBundleResource.
+// caller's own json.Unmarshal to surface. Mirrors the Smart Gateway's own
+// questionnaire-package unwrap and its scenario driver's package-bundle read.
 func unwrapPackageParameters(raw []byte) ([]byte, error) {
 	var top struct {
 		ResourceType string `json:"resourceType"`
@@ -311,7 +310,7 @@ func isPackageBundleParameter(name string) bool {
 }
 
 // ParseQuestionnaireURL returns the url field from a marshalled FHIR Questionnaire.
-// Ported standalone from internal/dtr.ParseQuestionnaireURL: errors if the
+// Ported standalone from the platform's DTR questionnaire-URL parser: errors if the
 // resourceType is not "Questionnaire" or the url is absent/empty.
 func ParseQuestionnaireURL(data []byte) (string, error) {
 	var probe struct {
@@ -338,7 +337,7 @@ func ParseQuestionnaireURL(data []byte) (string, error) {
 // FAIL LOUDLY (a clear error naming the supported canonical) on a questionnaire whose
 // canonical/url it does not recognize, and NEVER emit a half-filled QR. It is
 // FillQuestionnaireAtLine("2.0", …), byte-identical (regression-fenced by
-// sdk/dtr_test.go). Use FillQuestionnaireAtLine to target 2.1/2.2 (DTR package differential:
+// dtr_test.go). Use FillQuestionnaireAtLine to target 2.1/2.2 (DTR package differential:
 // the qr-coverage extension + the "auto-client" origin code at 2.2).
 func FillQuestionnaire(questionnaireJSON []byte, cc ClinicalContext, qc QRContext) ([]byte, error) {
 	return FillQuestionnaireAtLine("2.0", questionnaireJSON, cc, qc)

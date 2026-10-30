@@ -33,6 +33,11 @@ func parseAndVerifyHubAssertion(header, ownHolderID string, hubPub ed25519.Publi
 	if a.HolderID != "hub" {
 		return "", errors.New("issuer is not the hub")
 	}
+	// A transport key that is not an Ed25519 public key is an error, never a
+	// panic.
+	if len(hubPub) != ed25519.PublicKeySize {
+		return "", errors.New("no valid hub transport key")
+	}
 	// assertionSigningPayload zeroes Sig on an internal copy before marshalling, so passing a with Sig set is safe.
 	sig := a.Sig
 	if len(sig) == 0 || !ed25519.Verify(hubPub, assertionSigningPayload(a), sig) {
@@ -41,12 +46,12 @@ func parseAndVerifyHubAssertion(header, ownHolderID string, hubPub ed25519.Publi
 	if a.Audience != ownHolderID {
 		return "", errors.New("audience mismatch")
 	}
-	// Bounds (verifier-enforced, mirrors holderauth.Verify):
+	// Bounds (verifier-enforced, mirrors the network's holder-assertion verifier):
 	// 1. TTL cap: assertion lifetime must not exceed MaxAssertionTTL.
 	if a.Expiry.Sub(a.IssuedAt) > MaxAssertionTTL {
 		return "", errors.New("ttl exceeds maximum")
 	}
-	// 1a. Zero-TTL: expiry must be strictly after issuedAt (mirrors holderauth.Verify).
+	// 1a. Zero-TTL: expiry must be strictly after issuedAt (mirrors the network's holder-assertion verifier).
 	if !a.Expiry.After(a.IssuedAt) {
 		return "", errors.New("expiry not after issuance")
 	}

@@ -6,12 +6,12 @@ import (
 )
 
 // RegistrationRequest is the JSON wire body for POST {registrar}/register. Its
-// fields mirror the substrate's holder registration DTO (internal/registrar): the
+// fields mirror the network registrar's holder registration DTO: the
 // keys are std-base64-encoded and pop is the proof-of-possession signature. The
-// substrate's registrar VERIFIES pop with ed25519.Verify(signPub,
+// network's registrar VERIFIES pop with ed25519.Verify(signPub,
 // canonicalStatement, pop) — so this byte format must match exactly. Parity is
-// proven behaviorally against the real registrar in
-// test/sdkparity/registration_parity_test.go.
+// proven behaviorally against the real registrar in the platform's SDK parity
+// suite.
 type RegistrationRequest struct {
 	// ID is the holder id being registered.
 	ID string `json:"id"`
@@ -39,6 +39,12 @@ type RegistrationRequest struct {
 	// Deliberately OUTSIDE the PoP signing payload — registrationSigningPayload is
 	// a frozen 5-field layout (same rule as MessageFrames/ContractVersions).
 	RequestFrames []string `json:"requestFrames,omitempty"`
+	// Legs are the legs the holder takes as a recipient (Holder.Legs). A
+	// registration leaves it nil (absent) unless the caller sets it from what
+	// the system behind BaseURL answers: a builder of this request cannot know
+	// that, and the holder's own system declares it (Identity.DeclareCapabilities).
+	// Deliberately OUTSIDE the PoP signing payload, like the fields above.
+	Legs []string `json:"legs,omitzero"`
 	// Pop is base64.StdEncoding of this identity's ed25519 signature over the
 	// canonical registration statement, proving control of SignPub.
 	Pop string `json:"pop"`
@@ -46,8 +52,8 @@ type RegistrationRequest struct {
 
 // registrationSigningPayload is the canonical byte layout an identity signs to
 // prove control of the signPub it is registering (proof-of-possession). Fields are
-// newline-joined in a fixed order — byte-identical to the substrate's
-// internal/registrar.registrationSigningPayload, so the registrar's verifier
+// newline-joined in a fixed order — byte-identical to the network registrar's
+// own registration signing payload, so the registrar's verifier
 // accepts an SDK-built registration. The encPub/signPub here are the SAME
 // std-base64 strings carried in the wire body.
 func registrationSigningPayload(id, role, encPub, signPub, baseURL string) []byte {

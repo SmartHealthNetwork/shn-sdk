@@ -2,9 +2,9 @@ package shnsdk
 
 import "sync"
 
-// pendedLedger mirrors the substrate payer's pended-claim ledger semantics
+// pendedLedger mirrors the Smart Gateway's pended-claim ledger semantics
 // (RecordPendedClaim / BeginClaimUpdate / ReleaseClaimUpdate /
-// FinalizeClaimUpdate — see internal/gateway holderdata): one atomic
+// FinalizeClaimUpdate in its claim store): one atomic
 // test-and-set per (subjectPCI, correlationID) so exactly one ClaimUpdate is in
 // flight, a replay of an approved update finds nothing, and a failed or
 // insufficient update releases the claim back to pended. In-memory ⇒

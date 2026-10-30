@@ -38,6 +38,21 @@ type Holder struct {
 	// An originator frames a contract-mapped request ONLY toward a holder that
 	// declares it. Absent ⇒ send bare (byte-identical to the pre-request-frame wire).
 	RequestFrames []string `json:"requestFrames,omitempty"`
+	// Legs are the legs this holder takes as a recipient: the flat transaction
+	// types of the request legs it answers, declared by the holder itself
+	// (Identity.DeclareCapabilities). nil (the key absent) means the holder declares no
+	// list: it predates every leg TransactionTypeSince marks, and is routed
+	// every other leg as before. An empty list (present, []) declares that it
+	// takes none. The two are distinct, so the field is omitted only when nil.
+	Legs []string `json:"legs,omitzero"`
+	// AttachmentMaxBytes is the largest single inline attachment (file), in
+	// bytes after base64 decoding, the holder's system accepts in one
+	// documentation submission (cdex-attachment-submit): each FHIR Attachment
+	// with inline data is measured on its own. It is declared by the holder itself
+	// (Identity.DeclareCapabilities); nil (absent) means it declared none, and
+	// a sender then applies only its own ceiling. It is the holder's statement,
+	// served as declared: a sender applies the smaller of it and its ceiling.
+	AttachmentMaxBytes *int64 `json:"attachmentMaxBytes,omitempty"`
 }
 
 // EncKey decodes the holder's X25519 public key.

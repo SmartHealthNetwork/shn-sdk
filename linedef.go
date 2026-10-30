@@ -14,11 +14,11 @@ func LineOf(token string) string {
 }
 
 // PASDef is the per-line PAS contract definition — the strip/keep policy and
-// profile canonicals that used to live in prose comments (sdk/pas.go:294-299,
-// sdk/pasresponder.go:463-465) now live here as data, per line.
+// profile canonicals that used to live in prose comments (pas.go:294-299,
+// pasresponder.go:463-465) now live here as data, per line.
 type PASDef struct {
 	Line                 string // "2.0" | "2.1" | "2.2"
-	PackageVersion       string // "2.0.1" | "2.1.0" | "2.2.1" — mirrors tools/contracts/manifest.json (parity-pinned by test)
+	PackageVersion       string // "2.0.1" | "2.1.0" | "2.2.1" — mirrors the platform's contract manifest (parity-pinned by test)
 	ClaimResponseProfile string // set as meta.profile on built ClaimResponses
 	// NOT a field (was SubmitBundleMetaProfile, added unconsumed and
 	// REMOVED by the 2.2-lane conformance fix wave under the produce-iff rule): stamping
@@ -37,8 +37,8 @@ type PASDef struct {
 	// $validate gate (2 → 8). The IG's OWN example instances — which carry
 	// meta.profile — fail identically on the same lane, because matching a
 	// candidate requires expanding the licensed/undistributed X12 + CMS-POS value
-	// sets no package ships (see test/conformance/davinci_gap_test.go's
-	// pasSliceMatchConsequence). A field only a fake could ever make useful has no
+	// sets no package ships (the platform's conformance suite pins this
+	// consequence). A field only a fake could ever make useful has no
 	// legitimate producer, so it is not modeled. Re-add iff a validator that can
 	// expand those value sets makes the declaration load-bearing.
 	//
@@ -49,7 +49,7 @@ type PASDef struct {
 	// with a business-identifier Reference to the request Claim they answer —
 	// Reference.identifier = {urn:shn:correlation, correlationID}, the SAME
 	// identifier every SHN-built request Claim carries (buildPASClaim /
-	// internal/pas.buildClaim set Claim.identifier from that correlation id, and
+	// the platform's PAS claim builder set Claim.identifier from that correlation id, and
 	// the responder is handed that same id as its exchange correlation). NOT a
 	// literal "Claim/<id>" reference: the conformant submit path stamps its own
 	// stable Claim.id (convergence-claim) while the correlation identifier holds
@@ -64,9 +64,8 @@ type PASDef struct {
 	// (ClaimResponse-PractitionerRequestorPendingResponseExample) uses "complete"
 	// at 2.1.0 AND 2.2.1: in Da Vinci PAS the pend is carried by the A4 reviewAction
 	// / the Task, never by the outcome code — and SHN's wire convention already
-	// discriminates a pend by the Bundle's Task entry (see BuildPendedResponse and
-	// gateway/engine.normalizePASResponse, which checks the Task FIRST), so the
-	// 2.2 code change is conformance-only and changes no routing.
+	// discriminates a pend by the Bundle's Task entry (see BuildPendedResponse), so
+	// the 2.2 code change is conformance-only and changes no routing.
 	PendedResponseOutcome            string
 	ResponseBundleIdentifierRequired bool // 2.2: true (PAS 2.2 makes Bundle.identifier mandatory)
 	// ClaimItemLineDetailRequired: PAS 2.1+ requires (verified against the PAS 2.1.0/2.2.1
@@ -152,13 +151,13 @@ func PASLineDef(line string) (PASDef, bool) {
 }
 
 // DTRDef is the per-line DTR contract definition — the strip/keep policy and
-// extension/codesystem choices that used to live in prose comments (sdk/dtr.go:36,
-// 255, 422, 430, 457, 594, 598 and the internal/dtr twins) now live here as data,
+// extension/codesystem choices that used to live in prose comments (dtr.go:36,
+// 255, 422, 430, 457, 594, 598 and the platform's DTR twins) now live here as data,
 // per line. Derived live from packages.simplifier.net/hl7.fhir.us.davinci-dtr
 // {2.0.1,2.1.0,2.2.0} — the per-line DTR package differential.
 type DTRDef struct {
 	Line           string // "2.0" | "2.1" | "2.2"
-	PackageVersion string // mirrors tools/contracts/manifest.json (parity-pinned by test)
+	PackageVersion string // mirrors the platform's contract manifest (parity-pinned by test)
 
 	// SingleCoverageConstraint: DTR 2.2 (verified against StructureDefinition-dtr-
 	// questionnaireresponse.json's differential + StructureDefinition-qr-coverage.json):
@@ -284,7 +283,7 @@ func DTRLineDef(line string) (DTRDef, bool) {
 // behavioral delta: the split covered/pa-needed/questionnaire/satisfied-pa-id
 // sub-extension shape BuildCardsAtLine builds is min/max-identical across all three
 // STUs — so CRDDef carries no behavior-gating field beyond PackageVersion (see
-// BuildCardsAtLine's doc comment, sdk/crd.go, for the full citation).
+// BuildCardsAtLine's doc comment, crd.go, for the full citation).
 //
 // In-band CRD version extensions (NOT a field here): 2.2.1 adds two new
 // extensions — CDSHookServiceRequestExtensionRequestCRDVersion (client → server,
@@ -295,7 +294,7 @@ func DTRLineDef(line string) (DTRDef, bool) {
 // require them. Re-add as a field iff a future CRD line makes either mandatory.
 type CRDDef struct {
 	Line           string // "2.0" | "2.1" | "2.2"
-	PackageVersion string // mirrors tools/contracts/manifest.json (parity-pinned by test)
+	PackageVersion string // mirrors the platform's contract manifest (parity-pinned by test)
 	// extended as package diffs dictate — additive fields only
 }
 

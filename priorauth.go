@@ -42,7 +42,7 @@ type PriorAuthRequest struct {
 	// The order being prior-authed. ProcedureSystem is the code SYSTEM: "" defaults to
 	// CPT (systemCPT) so every EXISTING caller that set
 	// only ProcedureCPT/ProcedureDisplay/DiagnosisICD10 is unaffected. Set it to the HCPCS
-	// system URI to prior-auth one of the mirrored families (E0250/L8000/G0151/J3490) — a
+	// system URI to prior-auth one of the mirrored families (all HCPCS) — a
 	// discovery descriptor's advertised persona.Order names both the system and the code.
 	ProcedureSystem  string
 	ProcedureCPT     string
@@ -169,7 +169,7 @@ func DemoLumbarContextShortTherapy() ClinicalContext {
 // inputs, never conjured here. Every error is leg-attributed
 // ("<leg>: <step>: <err>") so a caller can tell which leg + step broke. Authority is
 // evaluated per leg (each round-trip mints + verifies its own token bound to its
-// ciphertext, AI-2/AI-11). It uses ONLY the SDK's own primitives (no internal/).
+// ciphertext, AI-2/AI-11). It uses ONLY the SDK's own primitives (no platform-internal packages).
 func (id Identity) RunPriorAuth(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, req PriorAuthRequest) (PriorAuthResult, error) {
 	return id.RunPriorAuthWith(ctx, c, ep, payer, req)
 }
@@ -553,7 +553,7 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 		// the submit QR/SR the update re-includes unchanged, and the
 		// continuation facts an inquiry needs.
 		// The record an amendment of this submission needs, read off the
-		// bytes sent (its type, priority, created and items). The handle
+		// bytes sent (the submitted Claim, as sent). The handle
 		// carries it beside the records the amendment re-sends; the
 		// continuation, which carries no clinical content, does not.
 		submission, err := PASPriorClaimOf(bundleJSON)
@@ -589,7 +589,7 @@ func (id Identity) submitPriorAuthClaim(ctx context.Context, c *http.Client, ep 
 // route through the Hub → assert envelope metadata → VerifyBound the response leg →
 // Open. Every error names the STEP (so the caller can prefix the leg). The request
 // frame is always "provider-tpo"; the response frame is always "payer-coverage" (the
-// payer-side frame the substrate's hubsvc.responseOp pins).
+// payer-side frame the network's leg taxonomy names for every payer response).
 //
 //	txType  — the leg's flat name (e.g. "crd-order-select", "pas-claim"); the envelope
 //	          carries its prefixed name (e.g. "pa.crd-order-select")
@@ -927,15 +927,15 @@ func (id Identity) resumePriorAuth(ctx context.Context, c *http.Client, ep Endpo
 	if err != nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: your Coverage search result names no payer identity: %w", err)
 	}
-	// The amendment states the submission's own facts and restates the recorded
-	// submission (its type, priority, created and items). A handle written
-	// before shn-sdk v0.62.0 carries neither, and is refused rather than
-	// amended with values this package would supply.
+	// The amendment states the submission's own facts and carries the recorded
+	// submission's Claim as sent. A handle written before shn-sdk v0.62.0
+	// carries neither, and one written by v1.0.0 or earlier records no Claim:
+	// each is refused rather than amended with values this package would supply.
 	if resume.ClaimFacts == nil {
 		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: Claim.type, Claim.priority and Claim.item.category %w (expected from the resume handle's claimFacts, which a handle written before shn-sdk v0.62.0 does not carry)", ErrPASClaimFactAbsent)
 	}
 	if resume.Submission == nil {
-		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: the prior Claim's type, priority, created and items %w (expected from the resume handle's submission record, which a handle written before shn-sdk v0.62.0 does not carry)", ErrPASClaimFactAbsent)
+		return PriorAuthResult{}, fmt.Errorf("pas-update-submit: the prior Claim %w (expected from the resume handle's submission record, which a handle written before shn-sdk v0.62.0 does not carry)", ErrPASClaimFactAbsent)
 	}
 	bundleJSON, err := BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{
 		PASClaimFacts: *resume.ClaimFacts,

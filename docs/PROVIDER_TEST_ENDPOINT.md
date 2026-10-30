@@ -101,9 +101,9 @@ Three things worth knowing before you test:
   orders sent to `shn-order-select` — with the `context.selections` array that hook
   requires — come back as a well-formed empty answer (`{"cards":[],"systemActions":[]}`),
   which is the payer's answer, not an error.
-- A request with `"hook":"order-dispatch"`, to `/cds-services/shn-order-dispatch` or any id
-  not advertised, answers `404` naming the service ids that are offered. Build against
-  `order-sign` (§5, §6) or `order-select`.
+- A request whose `hook` is `order-dispatch`, sent to `/cds-services/shn-order-dispatch` or
+  to any other id not advertised, answers `404` naming the service ids that are offered.
+  Build against `order-sign` (§5, §6) or `order-select`.
 
 ### 1.3 Prefetch
 
@@ -223,9 +223,8 @@ oxygen-concentrator order (§6.4) **pends with a `Task`**, the 2.0-line pended s
 
 **Test data on these two routes is cleared on a schedule.** The shared reference payers
 behind routes `00300` and `00301` start again from their published test data weekly, on
-Sundays from 07:00 UTC, nightly from 07:00 UTC (03:00 US Eastern) from 2026-10-07 through
-2026-10-14, and occasionally at other times: a submission made before a clearing is not found
-by an inquiry (§1.6) after it, so submit again before you inquire.
+Sundays from 07:00 UTC, and occasionally at other times: a submission made before a clearing
+is not found by an inquiry (§1.6) after it, so submit again before you inquire.
 
 **Route `00001`.** `urn:oid:2.16.840.1.113883.6.300|00001` also reaches another instance
 of the same 2.0-line reference payer. It answers every call in §6 identically, and writes
@@ -988,9 +987,9 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
   value. A CDS Hooks request is answered CDS Hooks' `412` (the service could not obtain the
   data it needs): `412 no coverage in request or system of record` for a member the endpoint holds, or a `null` coverage prefetch, and, for a
   member it does not hold, `412 no coverage to route by: send prefetch.coverage or fhirServer
-  (this gateway's system of record names no patient for this member)` when your request names
-  no `fhirServer`. On `$questionnaire-package` the answer stays `422 no coverage to route by:
-  send the coverage parameter …`. The endpoint adds nothing to your request, so any other key
+  (this gateway's records name no patient for this member)` when your request names no
+  `fhirServer` (this wording from shn-gateway v1.1.0). On `$questionnaire-package` the
+  answer stays `422 no coverage to route by: send the coverage parameter …`. The endpoint adds nothing to your request, so any other key
   you leave out is simply left out.
 - **Coverage read through your `fhirServer`.** A CDS Hooks request for a member the
   endpoint does not hold that carries no `coverage` prefetch but names `fhirServer` has its
@@ -1265,9 +1264,12 @@ and PAS test kits find in these payloads:
   member identifier or `subscriberId` (`us-core-15`) and no `relationship` (a constraint the
   kit evaluated against CRD 2.2.1, which its DTR 2.0.1 package pulls in); the questionnaire
   canonical is the payer's example URL (§6.2).
-- **CRD request**: no CRD test kit certifies this payload; treat it as payer-accepted only.
-- **The `00301` payloads in §5** are not certified by the Inferno 2.2.1 kits. Payer
-  acceptance on that route likewise **does not certify** them.
+- **CRD request**: no CRD test kit has been run against this payload; treat it as
+  payer-accepted only.
+- **The `00301` payloads in §5**: the PAS request bundle (Appendix A), run against the Inferno
+  PAS 2.2.1 server suite, keeps the `http://example.org/…` identifier systems the kit rejects;
+  the CRD and DTR requests (§5.1, §5.2) have not been run against the 2.2-line CRD and DTR
+  kits. Payer acceptance on that route **does not certify** them.
 
 A few further points if you copy these payloads:
 
@@ -1445,7 +1447,7 @@ curl -s -w '\nHTTP %{http_code}\n' https://pa-test.shn-preview.org/cds-services/
 Expected answer:
 
 ```
-{"error":"no coverage to route by: send prefetch.coverage or fhirServer (this gateway's system of record names no patient for this member)"}
+{"error":"no coverage to route by: send prefetch.coverage or fhirServer (this gateway's records name no patient for this member)"}
 HTTP 412
 ```
 

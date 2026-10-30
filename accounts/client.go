@@ -143,6 +143,11 @@ func (c *Client) SubmitPoP(ctx context.Context, id string, reg shnsdk.Registrati
 	if len(reg.RequestFrames) > 0 {
 		body["requestFrames"] = reg.RequestFrames
 	}
+	// Legs is not additive that way: absent says the registrant declares no
+	// list, and an empty list says it takes none, so only nil omits the key.
+	if reg.Legs != nil {
+		body["legs"] = reg.Legs
+	}
 	_, err := c.do(ctx, http.MethodPost, "/clients/"+id+"/pop", body)
 	return err
 }

@@ -17,11 +17,9 @@ import (
 // in the SDK: the json tags
 // (holderId/audience/issuedAt/expiry/jti/bh/sig), the signing payload, and the
 // verifier-enforced bounds live in the SDK so it is wire-identical WITHOUT
-// importing internal/. The cross-module parity tests
-// (test/sdkparity/assertion_parity_test.go,
-// test/sdkparity/holderauth_verify_parity_test.go) prove a substrate verifier
-// accepts an SDK-issued assertion and that VerifyAssertion matches
-// internal/holderauth.Verify.
+// importing the platform's internal packages. The platform's cross-module
+// parity tests prove the network's verifier accepts an SDK-issued assertion and
+// that VerifyAssertion matches the network's own holder-assertion verifier.
 type Assertion struct {
 	HolderID string    `json:"holderId"`
 	Audience string    `json:"audience"`
@@ -47,14 +45,14 @@ type Assertion struct {
 // (Expiry-IssuedAt) at MaxAssertionTTL and rejects assertions issued more than
 // MaxClockSkew in the future. PRODUCTION PREREQUISITE: holders and verifiers
 // share a disciplined time source (NTP); the skew window only absorbs small
-// drift, not an unsynchronized clock. Mirrors internal/holderauth.
+// drift, not an unsynchronized clock. Mirrors the network's holder-assertion bounds.
 const (
 	MaxAssertionTTL = time.Hour
 	MaxClockSkew    = 5 * time.Minute
 )
 
 // assertionSigningPayload is the exact bytes signed: the struct JSON-marshalled
-// with Sig zeroed. Byte-identical to internal/holderauth.signingPayload.
+// with Sig zeroed. Byte-identical to the network's holder-assertion signing payload.
 func assertionSigningPayload(a Assertion) []byte {
 	c := a
 	c.Sig = nil
@@ -82,7 +80,7 @@ func issueAssertion(holderID, audience string, priv ed25519.PrivateKey, issuedAt
 }
 
 // IssueAssertion creates a signed assertion valid for ttl from issuedAt. Ported
-// verbatim from internal/holderauth.Issue: a fresh random jti is stamped BEFORE
+// verbatim from the network's holder-assertion issuer: a fresh random jti is stamped BEFORE
 // signing so it is covered by the signature (a replay guard at the verifier
 // cannot be defeated by swapping in a fresh jti). Returns the raw Assertion
 // struct; most holders should use Identity.Assertion, which wraps this and
@@ -100,10 +98,15 @@ func IssueAssertionForBody(holderID, audience string, priv ed25519.PrivateKey, i
 }
 
 // VerifyAssertion checks the signature, audience, and expiry against the holder's
-// public key. Ported verbatim from internal/holderauth.Verify (error strings
+// public key. Ported verbatim from the network's holder-assertion verifier (error strings
 // carry the shnsdk: public-surface prefix). VerifyAssertion does not inspect
-// BodyHash — only a body-bound guard does.
+// BodyHash — only a body-bound guard does. A key that is not an Ed25519 public
+// key (ed25519.PublicKeySize bytes), a registered holder with no signing key
+// for one, is an error, never a panic.
 func VerifyAssertion(a Assertion, expectedAudience string, pub ed25519.PublicKey, now time.Time) error {
+	if len(pub) != ed25519.PublicKeySize {
+		return errors.New("shnsdk: no valid verifying key")
+	}
 	if len(a.Sig) == 0 || !ed25519.Verify(pub, assertionSigningPayload(a), a.Sig) {
 		return errors.New("shnsdk: invalid signature")
 	}

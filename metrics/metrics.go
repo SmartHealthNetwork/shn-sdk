@@ -6,7 +6,7 @@
 // fail a caller's path, so all errors are swallowed.
 //
 // Stdlib-only by policy (enforced by this package's deps test, same gate as
-// sdk/health): EMF is structured-log-shaped, so a later OTel/Prometheus move
+// package health): EMF is structured-log-shaped, so a later OTel/Prometheus move
 // (Tier 3) is additive — nothing here is a one-way door.
 package metrics
 

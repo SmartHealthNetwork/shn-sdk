@@ -4,8 +4,8 @@
 // token refresh, and the authenticated Accounts-service API client
 // (two-step client registration, list, revoke).
 //
-// It is consumed by the shn CLI (sdk/cmd/shn) and the SHN Kit daemon
+// It is consumed by the shn CLI (this module's cmd/shn) and the SHN Kit daemon
 // (shnkitd) — one implementation of the sign-in + registration arc, two
-// frontends. Dep-purity: stdlib + shnsdk only; never the substrate's
+// frontends. Dep-purity: stdlib + shnsdk only; never the platform's
 // internal packages.
 package accounts

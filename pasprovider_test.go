@@ -511,9 +511,13 @@ func TestBuildConformantClaimUpdateBundle_NamesTheSameParty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
+	submitted, err := PASPriorClaimOf(submit)
+	if err != nil {
+		t.Fatal(err)
+	}
 	qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-1","status":"completed","subject":{"reference":"Patient/MBR-1"}}`)
 	prov := []byte(`{"resourceType":"Provenance","id":"prov-1","recorded":"2026-06-01T12:00:00Z","target":[{"reference":"QuestionnaireResponse/qr-1"}],"agent":[{"who":{"identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567890"}}}]}`)
-	update, err := BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: json.RawMessage(testCertTypeJSON), PriorClaim: testPriorClaim(t), Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID),
+	update, err := BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: json.RawMessage(testCertTypeJSON), PriorClaim: submitted, Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID),
 		QR: qr, SR: in.SR, Provider: in.Provider, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
 		MemberID: in.MemberID, MemberIDSystem: in.MemberIDSystem, Provenance: prov, Corr: "corr-2", OriginalCorr: in.Corr,
 		Created: in.Created, Payer: in.Payer, PayerOrgEntry: true,
@@ -524,7 +528,7 @@ func TestBuildConformantClaimUpdateBundle_NamesTheSameParty(t *testing.T) {
 	if got, want := claimProviderRef(t, update), claimProviderRef(t, submit); got != want {
 		t.Fatalf("the amendment names %q and the submission named %q", got, want)
 	}
-	if _, err := BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: json.RawMessage(testCertTypeJSON), PriorClaim: testPriorClaim(t), Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID),
+	if _, err := BuildConformantClaimUpdateBundleExact(ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: json.RawMessage(testCertTypeJSON), PriorClaim: submitted, Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID),
 		QR: qr, SR: in.SR, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
 		MemberID: in.MemberID, MemberIDSystem: in.MemberIDSystem, Provenance: prov, Corr: "corr-2", OriginalCorr: in.Corr,
 		Created: in.Created, Payer: in.Payer, PayerOrgEntry: true,

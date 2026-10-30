@@ -74,15 +74,21 @@ type PASClaimFacts struct {
 
 // PASPriorClaim is what the participant recorded of the submission an
 // amendment continues, read off the bytes the submission sent
-// (PASPriorClaimOf): the submitted Claim's type and priority, each the
-// CodeableConcept exactly as sent (every member and value of every coding:
-// version, userSelected, extensions), which the amendment's prior-Claim entry
-// restates; its created, as sent; and its items, as sent, which the amendment
-// is compared with to say which of its own items carry the PAS infoChanged
-// marker (see ConformantClaimUpdateInputs). Every field is REQUIRED: a record
-// that lacks one is refused (ErrPASClaimFactAbsent), never filled — a
-// continuation written before shn-sdk v0.62.0 records none of the raw values.
+// (PASPriorClaimOf). Claim is the submitted Claim resource exactly as the
+// submission's bundle carried it: from PAS 2.1 the amendment carries it as its
+// prior-Claim entry, byte for byte, and at every line the amendment's items
+// are compared with its items to say which of them carry the PAS infoChanged
+// marker (see ConformantClaimUpdateInputs). Claim is REQUIRED: a record that
+// lacks it — every record written before it existed — is refused
+// (ErrPASPriorClaimNotCarried), never rebuilt from the fields beside it.
 type PASPriorClaim struct {
+	Claim json.RawMessage `json:"claim,omitempty"`
+	// ClaimType, Priority, Created and Items are the submitted Claim's type,
+	// priority, created and items, each as sent. PASPriorClaimOf still fills
+	// them; the update builder reads none of them.
+	//
+	// Deprecated: the update builder carries Claim as sent and reads its items
+	// from it. A later SDK release removes these fields, named in that release's notes.
 	ClaimType json.RawMessage   `json:"claimType"`
 	Priority  json.RawMessage   `json:"priority"`
 	Created   string            `json:"created"`
@@ -90,9 +96,9 @@ type PASPriorClaim struct {
 }
 
 // PASPriorClaimOf reads the record an amendment needs off a submitted PAS
-// request Bundle: its first Claim's type, priority, created and items, each
-// exactly as sent. A value the bytes do not carry stays empty, and the update
-// builder refuses an amendment built from it.
+// request Bundle: its first Claim entry's resource, exactly as the bundle's
+// bytes hold it. A record the bytes cannot supply is refused by the update
+// builder, never filled.
 func PASPriorClaimOf(submittedBundle []byte) (PASPriorClaim, error) {
 	var b struct {
 		Entry []struct {
@@ -113,7 +119,7 @@ func PASPriorClaimOf(submittedBundle []byte) (PASPriorClaim, error) {
 		if json.Unmarshal(e.Resource, &cl) != nil || cl.ResourceType != "Claim" {
 			continue
 		}
-		return PASPriorClaim{ClaimType: cl.Type, Priority: cl.Priority, Created: cl.Created, Items: cl.Item}, nil
+		return PASPriorClaim{Claim: e.Resource, ClaimType: cl.Type, Priority: cl.Priority, Created: cl.Created, Items: cl.Item}, nil
 	}
 	return PASPriorClaim{}, errors.New("shnsdk: record the submission: the submitted bundle carries no Claim")
 }
@@ -130,6 +136,18 @@ var ErrPASClaimFactAbsent = errors.New("absent at its source, so the request is 
 // element can carry (no code, no system, or a system the element's binding does
 // not draw from). Like ErrPASClaimFactAbsent it is about SHN's own build.
 var ErrPASClaimFactInvalid = errors.New("not a coding this Claim element can carry")
+
+// ErrPASPriorClaimNotCarried is the refusal of an amendment whose recorded
+// submission cannot be carried as its prior Claim exactly as the requester
+// submitted it: SHN never rebuilds, restates or rewrites a participant's
+// submitted Claim, so the amendment is not built and nothing is sealed or
+// sent. It is the fidelity of SHN's own edit, never a judgement of anyone's
+// payload.
+var ErrPASPriorClaimNotCarried = errors.New("the prior Claim cannot be carried as the requester submitted it, so the amendment is not built: SHN never rebuilds or rewrites a participant's submitted Claim (fidelity of SHN's own edit)")
+
+func pasPriorClaimNotCarried(why string) error {
+	return fmt.Errorf("%w: %s", ErrPASPriorClaimNotCarried, why)
+}
 
 func pasFactAbsent(element, source string) error {
 	return fmt.Errorf("%s %w (expected from %s)", element, ErrPASClaimFactAbsent, source)

@@ -5,20 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
 
 // OrderSelectContext is the CDS Hooks context for an order-select hook invocation.
-// Ported standalone from internal/crd.OrderSelectContext with the same json tags.
+// Ported standalone from the platform's CRD order-select context with the same json tags.
 type OrderSelectContext struct {
 	PatientID   string            `json:"patientId"`
 	DraftOrders []json.RawMessage `json:"draftOrders"`
 }
 
 // OrderSelectRequest is the full CDS Hooks order-select hook request payload.
-// Ported standalone from internal/crd.OrderSelectRequest; the prefetch carries only
-// Coverage (FR-14 minimum-necessary), exactly as the substrate emits.
+// Ported standalone from the platform's CRD order-select request; the prefetch carries only
+// Coverage (FR-14 minimum-necessary), exactly as the network emits.
 type OrderSelectRequest struct {
 	Hook     string             `json:"hook"`
 	Context  OrderSelectContext `json:"context"`
@@ -58,19 +56,6 @@ func (c CardCoverage) PARequired() bool {
 
 // NeedsDTR reports whether the card advertises at least one DTR questionnaire to gather.
 func (c CardCoverage) NeedsDTR() bool { return len(c.Questionnaires) > 0 }
-
-// Conformant Coverage + contained cms-payer Organization (CMS-0057). The system is the
-// NAIC Company Code OID (urn:oid:2.16.840.1.113883.6.300), HL7's registered namespace for
-// US insurance-company identifiers; value "00001" is the Da Vinci br-payer RI's first plan
-// id — a synthetic demo value, not an official NAIC-assigned code. These are fixed
-// (deterministic) and match the existing conformant goldens.
-const (
-	conformantCoverageID    = "c1"
-	conformantPayerOrgID    = "cms-payer"
-	conformantPayerOrgName  = "Centers for Medicare and Medicaid Services"
-	conformantPayerOrgValue = "00001"
-	systemNAICCompanyCode   = "urn:oid:2.16.840.1.113883.6.300"
-)
 
 // errCRDRequestNeedsPatient is the refusal of both deprecated CRD request
 // builders: a CRD request's patient prefetch is the participant's own Patient
@@ -113,81 +98,6 @@ func withResourceID(resourceJSON []byte, id string) ([]byte, error) {
 		return nil, err
 	}
 	m["id"] = idJSON
-	return json.Marshal(m)
-}
-
-// BuildCoverageWithPayer builds the CONFORMANT Coverage: the same us-core-coverage shape
-// as BuildCoverage (status active, beneficiary, self relationship, MB-type identifier
-// carrying the bare memberID, US Core meta.profile — all KEPT) but additionally carries (a)
-// a stable id "c1" and (b) a CONTAINED cms-payer Organization (identifier system|value taken
-// from payer), with payor referencing it (#cms-payer). memberID is the member's BARE member
-// number, never a "Coverage/<id>" reference — a reader that needs a reference to THIS
-// resource uses its id ("c1"), and a prefixed memberID is refused rather than stamped
-// (requireBareMemberID; the signature cannot express the change, both spellings are a
-// string). This is the additive conformant variant of BuildCoverage (which is
-// byte-parity-locked); a production-conformant CRD (CMS-0057) names the payer Organization,
-// and the contained Org $validates clean. Deterministic.
-//
-// Deprecated: it makes up most of the Coverage it returns (the id "c1", the status, the
-// relationship, and a contained payer Organization named "Centers for Medicare and Medicaid
-// Services"); only the beneficiary, the member identifier and the payer identifier are the
-// caller's. A member's Coverage is a record in your own system: read it from there and pass
-// those bytes. It is kept for API stability and is not used on any SHN product path.
-func BuildCoverageWithPayer(patientRef, memberID string, payer PayerIdentifier) ([]byte, error) {
-	if err := requireBareMemberID(memberID); err != nil {
-		return nil, err
-	}
-	cov := fhir.Coverage{
-		Id:          strPtr(conformantCoverageID),
-		Meta:        &fhir.Meta{Profile: []string{profileUSCoreCoverage}},
-		Status:      fhir.FinancialResourceStatusCodesActive,
-		Beneficiary: fhir.Reference{Reference: strPtr(patientRef)},
-		Payor:       []fhir.Reference{{Reference: strPtr("#" + conformantPayerOrgID)}},
-		Relationship: &fhir.CodeableConcept{
-			Coding: []fhir.Coding{{
-				System: strPtr(systemSubscriberRelationship),
-				Code:   strPtr("self"),
-			}},
-		},
-		Identifier: []fhir.Identifier{{
-			Type: &fhir.CodeableConcept{
-				Coding: []fhir.Coding{{
-					System: strPtr(systemV2Identifier),
-					Code:   strPtr("MB"),
-				}},
-			},
-			System: strPtr(systemSHNCoverage),
-			Value:  strPtr(memberID),
-		}},
-	}
-	covJSON, err := json.Marshal(cov)
-	if err != nil {
-		return nil, err
-	}
-	// fhir.Coverage has no Contained field; splice the contained cms-payer Organization
-	// in (the only field the typed model lacks). Deterministic re-marshal; the test
-	// canonicalizes so key order is immaterial.
-	org := fhir.Organization{
-		Id:   strPtr(conformantPayerOrgID),
-		Name: strPtr(conformantPayerOrgName),
-		Identifier: []fhir.Identifier{{
-			System: strPtr(payer.System),
-			Value:  strPtr(payer.Value),
-		}},
-	}
-	orgJSON, err := json.Marshal(org)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(covJSON, &m); err != nil {
-		return nil, err
-	}
-	containedJSON, err := json.Marshal([]json.RawMessage{json.RawMessage(orgJSON)})
-	if err != nil {
-		return nil, err
-	}
-	m["contained"] = containedJSON
 	return json.Marshal(m)
 }
 

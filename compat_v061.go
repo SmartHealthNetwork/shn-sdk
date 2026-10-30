@@ -1,146 +1,27 @@
 package shnsdk
 
-// The v0.61.1 builders, kept for one release.
+// The v0.61.1 builders the shn-kit still calls.
 //
-// This file is the shn-sdk v0.61.1 source of each builder that v0.62.0
-// replaces with an Exact builder, copied verbatim. A private helper that the
+// This file is the shn-sdk v0.61.1 source of the three builders below, which
+// v0.62.0 replaced with Exact builders, copied verbatim. A private helper that the
 // v0.62.0 source changed, or that calls one, is carried here with the suffix
-// V061, so these builders write exactly the bytes v0.61.1 writes. They write values the
-// caller never stated: Claim.type professional, priority normal, the item
-// category, location and request type, an amendment's certificationType I
-// and infoChanged marker, and the payer Organization/payer. Every one is
-// Deprecated, and a later SDK release, named in that release's notes, removes this file. Use the Exact builder
-// each one names.
+// V061, so these builders write exactly the bytes v0.61.1 writes. They write
+// values the caller never stated: Claim.type professional, priority normal,
+// the item category, location and request type, an amendment's
+// certificationType I and infoChanged marker, and the payer
+// Organization/payer. The other v0.61.1 builders are removed; these three stay,
+// Deprecated, while the shn-kit, which builds against an SDK before the Exact
+// builders, still calls them. A later SDK release, named in that release's
+// notes, removes this file. Use the Exact builder each one names.
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 )
-
-// BuildEligibilityRequest constructs a FHIR R4 CoverageEligibilityRequest for the
-// member, ordering NPI, and date of service (now). Returns FHIR JSON. PORTED
-// standalone from internal/fhirmap.BuildEligibilityRequest with the SAME field
-// shapes so the wire resource is identical — proven by the cross-module parity
-// test (test/sdkparity/fhir_parity_test.go), which feeds an SDK-built request to
-// the substrate parser.
-//
-// Deprecated: it writes values the caller never stated. Use
-// BuildEligibilityRequestExact, which names the payer by the identifier the
-// member's Coverage states. A later SDK release removes it, named in that release's notes.
-func BuildEligibilityRequest(memberID, npi string, now time.Time) ([]byte, error) {
-	created := now.UTC().Format(time.RFC3339)
-	patientRef := "Patient/" + memberID
-	providerRef := "Practitioner/" + npi
-	cer := fhir.CoverageEligibilityRequest{
-		Status:   fhir.FinancialResourceStatusCodesActive,
-		Purpose:  []fhir.EligibilityRequestPurpose{fhir.EligibilityRequestPurposeBenefits},
-		Patient:  fhir.Reference{Reference: strPtr(patientRef)},
-		Created:  created,
-		Insurer:  fhir.Reference{Reference: strPtr("Organization/payer")},
-		Provider: &fhir.Reference{Reference: strPtr(providerRef)},
-	}
-	return json.Marshal(cer)
-}
-
-// BuildEligibilityResponse constructs a FHIR R4 CoverageEligibilityResponse for the
-// payer side of a coverage-eligibility check. When covered, insurance is in force;
-// when not covered, inforce is false and reason is carried in the disposition.
-// PORTED standalone from
-// internal/fhirmap.BuildEligibilityResponse with identical field shapes — proven by
-// the cross-module parity test (test/sdkparity/fhir_parity_test.go).
-//
-// insurer names the member's real Coverage payor — the promoted engine handler
-// derives it from SoR.OpenCoverage via shnsdk.ParsePayerIdentifier, one Coverage
-// read feeding both the verdict and the identity. It is stamped as a LOGICAL reference
-// (Reference.identifier), the standard FHIR idiom for an identifier known but not locally
-// resolvable as a URL. A ZERO-VALUE insurer (both System and Value empty) preserves
-// today's byte-identical output — the pre-insurer literal Reference{Reference:
-// "Organization/payer"} — for callers not yet threading a real Coverage-derived identity
-// (sdk/responder.go's standalone Responder has no Coverage/SoR of its own; parity safety).
-//
-// The "req-" prefix on the request reference is applied here so callers pass only the
-// bare correlationID. created is supplied by the caller so the resource is
-// byte-deterministic for a given clock.
-//
-// Deprecated: it writes values the caller never stated. Use
-// BuildEligibilityAnswer, which restates the insurer the request names, or
-// BuildEligibilityResponseExact. A later SDK release removes it, named in that release's notes.
-func BuildEligibilityResponse(correlationID, patientRef string, covered bool, reason string, insurer PayerIdentifier, created time.Time) ([]byte, error) {
-	member := strings.TrimPrefix(patientRef, "Patient/")
-	insurerRef := fhir.Reference{Reference: strPtr("Organization/payer")}
-	if insurer.System != "" || insurer.Value != "" {
-		insurerRef = fhir.Reference{Identifier: &fhir.Identifier{System: strPtr(insurer.System), Value: strPtr(insurer.Value)}}
-	}
-	resp := fhir.CoverageEligibilityResponse{
-		Status:  fhir.FinancialResourceStatusCodesActive,
-		Purpose: []fhir.EligibilityResponsePurpose{fhir.EligibilityResponsePurposeBenefits},
-		Patient: fhir.Reference{Reference: strPtr(patientRef)},
-		Created: created.UTC().Format(time.RFC3339),
-		Request: fhir.Reference{Reference: strPtr("CoverageEligibilityRequest/req-" + correlationID)},
-		Outcome: fhir.ClaimProcessingCodesComplete,
-		Insurer: insurerRef,
-		Insurance: []fhir.CoverageEligibilityResponseInsurance{{
-			Coverage: fhir.Reference{Reference: strPtr("Coverage/" + member)},
-			Inforce:  boolPtr(covered),
-		}},
-	}
-
-	if !covered && reason != "" {
-		resp.Disposition = strPtr(reason)
-	}
-	return json.Marshal(resp)
-}
-
-// BuildCoverage builds a valid R4 Coverage conforming to us-core-coverage (US Core
-// 6.1.0): status "active", the given beneficiary (Patient) reference, a single payor
-// referencing the payer Organization, a "self" subscriber relationship (min=1), and
-// a member-number identifier (v2-0203 "MB" type, system urn:shn:coverage) carrying
-// memberID — the member's BARE member number, which is what an MB identifier means
-// (satisfies the us-core-15 invariant). memberID is NOT a "Coverage/<id>" reference:
-// nothing derives a resource reference from this identifier (a reader that needs one
-// uses Coverage.id), and a prefixed value is refused rather than stamped, because the
-// signature cannot express the change (both spellings are a string). meta.profile pins
-// the US Core profile. Reimplements internal/fhirmap.BuildCoverage standalone;
-// test/sdkparity asserts byte-identity.
-//
-// Deprecated: it writes values the caller never stated. Use BuildCoverageExact,
-// which names the payer by its identifier; a member's Coverage is a record in
-// your own system, to be read from there. A later SDK release removes it, named in that release's notes.
-func BuildCoverage(patientRef, memberID string) ([]byte, error) {
-	if err := requireBareMemberID(memberID); err != nil {
-		return nil, err
-	}
-	cov := fhir.Coverage{
-		Meta:        &fhir.Meta{Profile: []string{profileUSCoreCoverage}},
-		Status:      fhir.FinancialResourceStatusCodesActive,
-		Beneficiary: fhir.Reference{Reference: strPtr(patientRef)},
-		Payor:       []fhir.Reference{{Reference: strPtr("Organization/payer")}},
-		Relationship: &fhir.CodeableConcept{
-			Coding: []fhir.Coding{{
-				System: strPtr(systemSubscriberRelationship),
-				Code:   strPtr("self"),
-			}},
-		},
-		Identifier: []fhir.Identifier{{
-			Type: &fhir.CodeableConcept{
-				Coding: []fhir.Coding{{
-					System: strPtr(systemV2Identifier),
-					Code:   strPtr("MB"),
-				}},
-			},
-			System: strPtr(systemSHNCoverage),
-			Value:  strPtr(memberID),
-		}},
-	}
-
-	return json.Marshal(cov)
-}
 
 // buildPASClaimV061 constructs a FHIR Claim JSON for a preauthorization request
 // (related is nil for the initial submit bundle; the conformant builder
@@ -275,8 +156,8 @@ func addPASLineItemDetailV061(claimJSON []byte, def PASDef) ([]byte, error) {
 // BuildConformantClaimBundle assembles a LEAN, generic, demo-persona-derived CONFORMANT
 // Da Vinci $submit Claim Bundle — the only PA $submit contract (the minimized
 // BuildClaimBundle has been removed). The entry set is exactly what the
-// payer-side parseConformantPASSubjects (gateway/engine/pas_native.go) + the SHN-native
-// adjudicator + `make validate` require, with NO br-payer foreign seed:
+// payer-side parseConformantPASSubjects (the gateway's native PAS bind) + the SHN-native
+// adjudicator + the platform's IG-profile $validate gate require, with NO br-payer foreign seed:
 //
 //	Claim (use preauthorization; item[].productOrService = the passed order's own code (CPT
 //	      72148 for this doc's example demo persona) + extension-requestedService → the
@@ -297,31 +178,14 @@ func addPASLineItemDetailV061(claimJSON []byte, def PASDef) ([]byte, error) {
 // ConformantClaimInputs.Insurer); without one the builder refuses. Deterministic (no
 // time.Now/random); the QR/SR/refs are demo-persona-derived by the caller.
 //
-// BuildConformantClaimBundle speaks PAS line 2.0 — it is BuildConformantClaimBundleAtLine("2.0", in),
-// byte-identical (regression-fenced by test/sdkparity). Use BuildConformantClaimBundleAtLine to
-// target 2.1/2.2 (PAS package differential: Claim.item certificationType/requestType/location[x]).
+// BuildConformantClaimBundle speaks PAS line 2.0. Its other-line form is gone:
+// BuildConformantClaimBundleAtLineExact targets 2.1/2.2.
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildConformantClaimBundleExact, which carries the claim facts you state
 // (PASClaimFacts) and writes no default. A later SDK release removes it, named in that release's notes.
 func BuildConformantClaimBundle(in ConformantClaimInputs) ([]byte, error) {
 	def, _ := PASLineDef("2.0")
-	return buildConformantClaimBundleV061(def, in)
-}
-
-// BuildConformantClaimBundleAtLine is BuildConformantClaimBundle parameterized by PAS
-// line ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed — never a silent 2.0
-// fallback). ONE code path: the line-conditional sections are driven entirely by the
-// resolved PASDef (see addPASLineItemDetailV061), not inline per-line branches.
-//
-// Deprecated: it writes values the caller never stated. Use
-// BuildConformantClaimBundleAtLineExact, which carries the claim facts you
-// state (PASClaimFacts) and writes no default. A later SDK release removes it, named in that release's notes.
-func BuildConformantClaimBundleAtLine(line string, in ConformantClaimInputs) ([]byte, error) {
-	def, ok := PASLineDef(line)
-	if !ok {
-		return nil, fmt.Errorf("shnsdk: BuildConformantClaimBundleAtLine: unknown PAS line %q", line)
-	}
 	return buildConformantClaimBundleV061(def, in)
 }
 
@@ -560,7 +424,7 @@ func rewriteQRContextRefsV061(qrJSON []byte, coverageRef, srRef string) ([]byte,
 
 // buildPASUpdateClaimV061 constructs the FHIR Claim for an UPDATE bundle: identical to
 // buildPASClaimV061 but with related[] referencing the original claim by correlation
-// identifier (FR-21). Ported byte-for-byte from internal/pas.buildClaim's related path.
+// identifier (FR-21). Ported byte-for-byte from the platform's PAS claim builder's related path.
 // coverageRef carries the same caveat as buildPASClaimV061's: BuildConformantClaimUpdateBundle
 // overwrites insurance[0].coverage with a logical reference before the bundle is assembled.
 func buildPASUpdateClaimV061(patientRef, coverageRef, providerRef, correlationID, originalCorrelationID string, created time.Time) ([]byte, error) {
@@ -768,33 +632,16 @@ func buildPriorClaimEntryV061(patientRef, coverageRef, providerRef, payerOrgID, 
 //
 // meta.profile: NO meta.profile on any entry (identical to BuildConformantClaimBundle).
 // Deterministic (no time.Now/random); caller injects Created. It reuses the
-// byte-parity-locked buildPASUpdateClaimV061 helper (the minimized BuildClaimUpdateBundle
-// public builder has been removed — this is the sole PA-update builder).
+// buildPASUpdateClaimV061 helper.
 //
-// BuildConformantClaimUpdateBundle speaks PAS line 2.0 — it is
-// BuildConformantClaimUpdateBundleAtLine("2.0", in), byte-identical (regression-fenced
-// by test/sdkparity). Use BuildConformantClaimUpdateBundleAtLine to target 2.1/2.2
-// (PAS package differential: Claim.item line-detail + Claim.related.relationship).
+// BuildConformantClaimUpdateBundle speaks PAS line 2.0. Its other-line form is
+// gone: BuildConformantClaimUpdateBundleAtLineExact targets 2.1/2.2.
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildConformantClaimUpdateBundleExact, which carries the claim facts,
 // certification type and prior Claim you state. A later SDK release removes it, named in that release's notes.
 func BuildConformantClaimUpdateBundle(in ConformantClaimUpdateInputs) ([]byte, error) {
 	def, _ := PASLineDef("2.0")
-	return buildConformantClaimUpdateBundleV061(def, in)
-}
-
-// BuildConformantClaimUpdateBundleAtLine is BuildConformantClaimUpdateBundle
-// parameterized by PAS line ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
-//
-// Deprecated: it writes values the caller never stated. Use
-// BuildConformantClaimUpdateBundleAtLineExact, which carries the claim facts,
-// certification type and prior Claim you state. A later SDK release removes it, named in that release's notes.
-func BuildConformantClaimUpdateBundleAtLine(line string, in ConformantClaimUpdateInputs) ([]byte, error) {
-	def, ok := PASLineDef(line)
-	if !ok {
-		return nil, fmt.Errorf("shnsdk: BuildConformantClaimUpdateBundleAtLine: unknown PAS line %q", line)
-	}
 	return buildConformantClaimUpdateBundleV061(def, in)
 }
 
@@ -1005,25 +852,6 @@ func buildConformantClaimUpdateBundleV061(def PASDef, in ConformantClaimUpdateIn
 	return bundleOut, nil
 }
 
-type pasApprovedCRV061 struct {
-	ResourceType string                   `json:"resourceType"`
-	Meta         *pasClaimResponseMeta    `json:"meta,omitempty"`
-	Status       string                   `json:"status"`
-	Type         pasDeniedCodeableConcept `json:"type"`
-	Use          string                   `json:"use"`
-	Patient      pasDeniedReference       `json:"patient"`
-	Created      string                   `json:"created"`
-	Insurer      pasDeniedReference       `json:"insurer"`
-	Outcome      string                   `json:"outcome"`
-	Identifier   []pasDeniedIdentifier    `json:"identifier"`
-	// Request is the PAS 2.1+ mandatory ClaimResponse.request (omitted at 2.0 —
-	// PASDef.ClaimResponseRequestRequired).
-	Request       *pasClaimRequestRef       `json:"request,omitempty"`
-	PreAuthRef    string                    `json:"preAuthRef,omitempty"`
-	PreAuthPeriod *pasApprovedPreAuthPeriod `json:"preAuthPeriod,omitempty"`
-	Item          []pasDeniedItem           `json:"item"`
-}
-
 type pasDeniedCRV061 struct {
 	ResourceType string                   `json:"resourceType"`
 	Meta         *pasClaimResponseMeta    `json:"meta,omitempty"`
@@ -1043,220 +871,13 @@ type pasDeniedCRV061 struct {
 	ProcessNote []pasDeniedProcessNote `json:"processNote,omitempty"`
 }
 
-// BuildClaimResponse builds a Da Vinci PAS APPROVED ClaimResponse (FR-22).
-// It self-declares profile-claimresponse and carries the A1 reviewAction
-// (Certified in Total) on item.adjudication — the conformant approved shape
-// that the runtime PAS validator (FR-36) enforces at egress.
-// Custom-marshalled (mirroring the denied A3 path) so the CodeableConcept-valued
-// reviewAction extension serialises cleanly.
-//
-// PORTED-standalone: internal/pas.BuildClaimResponse.
-//
-// BuildClaimResponse speaks PAS line 2.0 — it is BuildClaimResponseAtLine("2.0", …),
-// byte-identical (regression-fenced by test/sdkparity). No structural delta was found
-// for profile-claimresponse.json across 2.0.1/2.1.0/2.2.1 (PAS package differential); the
-// AtLine variant exists for interface symmetry + meta.profile-from-def discipline.
-//
-// Deprecated: it writes values the caller never stated. Use
-// BuildClaimResponseExact, which restates the request Claim's own type and
-// insurer (PASAnswerRequest). A later SDK release removes it, named in that release's notes.
-func BuildClaimResponse(preAuthRef, validUntil, patientRef, correlationID string, created time.Time) ([]byte, error) {
-	def, _ := PASLineDef("2.0")
-	return buildClaimResponseV061(def, preAuthRef, validUntil, patientRef, correlationID, created)
-}
-
-// BuildClaimResponseAtLine is BuildClaimResponse parameterized by PAS line
-// ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
-//
-// Deprecated: it writes values the caller never stated. Use
-// BuildClaimResponseAtLineExact, which restates the request Claim's own type
-// and insurer (PASAnswerRequest). A later SDK release removes it, named in that release's notes.
-func BuildClaimResponseAtLine(line, preAuthRef, validUntil, patientRef, correlationID string, created time.Time) ([]byte, error) {
-	def, ok := PASLineDef(line)
-	if !ok {
-		return nil, fmt.Errorf("shnsdk: BuildClaimResponseAtLine: unknown PAS line %q", line)
-	}
-	return buildClaimResponseV061(def, preAuthRef, validUntil, patientRef, correlationID, created)
-}
-
-func buildClaimResponseV061(def PASDef, preAuthRef, validUntil, patientRef, correlationID string, created time.Time) ([]byte, error) {
-	cr := pasApprovedCRV061{
-		ResourceType: "ClaimResponse",
-		Meta:         &pasClaimResponseMeta{Profile: []string{def.ClaimResponseProfile}},
-		Status:       "active",
-		Type:         pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/claim-type", Code: "professional"}}},
-		Use:          "preauthorization",
-		Patient:      pasDeniedReference{Reference: patientRef},
-		Created:      created.UTC().Format(time.RFC3339),
-		Insurer:      pasDeniedReference{Reference: "Organization/payer"},
-		Outcome:      "complete",
-		Identifier:   []pasDeniedIdentifier{{System: pasCorrelationSystem, Value: correlationID}},
-
-		Request: pasClaimRequestFor(def, correlationID),
-		Item: []pasDeniedItem{{
-			ItemSequence: 1,
-
-			Adjudication: []pasDeniedAdj{{
-				Category: pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/adjudication", Code: "submitted"}}},
-				Extension: []pasReviewActionExt{{
-					URL: pasReviewActionExtURL,
-					Extension: []pasReviewActionSubExt{{
-						URL: pasReviewActionCodeExtURL,
-						ValueCodeableConcept: &pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{
-							System: pasSystemX12ReviewAction, Code: "A1", Display: "Certified in Total",
-						}}},
-					}},
-				}},
-			}},
-		}},
-	}
-	if preAuthRef != "" {
-		cr.PreAuthRef = preAuthRef
-		if validUntil != "" {
-			cr.PreAuthPeriod = &pasApprovedPreAuthPeriod{End: validUntil}
-		}
-	}
-	return json.Marshal(cr)
-}
-
-// BuildPendedClaimResponseAtLine builds a pended Da Vinci PAS response at a
-// PAS line ("2.0", "2.1", "2.2"): a collection Bundle holding the
-// ClaimResponse, whose items each carry the X12 306 review action A4 (Pended)
-// for a request line the payer needs information about, followed by the
-// Task(s) BuildPendedTasks builds from in.Task. The ClaimResponse outcome is
-// the line's pended outcome ("queued" at 2.0 and 2.1, "complete" at 2.2, where
-// the review action carries the pend).
-//
-// Deprecated: it writes values the caller never stated. Use
-// BuildPendedClaimResponseAtLineExact, which restates the request Claim's own
-// type and insurer (PendedResponseInputs.Request). A later SDK release removes it, named in that release's notes.
-func BuildPendedClaimResponseAtLine(line string, in PendedResponseInputs) ([]byte, error) {
-	def, ok := PASLineDef(line)
-	if !ok {
-		return nil, fmt.Errorf("shnsdk: BuildPendedClaimResponseAtLine: unknown PAS line %q", line)
-	}
-	if in.Correlation == "" {
-		return nil, errors.New("shnsdk: BuildPendedClaimResponseAtLine: Correlation is required")
-	}
-	if in.Task.ID == "" {
-		in.Task.ID = "task-" + in.Correlation
-	}
-	tasks, err := BuildPendedTasks(line, in.Task)
-	if err != nil {
-		return nil, err
-	}
-	return buildPendedResponseV061(def, in, tasks)
-}
-
-func buildPendedResponseV061(def PASDef, in PendedResponseInputs, tasks [][]byte) ([]byte, error) {
-	patientRef, correlationID, created := in.Task.Patient, in.Correlation, in.Created
-
-	outcome, err := pasPendedOutcome(def)
-	if err != nil {
-		return nil, err
-	}
-	cr := fhir.ClaimResponse{
-		Meta:   &fhir.Meta{Profile: []string{def.ClaimResponseProfile}},
-		Id:     strPtr("claim-response-" + correlationID),
-		Status: fhir.FinancialResourceStatusCodesActive,
-		Type: fhir.CodeableConcept{
-			Coding: []fhir.Coding{{
-				System: strPtr("http://terminology.hl7.org/CodeSystem/claim-type"),
-				Code:   strPtr("professional"),
-			}},
-		},
-		Use:     fhir.UsePreauthorization,
-		Patient: fhir.Reference{Reference: strPtr(patientRef)},
-		Created: created.UTC().Format(time.RFC3339),
-		Insurer: fhir.Reference{Reference: strPtr("Organization/payer")},
-		Outcome: outcome,
-		Identifier: []fhir.Identifier{{
-			System: strPtr(pasCorrelationSystem),
-			Value:  strPtr(correlationID),
-		}},
-	}
-
-	if def.ClaimResponseRequestRequired {
-		cr.Request = &fhir.Reference{Identifier: &fhir.Identifier{
-			System: strPtr(pasCorrelationSystem),
-			Value:  strPtr(correlationID),
-		}}
-	}
-	// One A4 item per request line the payer needs information about, in line
-	// order. A4 carries the decision independently of outcome and the Task.
-	var sequences []int
-	for _, it := range in.Task.Items {
-		if !slices.Contains(sequences, it.Sequence) {
-			sequences = append(sequences, it.Sequence)
-		}
-	}
-	slices.Sort(sequences)
-	items := make([]pasDeniedItem, 0, len(sequences))
-	for _, seq := range sequences {
-		items = append(items, pasDeniedItem{
-			ItemSequence: seq,
-			Adjudication: []pasDeniedAdj{{
-				Category: pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: "http://terminology.hl7.org/CodeSystem/adjudication", Code: "submitted"}}},
-				Extension: []pasReviewActionExt{{URL: pasReviewActionExtURL, Extension: []pasReviewActionSubExt{{
-					URL: pasReviewActionCodeExtURL, ValueCodeableConcept: &pasDeniedCodeableConcept{Coding: []pasDeniedCoding{{System: pasSystemX12ReviewAction, Code: "A4", Display: "Pended"}}},
-				}}}},
-			}},
-		})
-	}
-	type pendedBase fhir.ClaimResponse
-	pendedCR := struct {
-		pendedBase
-		Item []pasDeniedItem `json:"item"`
-	}{pendedBase: pendedBase(cr), Item: items}
-	crJSON, err := json.Marshal(pendedCR)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: marshal pended ClaimResponse: %w", err)
-	}
-	crJSON, err = pasInjectResourceType(crJSON, "ClaimResponse")
-	if err != nil {
-		return nil, err
-	}
-	crURL, err := pasFullURLFor(crJSON)
-	if err != nil {
-		return nil, err
-	}
-	entries := []fhir.BundleEntry{{FullUrl: strPtr(crURL), Resource: json.RawMessage(crJSON)}}
-	for _, taskJSON := range tasks {
-		taskURL, err := pasFullURLFor(taskJSON)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, fhir.BundleEntry{FullUrl: strPtr(taskURL), Resource: json.RawMessage(taskJSON)})
-	}
-	bundle := fhir.Bundle{
-		Type:      fhir.BundleTypeCollection,
-		Timestamp: strPtr(created.UTC().Format(time.RFC3339)),
-		Entry:     entries,
-	}
-
-	if def.ResponseBundleIdentifierRequired {
-		bundle.Identifier = &fhir.Identifier{System: strPtr(pasBundleIdentifierSystem), Value: strPtr(correlationID)}
-	}
-	raw, err := json.Marshal(bundle)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: marshal pended bundle: %w", err)
-	}
-	return pasInjectResourceType(raw, "Bundle")
-}
-
 // BuildDeniedResponse builds the Da Vinci PAS denied ClaimResponse (FR-22).
 // The rationale is the human-readable disposition, carried exactly; an empty
-// rationale emits no disposition. It carries no processNote — use
-// BuildDeniedResponseWithNotesAtLine to add the partner's own notes. No
-// preAuthRef is issued. Outcome is "complete" — denial is a decision, not an
+// rationale emits no disposition. It carries no processNote (the Exact
+// builders carry the partner's own notes). No preAuthRef is issued. Outcome is "complete" — denial is a decision, not an
 // error.
 //
-// PORTED-standalone: internal/pas.BuildDeniedResponse.
-//
-// BuildDeniedResponse speaks PAS line 2.0 — it is BuildDeniedResponseAtLine("2.0", …),
-// byte-identical (regression-fenced by test/sdkparity). No structural delta was found
-// for profile-claimresponse.json across 2.0.1/2.1.0/2.2.1 (PAS package differential); the
-// AtLine variant exists for interface symmetry + meta.profile-from-def discipline.
+// BuildDeniedResponse speaks PAS line 2.0.
 //
 // Deprecated: it writes values the caller never stated. Use
 // BuildDeniedResponseExact, which restates the request Claim's own type and
@@ -1264,32 +885,6 @@ func buildPendedResponseV061(def PASDef, in PendedResponseInputs, tasks [][]byte
 func BuildDeniedResponse(patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
 	def, _ := PASLineDef("2.0")
 	return buildDeniedResponseV061(def, patientRef, correlationID, rationale, nil, created)
-}
-
-// BuildDeniedResponseAtLine is BuildDeniedResponse parameterized by PAS line
-// ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
-//
-// Deprecated: it writes values the caller never stated. Use
-// BuildDeniedResponseAtLineExact, which restates the request Claim's own type
-// and insurer (PASAnswerRequest). A later SDK release removes it, named in that release's notes.
-func BuildDeniedResponseAtLine(line, patientRef, correlationID, rationale string, created time.Time) ([]byte, error) {
-	return BuildDeniedResponseWithNotesAtLine(line, patientRef, correlationID, rationale, nil, created)
-}
-
-// BuildDeniedResponseWithNotesAtLine is BuildDeniedResponseAtLine carrying the
-// partner's own notes as ClaimResponse.processNote, in order and numbered from
-// 1. A note without text, or with a type other than "display", "print" or
-// "printoper", is refused. Nil notes emit no processNote.
-//
-// Deprecated: it writes values the caller never stated. Use
-// BuildDeniedResponseWithNotesAtLineExact, which restates the request Claim's
-// own type and insurer (PASAnswerRequest). A later SDK release removes it, named in that release's notes.
-func BuildDeniedResponseWithNotesAtLine(line, patientRef, correlationID, rationale string, notes []PASProcessNote, created time.Time) ([]byte, error) {
-	def, ok := PASLineDef(line)
-	if !ok {
-		return nil, fmt.Errorf("shnsdk: BuildDeniedResponseWithNotesAtLine: unknown PAS line %q", line)
-	}
-	return buildDeniedResponseV061(def, patientRef, correlationID, rationale, notes, created)
 }
 
 func buildDeniedResponseV061(def PASDef, patientRef, correlationID, rationale string, notes []PASProcessNote, created time.Time) ([]byte, error) {

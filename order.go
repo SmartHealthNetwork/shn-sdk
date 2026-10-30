@@ -9,8 +9,8 @@ import (
 )
 
 // CRD-leg terminology systems + US Core profiles. Ported byte-for-byte from
-// internal/fhirmap so the SDK-built ServiceRequest/Coverage are wire-identical to
-// the substrate's (test/sdkparity/order_parity_test.go). RunPriorAuth's CRD leg
+// the platform's FHIR builders so the SDK-built ServiceRequest/Coverage are
+// wire-identical to the platform's (the platform's SDK parity suite pins it). RunPriorAuth's CRD leg
 // builds these itself — the order (procedure/diagnosis) is a dev-VISIBLE input
 // (PriorAuthRequest), never conjured inside the orchestrator.
 const (
@@ -18,12 +18,12 @@ const (
 	systemICD10 = "http://hl7.org/fhir/sid/icd-10-cm"
 	// systemHCPCS is the HCPCS Level II procedure code system. PINNED EXACTLY to the
 	// payer wire value: http:// (not https://) is load-bearing for the exact-match
-	// allowlist below. FR-36: this is the only HCPCS system the EOB validates against.
+	// allowlist below. FR-36: this is the only HCPCS system the allowlist accepts.
 	systemHCPCS = "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
 
-	// US Core 6.1.0 profiles pinned via meta.profile (the substrate's resources
+	// US Core 6.1.0 profiles pinned via meta.profile (the platform's resources
 	// genuinely conform; a plain non-IG validator strips meta.profile). These match
-	// internal/fhirmap's profile constants byte-for-byte.
+	// the platform's FHIR builders' profile constants byte-for-byte.
 	profileUSCoreServiceRequest = "http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"
 	profileUSCoreCoverage       = "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"
 
@@ -43,16 +43,12 @@ const (
 // "draft", intent "order", the given procedure code + display, the ICD-10-CM diagnosis
 // as reasonCode, and the patient subject.
 //
-// Pulled in from gateway/engine/order_build.go —
-// deferral D-PCB-1 ("build-side product-coding gap": shnsdk.BuildServiceRequest was
-// CPT-system-locked, so the published SDK could not build an HCPCS order — the mirrored
-// families E0250/L8000/G0151/J3490 are ALL HCPCS). That gateway-local stub's own comment
-// named the closing condition exactly: "When a real partner consumer needs to build
-// HCPCS orders via the SDK, lift this into sdk/order.go (additive)" — this round's
-// descriptor-driven persona order is that real consumer. test/sdkparity/
-// order_coded_parity_test.go now asserts THIS function is byte-identical to
-// gateway/engine's own BuildServiceRequestCoded (the deferral's own promised guard),
-// closing D-PCB-1 rather than leaving the gateway-local copy as the only implementation.
+// Pulled in from the Smart Gateway's own coded order builder to close a build-side
+// product-coding gap: shnsdk.BuildServiceRequest was CPT-system-locked, so the
+// published SDK could not build an HCPCS order — the mirrored families are ALL HCPCS.
+// The descriptor-driven persona order is the real consumer that needed it. The
+// platform's SDK parity suite asserts THIS function is byte-identical to the gateway's
+// own builder, rather than leaving the gateway-local copy as the only implementation.
 func BuildServiceRequestCoded(system, code, display, dxCode, patientRef string) ([]byte, error) {
 	sr := fhir.ServiceRequest{
 		Meta:   &fhir.Meta{Profile: []string{profileUSCoreServiceRequest}},
@@ -87,10 +83,10 @@ func BuildServiceRequestCoded(system, code, display, dxCode, patientRef string) 
 // BuildServiceRequest builds a DRAFT order (CDS Hooks order-select context): a FHIR
 // R4 ServiceRequest with status "draft", intent "order", the given CPT procedure
 // code + display, the ICD-10-CM diagnosis as reasonCode, and the patient subject.
-// Reimplements internal/fhirmap.BuildServiceRequest standalone (no internal/ import);
-// test/sdkparity asserts byte-identity with the substrate for the same inputs. Thin
-// CPT-only wrapper over BuildServiceRequestCoded (unchanged signature/behavior — every
-// existing caller of THIS function is unaffected by the D-PCB-1 pull-in above).
+// Reimplements the platform's ServiceRequest builder standalone (no platform-internal
+// import); the platform's SDK parity suite asserts byte-identity with it for the same
+// inputs. Thin CPT-only wrapper over BuildServiceRequestCoded (unchanged signature/behavior
+// — every existing caller of THIS function is unaffected by the HCPCS pull-in above).
 func BuildServiceRequest(cptCode, display, dxCode, patientRef string) ([]byte, error) {
 	return BuildServiceRequestCoded(systemCPT, cptCode, display, dxCode, patientRef)
 }
@@ -104,9 +100,8 @@ func BuildServiceRequest(cptCode, display, dxCode, patientRef string) ([]byte, e
 // nothing derives a resource reference from this identifier (a reader that needs one
 // uses Coverage.id), and a prefixed value is refused rather than stamped, because the
 // signature cannot express the change (both spellings are a string). meta.profile pins
-// the US Core profile. Its v0.61.1 form, the Deprecated BuildCoverage, is the one
-// test/sdkparity fences against internal/fhirmap; this builder names the payer
-// by identifier.
+// the US Core profile. It names the payer by identifier, which its v0.61.1 form
+// did not.
 //
 // payer is the payer the member's coverage is with, named by its identifier as a
 // logical reference (Reference.identifier). Without one the builder refuses
@@ -145,8 +140,8 @@ func BuildCoverageExact(patientRef, memberID string, payer PayerIdentifier) ([]b
 	return json.Marshal(cov)
 }
 
-// requireBareMemberID refuses a "Coverage/"-prefixed member id for the Coverage builders.
-// urn:shn:coverage carries the bare member number; before v0.42.0 these builders were
+// requireBareMemberID refuses a "Coverage/"-prefixed member id for BuildCoverageExact.
+// urn:shn:coverage carries the bare member number; before v0.42.0 the Coverage builders were
 // (mis)called with a reference-shaped "Coverage/<member>" value, and because the parameter
 // is a plain string that mistake is invisible to the compiler. Refusing loudly is the only
 // way a caller on the old convention finds out. The check is the PREFIX only — a member id
@@ -162,10 +157,8 @@ func requireBareMemberID(memberID string) error {
 // ServiceRequest JSON (the first code.coding[] with the CPT system
 // http://www.ama-assn.org/go/cpt). display is "" when that coding carries no display
 // (display is optional in FHIR). It errors if the resourceType is not ServiceRequest
-// or the CPT coding is absent. The display lets a responder source the PA-decision
-// EOB's productOrService.display from the ACTUAL service (FR-28) rather than a
-// hardcoded value. ParseServiceRequestCPT delegates to it. Ported standalone;
-// behavior parity proven by test/sdkparity/crd_parity_test.go.
+// or the CPT coding is absent. ParseServiceRequestCPT delegates to it. Ported standalone;
+// behavior parity proven by the platform's SDK parity suite.
 func ParseServiceRequestProcedure(data []byte) (code, display string, err error) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
@@ -299,9 +292,9 @@ func ParseServiceRequestCPT(data []byte) (string, error) {
 // ParseServiceRequestSubject extracts subject.reference from a ServiceRequest JSON
 // (e.g. "Patient/MBR-COVERED"). It errors if the resourceType is not ServiceRequest
 // or the subject reference is absent. Used to bind the token subject to the
-// order-select patient (H2). PORTED standalone from
-// internal/fhirmap.ParseServiceRequestSubject; behavior parity proven by
-// test/sdkparity/crd_parity_test.go.
+// order-select patient (H2). PORTED standalone from the platform's
+// ServiceRequest subject parser; behavior parity proven by the platform's SDK
+// parity suite.
 func ParseServiceRequestSubject(data []byte) (string, error) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
@@ -324,9 +317,9 @@ func ParseServiceRequestSubject(data []byte) (string, error) {
 // ParseCoverageBeneficiary extracts beneficiary.reference from a Coverage JSON
 // (e.g. "Patient/MBR-COVERED"). It errors if the resourceType is not Coverage or
 // the beneficiary reference is absent. Used to bind the token subject to the
-// order-select patient (H2). PORTED standalone from
-// internal/fhirmap.ParseCoverageBeneficiary; behavior parity proven by
-// test/sdkparity/crd_parity_test.go.
+// order-select patient (H2). PORTED standalone from the platform's
+// Coverage beneficiary parser; behavior parity proven by the platform's SDK
+// parity suite.
 //
 // data may also be a Bundle (a search result or a collection) of Coverages: every Coverage
 // entry must name the same beneficiary, which is returned; a Bundle with no Coverage or with

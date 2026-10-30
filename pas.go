@@ -80,7 +80,7 @@ type NeededItem struct {
 // (reviewActionCode + disposition + processNote). ReasonCode is the actual PAS
 // reviewActionCode (X12 306) — "A3" ("Not Certified"), the conformant denial code SHN's
 // own producer emits, or the real reference payer's (br-payer) observed "A2" denial shape
-// (a code/display self-contradiction in that RI — see sdk/pas.go's reviewAction* consts).
+// (a code/display self-contradiction in that RI — see pas.go's reviewAction* consts).
 type Denial struct {
 	ReasonCode string
 	Rationale  string   // ClaimResponse.disposition
@@ -146,11 +146,13 @@ type PriorAuthResume struct {
 
 	// ClaimFacts are the submission's own request facts (PriorAuthRequest.
 	// ClaimFacts), which the amendment states again; Submission is the recorded
-	// submission (PASPriorClaimOf: its Claim type and priority as sent, its
-	// created and its items), which the amendment's prior-Claim entry restates
-	// and its infoChanged marker is derived from. ADDITIVE serialized fields
-	// (shn-sdk v0.62.0): a handle written earlier lacks them, and resume
-	// refuses it rather than amend with values this package would supply.
+	// submission (PASPriorClaimOf: the submitted Claim as sent), which the
+	// amendment's prior-Claim entry carries and its infoChanged marker is
+	// derived from. ADDITIVE serialized fields (shn-sdk v0.62.0): a handle
+	// written earlier lacks them, and resume refuses it rather than amend with
+	// values this package would supply. A handle written by shn-sdk v1.0.0 or
+	// earlier has a Submission without its Claim, and resume refuses it too
+	// (ErrPASPriorClaimNotCarried): resubmit the request.
 	ClaimFacts *PASClaimFacts `json:"claimFacts,omitempty"`
 	Submission *PASPriorClaim `json:"submission,omitempty"`
 
@@ -166,7 +168,7 @@ type PriorAuthResume struct {
 // fullUrl SHALL be a URL consistent with Resource.id (FHIR bdl-7 / reference
 // resolution): with fullUrl "<base>/ServiceRequest/sr-x", a relative reference
 // "ServiceRequest/sr-x" elsewhere in the bundle resolves to this entry. Ported
-// byte-for-byte from internal/pas.bundleBaseURL.
+// byte-for-byte from the platform's PAS bundle base URL.
 const pasBundleBaseURL = "https://shn.example/fhir"
 
 // pasBundleIdentifierSystem is the Bundle.identifier.system stamped on every PAS
@@ -183,7 +185,7 @@ const pasCorrelationSystem = "urn:shn:correlation"
 
 // pasFullURLFor returns the resolvable fullUrl for a bundle entry resource, derived
 // from its resourceType + id. Errors if either is missing. Ported standalone from
-// internal/pas.fullURLFor.
+// the platform's PAS bundle builder.
 func pasFullURLFor(resourceJSON []byte) (string, error) {
 	var meta struct {
 		ResourceType string `json:"resourceType"`
@@ -200,7 +202,7 @@ func pasFullURLFor(resourceJSON []byte) (string, error) {
 
 // pasInjectResourceType adds "resourceType":"<rt>" to a marshalled JSON object.
 // samply structs do not include resourceType in their JSON tags. Ported standalone
-// from internal/pas.injectResourceType.
+// from the platform's PAS bundle builder.
 func pasInjectResourceType(raw []byte, rt string) ([]byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -544,6 +546,12 @@ type ConformantClaimInputs struct {
 	// this builder never emits) infoChanged is benign on br-payer — its re-evaluation
 	// path is gated on a prior claim, absent here. Default false. NO prior-claim ref is
 	// added (this is a submit, not an update).
+	//
+	// Deprecated: a fresh submit has no prior, so "changed" ("previously sent
+	// information has been changed", PAS PASTempCodes) is never true of its items. An
+	// amendment's markers are derived from the submission it continues
+	// (BuildConformantClaimUpdateBundleExact). A later SDK minor release removes this
+	// field, named in that release's notes.
 	InfoChanged bool
 	// Payer is the payer identity (system|value) the leg is routed on — the identity
 	// read from the patient's Coverage. Insurer must carry it as an identifier; a
@@ -564,7 +572,7 @@ type ConformantClaimInputs struct {
 	// PASClaimFacts are the request's own facts — claim type, priority, service
 	// category, place of service and request type — as the requester states
 	// them. See PASClaimFacts for when BuildConformantClaimBundle(AtLine)Exact
-	// refuses. The Deprecated BuildConformantClaimBundle(AtLine) ignores them.
+	// refuses. The Deprecated BuildConformantClaimBundle ignores them.
 	// certificationType is not among them: a submission is X12 1322 "I"
 	// Initial, a fact of the operation, written from PAS 2.1.
 	PASClaimFacts
@@ -573,8 +581,8 @@ type ConformantClaimInputs struct {
 // BuildConformantClaimBundleExact assembles a LEAN, generic, demo-persona-derived CONFORMANT
 // Da Vinci $submit Claim Bundle — the only PA $submit contract (the minimized
 // BuildClaimBundle has been removed). The entry set is exactly what the
-// payer-side parseConformantPASSubjects (gateway/engine/pas_native.go) + the SHN-native
-// adjudicator + `make validate` require, with NO br-payer foreign seed:
+// payer-side parseConformantPASSubjects (the gateway's native PAS bind) + the SHN-native
+// adjudicator + the platform's IG-profile $validate gate require, with NO br-payer foreign seed:
 //
 //	Claim (use preauthorization; item[].productOrService = the passed order's own code (CPT
 //	      72148 for this doc's example demo persona) + extension-requestedService → the
@@ -596,7 +604,7 @@ type ConformantClaimInputs struct {
 // time.Now/random); the QR/SR/refs are demo-persona-derived by the caller.
 //
 // BuildConformantClaimBundleExact speaks PAS line 2.0 — it is BuildConformantClaimBundleAtLineExact("2.0", in),
-// byte-identical (regression-fenced by test/sdkparity). Use BuildConformantClaimBundleAtLineExact to
+// byte-identical (regression-fenced by the platform's SDK parity suite). Use BuildConformantClaimBundleAtLineExact to
 // target 2.1/2.2 (PAS package differential: Claim.item certificationType/requestType/location[x]).
 func BuildConformantClaimBundleExact(in ConformantClaimInputs) ([]byte, error) {
 	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
@@ -676,9 +684,10 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: repoint insurer to entry: %w", err)
 	}
-	// The caller's own infoChanged statement (InfoChanged): every item marked "changed" when
-	// requested. NO prior-claim ref is added (fresh submit), so it stays benign on br-payer
-	// (whose re-evaluation is gated on a prior claim). Default false → byte-identical.
+	// The caller's own infoChanged statement (the Deprecated InfoChanged): every item marked
+	// "changed" when requested. NO prior-claim ref is added (fresh submit), so it stays benign
+	// on br-payer (whose re-evaluation is gated on a prior claim). Default false →
+	// byte-identical.
 	if in.InfoChanged {
 		claimJSON, err = appendInfoChangedToClaimItems(claimJSON)
 		if err != nil {
@@ -1133,7 +1142,7 @@ func repointInsurerToEntry(claimJSON []byte, payerOrgID string) ([]byte, error) 
 // such contained resource.
 //
 // entryOrgID is the id of the payer Organization ENTRY the request now carries.
-// It is the id to drop, not just the minted conformantPayerOrgID, because the
+// It is the id to drop, not just the minted id "cms-payer", because the
 // record this request carries is the PARTICIPANT'S OWN Coverage, and a
 // participant's Coverage may carry its payer organization INSIDE itself — the
 // shape the demo roster, the bridging personas and the Cambia member are all
@@ -1143,7 +1152,7 @@ func repointInsurerToEntry(claimJSON []byte, payerOrgID string) ([]byte, error) 
 // contained copy is referenced by nothing, which is FHIR dom-3 — a contained
 // resource SHALL be referred to from elsewhere in the resource that contains it.
 // A pinned IG-profile $validate rejects that at egress, which is how it surfaced:
-// only the members whose contained org id was NOT conformantPayerOrgID were hit,
+// only the members whose contained org id was NOT "cms-payer" were hit,
 // so every cms-payer persona passed and the bridging one did not.
 //
 // Nothing is lost by the drop: the very same Organization rides the request as
@@ -1365,8 +1374,8 @@ func absolutizeBundleRefs(bundleJSON []byte) ([]byte, error) {
 // NOT Provenance.entity which marks derived-from inputs) and the PurposeOfUse via
 // Provenance.reason. policyRef ("Consent/<id>") and purposeOfUse are omitted when
 // empty. Used by an external facility to make the disclosure provably consent-anchored
-// in a federated-query prior-auth flow. Promoted from internal/pas.BuildProvenanceWithPolicy;
-// parity-tested in test/sdkparity/pas_provenance_parity_test.go.
+// in a federated-query prior-auth flow. Promoted from the platform's Provenance builder;
+// parity-tested in the platform's SDK parity suite.
 func BuildProvenanceWithPolicy(targetRef, agentWho, policyRef, purposeOfUse string, recorded time.Time) ([]byte, error) {
 	prov := fhir.Provenance{
 		Target:   []fhir.Reference{{Reference: strPtr(targetRef)}},
@@ -1426,15 +1435,15 @@ func BuildProvenanceWithIdentifier(targetRef string, source ProvenanceIdentifier
 
 // BuildProvenance builds a Provenance attributing supplemental data to its source
 // (FR-32) — the no-policy form used for local supplemental evidence (no consent URI).
-// Reimplements internal/pas.BuildProvenance standalone; test/sdkparity asserts
-// byte-identity. recorded is injected (deterministic).
+// Reimplements the platform's Provenance builder standalone; the platform's SDK
+// parity suite asserts byte-identity. recorded is injected (deterministic).
 func BuildProvenance(targetRef, agentWho string, recorded time.Time) ([]byte, error) {
 	return BuildProvenanceWithPolicy(targetRef, agentWho, "", "", recorded)
 }
 
 // buildPASUpdateClaim constructs the FHIR Claim for an UPDATE bundle: identical to
 // buildPASClaim but with related[] referencing the original claim by correlation
-// identifier (FR-21). Ported byte-for-byte from internal/pas.buildClaim's related path.
+// identifier (FR-21). Ported byte-for-byte from the platform's PAS claim builder's related path.
 // coverageRef carries the same caveat as buildPASClaim's: BuildConformantClaimUpdateBundleExact
 // overwrites insurance[0].coverage with a logical reference before the bundle is assembled.
 func buildPASUpdateClaim(patientRef, coverageRef, providerRef, correlationID, originalCorrelationID string, created time.Time, facts pasResolvedFacts) ([]byte, error) {
@@ -1611,70 +1620,135 @@ func appendInfoChangedToClaimItemsMap(claim map[string]interface{}) error {
 	return nil
 }
 
-// buildPriorClaimEntry restates the prior Claim an amendment carries from PAS 2.1 as a resolvable
-// bundle ENTRY (see setPriorClaimReference). It stands for the original submit's claim:
-// br-payer's resolvePriorClaim finds it via related[0].claim.reference, then searches the stored
-// authorization by its FIRST identifier — so it carries urn:shn:correlation|OriginalCorr (the
-// initial submit's stored Claim identifier). The bundle is SHN-produced, so this entry must be a
-// base-FHIR-VALID Claim (FR-36 egress $validate): it carries every required Claim element
-// (status/type/use/patient/created/provider/priority/insurance). NOT first in the bundle, so
-// PasBundleValidator's first-entry profile checks do not apply.
-//
-// Its type, priority and created are the RECORDED SUBMISSION'S own (PASPriorClaim), as the
-// submission sent them — never this builder's constants and never the amendment's own time. Its
-// item list is not restated (Claim.item is 0..* in base R4). A record that lacks any of the three
-// refuses the amendment (PASPriorClaim.check).
-func buildPriorClaimEntry(patientRef, coverageRef, providerRef, payerOrgID, originalCorr string, prior PASPriorClaim) ([]byte, error) {
-	if err := prior.check(); err != nil {
-		return nil, err
-	}
-	claim := fhir.Claim{
-		Id:       strPtr(conformantPASClaimID),
-		Status:   fhir.FinancialResourceStatusCodesActive,
-		Use:      fhir.UsePreauthorization,
-		Patient:  fhir.Reference{Reference: strPtr(patientRef)},
-		Created:  prior.Created,
-		Provider: fhir.Reference{Reference: strPtr(providerRef)},
-		Insurer:  &fhir.Reference{Reference: strPtr("Organization/" + payerOrgID)},
-		Insurance: []fhir.ClaimInsurance{{
-			Sequence: 1,
-			Focal:    true,
-			Coverage: fhir.Reference{Reference: strPtr(coverageRef)},
-		}},
-		Identifier: []fhir.Identifier{{
-			System: strPtr("urn:shn:correlation"),
-			Value:  strPtr(originalCorr),
-		}},
-	}
-	raw, err := json.Marshal(claim)
-	if err != nil {
-		return nil, err
-	}
-	// The submitted type and priority, each the CodeableConcept exactly as
-	// sent: every member of every coding, never rebuilt from system and code.
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, err
-	}
-	m["type"], m["priority"] = prior.ClaimType, prior.Priority
-	if raw, err = json.Marshal(m); err != nil {
-		return nil, err
-	}
-	return pasInjectResourceType(raw, "Claim")
+// pasCarriedPriorClaim is the recorded submission's Claim as an amendment
+// carries it: its bytes as the submission sent them (compact), its id, which
+// the amendment's related claim references from PAS 2.1, and its items, which
+// the amendment's are compared with (pasInfoChangedMarks).
+type pasCarriedPriorClaim struct {
+	raw   []byte
+	id    string
+	items []json.RawMessage
 }
 
-// check refuses a recorded submission that cannot be restated as it was sent,
-// or whose items cannot be compared with the amendment's.
-func (p PASPriorClaim) check() error {
-	switch {
-	case pasFactIsAbsent(p.ClaimType):
-		return pasFactAbsent("the prior Claim's type", "the recorded submission (PASPriorClaim.ClaimType)")
-	case pasFactIsAbsent(p.Priority):
-		return pasFactAbsent("the prior Claim's priority", "the recorded submission (PASPriorClaim.Priority)")
-	case strings.TrimSpace(p.Created) == "":
-		return pasFactAbsent("the prior Claim's created", "the recorded submission (PASPriorClaim.Created; a continuation written before this release does not record it, and the amendment's own time is never restated as the original's)")
-	case len(p.Items) == 0:
-		return pasFactAbsent("the prior Claim's items", "the recorded submission (PASPriorClaim.Items: which of the amendment's items changed is read against them)")
+// carried reads the record an amendment of the submission correlated
+// originalCorr carries. It refuses a record with no Claim (every record
+// written before PASPriorClaim.Claim existed), one that is not a Claim, has
+// no id or no items, or is another submission's: its first identifier is not
+// urn:shn:correlation|originalCorr, which the amendment's related claim names
+// and by which a payer finds the authorization it holds.
+func (p PASPriorClaim) carried(originalCorr string) (pasCarriedPriorClaim, error) {
+	if pasFactIsAbsent(p.Claim) {
+		return pasCarriedPriorClaim{}, pasPriorClaimNotCarried("the recorded submission carries no Claim (a record written by shn-sdk v1.0.0 or earlier records none): resubmit the request instead of amending it")
+	}
+	// The bytes as the amendment's bundle encodes them: compact, with <, > and &
+	// in strings written as \u003c, \u003e and \u0026, as encoding/json writes
+	// every bundle (a submission the SDK built is already in this form). No
+	// member, value or order changes.
+	var compact, buf bytes.Buffer
+	if err := json.Compact(&compact, p.Claim); err != nil {
+		return pasCarriedPriorClaim{}, pasPriorClaimNotCarried("the recorded Claim is not JSON: " + err.Error())
+	}
+	json.HTMLEscape(&buf, compact.Bytes())
+	var cl struct {
+		ResourceType string `json:"resourceType"`
+		ID           string `json:"id"`
+		Identifier   []struct {
+			System string `json:"system"`
+			Value  string `json:"value"`
+		} `json:"identifier"`
+		Item []json.RawMessage `json:"item"`
+	}
+	if json.Unmarshal(buf.Bytes(), &cl) != nil || cl.ResourceType != "Claim" {
+		return pasCarriedPriorClaim{}, pasPriorClaimNotCarried("the recorded resource is not a Claim")
+	}
+	if !fhirIDPattern.MatchString(cl.ID) {
+		return pasCarriedPriorClaim{}, pasPriorClaimNotCarried("the recorded Claim has no id the amendment's related claim can reference")
+	}
+	if len(cl.Identifier) == 0 || cl.Identifier[0].System != pasCorrelationSystem || cl.Identifier[0].Value != originalCorr {
+		return pasCarriedPriorClaim{}, pasPriorClaimNotCarried(fmt.Sprintf("the recorded Claim's first identifier is not %s|%s, the submission this amendment names", pasCorrelationSystem, originalCorr))
+	}
+	if len(cl.Item) == 0 {
+		return pasCarriedPriorClaim{}, pasPriorClaimNotCarried("the recorded Claim has no items to compare the amendment's items with")
+	}
+	return pasCarriedPriorClaim{raw: buf.Bytes(), id: cl.ID, items: cl.Item}, nil
+}
+
+// checkPriorClaimCarried checks the built amendment carries the prior Claim
+// exactly as recorded — no build step (absolutizeBundleRefs among them)
+// rewrote it — and that each of its references resolves in the amendment's
+// bundle: an absolute one to an entry's fullUrl, a relative one against the
+// prior entry's own base, a local one to a contained resource. A reference
+// that does not resolve refuses the amendment, never rewritten to one that does.
+func checkPriorClaimCarried(bundleJSON []byte, prior pasCarriedPriorClaim) error {
+	var b struct {
+		Entry []struct {
+			FullURL  string          `json:"fullUrl"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundleJSON, &b); err != nil {
+		return fmt.Errorf("check the prior Claim: %w", err)
+	}
+	priorURL := pasBundleBaseURL + "/Claim/" + prior.id
+	fullURLs := map[string]bool{}
+	var carried json.RawMessage
+	for _, e := range b.Entry {
+		fullURLs[e.FullURL] = true
+		if e.FullURL == priorURL {
+			carried = e.Resource
+		}
+	}
+	if !bytes.Equal(carried, prior.raw) {
+		return pasPriorClaimNotCarried("a step of the amendment's build would change the recorded Claim; it is carried as sent or not at all")
+	}
+	var claim map[string]any
+	if err := json.Unmarshal(prior.raw, &claim); err != nil {
+		return fmt.Errorf("check the prior Claim: %w", err)
+	}
+	contained := map[string]bool{}
+	if cs, ok := claim["contained"].([]any); ok {
+		for _, c := range cs {
+			if cm, ok := c.(map[string]any); ok {
+				if id, ok := cm["id"].(string); ok {
+					contained["#"+id] = true
+				}
+			}
+		}
+	}
+	var unresolved []string
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			if ref, ok := x["reference"].(string); ok {
+				switch {
+				case strings.HasPrefix(ref, "#"):
+					if !contained[ref] {
+						unresolved = append(unresolved, ref)
+					}
+				case strings.Contains(ref, ":"):
+					if !fullURLs[ref] {
+						unresolved = append(unresolved, ref)
+					}
+				default:
+					if !fullURLs[pasBundleBaseURL+"/"+ref] {
+						unresolved = append(unresolved, ref)
+					}
+				}
+			}
+			for _, c := range x {
+				walk(c)
+			}
+		case []any:
+			for _, c := range x {
+				walk(c)
+			}
+		}
+	}
+	walk(claim)
+	if len(unresolved) > 0 {
+		slices.Sort(unresolved)
+		return pasPriorClaimNotCarried("the recorded Claim references what the amendment's bundle does not carry: " + strings.Join(unresolved, ", "))
 	}
 	return nil
 }
@@ -1892,10 +1966,10 @@ func applyInfoChangedMarks(claimJSON []byte, marks map[int]string) ([]byte, erro
 // foreign seed.
 //
 // From shn-sdk v0.59.0, as for ConformantClaimInputs, Insurer is required on every call and
-// the amendment names only that payer. At PAS 2.1 and 2.2 every amendment carries a
-// synthesized restatement of the prior Claim as a resolvable entry (that restatement is not
-// the requester's original Claim: see buildPriorClaimEntry). At PAS 2.0 it carries none: the
-// update names its prior by identifier alone (PASDef.UpdateCarriesPriorClaim).
+// the amendment names only that payer. At PAS 2.1 and 2.2 every amendment carries the
+// requester's submitted Claim as a resolvable entry, exactly as the submission sent it
+// (PriorClaim). At PAS 2.0 it carries none: the update names its prior by identifier alone
+// (PASDef.UpdateCarriesPriorClaim).
 //
 // AbsoluteRefs: same semantics as ConformantClaimInputs.AbsoluteRefs — set true for the
 // reference-payer lane so update bundle internal refs are absolute. Out-of-bundle refs (e.g.
@@ -1928,8 +2002,8 @@ type ConformantClaimUpdateInputs struct {
 	// Deprecated: as ConformantClaimInputs.ContainedInsurer.
 	ContainedInsurer bool
 	AbsoluteRefs     bool // reference-payer lane only; false = relative references
-	// PayerOrgEntry has no effect: the payer always rides as the Insurer entry and the
-	// synthesized prior-Claim restatement as the entry the update Claim's related claim names.
+	// PayerOrgEntry has no effect: the payer always rides as the Insurer entry and, from
+	// PAS 2.1, the submitted Claim as the entry the update Claim's related claim names.
 	//
 	// Deprecated: as ConformantClaimInputs.PayerOrgEntry.
 	PayerOrgEntry bool
@@ -1950,7 +2024,7 @@ type ConformantClaimUpdateInputs struct {
 	// PASClaimFacts are the amendment's own facts, read exactly as for
 	// ConformantClaimInputs.PASClaimFacts. This and the fields below through Pend
 	// are read by BuildConformantClaimUpdateBundle(AtLine)Exact; the Deprecated
-	// BuildConformantClaimUpdateBundle(AtLine) ignores them.
+	// BuildConformantClaimUpdateBundle ignores them.
 	PASClaimFacts
 	// CertificationType is the kind of amendment this is (Claim.item extension
 	// certificationType, an X12 1322 coding): the caller states it; the builder
@@ -1959,9 +2033,14 @@ type ConformantClaimUpdateInputs struct {
 	// when absent.
 	CertificationType json.RawMessage
 	// PriorClaim is the recorded submission (PASPriorClaimOf): from PAS 2.1 the
-	// prior-Claim entry restates its type, priority and created as sent (PAS 2.0
-	// carries no prior entry), and at every line the builder derives the PAS
-	// infoChanged marker from its items — no caller states it.
+	// prior-Claim entry is its Claim, carried as sent (PAS 2.0 carries no prior
+	// entry), and at every line the builder derives the PAS infoChanged marker
+	// from that Claim's items — no caller states it. A record that cannot be
+	// carried as sent refuses the amendment (ErrPASPriorClaimNotCarried): one
+	// with no Claim, or whose Claim has no id or items, names another
+	// submission (its first identifier is not urn:shn:correlation|OriginalCorr),
+	// or, from PAS 2.1, references what the amendment's bundle does not carry or
+	// would be changed by a step of the build.
 	// An item of this amendment whose sequence the submission had no item for
 	// carries infoChanged "added"; one that differs from the submitted item in
 	// any member or value carries "changed"; one sent before exactly as now
@@ -2010,7 +2089,7 @@ type ConformantClaimUpdateInputs struct {
 //
 // BuildConformantClaimUpdateBundleExact speaks PAS line 2.0 — it is
 // BuildConformantClaimUpdateBundleAtLineExact("2.0", in), byte-identical (regression-fenced
-// by test/sdkparity). Use BuildConformantClaimUpdateBundleAtLineExact to target 2.1/2.2
+// by the platform's SDK parity suite). Use BuildConformantClaimUpdateBundleAtLineExact to target 2.1/2.2
 // (PAS package differential: Claim.item line-detail + Claim.related.relationship).
 func BuildConformantClaimUpdateBundleExact(in ConformantClaimUpdateInputs) ([]byte, error) {
 	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
@@ -2035,7 +2114,11 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if err != nil {
 		return nil, err
 	}
-	marks, err := pasInfoChangedMarks(unmarked, in.PriorClaim.Items)
+	prior, err := in.PriorClaim.carried(in.OriginalCorr)
+	if err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
+	marks, err := pasInfoChangedMarks(unmarked, prior.items)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
@@ -2051,14 +2134,19 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	// below, unconditionally) and restamp id to the update-specific conformant id. ---
 	// The amendment's own facts: the same reading as the submission's,
 	// plus the certificationType only the caller can state (the kind of
-	// amendment this is), and the recorded submission the prior-Claim entry
-	// restates. Every refusal comes before anything is assembled.
+	// amendment this is), and the recorded submission whose Claim the
+	// prior-Claim entry carries. Every refusal of the record but the final
+	// carried-as-sent check comes before anything is assembled.
 	facts, err := resolvePASUpdateFacts(def, in.PASClaimFacts, in.CertificationType)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
-	if err := in.PriorClaim.check(); err != nil {
+	prior, err := in.PriorClaim.carried(in.OriginalCorr)
+	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
+	if def.UpdateCarriesPriorClaim && prior.id == conformantPASClaimUpdateID {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", pasPriorClaimNotCarried("the recorded Claim's id is the amendment's own Claim id ("+prior.id+"), so the two cannot both be bundle entries"))
 	}
 	providerRef, providerURL, err := pasProviderEntry(in.Provider)
 	if err != nil {
@@ -2157,7 +2245,7 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	// .identifier is kept. At PAS 2.0 the related claim stays the identifier alone, and the
 	// reference payer looks the prior up in its own records by it.
 	if def.UpdateCarriesPriorClaim {
-		claimJSON, err = setPriorClaimReference(claimJSON, "Claim/"+conformantPASClaimID)
+		claimJSON, err = setPriorClaimReference(claimJSON, "Claim/"+prior.id)
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant update: prior-claim ref: %w", err)
 		}
@@ -2251,16 +2339,13 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 		return nil, fmt.Errorf("shnsdk: conformant update: the requesting provider and the payer organization are the same bundle entry (%s)", providerRef)
 	}
 	baseResources = append(baseResources, payerOrg.raw)
-	// From PAS 2.1, the prior Claim as a resolvable bundle ENTRY (NOT first; carries
-	// urn:shn:correlation|OriginalCorr, what a payer searches the stored authorization on).
-	// The operative update Claim's related.reference resolves to it. Not at PAS 2.0, whose
-	// request Bundle allows one Claim.
+	// From PAS 2.1, the prior Claim as a resolvable bundle ENTRY (NOT first): the
+	// requester's submitted Claim, carried exactly as the submission sent it (its first
+	// identifier is urn:shn:correlation|OriginalCorr, what a payer searches the stored
+	// authorization on). The operative update Claim's related.reference resolves to it.
+	// Not at PAS 2.0, whose request Bundle allows one Claim.
 	if def.UpdateCarriesPriorClaim {
-		priorClaimJSON, err := buildPriorClaimEntry(in.PatientRef, coverageRef, providerRef, payerOrg.id, in.OriginalCorr, in.PriorClaim)
-		if err != nil {
-			return nil, fmt.Errorf("shnsdk: conformant update: build prior claim entry: %w", err)
-		}
-		baseResources = append(baseResources, priorClaimJSON)
+		baseResources = append(baseResources, prior.raw)
 	}
 	for _, rj := range baseResources {
 		e, err := entryFor(rj)
@@ -2315,6 +2400,11 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 		bundleOut, err = absolutizeBundleRefs(bundleOut)
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant update: absolutize refs: %w", err)
+		}
+	}
+	if def.UpdateCarriesPriorClaim {
+		if err := checkPriorClaimCarried(bundleOut, prior); err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 		}
 	}
 	if err := checkPASProviderResolves(bundleOut); err != nil {
@@ -2682,17 +2772,16 @@ func selectPASClaimResponse(data []byte) (json.RawMessage, []json.RawMessage, er
 }
 
 const (
-	// PAS reviewAction extension URLs (mirror internal/pas). The X12 review-action code
+	// PAS reviewAction extension URLs (mirror the platform's PAS builders). The X12 review-action code
 	// system (https://codesystem.x12.org/005010/306) defines A1 = Certified in total,
 	// A2 = Certified – partial, A3 = Not Certified (the denial), A4 = Pended. There is no
-	// "Not Required" code in the A-series. SHN's own producer (sdk/pasresponder.go) emits
+	// "Not Required" code in the A-series. SHN's own producer (pasresponder.go) emits
 	// the conformant A3 for its denials — this is correct, not a legacy stand-in for A2.
 	//
 	// The real reference payer (br-payer a8bece4) denies with reviewActionCode A2 but
 	// display text "Not Certified" — a code/display self-contradiction, i.e. a bug in the
-	// RI (worth reporting upstream to HL7 Da Vinci; see
-	// docs/workstreams/prior-authorization/mode-a-onboarding.md §"Denial review-action
-	// code" for the recorded divergence). The SDK PARSES A2-as-a-denial so it can read a
+	// RI (worth reporting upstream to HL7 Da Vinci; the platform's prior-authorization
+	// onboarding notes record the divergence). The SDK PARSES A2-as-a-denial so it can read a
 	// real RI's output, but never EMITS it — SHN's own denials always carry A3.
 	//
 	// The SDK only needs the two extension URLs + the code to PARSE a denial; the denied

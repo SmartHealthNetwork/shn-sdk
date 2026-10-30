@@ -1612,9 +1612,9 @@ func TestBuildConformantClaimBundle_PayerOrgEntry(t *testing.T) {
 			if len(r.Identifier) != 1 {
 				t.Fatalf("payer org entry identifier count = %d, want 1: %s", len(r.Identifier), e.Resource)
 			}
-			if r.Identifier[0].System != systemNAICCompanyCode || r.Identifier[0].Value != conformantPayerOrgValue {
+			if r.Identifier[0].System != CMSPayerIdentity.System || r.Identifier[0].Value != CMSPayerIdentity.Value {
 				t.Fatalf("payer org entry identifier = %s|%s, want %s|%s",
-					r.Identifier[0].System, r.Identifier[0].Value, systemNAICCompanyCode, conformantPayerOrgValue)
+					r.Identifier[0].System, r.Identifier[0].Value, CMSPayerIdentity.System, CMSPayerIdentity.Value)
 			}
 		}
 		if r.ResourceType == "Coverage" && len(r.Payor) == 1 {
@@ -1658,6 +1658,12 @@ func testPriorClaimResolvableAt(t *testing.T, line string) {
 	in.AbsoluteRefs = true
 	in.PayerOrgEntry = true
 	in.Insurer = testPayerOrganization(CMSPayerIdentity)
+	// The submission stated its service category without the display the
+	// amendment states, so the amendment's item carries information changed
+	// since (infoChanged "changed").
+	sub := in
+	sub.ServiceCategory = json.RawMessage(`{"system":"https://codesystem.x12.org/005010/1365","code":"1"}`)
+	in.PriorClaim = testSubmissionFor(t, line, sub)
 
 	got, err := BuildConformantClaimUpdateBundleAtLineExact(line, in)
 	if err != nil {

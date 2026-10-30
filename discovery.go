@@ -5,14 +5,15 @@ import (
 	"slices"
 )
 
-// Discovery is the SHN network discovery descriptor (accountsvc GET /discovery): the
+// Discovery is the SHN network discovery descriptor (the network's GET /discovery): the
 // machine-readable, FR-37 conformance surface for the sealed-envelope protocol. It is
 // SUFFICIENT to drive the loop — endpoints + AuthzPublicKeyURL + the persona's
 // payerId resolve the Payer{ID,EncPub,AuthzPub} RunEligibility needs (the holder
 // matched via the registrar /holders feed; AuthzPub from /pubkey). No keys are
 // embedded (no drift). A 2.0.0 network's descriptor leaves out the deprecated
 // fields below (ContractVersions, DemoResponders, Endpoints.PatientAccess).
-// MUST stay wire-identical to the substrate's accountsvc.Discovery (test/sdkparity).
+// MUST stay wire-identical to the network's discovery document (the platform's SDK
+// parity suite pins it).
 type Discovery struct {
 	Demo                bool   `json:"demo"`
 	SyntheticDataOnly   bool   `json:"syntheticDataOnly"`
@@ -20,22 +21,22 @@ type Discovery struct {
 	// WireProtocolVersionsAccepted lists the wire protocol versions the
 	// network accepts beside WireProtocolVersion, while it moves from one
 	// version to the next. Additive; absent means only WireProtocolVersion.
-	// Producer: internal/accountsvc/discovery.go.
+	// Producer: the network's discovery endpoint.
 	WireProtocolVersionsAccepted []string          `json:"wireProtocolVersionsAccepted,omitempty"`
 	IGVersions                   map[string]string `json:"igVersions"`
 	// ContractVersions is LEGACY and no longer populated (2026-08-13): what any
 	// participant declares — including SHN-operated test participants — is participant
 	// truth (registrar feed §2.3 / directory §3), not a network property. The field
 	// stays declared for wire compatibility (grow-only); the network's contract
-	// capability surface is BridgedContractVersions. Producer: internal/accountsvc/discovery.go.
+	// capability surface is BridgedContractVersions. Producer: the network's discovery endpoint.
 	//
 	// Deprecated: absent from a 2.0.0 network's descriptor; read as empty;
 	// never relied on.
 	ContractVersions []string `json:"contractVersions,omitempty"`
-	// RequestFrames are the sealed REQUEST-frame versions this substrate's
+	// RequestFrames are the sealed REQUEST-frame versions this network's
 	// holders accept ("v1" — the request-frame contract). ADDITIVE optional
 	// field — an older consumer ignores it; does NOT bump wireProtocolVersion.
-	// Producer: internal/accountsvc/discovery.go.
+	// Producer: the network's discovery endpoint.
 	RequestFrames     []string           `json:"requestFrames,omitempty"`
 	Endpoints         DiscoveryEndpoints `json:"endpoints"`
 	AuthzPublicKeyURL string             `json:"authzPublicKeyURL"`
@@ -44,14 +45,14 @@ type Discovery struct {
 	// transport assertions on inbound messages. ADDITIVE optional field — an
 	// older consumer ignores it; does NOT bump wireProtocolVersion (same
 	// precedent as ExpectedPriorAuth in DiscoveryPersona). No embedded key
-	// (no drift). Producer: internal/accountsvc/discovery.go.
+	// (no drift). Producer: the network's discovery endpoint.
 	HubTransportKeyURL string `json:"hubTransportKeyURL"`
 	// FHIRValidateURL is the FHIR $validate endpoint the gateway uses for
 	// per-message operation-level validation (FR-36). ADDITIVE optional field —
 	// an older consumer ignores it; does NOT bump wireProtocolVersion. A
 	// zero-config gateway image MUST use this URL so it validates against our
 	// published profiles without any extra env. Empty ⇒ not advertised.
-	// Producer: internal/accountsvc/discovery.go.
+	// Producer: the network's discovery endpoint.
 	FHIRValidateURL string `json:"fhirValidateURL,omitempty"`
 	// DemoResponders are a 1.1.0 network's test counterparties. The CLI falls
 	// back to them only for a persona or handle that names no payerId.
@@ -67,7 +68,7 @@ type Discovery struct {
 	// repo-tracked pins — never hand-set.
 	// ADDITIVE optional field — an older consumer ignores it; does NOT bump
 	// wireProtocolVersion. Nil ⇒ omitted (a build without the
-	// PUBLISHED_VERSIONS_FILE env). Producer: internal/accountsvc/discovery.go.
+	// PUBLISHED_VERSIONS_FILE env). Producer: the network's discovery endpoint.
 	PublishedVersions *PublishedVersions `json:"publishedVersions,omitempty"`
 	// IGVersionsByLine maps each contract line ("2.0", "2.1", "2.2") to the IG
 	// package pin set that line validates against — same composition and short
@@ -189,13 +190,13 @@ type DiscoveryPersona struct {
 	// ExpectedPriorAuth tells shn priorauth/doctor which PA outcome to expect for this
 	// persona. ADDITIVE optional field: an older consumer safely ignores it, so it does
 	// NOT bump wireProtocolVersion (only a breaking wire change does). This is the
-	// additive-change precedent — see internal/accountsvc/discovery.go for the producer.
+	// additive-change precedent; the network's discovery endpoint is the producer.
 	ExpectedPriorAuth string `json:"expectedPriorAuth"` // "approved"|"pended"|"denied"|"" (n/a)
 	// ExpectedAfterAmend tells doctor the outcome to expect AFTER resuming a pended PA
 	// (prior auth with local supplemental evidence): "approved" for a pended persona
 	// whose resume completes, "" = no resume stage. ADDITIVE optional field (an older
 	// consumer safely ignores it) ⇒ does NOT bump wireProtocolVersion.
-	// Producer: internal/accountsvc/discovery.go.
+	// Producer: the network's discovery endpoint.
 	ExpectedAfterAmend string `json:"expectedAfterAmend"` // "approved" | "" (n/a)
 	// PayerID is the payer-identity claim (system,value) of the seeded member's
 	// Coverage payor — fixture truth, not a participant property. A consumer
@@ -203,7 +204,7 @@ type DiscoveryPersona struct {
 	// payerIds in the public /holders feed (FR-G41 semantics; unique by AI-G12).
 	// ADDITIVE optional field — an older consumer ignores it; does NOT bump
 	// wireProtocolVersion (ExpectedPriorAuth precedent). Absent ⇒ consumer falls
-	// back to demoResponders. Producer: internal/accountsvc/discovery.go.
+	// back to demoResponders. Producer: the network's discovery endpoint.
 	PayerID *PayerIdentifier `json:"payerId,omitempty"`
 	// Order is the persona's advertised prior-auth order: a payer verdict is a
 	// function of the ORDER CODE, so a descriptor that advertises a per-persona
@@ -212,8 +213,8 @@ type DiscoveryPersona struct {
 	// (non-nil) exactly when ExpectedPriorAuth is non-empty — an eligibility-only
 	// persona (no PA leg) carries no order. ADDITIVE optional field — an older
 	// consumer ignores it; does NOT bump wireProtocolVersion (ExpectedPriorAuth
-	// precedent). Producer: internal/accountsvc/discovery.go, DERIVED from
-	// gateway/engine's DemoOrderCodes() — never a hand-copied second table.
+	// precedent). Producer: the network's discovery endpoint, DERIVED from
+	// the Smart Gateway's own demo order codes — never a hand-copied second table.
 	Order *DiscoveryOrder `json:"order,omitempty"`
 	// SupplementalReport is the DiagnosticReport this persona's own synthetic system
 	// holds as the evidence for its pended order, as JSON, its subject the persona's
@@ -221,7 +222,7 @@ type DiscoveryPersona struct {
 	// (SupplementalReport.Report). Present exactly when ExpectedAfterAmend is non-empty.
 	// ADDITIVE optional field — an older consumer ignores it; does NOT bump
 	// wireProtocolVersion (ExpectedPriorAuth precedent). Absent ⇒ the network states no
-	// report, and a consumer has none to send. Producer: internal/accountsvc/discovery.go.
+	// report, and a consumer has none to send. Producer: the network's discovery endpoint.
 	SupplementalReport json.RawMessage `json:"supplementalReport,omitempty"`
 }
 

@@ -41,7 +41,7 @@ func canonJSON(raw []byte) string {
 func wrapCoding(coding string) string { return canonJSON([]byte(`{"coding":[` + coding + `]}`)) }
 
 // bundleClaims returns the bundle's Claim resources in entry order (the
-// operative Claim first; an update's prior-Claim restatement after it).
+// operative Claim first; an update's prior Claim, carried as submitted, after it).
 func bundleClaims(t *testing.T, bundleJSON []byte) []map[string]json.RawMessage {
 	t.Helper()
 	var bundle struct {
@@ -422,13 +422,15 @@ func TestPASUpdate_InfoChangedDerivedFromThePriorClaim(t *testing.T) {
 	}
 	editItem := func(t *testing.T, p PASPriorClaim, edit func(map[string]any)) PASPriorClaim {
 		t.Helper()
-		var it map[string]any
-		if err := json.Unmarshal(p.Items[0], &it); err != nil {
+		var cl map[string]any
+		if err := json.Unmarshal(p.Claim, &cl); err != nil {
 			t.Fatal(err)
 		}
+		items, _ := cl["item"].([]any)
+		it, _ := items[0].(map[string]any)
 		edit(it)
-		raw, _ := json.Marshal(it)
-		p.Items = []json.RawMessage{raw}
+		raw, _ := json.Marshal(cl)
+		p.Claim = raw
 		return p
 	}
 	for _, line := range pasLines {
@@ -498,76 +500,6 @@ func TestPASUpdate_InfoChangedDerivedFromThePriorClaim(t *testing.T) {
 	}
 }
 
-// The prior-Claim entry restates the submitted type and priority exactly as
-// sent: every member of every coding (version, userSelected, an extension)
-// and the CodeableConcept's text, never rebuilt from system and code.
-const (
-	testSubmittedTypeJSON     = `{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","version":"1.0.0","code":"professional","display":"Professional","userSelected":true,"extension":[{"url":"http://example.org/ext","valueString":"as the requester's system wrote it"}]}],"text":"Professional"}`
-	testSubmittedPriorityJSON = `{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/processpriority","code":"stat","display":"Immediate"}]}`
-)
-
-func TestPASUpdate_PriorClaimRestatesTheRecordedSubmission(t *testing.T) {
-	for _, line := range pasLines {
-		prior := testPriorClaimAt(t, line)
-		prior.ClaimType = json.RawMessage(testSubmittedTypeJSON)
-		prior.Priority = json.RawMessage(testSubmittedPriorityJSON)
-		prior.Created = "2026-05-30T08:15:00-04:00"
-		in := conformantUpdateInputsFromGolden(t)
-		in.PriorClaim = prior
-		out, err := BuildConformantClaimUpdateBundleAtLineExact(line, in)
-		if err != nil {
-			t.Fatal(err)
-		}
-		claims := bundleClaims(t, out)
-		if def, _ := PASLineDef(line); !def.UpdateCarriesPriorClaim {
-			// PAS 2.0.1's request Bundle allows one Claim: the update names its prior by
-			// identifier and restates nothing.
-			if len(claims) != 1 {
-				t.Fatalf("%s: %d Claims, want the update alone", line, len(claims))
-			}
-			continue
-		}
-		if len(claims) != 2 {
-			t.Fatalf("%s: %d Claims, want the update and the prior-Claim restatement", line, len(claims))
-		}
-		p := claims[1]
-		if got := string(p["created"]); got != `"2026-05-30T08:15:00-04:00"` {
-			t.Errorf("%s prior created = %s, want the recorded submission's, as sent", line, got)
-		}
-		if got := compactJSON(t, p["type"]); got != canonJSON([]byte(testSubmittedTypeJSON)) {
-			t.Errorf("%s prior type = %s, want the submitted CodeableConcept as sent", line, got)
-		}
-		if got := compactJSON(t, p["priority"]); got != canonJSON([]byte(testSubmittedPriorityJSON)) {
-			t.Errorf("%s prior priority = %s", line, got)
-		}
-		if bytes.Contains(p["created"], []byte(in.Created.UTC().Format("2006-01-02T15"))) {
-			t.Errorf("%s prior created restates the amendment's own time", line)
-		}
-	}
-}
-
-func TestPASUpdate_PriorClaimWithoutRecordedCreatedRefuses(t *testing.T) {
-	for _, line := range pasLines {
-		for name, mutate := range map[string]func(*PASPriorClaim){
-			"no created (a record written before this release)": func(p *PASPriorClaim) { p.Created = "" },
-			"no type":     func(p *PASPriorClaim) { p.ClaimType = nil },
-			"type null":   func(p *PASPriorClaim) { p.ClaimType = json.RawMessage("null") },
-			"no priority": func(p *PASPriorClaim) { p.Priority = nil },
-			"no items":    func(p *PASPriorClaim) { p.Items = nil },
-		} {
-			in := conformantUpdateInputsFromGolden(t)
-			mutate(&in.PriorClaim)
-			out, err := BuildConformantClaimUpdateBundleAtLineExact(line, in)
-			if err == nil || out != nil || !errors.Is(err, ErrPASClaimFactAbsent) || !strings.Contains(err.Error(), "prior Claim") {
-				t.Errorf("%s %s: err=%v, want a refusal naming the prior Claim", line, name, err)
-			}
-			if strings.HasPrefix(name, "no created") && (err == nil || !strings.Contains(err.Error(), "written before this release")) {
-				t.Errorf("%s: %v, want the refusal to say the record predates this release", line, err)
-			}
-		}
-	}
-}
-
 func TestPriorAuthContinuation_RecordsCreated(t *testing.T) {
 	out, err := BuildConformantClaimBundleAtLineExact("2.2", conformantSubmitInputs(t))
 	if err != nil {
@@ -587,8 +519,11 @@ func TestPriorAuthContinuation_RecordsCreated(t *testing.T) {
 	if p.Created != c.Created || !strings.Contains(string(p.ClaimType), `"professional"`) || !strings.Contains(string(p.Priority), PASSystemProcessPriority) || len(p.Items) != 1 {
 		t.Errorf("PASPriorClaimOf = %+v, want the submitted Claim's own type, priority, created and item", p)
 	}
+	if _, sent := submittedClaim(t, out); !bytes.Equal(p.Claim, sent) {
+		t.Errorf("PASPriorClaimOf Claim = %s, want the submitted Claim's bytes as sent", p.Claim)
+	}
 	// An empty record (a handle written before v0.62.0 carries none) is refused.
-	if err := (PASPriorClaim{}).check(); !errors.Is(err, ErrPASClaimFactAbsent) {
+	if _, err := (PASPriorClaim{}).carried("convergence-pas-submit-0001"); !errors.Is(err, ErrPASPriorClaimNotCarried) {
 		t.Errorf("an empty record: %v, want it refused", err)
 	}
 }

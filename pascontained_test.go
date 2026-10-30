@@ -29,7 +29,7 @@ func testMemberCoverageWithContainedPayer(member, orgID string, payer PayerIdent
 }
 
 // bridgingPayer is a demo-namespaced payer identity — one whose organization id
-// is NOT the minted conformantPayerOrgID. The distinction is the whole bug: the
+// is NOT the minted "cms-payer". The distinction is the whole bug: the
 // drop that ran when a re-point displaced a contained payer organization was
 // keyed on the minted id, so a participant whose own record used any other id
 // kept a contained organization nothing pointed at.

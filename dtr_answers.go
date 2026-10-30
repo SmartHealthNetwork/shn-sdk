@@ -44,18 +44,18 @@ type AnswerCoding struct{ System, Code, Display string }
 // author is the Practitioner reference that recorded the manual answers (e.g.
 // "Practitioner/1234567890"). It is required: dtrx-1 mandates an author sub-extension
 // when source="manual". An empty author returns an error. NOTE: source="manual" alone
-// is not FR-16-conformant for a clinician/patient author — the fence
-// (gateway/engine/workstream_pa_conformance_attest.go) additionally requires a COMPLETE attestation
+// is not FR-16-conformant for a clinician/patient author — the Smart Gateway's
+// attestation fence additionally requires a COMPLETE attestation
 // extension (shnsdk.BuildManualAttestedItem / BuildPatientAttestedItem) whenever
 // author names a Practitioner/Patient; this generic filler does not add one, so a
 // genuinely clinician/patient-authored fill needs its own attestation step layered on
-// top (the pattern gateway/engine/originate_uc03_oxygen.go's 6.1 item uses).
+// top (the pattern the gateway's home-oxygen demo originator uses for its 6.1 item).
 //
 // The QR carries subject=qc.PatientRef, the versioned questionnaire canonical,
 // authored, and the DTR qr-context extensions (reuses dtrQRContextExtensions). Unlike
 // FillQuestionnaire it is NOT restricted to one canonical. It is
 // FillQuestionnaireFromAnswersAtLine("2.0", …), byte-identical (regression-fenced by
-// sdk/dtr_answers_test.go). Use FillQuestionnaireFromAnswersAtLine to target 2.1/2.2
+// dtr_answers_test.go). Use FillQuestionnaireFromAnswersAtLine to target 2.1/2.2
 // (DTR package differential: the qr-coverage extension at 2.2 — the answer-level
 // source="manual" code itself never changes by line).
 func FillQuestionnaireFromAnswers(questionnaireJSON []byte, answers map[string]Answer, author string, qc QRContext) ([]byte, error) {

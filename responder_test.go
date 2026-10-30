@@ -997,6 +997,30 @@ func TestNewResponder_FailsClosed(t *testing.T) {
 			wantErr: "HubTransportPub",
 		},
 		{
+			name: "AuthzPub of the wrong length",
+			cfg: ResponderConfig{
+				Identity:        validIdent,
+				AuthzURL:        "http://authz",
+				AuthzPub:        authzPub[:ed25519.PublicKeySize-1],
+				HubTransportPub: hubPub,
+				ResolveEnc:      validResolve,
+				Adjudicator:     validAdj,
+			},
+			wantErr: "AuthzPub",
+		},
+		{
+			name: "HubTransportPub of the wrong length",
+			cfg: ResponderConfig{
+				Identity:        validIdent,
+				AuthzURL:        "http://authz",
+				AuthzPub:        authzPub,
+				HubTransportPub: append(append(ed25519.PublicKey{}, hubPub...), 0),
+				ResolveEnc:      validResolve,
+				Adjudicator:     validAdj,
+			},
+			wantErr: "HubTransportPub",
+		},
+		{
 			name: "nil ResolveEnc",
 			cfg: ResponderConfig{
 				Identity:        validIdent,

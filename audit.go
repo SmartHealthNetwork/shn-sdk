@@ -67,11 +67,11 @@ type AuditRecord struct {
 }
 
 // signableAuditContent is the canonical type whose json tags and field order
-// define the signed byte sequence. It is the one definition:
-// internal/audit.SignableContent delegates to SignableContent (FR-31), so the
+// define the signed byte sequence. It is the one definition: the Audit
+// Plane's own canonicalisation delegates to SignableContent (FR-31), so the
 // signer and every verifier canonicalise alike. The version 2 members are the
-// SDK's alone until internal/audit.Record gains them with the Audit Plane
-// release that stores version 2.
+// SDK's alone until the Audit Plane's stored record gains them with the Audit
+// Plane release that stores version 2.
 //
 // CRITICAL: AuditRecord must keep the same field names, json tags and order. A
 // field-order or additive-field drift between the two would silently break
@@ -143,7 +143,7 @@ type AuditAppendRequest struct {
 // verifies on append and /verify (FR-31).
 //
 // The canonical format is pinned by signableAuditContent's field order and
-// json tags — a stable, deterministic JSON encoding. internal/audit delegates
+// json tags — a stable, deterministic JSON encoding. The Audit Plane delegates
 // to this function so there is exactly ONE canonicalisation.
 func SignableContent(r AuditRecord) []byte {
 	b, _ := json.Marshal(signableAuditContent{

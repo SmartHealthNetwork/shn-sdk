@@ -131,7 +131,7 @@ func TestDeprecatedCRDRequestBuilders_RefuseWithoutPatient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cov, err := BuildCoverageWithPayer("Patient/MBR-COVERED", "MBR-COVERED", CMSPayerIdentity)
+	cov, err := containedPayorCoverage("Patient/MBR-COVERED", "MBR-COVERED", CMSPayerIdentity)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,8 +4,8 @@ package main
 // `shn doctor`'s resolution path. It fetches the network discovery descriptor and runs
 // a prior-authorization (CRD→DTR→PAS) against the resolved test payer using the dev's
 // OWN registered identity, then prints the outcome. Like doctor it calls NO FHIR/IG
-// validator — the substrate validates server-side — and depends only on stdlib +
-// shnsdk (no internal/).
+// validator — the network validates server-side — and depends only on stdlib +
+// shnsdk (no platform-internal packages).
 
 import (
 	"bytes"

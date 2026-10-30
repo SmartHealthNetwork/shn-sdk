@@ -190,9 +190,8 @@ func TestVectorClaimResponseConsume(t *testing.T) {
 
 // TestVectorClaimResponseAtLineConsume (vector corpus): the additive
 // testdata/vectors/{2.1,2.2}/claimresponse-approved.json vectors must CONSUME
-// identically to the flat vector — BuildClaimResponseAtLine is documented
-// "interface symmetry" (no structural delta at any line, sdk/pasresponder.go),
-// so this also proves ParseClaimResponse doesn't accidentally depend on
+// identically to the flat vector (an approved ClaimResponse has no structural
+// delta at any line), so this also proves ParseClaimResponse doesn't accidentally depend on
 // anything that WOULD vary by line.
 func TestVectorClaimResponseAtLineConsume(t *testing.T) {
 	dir := vectorsDir(t)
@@ -448,8 +447,8 @@ func TestVectorDeniedConsume(t *testing.T) {
 
 // TestVectorDeniedAtLineConsume (vector corpus): the additive
 // testdata/vectors/{2.1,2.2}/claimresponse-denied-uc08.json vectors must CONSUME
-// identically to the flat vector — BuildDeniedResponseAtLine is documented
-// "interface symmetry" (no structural delta at any line, sdk/pasresponder.go).
+// identically to the flat vector (a denied ClaimResponse has no structural delta
+// at any line).
 func TestVectorDeniedAtLineConsume(t *testing.T) {
 	dir := vectorsDir(t)
 	for _, line := range []string{"2.1", "2.2"} {

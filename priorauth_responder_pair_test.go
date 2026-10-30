@@ -638,12 +638,18 @@ func TestResumePriorAuth_PreReleaseHandleRefused(t *testing.T) {
 	}
 	for name, tc := range map[string]struct {
 		strip func(*PriorAuthResume)
+		is    error
 		want  string
 	}{
-		"no claimFacts": {func(r *PriorAuthResume) { r.ClaimFacts = nil },
+		"no claimFacts": {func(r *PriorAuthResume) { r.ClaimFacts = nil }, ErrPASClaimFactAbsent,
 			"pas-update-submit: Claim.type, Claim.priority and Claim.item.category " + ErrPASClaimFactAbsent.Error() + " (expected from the resume handle's claimFacts, which a handle written before shn-sdk v0.62.0 does not carry)"},
-		"no submission": {func(r *PriorAuthResume) { r.Submission = nil },
-			"pas-update-submit: the prior Claim's type, priority, created and items " + ErrPASClaimFactAbsent.Error() + " (expected from the resume handle's submission record, which a handle written before shn-sdk v0.62.0 does not carry)"},
+		"no submission": {func(r *PriorAuthResume) { r.Submission = nil }, ErrPASClaimFactAbsent,
+			"pas-update-submit: the prior Claim " + ErrPASClaimFactAbsent.Error() + " (expected from the resume handle's submission record, which a handle written before shn-sdk v0.62.0 does not carry)"},
+		// A handle shn-sdk v1.0.0 wrote: its submission record carries no Claim.
+		// The amendment is refused before anything is sent, and the request is
+		// resubmitted.
+		"a submission record without the Claim": {func(r *PriorAuthResume) { r.Submission.Claim = nil }, ErrPASPriorClaimNotCarried,
+			"pas-update-submit: build claim update bundle: shnsdk: conformant update: " + ErrPASPriorClaimNotCarried.Error() + ": the recorded submission carries no Claim (a record written by shn-sdk v1.0.0 or earlier records none): resubmit the request instead of amending it"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			handle := *res.Resume
@@ -661,7 +667,7 @@ func TestResumePriorAuth_PreReleaseHandleRefused(t *testing.T) {
 			// No endpoints: a refusal that came after anything was sent
 			// would fail on the wire instead, with another error.
 			_, err = senderIdent.ResumePriorAuth(context.Background(), nil, Endpoints{}, Payer{}, stored, demoSupplementalReport(handle.PatientRef))
-			if err == nil || !errors.Is(err, ErrPASClaimFactAbsent) || err.Error() != tc.want {
+			if err == nil || !errors.Is(err, tc.is) || err.Error() != tc.want {
 				t.Fatalf("err = %v\nwant %s", err, tc.want)
 			}
 		})

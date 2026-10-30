@@ -73,11 +73,11 @@ func TestNativeContractVersions(t *testing.T) {
 // TestParseDeclaredContractVersions_RefusesPDex: pa.pdex@2.1 left the native
 // and default sets, so a declared set naming it is refused, alone or beside
 // lines this build declares, with its own reason (remove it), not the
-// unbuildable-line refusal, whose remedy is a newer build. The constant keeps
-// its value, so a caller still holding it names the refused token.
+// unbuildable-line refusal, whose remedy is a newer build. The library owns
+// the token's bytes, since the refusal names it.
 func TestParseDeclaredContractVersions_RefusesPDex(t *testing.T) {
-	if ContractPAPDex21 != "pa.pdex@2.1" {
-		t.Fatalf("ContractPAPDex21 = %q, want pa.pdex@2.1", ContractPAPDex21)
+	if retiredPDexToken != "pa.pdex@2.1" {
+		t.Fatalf("retiredPDexToken = %q, want pa.pdex@2.1", retiredPDexToken)
 	}
 	const want = `contract-version token "pa.pdex@2.1" is declared by no Smart Gateway from shn-gateway v0.62.0 (no gateway builds a PDex resource), so this library no longer declares it: remove it from the declared set`
 	for _, csv := range []string{"pa.pdex@2.1", " pa.pdex@2.1 ", "pa.crd@2.0, pa.dtr@2.0, pa.pas@2.0, pa.pdex@2.1", ",pa.pdex@2.1,"} {
@@ -93,7 +93,7 @@ func TestParseDeclaredContractVersions_RefusesPDex(t *testing.T) {
 	// The value naming no token is still the default, which names no PDex line.
 	for _, csv := range []string{"", " , "} {
 		got, err := ParseDeclaredContractVersions(csv)
-		if err != nil || slices.Contains(got, ContractPAPDex21) || !slices.Equal(got, SupportedContractVersions()) {
+		if err != nil || slices.Contains(got, retiredPDexToken) || !slices.Equal(got, SupportedContractVersions()) {
 			t.Errorf("ParseDeclaredContractVersions(%q) = %v, %v; want the default without pa.pdex@2.1", csv, got, err)
 		}
 	}

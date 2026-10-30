@@ -6,7 +6,7 @@ package main
 // (CLI-direct holder-self against the registrar, not the Accounts service).
 //
 // Dep-purity: this file uses ONLY stdlib + shnsdk + x/crypto. The Accounts API
-// client (accounts.Client) is plain net/http; the substrate's internal/ packages
+// client (accounts.Client) is plain net/http; the platform's internal packages
 // are never imported.
 
 import (

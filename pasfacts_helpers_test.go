@@ -3,6 +3,7 @@ package shnsdk
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 // Synthetic request facts for the SDK's own builder tests: the demo
@@ -44,6 +45,27 @@ func testPriorClaimAt(t *testing.T, line string) PASPriorClaim {
 		t.Fatalf("build the submission: %v", err)
 	}
 	p, err := PASPriorClaimOf(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// testSubmissionFor is the recorded submission an amendment built from in
+// continues, at line: the submission those same parties, records and lane
+// sent under in.OriginalCorr, read off its bytes as a participant records it.
+func testSubmissionFor(t *testing.T, line string, in ConformantClaimUpdateInputs) PASPriorClaim {
+	t.Helper()
+	out, err := BuildConformantClaimBundleAtLineExact(line, ConformantClaimInputs{PASClaimFacts: in.PASClaimFacts,
+		Provider: in.Provider, Coverage: in.Coverage, Insurer: in.Insurer, MemberIDSystem: in.MemberIDSystem,
+		QR: in.QR, SR: in.SR, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef, MemberID: in.MemberID,
+		Corr: in.OriginalCorr, Created: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+		ContainedInsurer: in.ContainedInsurer, AbsoluteRefs: in.AbsoluteRefs, PayerOrgEntry: in.PayerOrgEntry, Payer: in.Payer,
+	})
+	if err != nil {
+		t.Fatalf("build the submission: %v", err)
+	}
+	p, err := PASPriorClaimOf(out)
 	if err != nil {
 		t.Fatal(err)
 	}

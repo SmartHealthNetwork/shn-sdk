@@ -18,12 +18,11 @@ import (
 )
 
 // This file signs a provider gateway's /scenario requests. It is the
-// documented wire format (sdk/docs/PARTICIPANT_PROTOCOL.md, "/scenario caller
-// assertions"), not a copy of the gateway's own package, which this module
-// cannot import; it is drift-fenced against gateway/scenarioauth by the
-// TestShnSignsWhatScenarioauthVerifies in the SHN platform repository
-// (test/scenariowire there), which builds this command and has the gateway's
-// Verify check what it signs.
+// documented wire format (this module's docs/PARTICIPANT_PROTOCOL.md, "/scenario
+// caller assertions"), not a copy of the gateway's own package, which this module
+// cannot import; it is drift-fenced against the gateway module's scenarioauth
+// package by a test in the SHN platform repository, which builds this command
+// and has scenarioauth's Verify check what it signs.
 
 // The wire format of a /scenario caller assertion.
 const (

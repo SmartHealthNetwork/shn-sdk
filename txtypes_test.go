@@ -8,8 +8,8 @@ import (
 
 func TestTransactionTypeNames(t *testing.T) {
 	all := PrefixedTransactionTypes()
-	if len(all) != 9 {
-		t.Fatalf("%d legs, want 9", len(all))
+	if len(all) != 10 {
+		t.Fatalf("%d legs, want 10", len(all))
 	}
 	for flat, prefixed := range all {
 		ws, name, ok := strings.Cut(prefixed, ".")

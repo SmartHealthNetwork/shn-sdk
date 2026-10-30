@@ -54,9 +54,9 @@ const (
 	sendTestPatientAnswer   = "I have trouble walking and standing without help and need physical therapy to regain my strength and mobility."
 )
 
-// sendTestCases are the 8 prior-auth UCs (both branches for uc01/uc05), asserted against the real
-// /scenario response structs (gateway/engine/originate*.go): covered/paRequired/authNumber/
-// attested/consentDenied/denied. gateway/deploy/eval/smoke.sh drives its scenarios through them.
+// sendTestCases are the 8 prior-auth UCs (both branches for uc01/uc05), asserted against the
+// gateway's real /scenario response fields: covered/paRequired/authNumber/
+// attested/consentDenied/denied. The platform's gateway smoke test drives its scenarios through them.
 func sendTestCases() []sendTestCase {
 	return []sendTestCase{
 		{"uc01 covered", "uc01", `{"branch":"covered"}`, func(m map[string]any) bool { return boolField(m, "covered") }, "uc01", false},

@@ -12,8 +12,8 @@ package main
 // STABLE exit code so a script can branch on whose problem it is.
 //
 // The bar is wire-correctness + expected outcome — NOT IG validation. doctor calls NO
-// FHIR/IG validator; the substrate validates server-side. Dep-purity: stdlib + shnsdk
-// + x/crypto only (no internal/).
+// FHIR/IG validator; the network validates server-side. Dep-purity: stdlib + shnsdk
+// + x/crypto only (no platform-internal packages).
 
 import (
 	"context"
@@ -271,8 +271,8 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		// advertises a post-amend outcome.
 		//
 		// A pend with NOTHING to continue is the one that is not: the decision could
-		// then never be asked for at all. Its rejection row lives in the cloud sweep
-		// (tools/cloudsmoke), which runs the same rule over an injectable leg; here
+		// then never be asked for at all. Its rejection row lives in the platform's
+		// cloud smoke sweep, which runs the same rule over an injectable leg; here
 		// the leg is the real one, which cannot produce that shape.
 		//
 		// Whether the CLI can DRIVE the inquiry is a separate question from whether
