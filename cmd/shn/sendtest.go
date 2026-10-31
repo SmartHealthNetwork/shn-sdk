@@ -438,6 +438,11 @@ func sendTestBody(disc shnsdk.Discovery, lane string, c sendTestCase) ([]byte, e
 				return nil, fmt.Errorf("the descriptor's %s persona %s states no certificationType for its amendment", c.scenario, p.MemberID)
 			}
 			body["certificationType"] = p.Amendment.CertificationType
+			// The report type is optional: with none stated, nothing links at
+			// PAS 2.2, and the amendment is otherwise the same.
+			if p.Amendment.ReportType != nil {
+				body["reportType"] = p.Amendment.ReportType
+			}
 		}
 	}
 	return json.Marshal(body)

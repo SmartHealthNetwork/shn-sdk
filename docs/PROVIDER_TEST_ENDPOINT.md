@@ -50,6 +50,9 @@ without deploying anything of your own.
 | `POST /Claim/$submit` | yes | PAS — submit a prior-authorization request |
 | `POST /Claim/$inquire` | yes | PAS — ask the payer for the decision it holds on a submission (§1.6) |
 | `POST /CoverageEligibilityRequest/$submit` | yes | Coverage eligibility (IHE FAIS ITI-124) — ask the payer about a member's coverage (§1.7) |
+| `POST /$submit-attachment` | yes | CDex — send documentation to the payer the submission's `PayerId` names (§5.4) |
+| `POST /cdex/payer/{payer}` | yes | CDex — send documentation to the payer this return path names; `/$submit-attachment` may follow it (§5.4) |
+| `GET /cdex/payers` | yes | CDex — the payers that take the submission, each with its return path (§5.4) |
 | `GET /healthz` | no | Liveness |
 
 **Not offered on this endpoint:**
@@ -58,7 +61,6 @@ without deploying anything of your own.
   it with `Claim/$inquire` (§1.6);
 - DTR `Questionnaire/$next-question` (the next questions of an adaptive questionnaire) and
   `Questionnaire/$populate`;
-- CDex `$submit-attachment`;
 - the CDS Hooks `order-dispatch`, `appointment-book`, `encounter-start` and
   `encounter-discharge` hooks.
 
@@ -71,7 +73,9 @@ that type's operation (`/fhir/CoverageEligibilityRequest/$submit` as
 operation's (`/fhir/ExplanationOfBenefit/$submit`) is not served. A
 `POST /cds-services/{id}` with an id this endpoint does not advertise, whose body `hook`
 is one an advertised service carries — `order-sign-crd` with `"hook":"order-sign"` — is
-served by that service (`shn-order-sign`). An aliased answer is the payer's answer
+served by that service (`shn-order-sign`). `/fhir/$submit-attachment` is served as the plain
+`POST /$submit-attachment`; a return path under a base (`/fhir/cdex/payer/{payer}`), or a path
+under one that the table does not list, is not aliased, and is answered `404`. An aliased answer is the payer's answer
 unchanged, plus two headers naming the canonical form:
 `Link: </Claim/$submit>; rel="canonical"` (or `</cds-services/shn-order-sign>`) and a
 `Warning: 299` that says the same in words. The canonical forms are the table above and
@@ -276,9 +280,10 @@ An inquiry can return more than the submission you are asking about: the payer r
 submission it holds that matches, since its last clearing (§1.5), for the same member and
 requesting provider (and, on route `00301`, the same order), another participant's included.
 A pend that asked for documentation stays pended: its later answer is not pushed, and an
-inquiry keeps returning the pend. CDex `$submit-attachment`, which would carry documentation
-for it, is not offered here (§1.1). A new submission that carries the documentation is decided
-on its own and leaves the pend as it was (§10.4).
+inquiry keeps returning the pend. On route `00301`, CDex `$submit-attachment` carries the
+documentation for it, and the next inquiry returns the decision it reached (§5.4). A new
+submission that carries the documentation is decided on its own and leaves the pend as it was
+(§10.4).
 
 ### 1.7 Coverage eligibility
 
@@ -300,8 +305,8 @@ references (IHE FAIS's CoverageEligibilityRequest Bundle), a batch of requests, 
 payer's own. A batch carries at most 17 requests; send a larger set as several batches. A
 batch of more is refused `413` before it is sent. A payer gateway before shn-gateway v0.63.0 reads the request on its own only,
 and answers the `Parameters` form and a FAIS Bundle `400 parse member failed`. The payers
-behind `00300` and `00301` run such a gateway, so send them the `CoverageEligibilityRequest`
-itself. A request that names no payer the endpoint can route to is
+behind `00300` and `00301` have been run with the `CoverageEligibilityRequest` itself, so send
+them that. A request that names no payer the endpoint can route to is
 refused `422` with what is missing, as in §8.1.
 
 ---
@@ -679,7 +684,7 @@ curl -s "https://pa-test.shn-preview.org/Claim/\$submit" \
   -d @pas-00301.json | tee pas-00301-response.json
 ```
 
-Expect `HTTP 200` and a PAS response `Bundle` (`collection`) of ten entries — a
+Expect `HTTP 200` and a PAS response `Bundle` (`collection`) — a
 `ClaimResponse`, a `CommunicationRequest`, and the Patient, Claim, Coverage, ServiceRequest,
 Organizations, PractitionerRole and Practitioner they reference — with every reference
 resolving inside the Bundle:
@@ -717,8 +722,66 @@ number to the pended claim: the `QuestionnaireResponse`'s `qr-context` extension
 order **as the payer stored it from your submission**, and `intendedUse` is `withpa`.
 
 The pend's later resolution is not pushed to you; ask for its current state with
-`Claim/$inquire` (§1.6). A pend that asks for documentation stays pended: CDex
-`$submit-attachment`, which would carry the documentation, is not offered here (§1.1).
+`Claim/$inquire` (§1.6). A pend that asks for documentation stays pended until the
+documentation reaches the payer (§5.4).
+
+### 5.4 CDex — send the documentation for a pend
+
+Send a completed `QuestionnaireResponse` to the payer with CDex `$submit-attachment`, at the
+plain endpoint or at the payer's return path. `GET /cdex/payers` lists the payers that take the
+submission, each with its return path:
+
+```bash
+curl -s "https://pa-test.shn-preview.org/cdex/payers" -H "Authorization: Bearer $TOKEN"
+```
+
+Route `00301` is the entry whose `payerIdentifiers` name `00301`. Post to `/$submit-attachment`,
+where the submission's `PayerId` routes it, or to `<its returnBase>/$submit-attachment`. Both ran
+with this body, its `TrackingId` and `Content` filled in as below; every other value is the one
+that ran:
+
+```json
+{
+  "resourceType": "Parameters",
+  "parameter": [
+    {"name": "TrackingId", "valueIdentifier": {"system": "<the ClaimResponse's identifier system>", "value": "<its value>"}},
+    {"name": "AttachTo", "valueCode": "preauthorization"},
+    {"name": "PayerId", "valueIdentifier": {"system": "urn:oid:2.16.840.1.113883.6.300", "value": "00301"}},
+    {"name": "OrganizationId", "valueIdentifier": {"system": "http://hl7.org/fhir/sid/us-npi", "value": "1234567893"}},
+    {"name": "MemberId", "valueIdentifier": {"system": "http://example.org/MIN", "value": "1122334455"}},
+    {"name": "Attachment", "part": [{"name": "Content", "resource": {"resourceType": "QuestionnaireResponse", "status": "completed", "questionnaire": "http://example.org/fhir/Questionnaire/HomeHealthAssessment"}}]}
+  ]
+}
+```
+
+- **`TrackingId`** is the first `identifier` of the pended `ClaimResponse`, not the
+  `CommunicationRequest`'s `AUTH-TRN` trace number.
+- **`OrganizationId`** ran as the Appendix's insurer organization, and **`MemberId`** as the
+  Appendix's `Coverage.subscriberId`. The endpoint binds the patient by `MemberId`, and two that
+  differ are refused `400`.
+- **`Content`** is the `QuestionnaireResponse` the §5.3 relaunch's package carries, with `status`
+  `completed`, its `id` removed and `questionnaire` set to the canonical the
+  `CommunicationRequest` asks for, in its `extension-requestedQuestionnaire`. The example shows
+  those two elements only: send the whole resource.
+
+**This payer matches the questionnaire, not the answers.** The `QuestionnaireResponse` that ran
+held no answers: its `item` carried the linkIds alone. What resolves the pend is the
+`questionnaire` canonical, so `A1` here says the documentation arrived, and is no judgment of what
+it says.
+
+Expect `HTTP 200` and an `OperationOutcome` with severity `information` and diagnostics
+`Attachments accepted and associated with the prior authorization.` Read those diagnostics: this
+payer also answers `200` when it does not match the submission to your pend, with other text, and
+the pend stays. Then ask with `Claim/$inquire` (§1.6) and read the `ClaimResponse` whose identifier
+is your `TrackingId`, since an inquiry can return others. It read `A4` before the submission and
+`A1` after it: this payer resolved the pend at once.
+
+This endpoint's 5 MiB body limit applies to the submission (§8).
+
+**Route `00300` does not take the submission.** `GET /cdex/payers` does not list it, and a
+submission naming it is answered `HTTP 422`, an `OperationOutcome` with code `not-supported`:
+`the recipient does not take cdex-attachment-submit: it declares no legs, and
+cdex-attachment-submit is since 1.1.0`. Its pend's `Task` keeps the payer's own `payer-url` (§6.4).
 
 ---
 
@@ -909,10 +972,11 @@ decision uses review-action code `A4` — see §5.3 for the 2.2-line pend (a
 This payer pends an oxygen-concentrator order. Take the §6.3 request and change both
 `"code": "L8000"` codings to `"code": "E1390"` (on `Claim.item.productOrService` and on the
 `ServiceRequest`), with a Bundle identifier of your own, and submit it the same way. Expect
-`HTTP 200` and a ten-entry Bundle whose `ClaimResponse` is `outcome` `queued` with review
+`HTTP 200` and a Bundle whose `ClaimResponse` is `outcome` `queued` with review
 action `A4` "Pending", plus a `Task` (`status` `requested`, code
 `attachment-request-questionnaire`): the PAS 2.0 pended model, in which the payer asks for
-documentation through a `Task` rather than the `CommunicationRequest` of §5.3. The `G0151`
+documentation through a `Task` rather than the `CommunicationRequest` of §5.3. Its `payer-url`
+input is the payer's own address, carried as the payer sent it (§5.4). The `G0151`
 home-health order of §5, sent to this route, is answered `A3` "Not certified" — a denial,
 and this payer's decision for that order.
 
@@ -1158,11 +1222,22 @@ only that the endpoint could not reach the network's routing service.
 | Requests per client | 60 per minute | `429` |
 | Concurrent requests in flight, across every caller of the endpoint | 8 | `503` |
 | Request body | 5 MiB | `400` |
-| One forwarded call (CRD, DTR, PAS, coverage eligibility), from its arrival | 90 seconds | `408`, `504`, or the connection is closed |
+| One forwarded call (CRD, DTR, PAS, coverage eligibility, CDex), from its arrival | 90 seconds | `408`, `504`, or the connection is closed |
 | Calls from one network address straight to a payer's host on the network, not through this endpoint | 2,000 per 5 minutes (about 6.7 a second) | `403` |
 
 A body over the cap is refused before any of it is forwarded, with
 `{"error":"request body exceeds 5 MiB"}`.
+
+From shn-gateway v1.1.0, a request body may be sent gzip-coded (`Content-Encoding: gzip`). The cap applies to the
+decoded body, and the body is forwarded decoded. A coded body is read no further than the most any
+gzip of a body at the cap takes, so one that decodes to little or nothing for longer is refused as
+over the cap too. A body in any other content coding, or in
+more than one, is refused before any of it is forwarded, with `415`,
+`Accept-Encoding: gzip`, and
+`{"error":"unsupported content coding: send the body as gzip or uncoded"}`. `POST /oauth/token`
+answers it as an OAuth error, `{"error":"invalid_request","error_description":"unsupported content
+coding: send the body as gzip or uncoded"}`, and `POST /register` with that reason as plain text.
+The endpoint's answers are not compressed.
 
 A forwarded call still running 90 seconds after it arrived is cut. If its request had not
 fully arrived, it is answered `408` with
@@ -1707,7 +1782,7 @@ curl -s "https://pa-test.shn-preview.org/Claim/\$inquire" \
 
 Expected answer: `HTTP 200` and a `Parameters` resource with two `responseBundle`s, one for each submission above: the pend (`A4` "Pending") and the documented submission (`A1` "Certified in total"). You may see more: the payer also returns earlier submissions of this order for this member and requesting provider since its last clearing (§1.5), such as another participant's run of this case. TC-01's submissions in §10.4, for the same member and provider but another order, are not returned.
 
-The second submission is the first with the completed QuestionnaireResponse added as a Bundle entry and named in `Claim.supportingInfo`, under its own `Claim.identifier` and Bundle identifier. It is a separate request: it does not resolve the first one's pend. The pend does not change on its own: a pend that asks for documentation stays pended, since CDex `$submit-attachment` is not offered here (§1.1).
+The second submission is the first with the completed QuestionnaireResponse added as a Bundle entry and named in `Claim.supportingInfo`, under its own `Claim.identifier` and Bundle identifier. It is a separate request: it does not resolve the first one's pend. The pend does not change on its own: on route `00301`, CDex `$submit-attachment` carries the documentation for a pend that asks for it (§5.4).
 
 ### 10.6 TC-04 — tonsillectomy (CPT `42836`), and an order the payer does not cover
 

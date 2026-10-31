@@ -295,10 +295,13 @@ type DiscoveryScenarioPersona struct {
 
 // DiscoveryAmendment is a persona's own statement about an amendment it sends:
 // the X12 1322 certificationType it states on the amending Claim (required
-// from PAS 2.1, carried at 2.0 when stated). A driver passes it as the route's
-// certificationType.
+// from PAS 2.1, carried at 2.0 when stated), and the X12 PWK01 report type it
+// states for the answer it attaches (ConformantClaimUpdateInputs.ReportType).
+// A driver passes each as the route's input of the same name: a Smart Gateway's
+// routes take reportType from shn-gateway v1.2.0.
 type DiscoveryAmendment struct {
 	CertificationType *PASCoding `json:"certificationType,omitempty"`
+	ReportType        *PASCoding `json:"reportType,omitempty"`
 }
 
 // ScenarioPersona returns the persona the descriptor states for a route's

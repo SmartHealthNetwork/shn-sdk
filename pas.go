@@ -2057,14 +2057,23 @@ type ConformantClaimUpdateInputs struct {
 	// request for a specific item, and is linked to the items the payer's own
 	// pend asks it for: Claim.item.informationSequence pointing at a new
 	// Claim.supportingInfo entry (PASTempCodes additionalInformation)
-	// referencing it. An item is linked only when a pended-response Task names
-	// its line with a need the answer meets (its attachment code, or the
-	// questionnaire a QR answers); nil, or a pend that ties the answer to no
-	// item, links nothing. Nothing is linked at PAS 2.2, whose
-	// supportingInfo:AdditionalInformation requires an X12 PWK01 report type
-	// no source states (PASDef.SupportingInfoDocumentInformationRequired).
-	// ADDITIVE (shn-sdk v0.62.0).
+	// referencing it. An item is linked only when a pended-response Task or
+	// CommunicationRequest names its line with a need the answer meets (its
+	// attachment code, or the questionnaire a QR answers); nil, or a pend that ties the answer to no
+	// item, links nothing. At PAS 2.2 nothing is linked without ReportType
+	// (PASDef.SupportingInfoDocumentInformationRequired). ADDITIVE (shn-sdk
+	// v0.62.0).
 	Pend []byte
+	// ReportType is the X12 PWK01 attachment report type the requester states
+	// for the attached answer, one Coding as JSON: its own system's statement,
+	// never read from the payer's pend and never defaulted. PAS 2.2 requires it
+	// on the supportingInfo entry that links an answer, as
+	// extension-documentInformation's reportTypeCode, so with it the answer is
+	// linked there and without it nothing is. Lines below 2.2 have no such
+	// extension and do not use it. A statement that is not a Coding from the X12
+	// 755 code system is refused (ErrPASClaimFactInvalid). `$validate` cannot
+	// certify the code: the value set's codes are licensed and unpublished.
+	ReportType json.RawMessage
 }
 
 // BuildConformantClaimUpdateBundleExact assembles a LEAN, generic, demo-persona-derived CONFORMANT
@@ -2208,7 +2217,14 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: the attached answer: %w", err)
 	}
-	claimJSON, err = linkPASAnswer(def, claimJSON, in.Pend, answer)
+	if err := CheckPASReportType(in.ReportType); err != nil {
+		return nil, err
+	}
+	reportType := in.ReportType
+	if pasFactIsAbsent(reportType) {
+		reportType = nil
+	}
+	claimJSON, err = linkPASAnswer(def, claimJSON, in.Pend, answer, reportType)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
@@ -2446,6 +2462,24 @@ type PendedResponseDetail struct {
 	// OtherTasks are the response's other Tasks (for example a CDex data
 	// request), exactly as received.
 	OtherTasks []json.RawMessage
+	// Requests are the response's CommunicationRequests, in Bundle order: the
+	// other shape a payer pends in, the reference payer's at PAS 2.2.
+	Requests []PendedCommunicationRequest
+}
+
+// PendedCommunicationRequest is what a pended response's CommunicationRequest
+// asks for. Its category is not read: a report type in a requester's message
+// comes from the requester.
+type PendedCommunicationRequest struct {
+	// Sequence is the Claim item line it names (extension-serviceLineNumber), 0
+	// when it names none. A request whose payloads name their own lines (PAS
+	// 2.1.0) is one PendedCommunicationRequest for each.
+	Sequence int
+	// Codes are its payloads' contentString values: LOINC codes at PAS 2.2.1, an
+	// unbound string at 2.1.0.
+	Codes []string
+	// Questionnaire is the canonical it asks for, empty when it names none.
+	Questionnaire string
 }
 
 // PendedTask is one PAS pended-response Task as the payer sent it.
@@ -2511,7 +2545,8 @@ func (d PendedResponseDetail) NeededItems() []NeededItem {
 
 // ParsePendedResponseDetail reads a PAS response. pended is true when the
 // uniquely selected ClaimResponse's decision is pending (queued outcome or the
-// A4 review action); detail then lists the response's Tasks. Each PAS Task
+// A4 review action); detail then lists the response's Tasks and
+// CommunicationRequests. Each PAS Task
 // input is read by the type its line defines: attachments-needed as a
 // CodeableConcept, questionnaires-needed as an Identifier (PAS 2.0.1),
 // questionnaire-context as a string (PAS 2.1.0 and 2.2.1), payer-url as a
@@ -2541,7 +2576,92 @@ func ParsePendedResponseDetail(data []byte) (pended bool, detail PendedResponseD
 		}
 		detail.Tasks = append(detail.Tasks, t)
 	}
+	detail.Requests = parsePendedCommunicationRequests(data)
 	return true, detail, nil
+}
+
+// parsePendedCommunicationRequests reads what the Bundle's CommunicationRequests
+// ask for. It never fails: a payer's answer is carried whatever it holds, so a
+// value it cannot read here is one it does not state, which ties nothing. A
+// request names its line on the resource (PAS 2.2.1) or on a payload (PAS 2.1.0);
+// a payload's own line takes that payload's code, and the rest take the
+// resource's.
+func parsePendedCommunicationRequests(data []byte) []PendedCommunicationRequest {
+	var bundle struct {
+		Entry []struct {
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if json.Unmarshal(data, &bundle) != nil {
+		return nil
+	}
+	var out []PendedCommunicationRequest
+	for _, entry := range bundle.Entry {
+		var r struct {
+			ResourceType string          `json:"resourceType"`
+			Extension    json.RawMessage `json:"extension"`
+			Payload      json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(entry.Resource, &r) != nil || r.ResourceType != "CommunicationRequest" {
+			continue
+		}
+		line, questionnaire := pendedRequestExtensions(r.Extension)
+		req := PendedCommunicationRequest{Sequence: line, Questionnaire: questionnaire}
+		var payloads []json.RawMessage
+		_ = json.Unmarshal(r.Payload, &payloads)
+		for _, raw := range payloads {
+			var p struct {
+				ContentString json.RawMessage `json:"contentString"`
+				Extension     json.RawMessage `json:"extension"`
+			}
+			if json.Unmarshal(raw, &p) != nil {
+				continue
+			}
+			var code string
+			if json.Unmarshal(p.ContentString, &code) != nil || code == "" {
+				continue
+			}
+			if own, _ := pendedRequestExtensions(p.Extension); own > 0 {
+				out = append(out, PendedCommunicationRequest{Sequence: own, Codes: []string{code}, Questionnaire: questionnaire})
+				continue
+			}
+			req.Codes = append(req.Codes, code)
+		}
+		if req.Sequence > 0 || len(req.Codes) > 0 || req.Questionnaire != "" {
+			out = append(out, req)
+		}
+	}
+	return out
+}
+
+// pendedRequestExtensions reads a service line and a requested questionnaire
+// from an extension array, each zero when it is absent or not of its type.
+func pendedRequestExtensions(raw json.RawMessage) (line int, questionnaire string) {
+	var exts []json.RawMessage
+	_ = json.Unmarshal(raw, &exts)
+	for _, one := range exts {
+		var e struct {
+			URL              string          `json:"url"`
+			ValuePositiveInt json.RawMessage `json:"valuePositiveInt"`
+			ValueCanonical   json.RawMessage `json:"valueCanonical"`
+		}
+		if json.Unmarshal(one, &e) != nil {
+			continue
+		}
+		switch e.URL {
+		case pasExtServiceLineNumber:
+			var n int
+			if json.Unmarshal(e.ValuePositiveInt, &n) == nil && n > 0 {
+				line = n
+			}
+		case pasExtRequestedQuestionnaire:
+			var c string
+			if json.Unmarshal(e.ValueCanonical, &c) == nil {
+				questionnaire = c
+			}
+		}
+	}
+	return line, questionnaire
 }
 
 type pendedTaskCoding struct {

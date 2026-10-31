@@ -13,8 +13,8 @@ import (
 // answering the payer's request for a specific item. It is linked to
 // that item through Claim.item.informationSequence, which points at a new
 // Claim.supportingInfo entry referencing the answer, and only where the
-// payer's OWN pend ties the answer to the item: a PAS pended-response Task
-// whose need on that item's line (extension-paLineNumber /
+// payer's OWN pend ties the answer to the item: a PAS pended-response Task or
+// CommunicationRequest whose need on that item's line (extension-paLineNumber /
 // extension-serviceLineNumber, the Claim item.sequence the need is about) is
 // one the answer meets. Nothing is linked by default, and an answer no pended
 // item asked for links nothing.
@@ -24,9 +24,10 @@ import (
 // answer), with the same shape at PAS 2.0.1 and 2.1.0; Claim.item.
 // informationSequence is 0..* at every line. At PAS 2.2.1 the slice also
 // requires extension:documentInformation with an X12 PWK01 report type
-// (PASDef.SupportingInfoDocumentInformationRequired) that neither the pend nor
-// the answer states, so at 2.2 nothing is linked rather than a report type
-// minted.
+// (PASDef.SupportingInfoDocumentInformationRequired). Only the requester states
+// that: a pend can carry one, but what a requester's message asserts comes from
+// the requester. So at 2.2 an answer is linked only with its reportType, and
+// otherwise nothing is linked rather than a report type minted.
 
 // pasSupportingInfoCategoryAdditional is the PASTempCodes category of the
 // Claim.supportingInfo:AdditionalInformation slice (its patternCodeableConcept
@@ -36,8 +37,11 @@ const pasSupportingInfoCategoryAdditional = "additionalInformation"
 // linkPASAnswer links answer (a resource of the amendment's Bundle, with its
 // bundle-local id) to the items of claimJSON the payer's pend asks it for.
 // It returns claimJSON unchanged when nothing links.
-func linkPASAnswer(def PASDef, claimJSON, pend, answer []byte) ([]byte, error) {
-	if def.SupportingInfoDocumentInformationRequired || len(pend) == 0 || len(answer) == 0 {
+func linkPASAnswer(def PASDef, claimJSON, pend, answer []byte, reportType json.RawMessage) ([]byte, error) {
+	if def.SupportingInfoDocumentInformationRequired && len(reportType) == 0 {
+		return claimJSON, nil
+	}
+	if len(pend) == 0 || len(answer) == 0 {
 		return claimJSON, nil
 	}
 	asked := pasPendedItemsAnswered(pend, answer)
@@ -93,13 +97,23 @@ func linkPASAnswer(def PASDef, claimJSON, pend, answer []byte) ([]byte, error) {
 	if !linked {
 		return claimJSON, nil
 	}
-	entry, err := json.Marshal(map[string]any{
+	info := map[string]any{
 		"sequence": next,
 		"category": map[string]any{"coding": []any{map[string]any{
 			"system": PASTempCodesSystem, "code": pasSupportingInfoCategoryAdditional,
 		}}},
 		"valueReference": map[string]any{"reference": head.ResourceType + "/" + head.ID},
-	})
+	}
+	if def.SupportingInfoDocumentInformationRequired {
+		info["extension"] = []any{map[string]any{
+			"url": pasExtDocumentInformation,
+			"extension": []any{map[string]any{
+				"url":                  "reportTypeCode",
+				"valueCodeableConcept": map[string]any{"coding": []any{reportType}},
+			}},
+		}}
+	}
+	entry, err := json.Marshal(info)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +130,9 @@ func linkPASAnswer(def PASDef, claimJSON, pend, answer []byte) ([]byte, error) {
 }
 
 // pasPendedItemsAnswered returns, in order, the item sequences the payer's
-// pend asks for something the answer is: a pended-response Task need on that
+// pend asks for something the answer is: a CommunicationRequest naming that
+// line with a LOINC code the answer carries or a questionnaire it answers, or a
+// pended-response Task need on that
 // line whose attachment code (system and code) is one the answer's code
 // carries, or whose questionnaire the answer (a QuestionnaireResponse)
 // answers — named by a questionnaires-needed identifier (PAS 2.0.1), or by
@@ -166,6 +182,18 @@ func pasPendedItemsAnswered(pend, answer []byte) []int {
 			if isQR && nc.Type == pasTaskInputQuestionnaires && pasCanonicalNames(nc.Text, a.Questionnaire) {
 				add(nc.Sequence)
 			}
+		}
+	}
+	for _, r := range detail.Requests {
+		for _, code := range r.Codes {
+			for _, c := range a.Code.Coding {
+				if c.System == pasSystemLOINC && c.Code == code {
+					add(r.Sequence)
+				}
+			}
+		}
+		if isQR && r.Questionnaire != "" && pasCanonicalNames(r.Questionnaire, a.Questionnaire) {
+			add(r.Sequence)
 		}
 	}
 	sort.Ints(out)

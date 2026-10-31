@@ -292,6 +292,20 @@ func CheckPASUpdateFactsAtLine(line string, f PASClaimFacts, certificationType j
 	return nil
 }
 
+// CheckPASReportType refuses, before anything is sent, a statement
+// ConformantClaimUpdateInputs.ReportType cannot carry, exactly as
+// BuildConformantClaimUpdateBundleAtLineExact refuses it at every line. No
+// statement is not an error: it links nothing at PAS 2.2.
+func CheckPASReportType(reportType json.RawMessage) error {
+	if pasFactIsAbsent(reportType) {
+		return nil
+	}
+	if _, err := pasCodingOf("ReportType", reportType, pasSystemX12AttachmentReports); err != nil {
+		return fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
+	return nil
+}
+
 // pasSubmitCertificationType is the certificationType of a submission: X12
 // 1322 "I" Initial. It is a fact of the operation — a submission is a new
 // request — not a value read or assumed about the request's content. The code

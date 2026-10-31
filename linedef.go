@@ -89,8 +89,8 @@ type PASDef struct {
 	// reportTypeCode sub-extension carries an X12 PWK01 attachment report type
 	// (pas-pwk01-attachment-report-type-code, required binding). Absent at 2.0.1
 	// and 2.1.0, where the slice is sequence, category and a valueReference. An
-	// amendment links its attached answer to an item through that slice only
-	// where the line does not require a report type no source states.
+	// amendment links its attached answer to an item through that slice, so at a
+	// line that requires a report type it links only one the requester states.
 	SupportingInfoDocumentInformationRequired bool
 	// UpdateCarriesPriorClaim: from PAS 2.1.0 an update Bundle carries the prior Claim it
 	// names, as a second Claim entry Claim.related[0].claim resolves to (2.1.0's

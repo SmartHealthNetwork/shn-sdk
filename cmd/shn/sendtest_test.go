@@ -243,6 +243,10 @@ func allScenarioPersonas() []shnsdk.DiscoveryScenarioPersona {
 		p.Order.Priority = &shnsdk.PASCoding{System: shnsdk.PASSystemProcessPriority, Code: []string{"normal", "stat", "deferred"}[i%3]}
 		if p.Amendment != nil {
 			p.Amendment.CertificationType.Code = []string{"I", "3", "4"}[i%3]
+			// A report type is optional: one persona in two states it.
+			if i%2 == 0 {
+				p.Amendment.ReportType = &shnsdk.PASCoding{System: "https://codesystem.x12.org/005010/755", Code: "PY"}
+			}
 		}
 		ps = append(ps, p)
 	}
@@ -251,7 +255,7 @@ func allScenarioPersonas() []shnsdk.DiscoveryScenarioPersona {
 
 // With a descriptor stating the scenario routes' personas, each scenario sends
 // its persona: its own keys, the member, the order, the claim facts and, on an
-// amending route, the certificationType.
+// amending route, the certificationType and any report type it states.
 func TestSendTestSendsTheDescriptorsPersonas(t *testing.T) {
 	disc := discoveryServer(t, shnsdk.Discovery{ScenarioPersonas: allScenarioPersonas()})
 	gw, got := recordingGateway(t, http.StatusOK)
@@ -279,6 +283,7 @@ func TestSendTestSendsTheDescriptorsPersonas(t *testing.T) {
 		var sent struct {
 			ClaimFacts        shnsdk.PASClaimFacts `json:"claimFacts"`
 			CertificationType *shnsdk.PASCoding    `json:"certificationType"`
+			ReportType        *shnsdk.PASCoding    `json:"reportType"`
 		}
 		_ = json.Unmarshal([]byte(body), &sent)
 		if !reflect.DeepEqual(sent.ClaimFacts, wantFacts) {
@@ -288,8 +293,13 @@ func TestSendTestSendsTheDescriptorsPersonas(t *testing.T) {
 			if sent.CertificationType == nil || *sent.CertificationType != *p.Amendment.CertificationType {
 				t.Fatalf("%s sent certificationType %+v, want the persona's %+v", c.label, sent.CertificationType, p.Amendment.CertificationType)
 			}
+			if _, has := m["reportType"]; has != (p.Amendment.ReportType != nil) || !reflect.DeepEqual(sent.ReportType, p.Amendment.ReportType) {
+				t.Fatalf("%s sent reportType %+v (in the body: %v), want the persona's %+v", c.label, sent.ReportType, has, p.Amendment.ReportType)
+			}
 		} else if _, has := m["certificationType"]; has {
 			t.Fatalf("%s sent a certificationType on a route that sends no amendment: %s", c.label, body)
+		} else if _, has := m["reportType"]; has {
+			t.Fatalf("%s sent a reportType on a route that sends no amendment: %s", c.label, body)
 		}
 		if strings.Contains(c.body, "branch") && m["branch"] == nil {
 			t.Fatalf("%s lost its own keys: %s", c.label, body)

@@ -78,13 +78,18 @@ const (
 	// questionnaires.
 	PASTaskCodeQuestionnaires = "attachment-request-questionnaire"
 
-	pasTaskReasonCode             = "priorAuthorization"
-	pasTaskInputPayerURL          = "payer-url"
-	pasTaskInputAttachments       = "attachments-needed"
-	pasTaskInputQuestionnaires    = "questionnaires-needed"
-	pasTaskInputQuestionnaireCtx  = "questionnaire-context"
-	pasExtPALineNumber            = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-paLineNumber"
-	pasExtServiceLineNumber       = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceLineNumber"
+	pasTaskReasonCode            = "priorAuthorization"
+	pasTaskInputPayerURL         = "payer-url"
+	pasTaskInputAttachments      = "attachments-needed"
+	pasTaskInputQuestionnaires   = "questionnaires-needed"
+	pasTaskInputQuestionnaireCtx = "questionnaire-context"
+	pasExtPALineNumber           = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-paLineNumber"
+	pasExtServiceLineNumber      = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-serviceLineNumber"
+	pasExtDocumentInformation    = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-documentInformation"
+	// pasExtRequestedQuestionnaire is the extension the reference payer names a
+	// CommunicationRequest's questionnaire by. It is the payer's own, not the
+	// IG's, and still its statement of what that line needs.
+	pasExtRequestedQuestionnaire  = "http://example.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedQuestionnaire"
 	pasSystemLOINC                = "http://loinc.org"
 	pasSystemX12AttachmentReports = "https://codesystem.x12.org/005010/755"
 )
