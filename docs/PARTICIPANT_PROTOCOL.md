@@ -2280,10 +2280,27 @@ rest          body        raw bytes — no additional encoding
   payer gateway, and an unframed answer are `200`. A frame stating `204` carries
   no body; one that carries a body is not read (`502`, recorded as `integrity`).
 - `headers` — an **allowlist**: `Content-Type`, `contractVersion` (version-matched
-  routing, §8.6) and, for framed DTR operations, `operation` (request frames only,
-  below).
+  routing, §8.6), for framed DTR operations `operation` (request frames only,
+  below) and, from shn-sdk v1.3.0, `ETag`, `Last-Modified` and `Retry-After`, which
+  describe an answer: a producer frames them only for a 2xx answer. A frame does not
+  judge such a value as a validator or a date. Both encoders refuse a header segment
+  over 64 KiB, the most `DecodeHTTPFrame` reads, as `ErrFrameHeaderTooLarge`.
+  `FrameCarriesHeaderValue` says whether a frame's encoding keeps a value exactly: an
+  HTTP field value, in valid UTF-8 since the header segment is JSON.
+  `EncodeHTTPFrameHeaders` refuses one of these three it would change, as
+  `ErrFrameHeaderValue`. A decoder keeps a value as it came, so a consumer that writes
+  one on checks it first.
   No other header (hop-by-hop, cookie, or otherwise) is ever carried inside a
-  frame.
+  frame. A header name is case-insensitive (RFC 9110 section 5.1): from shn-sdk
+  v1.3.0 `EncodeHTTPFrameHeaders` takes an allowlisted name in any case (`ETag`,
+  Go's `Etag`, `etag`), and a frame carries it under the spelling listed here, the
+  one spelling on the wire; `DecodeHTTPFrame` reads one in any case and returns it
+  under that spelling. Only ASCII letters fold. One header given twice, under one
+  spelling or two, is `ErrFrameHeaderDuplicate`: the encoder refuses it, and a
+  frame carrying it twice with different values is not read, since it cannot say
+  which it means, a failure of the frame's integrity. The same value twice is that
+  value. Earlier releases matched the exact spelling, so `Contractversion` or
+  `content-type` was refused at encode and dropped at decode.
 - `Content-Type` on a **request** frame — the media type of the body. An SHN
   gateway frames the body's own media type (`application/json` for a CDS Hooks
   request, `application/fhir+json` for a FHIR one) and, on a framed DTR
@@ -2893,7 +2910,9 @@ amendment (`ErrPASPriorClaimNotCarried`, the fidelity of SHN's own edit): one wi
 (every record shn-sdk v1.0.0 or earlier wrote), whose Claim has no id or no items or names
 another submission, or, from PAS 2.1, whose id is the amendment's own Claim id, which
 references what the amendment's bundle does not carry, or whose bytes a step of the build
-would change. `Pend` (optional) is the payer's
+would change. From shn-sdk v1.3.0, `CheckPASSubmittedFactsCarriedAtLine` reports, before anything
+is sent, a reference stated in a submission's facts that no amendment's bundle can resolve. `Pend`
+(optional) is the payer's
 pended answer: the attached answer is linked to the items it asks the answer for (§7b.2). A submission's certificationType
 is X12 1322 `I` Initial, a fact of the operation, written from PAS 2.1. The derived
 `infoChanged` marker compares an item's certificationType only when the submitted item and
@@ -3200,8 +3219,8 @@ is read or carried (from shn-gateway v0.60.0).
   type is not a FHIR resource type name).
 - **No transport signatures.** HTTP-level signatures (signed header fields, a detached JWS)
   are not carried. Each Smart Gateway terminates HTTP, and a message frame (§6.3) carries only
-  `Content-Type`, `contractVersion` and `operation`. A participant that needs an end-to-end
-  signature signs inside the payload.
+  the headers on its allowlist, none of them a signature. A participant that needs an
+  end-to-end signature signs inside the payload.
 - **Hooks and services.** The payer's gateway sends each request to the CDS service the
   payer's own `/cds-services` listing offers for the request's hook. A hook the payer does not
   offer is refused before anything is sent, with `422` and the hooks it does offer:
@@ -3467,6 +3486,12 @@ at PAS 2.0.1" below); earlier releases carry one at every line.
   Without a statement nothing is linked at PAS 2.2. A report type in the payer's pend is
   the payer's and is never copied into your message. `ResumePriorAuth` builds at PAS 2.0
   only and takes none.
+  A Smart Gateway building your amendment takes the statement as the `reportType` of an
+  amending route's request, from shn-gateway v1.2.0, and refuses a malformed one before any
+  leg. The statement is never a reason to refuse an otherwise valid amendment:
+  where the amendment cannot carry it (its line has no place for one, its build is bridged
+  to another line, or the pend ties the answer to no item), the amendment goes on without
+  it and the exchange record's `editsNotMade` names `amendment:report-type-not-carried`.
 - At PAS 2.1 and 2.2, a **prior `Claim`** entry so that reference resolves: from
   shn-sdk v1.1.0, your submitted Claim exactly as you sent it, read off
   the bytes you sent (`shnsdk.PASPriorClaimOf`) and carried as sent, in the bundle's compact
@@ -4419,6 +4444,22 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-10-31 — From shn-sdk v1.3.0, `CheckPASSubmittedFactsCarriedAtLine` reports a stated reference no amendment can carry (§7a.3).**
+  From PAS 2.1 an amendment carries your submitted Claim whole, so a reference you stated inside a
+  claim fact must resolve in its bundle. This new check refuses (`ErrPASPriorClaimNotCarried`),
+  before anything is sent, a reference to a resource type the bundle has no entry of, an absolute one
+  under another base, and one that is not a type and an id. Run it only for a submission that will
+  be amended: one that is not is carried as stated. A reference to a type the bundle holds, and a
+  local one, are still decided at the build, so a submission that passes can still be refused then.
+
+- **2026-10-31 — From shn-sdk v1.3.0, a message frame's allowlist adds a success answer's `ETag`, `Last-Modified` and `Retry-After` (§6.3).**
+  An older decoder drops them. `EncodeHTTPFrameHeaders` and `EncodeHTTPFrame` now refuse
+  a header segment `DecodeHTTPFrame` would not read, as `ErrFrameHeaderTooLarge`, and
+  `FrameCarriesHeaderValue` and `ErrFrameHeaderValue` are new. Locations stay off the
+  allowlist: each is an address into a participant's system. Every allowlisted name is
+  now matched in any case and framed under its listed spelling, and one header given
+  twice is the new `ErrFrameHeaderDuplicate` (§6.3).
+
 - **2026-10-31 — From shn-sdk v1.2.0, an amendment links its attached answer at PAS 2.2 on the report type you state, and a `CommunicationRequest` is read as a pend (§7b.2).**
   `ConformantClaimUpdateInputs.ReportType` states the X12 PWK01 report type, and
   `shnsdk.CheckPASReportType` checks it before anything is sent. Without a statement,
@@ -4426,6 +4467,8 @@ property. Until then, build to the rule: preserve what you do not recognise.
   the item and the need as a `Task` does, and `PendedResponseDetail.Requests` lists them. A
   discovery persona's `amendment` can state `reportType`, which a Smart Gateway's routes take
   from shn-gateway v1.2.0.
+  A statement the amendment does not carry is recorded, in `editsNotMade`, as
+  `amendment:report-type-not-carried`.
 - **2026-10-31 — From shn-gateway v1.2.0, a questionnaire package answer whose own-line check could not run is carried as sent (§7a.4).**
   From shn-gateway v1.2.0, when a provider's gateway that sets `TRANSLATE_IG_LINES=true` and declares one
   DTR line cannot tell whether a payer's questionnaire package answer is valid at its own line, because the

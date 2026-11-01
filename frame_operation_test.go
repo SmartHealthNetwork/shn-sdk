@@ -50,8 +50,14 @@ func TestFrameOperationHeader_UnknownStillDropped(t *testing.T) {
 	if len(hdr.Headers) != 2 || hdr.Headers[FrameHeaderOperation] != "questionnaire-package" || hdr.Headers["Content-Type"] != "application/fhir+json" {
 		t.Fatalf("decoded headers = %v, want only Content-Type and operation", hdr.Headers)
 	}
-	if _, err := EncodeHTTPFrameHeaders(200, map[string]string{"Operation": "questionnaire-package"}, nil); err == nil {
-		t.Fatal("a header differing from operation only by case must be refused at encode")
+	// A field name is case-insensitive (RFC 9110 section 5.1): "Operation" is
+	// the operation header, framed under its wire name.
+	frame, err = EncodeHTTPFrameHeaders(200, map[string]string{"Operation": "questionnaire-package"}, nil)
+	if err != nil {
+		t.Fatalf("Operation: %v", err)
+	}
+	if !bytes.Contains(frame, []byte(`"operation":"questionnaire-package"`)) {
+		t.Fatalf("Operation was not framed as operation: %q", frame)
 	}
 }
 

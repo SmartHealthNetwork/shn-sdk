@@ -1,10 +1,15 @@
 package shnsdk
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
+	"unicode/utf8"
 )
 
 // MessageFrameV1 is the capability token a holder advertises in its registry
@@ -127,12 +132,96 @@ type HTTPFrameHeader struct {
 // (the frames-absent lane precedent) and is always tolerated.
 const FrameHeaderContractVersion = "contractVersion"
 
+// The headers a producer may frame for a participant's 2xx answer. They describe
+// the answer; none is an address into the participant's system. A frame carries
+// a value as sent, and never judges it as a validator or a date. The codec reads
+// no status: keeping them to a 2xx answer is the producer's rule. A decoder keeps
+// a value as it came, so a consumer that writes one on checks it with
+// FrameCarriesHeaderValue first.
+const (
+	FrameHeaderETag         = "ETag"
+	FrameHeaderLastModified = "Last-Modified"
+	FrameHeaderRetryAfter   = "Retry-After"
+)
+
 // allowedFrameHeaders is the produce+consume header allowlist: relaying
 // arbitrary headers through the seal would be a smuggling vector (cookies,
 // hop-by-hop, internal headers). Widening it is a spec change — contractVersion
-// was added with the multi-version contracts design, and operation with framed
-// DTR operations.
-var allowedFrameHeaders = map[string]bool{"Content-Type": true, FrameHeaderContractVersion: true, FrameHeaderOperation: true}
+// was added with the multi-version contracts design, operation with framed
+// DTR operations, and the answer's own headers above to carry a 2xx as sent.
+var allowedFrameHeaders = map[string]bool{
+	"Content-Type": true, FrameHeaderContractVersion: true, FrameHeaderOperation: true,
+	FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true,
+}
+
+// frameHeaderNames maps each allowlisted header's name, folded to ASCII lower
+// case, to the spelling a frame carries: the allowlist's own. HTTP field names
+// are case-insensitive (RFC 9110 section 5.1), so "ETag", "Etag" (Go's
+// http.CanonicalHeaderKey) and "etag" are one header. Only ASCII letters fold,
+// so no other character can come to spell an allowlisted name.
+var frameHeaderNames = func() map[string]string {
+	m := make(map[string]string, len(allowedFrameHeaders))
+	for k := range allowedFrameHeaders {
+		m[asciiLower(k)] = k
+	}
+	return m
+}()
+
+// frameHeaderName is the frame's spelling of the allowlisted header k names,
+// in any case, and whether k names one.
+func frameHeaderName(k string) (string, bool) {
+	n, ok := frameHeaderNames[asciiLower(k)]
+	return n, ok
+}
+
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 0x41 && c <= 0x5a { // an ASCII upper-case letter
+			b[i] = c + 0x20
+		}
+	}
+	return string(b)
+}
+
+// answerFrameHeaders are the three headers above, whose values a frame carries
+// as sent. Content-Type keeps the encoder's older rule.
+var answerFrameHeaders = map[string]bool{FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true}
+
+// ErrFrameHeaderTooLarge is a header segment over the limit DecodeHTTPFrame
+// reads. The frame would not be readable, so it is not made.
+var ErrFrameHeaderTooLarge = errors.New("shnsdk: frame header segment over the limit")
+
+// ErrFrameHeaderDuplicate is one allowlisted header given twice in a frame's
+// header segment, under one spelling or two (names match in any case). A
+// producer that gives it twice is refused; a frame that carries it twice with
+// different values cannot say which it means, so it is not read: it is
+// malformed framing, a failure of the frame's integrity. The same value twice
+// is that value.
+var ErrFrameHeaderDuplicate = errors.New("shnsdk: frame header given twice")
+
+// ErrFrameHeaderValue is an answer header's value a frame cannot carry exactly
+// (FrameCarriesHeaderValue). The frame's JSON would change it, so it is not made.
+var ErrFrameHeaderValue = errors.New("shnsdk: frame header value cannot be carried exactly")
+
+// FrameCarriesHeaderValue reports whether a frame's encoding keeps v exactly:
+// it is an HTTP field value, with no control character but a tab (RFC 9110
+// section 5.5), and valid UTF-8, since a frame's header segment is JSON, which
+// would replace any other byte. That is all it answers. A value it passes and
+// that is odd as a validator or a date is carried as sent. It does not judge
+// size, which EncodeHTTPFrameHeaders reports for the segment as a whole, and an
+// empty value passes but is omitted, as every empty header is.
+func FrameCarriesHeaderValue(v string) bool {
+	if !utf8.ValidString(v) {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if b := v[i]; (b < 0x20 && b != '\t') || b == 0x7f {
+			return false
+		}
+	}
+	return true
+}
 
 // IsFramed reports whether payload begins with the v1 frame magic. Bare legacy
 // payloads are all text formats, which cannot begin 0x00 — see the spec's
@@ -141,7 +230,8 @@ func IsFramed(payload []byte) bool { return len(payload) > 0 && payload[0] == fr
 
 // EncodeHTTPFrame seals an application answer (status + optional Content-Type +
 // raw body) into a v1 message frame. The body is carried raw — the sealed box
-// already handles arbitrary bytes, so there is no inner base64.
+// already handles arbitrary bytes, so there is no inner base64. A header
+// segment DecodeHTTPFrame would refuse is ErrFrameHeaderTooLarge.
 func EncodeHTTPFrame(status int, contentType string, body []byte) ([]byte, error) {
 	if status < 100 || status > 599 {
 		return nil, fmt.Errorf("shnsdk: frame status %d out of range", status)
@@ -153,6 +243,9 @@ func EncodeHTTPFrame(status int, contentType string, body []byte) ([]byte, error
 	hj, err := json.Marshal(hdr)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: marshal frame header: %w", err)
+	}
+	if len(hj) > maxFrameHeaderBytes {
+		return nil, ErrFrameHeaderTooLarge
 	}
 	out := make([]byte, 0, 6+len(hj)+len(body))
 	out = append(out, frameMagic, frameVersion1)
@@ -166,15 +259,29 @@ func EncodeHTTPFrame(status int, contentType string, body []byte) ([]byte, error
 // EncodeHTTPFrameHeaders seals an application answer with an explicit header
 // map. Every header must be allowlisted — producing a header the consumer
 // would strip (DecodeHTTPFrame deletes non-allowlisted keys) is a caller bug
-// surfaced as an error, never a silent drop. Empty-valued headers are omitted.
+// surfaced as an error, never a silent drop. A name is matched in any case and
+// framed under the allowlist's spelling; two keys naming one header are an
+// error too. Empty-valued headers are omitted.
+// A header segment DecodeHTTPFrame would refuse is ErrFrameHeaderTooLarge, and
+// an answer header's value the frame would change is ErrFrameHeaderValue.
 func EncodeHTTPFrameHeaders(status int, headers map[string]string, body []byte) ([]byte, error) {
 	if status < 100 || status > 599 {
 		return nil, fmt.Errorf("shnsdk: frame status %d out of range", status)
 	}
 	hdr := HTTPFrameHeader{Status: status}
-	for k, v := range headers {
-		if !allowedFrameHeaders[k] {
+	named := make(map[string]string, len(headers))
+	for _, k := range slices.Sorted(maps.Keys(headers)) {
+		v := headers[k]
+		name, ok := frameHeaderName(k)
+		if !ok {
 			return nil, fmt.Errorf("shnsdk: frame header %q is not allowlisted", k)
+		}
+		if other, dup := named[name]; dup {
+			return nil, fmt.Errorf("%w: %s, as %q and %q", ErrFrameHeaderDuplicate, name, other, k)
+		}
+		named[name] = k
+		if answerFrameHeaders[name] && !FrameCarriesHeaderValue(v) {
+			return nil, fmt.Errorf("%w: %s", ErrFrameHeaderValue, name)
 		}
 		if v == "" {
 			continue
@@ -182,11 +289,14 @@ func EncodeHTTPFrameHeaders(status int, headers map[string]string, body []byte) 
 		if hdr.Headers == nil {
 			hdr.Headers = map[string]string{}
 		}
-		hdr.Headers[k] = v
+		hdr.Headers[name] = v
 	}
 	hj, err := json.Marshal(hdr)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: marshal frame header: %w", err)
+	}
+	if len(hj) > maxFrameHeaderBytes {
+		return nil, ErrFrameHeaderTooLarge
 	}
 	out := make([]byte, 0, 6+len(hj)+len(body))
 	out = append(out, frameMagic, frameVersion1)
@@ -199,7 +309,10 @@ func EncodeHTTPFrameHeaders(status int, headers map[string]string, body []byte) 
 
 // DecodeHTTPFrame strictly decodes a v1 frame: magic, version, header length
 // (bounded), header JSON, status range; non-allowlisted headers are dropped on
-// consume. The remaining bytes are the verbatim application body.
+// consume. An allowlisted header is read in any case and returned under the
+// allowlist's spelling; one given twice with different values, under one
+// spelling or two, is ErrFrameHeaderDuplicate. The remaining bytes are the
+// verbatim application body.
 func DecodeHTTPFrame(payload []byte) (HTTPFrameHeader, []byte, error) {
 	if len(payload) < 6 || payload[0] != frameMagic {
 		return HTTPFrameHeader{}, nil, errors.New("shnsdk: not a message frame")
@@ -218,12 +331,79 @@ func DecodeHTTPFrame(payload []byte) (HTTPFrameHeader, []byte, error) {
 	if hdr.Status < 100 || hdr.Status > 599 {
 		return HTTPFrameHeader{}, nil, fmt.Errorf("shnsdk: frame status %d out of range", hdr.Status)
 	}
-	for k := range hdr.Headers {
-		if !allowedFrameHeaders[k] {
-			delete(hdr.Headers, k)
+	if hdr.Headers != nil {
+		// The map Unmarshal filled keeps the last of two equal keys; the segment's
+		// own key/value pairs keep every one, so a header given twice is seen
+		// however it is spelled.
+		pairs, err := frameHeaderPairs(payload[6 : 6+hlen])
+		if err != nil {
+			return HTTPFrameHeader{}, nil, err
 		}
+		named := make(map[string]string, len(pairs))
+		for _, kv := range pairs {
+			name, ok := frameHeaderName(kv[0])
+			if !ok {
+				continue
+			}
+			if prev, dup := named[name]; dup && prev != kv[1] {
+				return HTTPFrameHeader{}, nil, fmt.Errorf("%w: %s, with different values", ErrFrameHeaderDuplicate, name)
+			}
+			named[name] = kv[1]
+		}
+		hdr.Headers = named
 	}
 	return hdr, payload[6+hlen:], nil
+}
+
+// frameHeaderPairs is every key and value of a header segment's headers
+// object, in order, duplicates included, read as json.Unmarshal reads them into
+// HTTPFrameHeader.Headers: encoding/json matches the field name in any case, so
+// every top-level key that names headers is read into the one set, and a null
+// one empties it, as it sets the map to nil. The segment has already
+// unmarshalled, so a value is a string or null, which reads as "", as Unmarshal
+// reads it.
+func frameHeaderPairs(segment []byte) ([][2]string, error) {
+	dec := json.NewDecoder(bytes.NewReader(segment))
+	if _, err := dec.Token(); err != nil { // {
+		return nil, fmt.Errorf("shnsdk: frame header not valid JSON: %w", err)
+	}
+	var pairs [][2]string
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: frame header not valid JSON: %w", err)
+		}
+		key, _ := t.(string)
+		if !strings.EqualFold(key, "headers") {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return nil, fmt.Errorf("shnsdk: frame header not valid JSON: %w", err)
+			}
+			continue
+		}
+		if t, err := dec.Token(); err != nil {
+			return nil, fmt.Errorf("shnsdk: frame header not valid JSON: %w", err)
+		} else if t == nil { // null
+			pairs = pairs[:0]
+			continue
+		}
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return nil, fmt.Errorf("shnsdk: frame header not valid JSON: %w", err)
+			}
+			var v string
+			if err := dec.Decode(&v); err != nil {
+				return nil, fmt.Errorf("shnsdk: frame header not valid JSON: %w", err)
+			}
+			k, _ := kt.(string)
+			pairs = append(pairs, [2]string{k, v})
+		}
+		if _, err := dec.Token(); err != nil { // }
+			return nil, fmt.Errorf("shnsdk: frame header not valid JSON: %w", err)
+		}
+	}
+	return pairs, nil
 }
 
 // AppAnswerError is a recipient's non-2xx APPLICATION answer, carried verbatim

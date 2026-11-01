@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -255,6 +256,162 @@ func TestPASUpdate_PriorClaimItemsAreTheCarriedClaims(t *testing.T) {
 		}
 		if bytes.Contains(bundleClaims(t, out)[0]["item"], []byte(pasInfoChangedExtensionURL)) {
 			t.Errorf("%s: the item is marked against the Deprecated Items field, want it read against the carried Claim (unchanged)", line)
+		}
+	}
+}
+
+// statingReference is the facts with ref stated on each fact in turn.
+func statingReference(t *testing.T, ref string) []PASClaimFacts {
+	t.Helper()
+	state := func(raw json.RawMessage) json.RawMessage {
+		var coding map[string]any
+		if err := json.Unmarshal(raw, &coding); err != nil {
+			t.Fatal(err)
+		}
+		coding["extension"] = []any{map[string]any{"url": "http://example.org/stated", "valueReference": map[string]any{"reference": ref}}}
+		out, err := json.Marshal(coding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	var all []PASClaimFacts
+	for _, edit := range []func(*PASClaimFacts){
+		func(f *PASClaimFacts) { f.ClaimType = state(f.ClaimType) },
+		func(f *PASClaimFacts) { f.Priority = state(f.Priority) },
+		func(f *PASClaimFacts) { f.ServiceCategory = state(f.ServiceCategory) },
+		func(f *PASClaimFacts) { f.PlaceOfService = state(f.PlaceOfService) },
+		func(f *PASClaimFacts) { f.RequestType = state(f.RequestType) },
+	} {
+		f := testClaimFacts()
+		edit(&f)
+		all = append(all, f)
+	}
+	return all
+}
+
+// A reference stated in a submission's fact that no amendment's bundle can
+// resolve is refused without building anything, from PAS 2.1. At 2.0 no prior
+// Claim is carried, so the statement is sent as it is.
+func TestCheckPASSubmittedFacts_AReferenceAnAmendmentCannotCarry(t *testing.T) {
+	for name, row := range map[string]struct {
+		ref     string
+		refused bool
+	}{
+		"a type no entry has":                  {"Observation/stated", true},
+		"an absolute reference to it":          {pasBundleBaseURL + "/Observation/stated", true},
+		"another base":                         {"https://elsewhere.example/fhir/Patient/x", true},
+		"a urn":                                {"urn:uuid:7f6c1a9e-0000-4000-8000-000000000001", true},
+		"no type at all":                       {"stated", true},
+		"a type and no id":                     {"Patient/", true},
+		"a version on the reference":           {"Patient/x/_history/1", true},
+		"a type it holds: the build decides":   {"Patient/someone", false},
+		"an absolute reference to one":         {pasBundleBaseURL + "/Coverage/someone", false},
+		"a provider's own type":                {"PractitionerRole/someone", false},
+		"a local reference: the build decides": {"#stated", false},
+	} {
+		for _, line := range pasLines {
+			def, _ := PASLineDef(line)
+			for i, facts := range statingReference(t, row.ref) {
+				err := CheckPASSubmittedFactsCarriedAtLine(line, facts)
+				if !row.refused || !def.UpdateCarriesPriorClaim {
+					if err != nil {
+						t.Errorf("%s %s, fact %d: %v, want no refusal", line, name, i, err)
+					}
+					continue
+				}
+				if !errors.Is(err, ErrPASPriorClaimNotCarried) || !strings.Contains(err.Error(), row.ref) {
+					t.Errorf("%s %s, fact %d: %v, want ErrPASPriorClaimNotCarried naming the reference", line, name, i, err)
+				}
+			}
+		}
+	}
+	if err := CheckPASSubmittedFactsCarriedAtLine("9.9", testClaimFacts()); err == nil {
+		t.Error("an unknown line passed")
+	}
+}
+
+// What the check refuses is what the build refuses of the same submission: the
+// check says nothing the build would not, on either lane, for any fact.
+func TestCheckPASSubmittedFacts_AgreesWithTheBuild(t *testing.T) {
+	for _, line := range []string{"2.1", "2.2"} {
+		for _, absolute := range []bool{false, true} {
+			for _, ref := range []string{"Observation/stated", pasBundleBaseURL + "/Observation/stated", "https://elsewhere.example/fhir/Patient/x",
+				"urn:uuid:7f6c1a9e-0000-4000-8000-000000000001", "Patient/x/_history/1", "Patient/", "stated"} {
+				for i, facts := range statingReference(t, ref) {
+					if err := CheckPASSubmittedFactsCarriedAtLine(line, facts); !errors.Is(err, ErrPASPriorClaimNotCarried) {
+						t.Fatalf("%s %s fact %d: the check passed: %v", line, ref, i, err)
+					}
+					sub := conformantSubmitInputs(t)
+					sub.AbsoluteRefs, sub.PayerOrgEntry = absolute, absolute
+					sub.PASClaimFacts = facts
+					out, err := BuildConformantClaimBundleAtLineExact(line, sub)
+					if err != nil {
+						t.Fatalf("%s %s fact %d: the submission is not refused here: %v", line, ref, i, err)
+					}
+					prior, err := PASPriorClaimOf(out)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, in := carriedUpdateInputs(t, line, absolute)
+					in.PriorClaim = prior
+					if _, err := BuildConformantClaimUpdateBundleAtLineExact(line, in); !errors.Is(err, ErrPASPriorClaimNotCarried) {
+						t.Errorf("%s absolute=%v %s fact %d: the check refuses what the build carries: %v", line, absolute, ref, i, err)
+					}
+				}
+			}
+		}
+	}
+}
+
+// The amendment's own statements are carried as stated: its check is the
+// builder's rule, and a reference there is no prior Claim's.
+func TestCheckPASUpdateFacts_AnAmendmentsOwnReferenceIsCarried(t *testing.T) {
+	cert := json.RawMessage(`{"system":"` + pasSystemX12CertificationType + `","code":"3"}`)
+	for _, line := range []string{"2.1", "2.2"} {
+		for _, facts := range statingReference(t, "Observation/stated") {
+			if err := CheckPASUpdateFactsAtLine(line, facts, cert); err != nil {
+				t.Errorf("%s: %v", line, err)
+			}
+		}
+	}
+}
+
+// The check is only as true as its list of the amendment's entry types: the list
+// is exactly the entries a built amendment holds, each provider type among them.
+func TestPASAmendmentEntryTypesAreTheBundles(t *testing.T) {
+	seen := map[string]bool{}
+	for _, line := range pasLines {
+		_, in := carriedUpdateInputs(t, line, true)
+		out, err := BuildConformantClaimUpdateBundleAtLineExact(line, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b struct {
+			Entry []struct {
+				Resource struct {
+					ResourceType string `json:"resourceType"`
+				} `json:"resource"`
+			} `json:"entry"`
+		}
+		if err := json.Unmarshal(out, &b); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range b.Entry {
+			seen[e.Resource.ResourceType] = true
+		}
+	}
+	for _, provider := range PASProviderTypes {
+		seen[provider] = true
+	}
+	for rt := range seen {
+		if !slices.Contains(pasAmendmentEntryTypes, rt) {
+			t.Errorf("an amendment's bundle holds a %s, which pasAmendmentEntryTypes does not name", rt)
+		}
+	}
+	for _, rt := range pasAmendmentEntryTypes {
+		if !seen[rt] {
+			t.Errorf("pasAmendmentEntryTypes names %s, which no amendment's bundle holds", rt)
 		}
 	}
 }

@@ -1716,41 +1716,45 @@ func checkPriorClaimCarried(bundleJSON []byte, prior pasCarriedPriorClaim) error
 		}
 	}
 	var unresolved []string
-	var walk func(v any)
-	walk = func(v any) {
-		switch x := v.(type) {
-		case map[string]any:
-			if ref, ok := x["reference"].(string); ok {
-				switch {
-				case strings.HasPrefix(ref, "#"):
-					if !contained[ref] {
-						unresolved = append(unresolved, ref)
-					}
-				case strings.Contains(ref, ":"):
-					if !fullURLs[ref] {
-						unresolved = append(unresolved, ref)
-					}
-				default:
-					if !fullURLs[pasBundleBaseURL+"/"+ref] {
-						unresolved = append(unresolved, ref)
-					}
-				}
+	walkPASReferences(claim, func(ref string) {
+		switch {
+		case strings.HasPrefix(ref, "#"):
+			if !contained[ref] {
+				unresolved = append(unresolved, ref)
 			}
-			for _, c := range x {
-				walk(c)
+		case strings.Contains(ref, ":"):
+			if !fullURLs[ref] {
+				unresolved = append(unresolved, ref)
 			}
-		case []any:
-			for _, c := range x {
-				walk(c)
+		default:
+			if !fullURLs[pasBundleBaseURL+"/"+ref] {
+				unresolved = append(unresolved, ref)
 			}
 		}
-	}
-	walk(claim)
+	})
 	if len(unresolved) > 0 {
 		slices.Sort(unresolved)
 		return pasPriorClaimNotCarried("the recorded Claim references what the amendment's bundle does not carry: " + strings.Join(unresolved, ", "))
 	}
 	return nil
+}
+
+// walkPASReferences calls see with every reference value in v, a decoded JSON
+// value: each string member named reference, at any depth.
+func walkPASReferences(v any, see func(string)) {
+	switch x := v.(type) {
+	case map[string]any:
+		if ref, ok := x["reference"].(string); ok {
+			see(ref)
+		}
+		for _, c := range x {
+			walkPASReferences(c, see)
+		}
+	case []any:
+		for _, c := range x {
+			walkPASReferences(c, see)
+		}
+	}
 }
 
 // The PAS infoChanged codes (PASTempCodes, PASInformationChangeMode): "added"

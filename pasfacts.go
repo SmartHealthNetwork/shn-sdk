@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -288,6 +289,79 @@ func CheckPASUpdateFactsAtLine(line string, f PASClaimFacts, certificationType j
 	}
 	if _, err := resolvePASUpdateFacts(def, f, certificationType); err != nil {
 		return fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
+	return nil
+}
+
+// CheckPASSubmittedFactsCarriedAtLine reports, without building or sending
+// anything, a reference stated in the facts of a submission that its amendment
+// at line could never carry: from PAS 2.1 the amendment carries the submitted
+// Claim whole, and every reference in it must resolve in the amendment's bundle
+// (ErrPASPriorClaimNotCarried). It refuses a reference to a type that bundle has
+// no entry of, one absolute under another base, and one that is not a type and
+// an id. It takes the facts of the submission, not of an amendment, whose own
+// statements the build carries as stated. A caller runs it only for a
+// submission that will be amended: a submission that is not is carried as
+// stated. Which entry a reference to a type the bundle does hold resolves to,
+// and a local reference, are known only at the build, which still decides them.
+// The bundle's types are as the builder documents them; a caller that passes a
+// report, a questionnaire response or a provenance of another type is not
+// covered.
+func CheckPASSubmittedFactsCarriedAtLine(line string, f PASClaimFacts) error {
+	def, ok := PASLineDef(line)
+	if !ok {
+		return fmt.Errorf("shnsdk: CheckPASSubmittedFactsCarriedAtLine: unknown PAS line %q", line)
+	}
+	if !def.UpdateCarriesPriorClaim {
+		return nil
+	}
+	if err := checkPASFactReferences(f); err != nil {
+		return fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
+	return nil
+}
+
+// pasAmendmentEntryTypes are the resource types an amendment's bundle holds an
+// entry of (buildConformantClaimUpdateBundle), PASProviderTypes among them.
+var pasAmendmentEntryTypes = []string{"Claim", "Coverage", "DiagnosticReport", "Organization", "Patient",
+	"PractitionerRole", "Provenance", "QuestionnaireResponse", "ServiceRequest"}
+
+// checkPASFactReferences refuses a reference stated in the facts that no
+// amendment's bundle can resolve, by the rule checkPriorClaimCarried applies to
+// the built bundle: a bundle entry's fullUrl is pasBundleBaseURL/type/id. A local
+// reference and one that could name an entry are left to that check, which reads
+// the entries themselves.
+func checkPASFactReferences(f PASClaimFacts) error {
+	var unresolved []string
+	for _, raw := range []json.RawMessage{f.ClaimType, f.Priority, f.ServiceCategory, f.PlaceOfService, f.RequestType} {
+		if pasFactIsAbsent(raw) {
+			continue
+		}
+		var fact any
+		if err := json.Unmarshal(raw, &fact); err != nil {
+			continue // not a coding: the build refuses it
+		}
+		walkPASReferences(fact, func(ref string) {
+			if strings.HasPrefix(ref, "#") {
+				return
+			}
+			relative := ref
+			if strings.Contains(ref, ":") {
+				var under bool
+				if relative, under = strings.CutPrefix(ref, pasBundleBaseURL+"/"); !under {
+					unresolved = append(unresolved, ref)
+					return
+				}
+			}
+			resourceType, id, _ := strings.Cut(relative, "/")
+			if !slices.Contains(pasAmendmentEntryTypes, resourceType) || !fhirIDPattern.MatchString(id) {
+				unresolved = append(unresolved, ref)
+			}
+		})
+	}
+	if len(unresolved) > 0 {
+		slices.Sort(unresolved)
+		return pasPriorClaimNotCarried("a stated fact references what an amendment's bundle cannot carry: " + strings.Join(unresolved, ", "))
 	}
 	return nil
 }
