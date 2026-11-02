@@ -240,7 +240,7 @@ func buildConformantClaimBundleV061(def PASDef, in ConformantClaimInputs) ([]byt
 	if in.MemberID == "" {
 		return nil, fmt.Errorf("shnsdk: MemberID is required (bare member id; see the v0.42.0 identifier-semantics release note)")
 	}
-	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg)
+	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg, nil)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
@@ -711,7 +711,7 @@ func buildConformantClaimUpdateBundleV061(def PASDef, in ConformantClaimUpdateIn
 	if in.MemberID == "" {
 		return nil, fmt.Errorf("shnsdk: MemberID is required (bare member id; see the v0.42.0 identifier-semantics release note)")
 	}
-	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg)
+	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg, nil)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}

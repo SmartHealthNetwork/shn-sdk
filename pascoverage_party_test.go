@@ -106,7 +106,7 @@ func TestPASBuildersCarryACoveragesParty(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cov, err := pasCoverageEntry(record, in.PatientRef, payerOrg)
+			cov, err := pasCoverageEntry(record, in.PatientRef, payerOrg, nil)
 			if err != nil {
 				t.Fatalf("refused a dependent's Coverage: %v", err)
 			}
@@ -173,7 +173,10 @@ func TestPASBuildersRefuseWhatIsNoParty(t *testing.T) {
 	for _, tc := range []struct{ name, coverage, want string }{
 		{"a contained RelatedPerson subscriber", string(dependentCoverage(member, `{"resourceType":"RelatedPerson","id":"parent","patient":{"reference":"Patient/MBR-COVERED"}}`, []string{"subscriber"}, "")), other},
 		{"an Organization policyHolder", string(dependentCoverage(member, dependentParent, []string{"subscriber"}, `,"policyHolder":{"reference":"Organization/employer"}`)), "policyHolder names someone other than the member"},
-		{"another Patient by reference", string(dependentCoverage(member, dependentParent, []string{"policyHolder"}, `,"subscriber":{"reference":"Patient/other"}`)), other},
+		// Another Patient record is carried only as the caller's own record of
+		// that person (CoverageParties); with none supplied it is refused
+		// (TestPASBuildersCarryTheCoverageEntryParty holds the carried side).
+		{"another Patient by reference, no record supplied", string(dependentCoverage(member, dependentParent, []string{"policyHolder"}, `,"subscriber":{"reference":"Patient/other"}`)), "subscriber names Patient/other, a person other than the member, and no Patient record of that person was supplied"},
 		{"the parent also named from an extension", string(dependentCoverage(member, dependentParent, []string{"subscriber"}, `,"extension":[{"url":"http://example.org/x","valueReference":{"reference":"#parent"}}]`)), other},
 		{"the parent also named inside its slot", strings.Replace(string(dependentCoverage(member, dependentParent, nil, "")), `"beneficiary"`, `"subscriber":{"reference":"#parent","extension":[{"url":"http://example.org/x","valueReference":{"reference":"#parent"}}]},"beneficiary"`, 1), other},
 		{"the parent also named from another contained resource", string(dependentCoverage(member, dependentParent+`,{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"#parent"}}`, []string{"subscriber"}, `,"contract":[{"reference":"#rp"}]`)), other},
@@ -470,7 +473,7 @@ func buildEveryWay(t *testing.T, record []byte) map[string]error {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, errs["entry"] = pasCoverageEntry(record, in.PatientRef, payerOrg)
+	_, errs["entry"] = pasCoverageEntry(record, in.PatientRef, payerOrg, nil)
 	in.Coverage = record
 	_, errs["submit"] = BuildConformantClaimBundleExact(in)
 	up := conformantUpdateInputsFromGolden(t)

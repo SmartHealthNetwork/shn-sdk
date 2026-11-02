@@ -43,6 +43,10 @@ import (
 type pasCoverageRecord struct {
 	id  string
 	raw []byte
+	// parties are the people its subscriber or policyHolder names who are not
+	// the member, each to ride as a Patient entry of its own, in slot order and
+	// once each.
+	parties []pasEntryParty
 }
 
 var errPASCoverageRequired = errors.New(
@@ -115,10 +119,17 @@ func readPASCoverage(record []byte) (pasCoverageRecord, error) {
 //     in the Coverage that only these slots name, by their own reference
 //     member) they are carried with the record's JSON values, and so is the
 //     contained parent, which resolves inside the Coverage wherever it goes.
-//     When they name anyone else (a RelatedPerson, an employer Organization,
-//     another Patient record) the request is refused: that party does not
-//     ride the request, and dropping the element would change what the
-//     participant's record asserts.
+//     When they name another Patient record by a literal reference (a
+//     dependent's parent as a record of its own) and the beneficiary names a
+//     literal Patient too, the participant's own record
+//     of that person, supplied as CoverageParties, rides as a Patient entry of
+//     its own and the slot names that entry: the Coverage's party by
+//     CoverageEntryParties' rule (pascoverageentry.go). With no such record,
+//     or one that cannot ride, the request is refused
+//     (ErrPASCoveragePartyNotCarried). When they name anyone else (a
+//     RelatedPerson, an employer Organization) the request is refused: that
+//     party does not ride the request, and dropping the element would change
+//     what the participant's record asserts.
 //   - every OTHER reference the Coverage itself makes — a contract, one
 //     inside an extension, one the party makes, one in a slot naming the party
 //     beside the slot's own reference — is refused, naming the element.
@@ -141,7 +152,7 @@ var (
 // unchanged, meta.profile is dropped (the PAS context declares none), the two
 // references this package owns are pointed at this Bundle's own entries, and a
 // record making any OTHER reference is refused.
-func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgRecord) (pasCoverageRecord, error) {
+func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgRecord, supplied [][]byte) (pasCoverageRecord, error) {
 	cov, err := readPASCoverage(record)
 	if err != nil {
 		return pasCoverageRecord{}, err
@@ -171,6 +182,7 @@ func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgReco
 	// same person — the subscriber and policy holder with them. A slot naming
 	// the Coverage's party stays as the record has it.
 	beneficiaryKey := patientKey(coverageReferenceOf(m["beneficiary"]))
+	var entryParties []pasEntryParty
 	for _, field := range pasCoverageSubjectReferences {
 		raw, ok := m[field]
 		if !ok || len(raw) == 0 {
@@ -189,11 +201,38 @@ func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgReco
 		// Patient by a literal reference: a slot naming no Patient (an
 		// Organization, a RelatedPerson, "#x", an identifier) never matches,
 		// even when the beneficiary names none either.
-		if slotKey := patientKey(coverageReferenceOf(raw)); slotKey == "" || slotKey != beneficiaryKey {
-			return pasCoverageRecord{}, fmt.Errorf("your Coverage record's %s names someone other than the member it covers, and this request carries only the member: a payer refuses a request whose graph names a party it cannot resolve, and this package will not drop what your record asserts",
-				field)
+		slotKey := patientKey(coverageReferenceOf(raw))
+		if slotKey != "" && slotKey == beneficiaryKey {
+			m[field] = beneficiary
+			continue
 		}
-		m[field] = beneficiary
+		// A slot naming another Patient record by a literal reference names
+		// the Coverage's party (a dependent's parent): the participant's own
+		// record of that person rides as a Patient entry of its own, and the
+		// slot names that entry. Nothing is made up and nothing the record
+		// asserts is dropped (pasCoverageSlotParty).
+		if slotKey != "" && beneficiaryKey != "" {
+			repointed, err := pasCoverageSlotToEntry(field, raw, slotKey)
+			if err != nil {
+				return pasCoverageRecord{}, err
+			}
+			at := slices.IndexFunc(entryParties, func(p pasEntryParty) bool { return "Patient/"+p.id == slotKey })
+			if at < 0 {
+				party, err := pasCoverageSlotParty(field, slotKey, supplied)
+				if err != nil {
+					return pasCoverageRecord{}, err
+				}
+				entryParties = append(entryParties, party)
+				at = len(entryParties) - 1
+			}
+			if err := pasCoverageSlotVersion(field, coverageReferenceOf(raw), entryParties[at]); err != nil {
+				return pasCoverageRecord{}, err
+			}
+			m[field] = repointed
+			continue
+		}
+		return pasCoverageRecord{}, fmt.Errorf("your Coverage record's %s names someone other than the member it covers, and this request carries only the member: a payer refuses a request whose graph names a party it cannot resolve, and this package will not drop what your record asserts",
+			field)
 	}
 	m["beneficiary"] = beneficiary
 	out, err := json.Marshal(m)
@@ -211,7 +250,7 @@ func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgReco
 	if err != nil {
 		return pasCoverageRecord{}, err
 	}
-	return pasCoverageRecord{id: cov.id, raw: out}, nil
+	return pasCoverageRecord{id: cov.id, raw: out, parties: entryParties}, nil
 }
 
 // checkCoverageReferencesOwned refuses a Coverage record that references

@@ -39,13 +39,18 @@ func consistentPASGraphSubjects(g *pasGraph, expected string) bool {
 	}
 
 	found := false
-	// visit walks v. party is set only for a resource in an entry Coverage's
-	// own contained list that is the Coverage's party (CoverageParty): another
-	// person, so its identity is not the patient's and is not checked (the
-	// rule itself requires that it holds as a contained resource). partyRefs
-	// are the local references naming the
-	// parties of the Coverage v is in, which only that Coverage's subscriber
-	// and policyHolder make.
+	// entryParties are the Patient entries that are a Coverage's party
+	// (CoverageEntryParties), read once for the Bundle.
+	entryParties := CoverageEntryParties(g.bundle)
+	// visit walks v. party is set only for a resource that is a Coverage's
+	// party: one in an entry Coverage's own contained list (CoverageParty), or
+	// a Patient entry of its own (entryParties). It is another person, so its
+	// identity is not the patient's and is not checked (either rule itself
+	// requires that it contains nothing and lists its identifier). partyRefs are the
+	// references naming the parties of the Coverage v is in, which only that
+	// Coverage's subscriber and policyHolder make: a local one, or one that
+	// resolves to an entry party's fullUrl from the Coverage's entry
+	// (BundleReferenceURL).
 	var visit func(v any, owner *pasGraphEntry, depth int, party bool, partyRefs map[string]bool) bool
 	visit = func(v any, owner *pasGraphEntry, depth int, party bool, partyRefs map[string]bool) bool {
 		switch x := v.(type) {
@@ -81,6 +86,16 @@ func consistentPASGraphSubjects(g *pasGraph, expected string) bool {
 							partyRefs = map[string]bool{}
 						}
 						partyRefs["#"+cr["id"].(string)] = true
+					}
+				}
+				from, _ := g.entries[owner.index].(map[string]any)
+				for _, k := range []string{"subscriber", "policyHolder"} {
+					slot, _ := x[k].(map[string]any)
+					if ref, _ := slot["reference"].(string); ref != "" && entryParties[BundleReferenceURL(from, ref)] {
+						if partyRefs == nil {
+							partyRefs = map[string]bool{}
+						}
+						partyRefs[ref] = true
 					}
 				}
 			}
@@ -124,7 +139,7 @@ func consistentPASGraphSubjects(g *pasGraph, expected string) bool {
 		return true
 	}
 	for _, entry := range g.byURL {
-		if !visit(entry.resource, entry, 0, false, nil) {
+		if !visit(entry.resource, entry, 0, entryParties[entry.fullURL], nil) {
 			return false
 		}
 	}

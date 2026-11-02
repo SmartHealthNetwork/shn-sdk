@@ -63,8 +63,10 @@ var coveragePartySlots = map[string]bool{"subscriber": true, "policyHolder": tru
 //
 // This package's PAS request builders and PAS response check decide a
 // Coverage's party by it. Its rows are the table in
-// testdata/coverageparty/rows.json. A party carried as a Patient entry of its
-// own is CoverageEntryParties'.
+// testdata/coverageparty/rows.json. A Coverage's party may also be a Patient
+// entry of its own that only a Coverage's subscriber or policyHolder names:
+// that is CoverageEntryParties', which this package's PAS request and
+// response checks read too.
 func CoverageParty(coverage, contained map[string]any) bool {
 	if rt, _ := coverage["resourceType"].(string); rt != "Coverage" {
 		return false

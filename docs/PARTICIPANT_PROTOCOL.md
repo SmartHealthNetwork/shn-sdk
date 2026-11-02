@@ -1697,7 +1697,9 @@ error; the ingress token endpoint answers the `415` as an OAuth error
 reads its form under its own bound rather than the 8 MiB limit. An answer of at least 1 KiB
 from the Hub's `POST /route`, a gateway's inbound route, or an ingress route other than
 its token endpoint is gzip-coded when the request carries `Accept-Encoding: gzip`, and
-each of their answers states `Vary: Accept-Encoding`. The Hub reads a recipient's gzip
+each of their answers states `Vary: Accept-Encoding`. From shn-gateway v1.3.0 an answer
+carrying a strong `ETag` stays uncoded, since coding would make that validator untrue.
+The Hub reads a recipient's gzip
 answer the same way: the 8 MiB answer limit applies to the decoded answer, and a `2xx`
 answer whose coded stream runs past that limit plus 1/1024 of it plus 1 KiB is refused as
 over the limit, at once. A refusal past it keeps its status, with no body read.
@@ -1735,6 +1737,21 @@ content): an attachment given by `url`, content with no inline file, and `data` 
 well-formed base64 are carried, and several
 files each under the limit are carried whatever their sum. A payer that declares no limit has
 only the ceiling applied. Each refusal is `routing`, at every conformance level.
+
+**Instead of a submission over these bounds.** Two ways stay within them; neither is the
+network's to decide, and neither has been shown with a payer:
+- **An attachment given by `url`.** The network carries it as sent, whatever size it states:
+  the declared limit applies to inline files only. Whether the payer fetches it, and with what
+  authorization, is between the provider and the payer; the network does not fetch it, and no
+  payer has yet been shown fetching one sent through the network. CDex 2.1.0 requires a payer's
+  server to support only one of an address (`url`) and inline `data`, and says it should
+  document which (OperationDefinition `submit-attachment`): check what the payer documents.
+- **Several submissions.** CDex 2.1.0's `$submit-attachment` takes `Final`: `false` says the
+  provider expects to send more for the same prior authorization, and `true`, or no `Final`,
+  says this is the last (OperationDefinition `submit-attachment`). The IG notes that payers
+  typically anticipate a single submission and may discourage several. The network carries
+  each submission as sent, its `Final` included, each within the bounds above; no payer has
+  yet been shown taking documentation split this way.
 
 ---
 
@@ -2279,6 +2296,20 @@ rest          body        raw bytes — no additional encoding
   route. An answer the gateway built itself, a success frame from an earlier
   payer gateway, and an unframed answer are `200`. A frame stating `204` carries
   no body; one that carries a body is not read (`502`, recorded as `integrity`).
+  From shn-gateway v1.3.0 it also states that answer's `ETag`, `Last-Modified` and
+  `Retry-After`, and the requesting gateway writes them to its own participant's
+  system as sent, on every Da Vinci ingress route: a value is never judged as a
+  validator or a date. A value a frame cannot carry exactly is left out and recorded,
+  and so are an answer's headers when, with them, it would leave less than 64 KiB under
+  the network's limit for its authorization: such a header never costs an answer, and
+  the answer is authorized once. A non-2xx answer, and an answer the gateway built, state none. A registered
+  edit of an answer drops its `ETag`, under that edit's own disclosure, since it named
+  the participant's bytes. So does a gateway whose transport decoded a gzip answer, for a
+  strong `ETag`, since it named the coded bytes. The network's limit on an answer also
+  covers its frame header: an answer whose own `Content-Type` is over the header limit
+  cannot be carried at all, and is refused `502 {"error":"response body too large"}`,
+  recorded as `routing`, and delivered `yes` (§6.2). A header an HTTP reader cannot parse
+  is a different failure: it ends the read before a gateway sees the answer.
 - `headers` — an **allowlist**: `Content-Type`, `contractVersion` (version-matched
   routing, §8.6), for framed DTR operations `operation` (request frames only,
   below) and, from shn-sdk v1.3.0, `ETag`, `Last-Modified` and `Retry-After`, which
@@ -2346,8 +2377,9 @@ is a distinct error message from `shnsdk.DecodeHTTPFrame`; it does not yet expor
 a typed error for each. A
 header field outside the allowlist is **not** a reject: the reference decoder silently drops it and returns success
 (SHN gateways only ever emit the allowlisted headers, `Content-Type`, on
-contract-mapped legs `contractVersion` (§8.6), and on a framed DTR operation
-`operation`, so this rarely fires in practice). Because an unknown header is
+contract-mapped legs `contractVersion` (§8.6), on a framed DTR operation
+`operation`, and from shn-gateway v1.3.0 on a participant's 2xx answer `ETag`,
+`Last-Modified` and `Retry-After`, so this rarely fires in practice). Because an unknown header is
 dropped rather than refused, a receiver built before a header was allowlisted
 never sees it: a new header that changes how the body is read is therefore
 sent only to a receiver that declares the matching capability (see
@@ -3114,11 +3146,32 @@ reads is spelled exactly (no member of the slot names `reference` in another cas
 say; none of the party names `resourceType`, `id`, `contained` or `identifier` in another
 case; and none of the Coverage names `resourceType`, `contained`, `subscriber` or
 `policyHolder` in another case beside its own). `shnsdk.CoverageParty` is
-that rule. A reference the party makes to a record the request does not carry is refused. So
+that rule. A Coverage's party may also be a `Patient` entry of its own that only a Coverage's
+`subscriber` or `policyHolder` names (`shnsdk.CoverageEntryParties`, from shn-sdk v1.3.0): named
+by its exact `fullUrl` or by a relative reference that resolves to it against the Coverage
+entry's base, never by id alone, and referred to by nothing else in the Bundle. The rule does not
+check that the Coverage's `beneficiary` is the member; the checks of a request and an answer do,
+and refuse another member as before. From shn-sdk v1.4.0 and shn-gateway v1.4.0 those checks
+read such an entry as they read a contained party (§9, 2026-11-01), and these builders carry
+one from `CoverageParties` (below). A reference the party makes to a record the request does not carry is refused. So
 is such a reference anywhere else in a slot naming the party (an extension, an
 `identifier.assigner`), and anywhere else in the Coverage outside its `contained` list; a
-member named `reference` in another case counts as a reference there. Any other `subscriber`
-or `policyHolder` (a `RelatedPerson`, an `Organization`, another Patient record) is refused. A
+member named `reference` in another case counts as a reference there. From shn-sdk v1.4.0,
+when the `beneficiary` names the member by a literal reference, a `subscriber` or
+`policyHolder` naming another Patient record by a literal reference (a dependent's parent as a
+record of its own) is carried from `CoverageParties`, your own
+`Patient` records of the people the Coverage names who are not the member: that person's record
+rides as a `Patient` entry of its own, as your record has it less `meta.profile`, and the slot
+names that entry, so `shnsdk.CoverageEntryParties` names it the Coverage's party. The request is
+refused (`shnsdk.ErrPASCoveragePartyNotCarried`, the fidelity of SHN's own build) when the
+record cannot ride as it is: among other reasons, when you supplied no record of that person, or
+more than one, when the record makes a reference or contains other resources, when the slot
+names another version of the record than the one supplied, when a reference beside the slot's
+own names a record the request does not carry, and when anything else in the request names that
+person too. The Deprecated `BuildConformantClaimBundle` and `BuildConformantClaimUpdateBundle`
+ignore `CoverageParties`. With a `beneficiary` naming no literal Patient, and for any other
+`subscriber` or `policyHolder` (a `RelatedPerson`, an `Organization`), the slot is refused as
+before. A
 contained resource other than the party is carried as your record has it: the references it
 makes are not checked. A Coverage record that repeats a member name in any object, exactly or
 in another case, is refused, as is one that is not strict JSON. A `beneficiary`, `payor` entry,
@@ -3380,7 +3433,8 @@ submit, update or inquiry it relays to its own system (registered edit E-10,
 the payer the exchange was routed to: `{its Da Vinci ingress base}/cdex/payer/{that
 payer's participant id}`, rebuilt from the payer's network identity and never read from the
 answer. Documentation the provider sends there with `$submit-attachment` reaches that
-payer through the network. Only a `payer-url` input written as a `valueUrl` (the input's
+payer through the network. From shn-gateway v1.3.0 the payer's `ETag` is left out of an
+answer so edited, since it named the payer's bytes. Only a `payer-url` input written as a `valueUrl` (the input's
 type is `PASTempCodes#payer-url`) is re-keyed; one in any other form is carried as the
 payer sent it, and the exchange record says it was not re-keyed. So is the `payer-url` of
 a payer whose registry entry does not list `cdex-attachment-submit` (§2.3 `legs`), one that
@@ -4443,6 +4497,68 @@ property. Until then, build to the rule: preserve what you do not recognise.
 ## 9. Status and roadmap
 
 ### Changelog
+
+- **2026-11-01 — From shn-sdk v1.4.0 and shn-gateway v1.4.0, a dependent's parent carried as a `Patient` entry of its own is the Coverage's party, on the request and on the answer (§7a.3).**
+  A Coverage's party is a contained Patient, or a `Patient` entry of its own that only a
+  Coverage's `subscriber` or `policyHolder` names: by the entry's exact `fullUrl` or by a
+  relative reference that resolves to it against the Coverage entry's base (never by id alone),
+  and referred to by nothing else in the Bundle. `shnsdk.CoverageEntryParties` (from shn-sdk
+  v1.3.0) is that rule; it does not check that the Coverage's `beneficiary` is the member, which
+  the checks below do, refusing another member as before. From shn-gateway v1.4.0 a Smart
+  Gateway reads such an entry as it reads a contained party, on a PAS request (`Claim/$submit`,
+  an amendment and `Claim/$inquire`, rule `patient.mixed`, the inquiry's own member check
+  included) and on its answer
+  (`patient.answer`): the parent's entry is not read as a second patient, the slot's reference
+  and an identifier beside it that the parent carries name the parent, and what the parent's
+  entry references is still read. The patients a request involves (§5.1) do not include the
+  parent, but do include a patient the parent's entry names (one it links to, say), as for a
+  parent contained in the Coverage. Before, such a request was refused at `strict` (`403 inconsistent patient in PAS
+  bundle`, or `… in PAS inquiry`) and such an answer refused at `strict` (`PAS response has
+  inconsistent patient linkage`, `PAS inquiry answer has inconsistent patient linkage`), each
+  recorded and carried at `observe` and `structural`; both are now carried and read at every
+  level. From shn-sdk v1.4.0 a `shnsdk.Responder` reads a PAS request, and checks the response
+  it builds, the same way; before, it refused the request. From shn-sdk v1.4.0 the PAS builders
+  carry such an entry too (the next entry). Unchanged: a `Patient` entry no Coverage names, one named by a relative
+  reference that does not resolve to its `fullUrl`, and one anything else in the Bundle refers
+  to (the Claim, an extension, a beneficiary) are another patient, refused at `strict` and
+  recorded and carried at `observe` and `structural`, as is another patient's Coverage entry
+  and that patient; nothing is checked at `none`.
+
+- **2026-11-01 — From shn-sdk v1.4.0 the PAS builders carry a dependent's parent as a `Patient` entry of its own (§7a.3).**
+  `BuildConformantClaimBundle(AtLine)Exact` and `BuildConformantClaimUpdateBundle(AtLine)Exact`
+  take `CoverageParties`, your own `Patient` records of the people the member's Coverage names
+  as `subscriber` or `policyHolder` who are not the member. When the Coverage's `beneficiary`
+  names the member by a literal reference and a slot names another Patient record by one, that
+  person's record rides as a `Patient` entry of its own, less `meta.profile`, after the member's,
+  and the slot names that entry: the Coverage's party by `shnsdk.CoverageEntryParties`. A
+  Coverage naming such a person whose record was not supplied, or cannot ride (among other
+  reasons: it makes a reference, contains other resources, is another version than the slot
+  names, or another element of the request names that person too), is refused with
+  `shnsdk.ErrPASCoveragePartyNotCarried`, before anything is sent. The Deprecated builders
+  ignore `CoverageParties`. Before, every such Coverage was refused (`names someone other than
+  the member it covers`). Unchanged: a request whose Coverage names its party as a contained
+  `Patient`, or no one but the member, is byte-identical; a supplied record the Coverage does not
+  name is not carried; a `RelatedPerson` or `Organization` in those slots, or a slot beside a
+  `beneficiary` naming no literal Patient, is refused. A `shnsdk.Responder` from shn-sdk v1.4.0
+  and a Smart Gateway from shn-gateway v1.4.0 read the parent's entry as the Coverage's party
+  (the previous entry); an earlier gateway's `patient.mixed` check, the sender's own at ingress
+  and the payer's, reads it as a second patient, refusing such a request at `strict` and
+  recording and carrying it at `observe` and `structural`.
+
+- **2026-11-01 — What a provider can do instead of a documentation submission over its bounds (§5.3).**
+  An attachment given by `url` is carried as sent, whatever size it states, and CDex 2.1.0's
+  `Final` lets documentation be split over several submissions, each carried as sent. Neither
+  has been shown with a payer.
+
+- **2026-10-31 — From shn-gateway v1.3.0, a payer's 2xx answer reaches the provider's system with its `ETag`, `Last-Modified` and `Retry-After` (§6.3).**
+  Each is carried as sent, on every Da Vinci ingress route. One a frame cannot carry is
+  left out and recorded, and so are an answer's headers when, with them, it would leave
+  less than 64 KiB under the network's limit for its authorization. A gateway's
+  answer carrying a strong `ETag` stays uncoded, since gzip would make that validator
+  untrue. A registered edit of an answer drops its `ETag` under its own disclosure, and a
+  strong `ETag` on an answer the transport decoded from gzip is left out. The limit on
+  an answer also covers its frame header: a frame whose own `Content-Type` is over the
+  header limit is refused as `routing`, since bare the answer would lose its status.
 
 - **2026-10-31 — From shn-sdk v1.3.0, `CheckPASSubmittedFactsCarriedAtLine` reports a stated reference no amendment can carry (§7a.3).**
   From PAS 2.1 an amendment carries your submitted Claim whole, so a reference you stated inside a

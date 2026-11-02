@@ -625,11 +625,13 @@ curl -s "https://pa-test.shn-preview.org/Questionnaire/\$questionnaire-package" 
 Expect `HTTP 200` and a `Parameters` resource with two parameters:
 
 - `packagebundle` — a Bundle carrying the `HomeHealthAssessment` `Questionnaire`, its three
-  prepopulation `Library` resources, a `ValueSet` and a `QuestionnaireResponse`;
+  prepopulation `Library` resources, the published `FHIRHelpers` Library
+  they depend on and the `FHIR-ModelInfo` Library it depends on, a `ValueSet` and a `QuestionnaireResponse`;
 - `outcome` — an `OperationOutcome` carrying one warning.
 
-The package does not carry the `FHIRHelpers` Library its libraries depend on. You receive
-it as the payer sent it.
+With the two published Libraries the package is about 2 MB. Each questionnaire that uses CQL
+Libraries comes in a package Bundle of its own, with its own copy of them, so a request that
+names several such questionnaires has a large answer: see the answer limit in §8.4.
 
 Use the `questionnaire` canonical exactly as the payer stated it in §5.1. The payer resolves
 it exactly, so a `|version` its questionnaire does not carry is answered with a
@@ -1222,11 +1224,31 @@ only that the endpoint could not reach the network's routing service.
 | Requests per client | 60 per minute | `429` |
 | Concurrent requests in flight, across every caller of the endpoint | 8 | `503` |
 | Request body | 5 MiB | `400` |
+| The payer's answer, as the network carries it | about 6 MiB | `502`, `X-SHN-Delivered: yes` |
 | One forwarded call (CRD, DTR, PAS, coverage eligibility, CDex), from its arrival | 90 seconds | `408`, `504`, or the connection is closed |
 | Calls from one network address straight to a payer's host on the network, not through this endpoint | 2,000 per 5 minutes (about 6.7 a second) | `403` |
 
 A body over the cap is refused before any of it is forwarded, with
 `{"error":"request body exceeds 5 MiB"}`.
+
+An answer over the network's limit is never relayed cut short. The payer answered, but the network
+refuses its answer for size: `502` with `X-SHN-Delivered: yes`, and on a FHIR operation an
+`OperationOutcome` whose `diagnostics` is `response body too large`. Check the request's outcome
+before resending it. The network's own envelope around the answer counts toward the limit, so the
+exact figure varies slightly from call to call: plan for just under 6 MiB. This endpoint records at most 5 MiB of one answer: a larger answer it relays
+is shown on the call's page as answered with its body not captured whole, and that call is not
+rated.
+
+The limit is in bytes, so on route `00301` a `$questionnaire-package` answer reaches it by the
+questionnaires that use CQL Libraries, about 1.7 to 2.2 MB each:
+
+| Questionnaires with Libraries, in one request | Answer |
+|---|---|
+| 1 or 2 | Answered, and recorded as usual. |
+| 3 | Over 5 MiB, so not captured whole when it is answered. Most sets of three are over the network's limit and refused. |
+| 4 or more | Refused for size. |
+
+Ask for at most two such questionnaires in one request, and send the rest in another.
 
 From shn-gateway v1.1.0, a request body may be sent gzip-coded (`Content-Encoding: gzip`). The cap applies to the
 decoded body, and the body is forwarded decoded. A coded body is read no further than the most any

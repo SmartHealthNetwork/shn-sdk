@@ -233,7 +233,9 @@ instead state a NUBC type of bill) and `--request-type`
 From shn-sdk v0.62.0, claim type, priority and service category are required: with neither the
 descriptor nor the flag stating one, the command refuses before it sends anything, naming the
 element, the flag and the descriptor (from shn-gateway v0.62.0 a Smart Gateway's origination
-route likewise refuses a request missing one, with 422, before any leg). Place of service and request
+route likewise refuses a request missing one, with 422: before shn-gateway v1.4.0 before any leg,
+and from shn-gateway v1.4.0 at the build of the prior-authorization claim, after the legs that do
+not need it). Place of service and request
 type are optional at the line `shn priorauth` submits (PAS 2.0): each is carried when stated
 and omitted when neither states it.
 

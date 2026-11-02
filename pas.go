@@ -518,12 +518,29 @@ type ConformantClaimInputs struct {
 	// does not carry — so whatever this request names is what a later inquiry must
 	// name. A request naming a payer Organization this package minted, while the
 	// inquiry named the one the participant's records hold, matched nothing.
-	Insurer     []byte
-	Coverage    []byte
-	PatientRef  string
-	CoverageRef string
-	Corr        string
-	Created     time.Time
+	Insurer  []byte
+	Coverage []byte
+	// CoverageParties are the participant's own Patient records of the people
+	// the member's Coverage names as subscriber or policyHolder who are not the
+	// member (a dependent's parent, the PAS IG's subscriber), read from its own
+	// system. When the Coverage's beneficiary names the member by a literal
+	// Patient reference, each person a subscriber or policyHolder names by a
+	// literal reference to another Patient record rides the request as a
+	// Patient entry of its own, carried as the record has it less
+	// meta.profile, and the slot names that entry: the Coverage's party exactly
+	// by CoverageEntryParties' rule. A Coverage naming such a person whose record
+	// is not here, or cannot ride (among other reasons: it contains other
+	// resources, makes a reference, is another version than the slot names, or
+	// another element of the request names it too), is refused with
+	// ErrPASCoveragePartyNotCarried. With a beneficiary naming no literal
+	// Patient, such a slot is refused as before. Records the Coverage does not
+	// name are not carried. Optional: a member who is their own subscriber needs
+	// none. The Deprecated BuildConformantClaimBundle ignores it.
+	CoverageParties [][]byte
+	PatientRef      string
+	CoverageRef     string
+	Corr            string
+	Created         time.Time
 	// ContainedInsurer has no effect.
 	//
 	// Deprecated: from shn-sdk v0.59.0 the payer always rides as the Insurer entry
@@ -710,7 +727,7 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if in.MemberID == "" {
 		return nil, fmt.Errorf("shnsdk: MemberID is required (bare member id; see the v0.42.0 identifier-semantics release note)")
 	}
-	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg)
+	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg, in.CoverageParties)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
@@ -788,7 +805,13 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if providerURL == pasBundleBaseURL+"/Organization/"+payerOrg.id {
 		return nil, fmt.Errorf("shnsdk: conformant submit: the requesting provider and the payer organization are the same bundle entry (%s)", providerRef)
 	}
-	resources := [][]byte{claimJSON, patientJSON, coverageJSON, srJSON, in.Provider, payerOrg.raw}
+	resources := [][]byte{claimJSON, patientJSON, coverageJSON}
+	// The people the Coverage names beside the member ride right after it, each
+	// as a Patient entry of its own (ConformantClaimInputs.CoverageParties).
+	for _, p := range coverage.parties {
+		resources = append(resources, p.raw)
+	}
+	resources = append(resources, srJSON, in.Provider, payerOrg.raw)
 	if qrJSON != nil {
 		resources = append(resources, qrJSON)
 	}
@@ -840,6 +863,9 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
 	if err := checkPASInsurerResolves(bundleOut); err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
+	}
+	if err := checkPASCoverageEntryParties(bundleOut, coverage.parties); err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
 	return bundleOut, nil
@@ -1992,8 +2018,14 @@ type ConformantClaimUpdateInputs struct {
 	// Insurer is the participant's own Organization record for the payer, with the
 	// same meaning and the same requirement as ConformantClaimInputs.Insurer: an
 	// amendment names the payer the submission named.
-	Insurer          []byte
-	Coverage         []byte
+	Insurer  []byte
+	Coverage []byte
+	// CoverageParties are the participant's own Patient records of the people
+	// the member's Coverage names beside the member, with the same meaning and
+	// the same refusal as ConformantClaimInputs.CoverageParties: an amendment is
+	// made under the same Coverage, so it carries the same people. The
+	// Deprecated BuildConformantClaimUpdateBundle ignores it.
+	CoverageParties  [][]byte
 	PatientRef       string
 	CoverageRef      string
 	Provenance       []byte // FR-32 — REQUIRED (the inbound gate 403s if absent)
@@ -2277,7 +2309,7 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	if in.MemberID == "" {
 		return nil, fmt.Errorf("shnsdk: MemberID is required (bare member id; see the v0.42.0 identifier-semantics release note)")
 	}
-	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg)
+	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg, in.CoverageParties)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
@@ -2352,7 +2384,11 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	entries := make([]fhir.BundleEntry, 0, 9)
 	// The requesting provider rides as its own entry, exactly as on the submit:
 	// an amendment names the same party, and it resolves in the Bundle.
-	baseResources := [][]byte{claimJSON, patientJSON, coverageJSON, srJSON, qrJSON, in.Provider}
+	baseResources := [][]byte{claimJSON, patientJSON, coverageJSON}
+	for _, p := range coverage.parties {
+		baseResources = append(baseResources, p.raw)
+	}
+	baseResources = append(baseResources, srJSON, qrJSON, in.Provider)
 	// The payer's own Organization as the resolvable bundle ENTRY the repointed
 	// Coverage.payor/Claim.insurer name (br-payer findInBundle, entries only).
 	if providerURL == pasBundleBaseURL+"/Organization/"+payerOrg.id {
@@ -2441,6 +2477,9 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
 	if err := checkPASInsurerResolves(bundleOut); err != nil {
+		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+	}
+	if err := checkPASCoverageEntryParties(bundleOut, coverage.parties); err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
 	return bundleOut, nil
