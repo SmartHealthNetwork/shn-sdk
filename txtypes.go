@@ -15,6 +15,7 @@ var prefixedTransactionTypes = map[string]string{
 	"pas-claim-inquire":       "pa.pas-claim-inquire",
 	"patient-dtr":             "pa.patient-dtr",
 	"cdex-attachment-submit":  "pa.cdex-attachment-submit",
+	"cdex-attachment-request": "pa.cdex-attachment-request",
 	"federated-query":         "fqs.federated-query",
 }
 
@@ -23,7 +24,8 @@ var prefixedTransactionTypes = map[string]string{
 // no legs list (RegistryEntry.Legs absent) predates every leg here, so the
 // network does not route one to it.
 var transactionTypeSince = map[string]string{
-	"cdex-attachment-submit": "1.1.0",
+	"cdex-attachment-submit":  "1.1.0",
+	"cdex-attachment-request": "1.5.0",
 }
 
 // TransactionTypeSince is the release that brings the leg named, in either

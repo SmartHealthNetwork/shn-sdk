@@ -4498,6 +4498,24 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-11-02 — From shn-gateway v1.4.0, a requester's gateway refuses a facility record about another patient on `POST /scenario/uc05` at `strict` only, unless the record is the claim update's evidence.**
+  This applies to a provider gateway that builds the prior-authorization exchange for its
+  participant (`ORIGINATION_PROFILE`).
+  - **The evidence:** the facility's `DiagnosticReport`, and the `Provenance` that
+    attributes it, go into the `pas-claim-update` `ClaimUpdate`, the provider's own message,
+    with the report's `subject` re-pointed at the Claim's patient, as before. From
+    shn-gateway v1.4.0, if either is about another patient, the gateway refuses its own build
+    at every level: `422 build update bundle failed: … (fidelity of SHN's own build)`,
+    recorded as `fidelity` at the build stage. No `ClaimUpdate` is sent.
+  - **Every other record** on either `federated-query` leg is used for nothing, as before.
+    From shn-gateway v1.4.0, whether it is about the member is the content check
+    `patient.answer`, as on a participant's own federated query: refused
+    `502 federated response refused: …` at `strict`, and carried below it, recorded at
+    `observe` and `structural`.
+  - **Before shn-gateway v1.4.0,** both cases were `502 federated response refused: …` at
+    every level.
+  - **Both refusals,** from shn-gateway v1.4.0, say which legs the request had already sent;
+    those legs were carried and stand.
 - **2026-11-01 — From shn-sdk v1.4.0 and shn-gateway v1.4.0, a dependent's parent carried as a `Patient` entry of its own is the Coverage's party, on the request and on the answer (§7a.3).**
   A Coverage's party is a contained Patient, or a `Patient` entry of its own that only a
   Coverage's `subscriber` or `policyHolder` names: by the entry's exact `fullUrl` or by a
