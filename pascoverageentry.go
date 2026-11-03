@@ -28,6 +28,10 @@ var ErrPASCoveragePartyNotCarried = errors.New("a person the member's Coverage n
 type pasEntryParty struct {
 	id  string
 	raw []byte
+	// record is the participant's record exactly as supplied, before
+	// meta.profile is taken out: what an inquiry, which carries every record as
+	// its own bytes, embeds.
+	record []byte
 	// versionId is the record's meta.versionId, or "" when it states none.
 	versionId string
 }
@@ -98,7 +102,7 @@ func pasCoverageSlotParty(field, key string, supplied [][]byte) (pasEntryParty, 
 	if meta, ok := party["meta"].(map[string]any); ok {
 		version, _ = meta["versionId"].(string)
 	}
-	return pasEntryParty{id: id, raw: out, versionId: version}, nil
+	return pasEntryParty{id: id, raw: out, record: found, versionId: version}, nil
 }
 
 // pasCoverageSlotVersion refuses a slot that names one version of the

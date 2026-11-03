@@ -378,7 +378,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. At most 8 tokens, each matching `^[a-z0-9]{1,16}$`. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
 | `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`). A current SDK or Smart Gateway build declares `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0` by default (shn-sdk v0.62.0 and gateways before v0.62.0 also declared `pa.pdex@2.1`; from shn-gateway v0.62.0 a gateway whose declared set names it refuses to boot, and from shn-sdk v0.63.0 the SDK refuses a set naming it); the lines the network's gateways can build or bridge are the discovery descriptor's `bridgedContractVersions` (§1a). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. An originating Smart Gateway reads the recipient's declaration to choose each leg's contract line (version-matched routing, §8.6). |
 | `requestFrames` | **Optional** JSON array of the sealed request-frame versions this holder accepts (today `"v1"` and `"v1op"` — see §6.3). **Self-declared**, stamped by the SDK/gateway build like `messageFrames`, with the same limits (at most 8 tokens, each `^[a-z0-9]{1,16}$`). Omitted ⇒ requests to you are sent bare. Outside the PoP signing payload. |
-| `legs` | **Optional** JSON array of the request legs this holder takes as recipient, each named by its flat transaction type (`"cdex-attachment-submit"`, never a `pa.`-prefixed name). **Self-declared** by the system answering at `baseURL`: from shn-gateway v1.1.0, a Smart Gateway declares its own as it starts (`PUT /register/{id}/capabilities`, §2.4), and a registration the SDK builds leaves it absent. **Absent and empty differ.** Absent (or `null`) declares no list, the registration of a build older than this field; `[]` declares that the holder takes none. The Hub refuses a leg the network marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0) to a recipient whose list lacks it, and to one that declares no list (§6.1). Every other leg is routed whatever the holder declares. On a rotation, absent `legs` keeps the legs held (§2.4). Each element must be a leg of the network, named once. Outside the PoP signing payload. |
+| `legs` | **Optional** JSON array of the request legs this holder takes as recipient, each named by its flat transaction type (`"cdex-attachment-submit"`, never a `pa.`-prefixed name). **Self-declared** by the system answering at `baseURL`: from shn-gateway v1.1.0, a Smart Gateway declares its own as it starts (`PUT /register/{id}/capabilities`, §2.4), and a registration the SDK builds leaves it absent. **Absent and empty differ.** Absent (or `null`) declares no list, the registration of a build older than this field; `[]` declares that the holder takes none. The Hub refuses a leg the network marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0, and `cdex-attachment-request`, since 1.5.0) to a recipient whose list lacks it, and to one that declares no list (§6.1). Every other leg is routed whatever the holder declares. On a rotation, absent `legs` keeps the legs held (§2.4). Each element must be a leg of the network, named once, whose row (§4.3) names the holder's `role` for its recipient: a payer declares no leg a provider answers, and the reverse. Outside the PoP signing payload. |
 | `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted**: on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). At admission the registrar checks only the role and this uniqueness; the entry-shape rules (count, both parts present, no whitespace or `\|`, no repeats) are applied by `PUT /register/{id}/payer-ids` and by the self-serve access request (§2.3a). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). Identities acquired **after** admission are attested through `PUT /register/{id}/payer-ids` (§2.4) — same authority — so a payer never re-onboards to become routable on a new one. |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
 
@@ -414,7 +414,7 @@ Rejection cases:
 | `messageFrames` breaks its limits | 400 (`"too many messageFrames"` or `"messageFrames token must match ^[a-z0-9]{1,16}$"`) |
 | `contractVersions` breaks its limits | 400 (`"too many contractVersions"` or `"contractVersions token must match <contract>@<major.minor> (e.g. pa.pas@2.0)"`) |
 | `requestFrames` breaks its limits | 400 (`"too many requestFrames"` or `"requestFrames token must match ^[a-z0-9]{1,16}$"`) |
-| `legs` breaks its rules | 400 (`"legs: \"<name>\" is not a leg of the network"`, `"legs: \"<name>\" is a staged name; declare the leg's flat name"`, `"legs: \"<name>\" is declared twice"`, `"legs: more than the network has"` or `"legs: an element is longer than any leg's name"`) |
+| `legs` breaks its rules | 400 (`"legs: \"<name>\" is not a leg of the network"`, `"legs: \"<name>\" is a staged name; declare the leg's flat name"`, `"legs: \"<name>\" is declared twice"`, `"legs: \"<name>\" is answered by <roles>, and this holder is registered as <role>"` and `"legs: \"<name>\" is not a leg the network routes to a recipient"` (both from shn-gateway v1.5.0, the registrar's deploy), `"legs: more than the network has"` or `"legs: an element is longer than any leg's name"`) |
 | `attachmentMaxBytes` carries a value: only the holder's system declares it (§2.4) | 400 (`"attachmentMaxBytes is declared by the holder's system (PUT /register/{id}/capabilities), not by a registration or rotation"`) |
 | `id` or `baseURL` contains a control character | 400 (`"id/baseURL must not contain control characters"`) |
 | `baseURL` is not an acceptable public https URL (scheme, userinfo, private/unresolvable address) | 400 — body `{"error":"invalid baseURL: <reason>"}`; the `"invalid baseURL: "` prefix is the stable contract, the reason tail may evolve |
@@ -1373,7 +1373,10 @@ list of transaction types and the authority each side needs: the Hub and the
 authorization policy enforce it, the discovery descriptor's operations derive
 from it, and a new transaction type is added there. Each transaction type belongs to
 one workstream: `federated-query` to Federated Query Services (`fqs`), the others to
-Prior Authorization (`pa`).
+Prior Authorization (`pa`). Every leg is a provider's request but one: from shn-gateway
+v1.5.0, `cdex-attachment-request` is the payer's, a CDex 2.1.0 Task Attachment Request for the
+provider's own Task endpoint, routed only to a provider whose registry entry lists the leg
+(§2.3 `legs`).
 
 Each transaction type has a second name: its workstream's prefix, a dot, and the name
 the table lists (`pa.pas-claim`, `fqs.federated-query`). Wire protocol 2.0.0 names a leg
@@ -1388,7 +1391,7 @@ lists. From shn-sdk v1.0.0, the SDK's originators (`RunEligibility`, `RunPriorAu
 answers under the name the request used. The token's `operation` is the same whichever
 name the envelope uses.
 
-Under the Smart Gateway's stability promise (shn-gateway `STABILITY.md`), the `coverage-eligibility`, `patient-dtr` and `federated-query` legs are evolving at shn-gateway v1.0, and the `cdex-attachment-submit` leg is evolving from shn-gateway v1.1.0, the release that adds it, while this protocol's own versioning still governs their names.
+Under the Smart Gateway's stability promise (shn-gateway `STABILITY.md`), the `coverage-eligibility`, `patient-dtr` and `federated-query` legs are evolving at shn-gateway v1.0, the `cdex-attachment-submit` leg is evolving from shn-gateway v1.1.0, the release that adds it, and the `cdex-attachment-request` leg is evolving from shn-gateway v1.5.0, the release that adds it, while this protocol's own versioning still governs their names.
 
 | `transactionType` (envelope) | Request `operation` | Response `operation` |
 |---|---|---|
@@ -1402,6 +1405,7 @@ Under the Smart Gateway's stability promise (shn-gateway `STABILITY.md`), the `c
 | `federated-query` | `federated-query-submit` | `federated-query-response` |
 | `patient-dtr` | `patient-dtr-request` | `patient-dtr-response` |
 | `cdex-attachment-submit` (from shn-gateway v1.1.0) | `cdex-attachment-submit` | `cdex-attachment-submit-response` |
+| `cdex-attachment-request` (from shn-gateway v1.5.0) | `cdex-attachment-request` | `cdex-attachment-request-response` |
 
 Standard authority frames:
 
@@ -1410,11 +1414,13 @@ Standard authority frames:
 | Provider → payer (eligibility, CRD, DTR, PAS submit, update and inquire; from shn-gateway v1.1.0, CDex `$submit-attachment`) | `provider-tpo` | `payer-coverage` |
 | Provider → facility (federated query) | `provider-tpo` | `facility-disclosure` |
 | Provider → PHG (patient-authored DTR, `patient-dtr`) | `provider-tpo` | `patient-authorship` |
+| Payer → provider (from shn-gateway v1.5.0, a CDex attachment-request Task) | `payer-payment` | `provider-disclosure` |
 
 The policy also checks the caller's registered role: a `provider-tpo` request comes
 from a `provider`, a `payer-coverage` response from a `payer`, a
 `facility-disclosure` response from a `facility`, and a `patient-authorship`
-response from the `phg`. Every operation rides an envelope.
+response from the `phg`; from shn-gateway v1.5.0, a `payer-payment` request comes from a
+`payer`, and a `provider-disclosure` response from a `provider`. Every operation rides an envelope.
 
 ### 4.4 Per-leg token verification — `VerifyBound`
 
@@ -1544,7 +1550,9 @@ The Smart Gateway does this from shn-gateway v0.55.0, on the prior-authorization
 legs, and from v0.62.0 a payer's gateway also names its own binding on an eligibility answer. Whenever the network's Hub advertises `involved`, at every conformance
 level, it reads its own system of record to identify each other member a request
 carries (each Patient in it and each Patient reference, read as it reads the
-request's own patient), so the exchange is recorded under each of them. This is for the audit record only: it
+request's own patient; from shn-gateway v1.6.0, none it cannot identify
+under an identifier derived from an id alone, and a Coverage's `subscriber` or
+`policyHolder` names no one), so the exchange is recorded under each of them. This is for the audit record only: it
 never refuses a request or records a finding, and the conformance checks decide
 as they do without it. It names at most 16 patients within 2 seconds per leg,
 and leaves out, with an observer event, any it cannot identify or obtain a token
@@ -1786,8 +1794,18 @@ The Hub:
 If the Hub cannot reach its replay record at step 1 or 3, it refuses the leg (503)
 rather than route it unguarded.
 
+**A leg for another role.** From shn-gateway v1.5.0 (the network's deploy of that
+release, whatever release a gateway runs), between steps 3 and 4, before the check below, the Hub
+checks the recipient's registered `role` against the roles the leg's row (§4.3) names
+for its recipient, for every leg. A recipient of another role, or registered with
+none, is never contacted, whatever legs it declares: the Hub appends a `"refused"`
+request record and answers `422` with `X-SHN-Delivered: no`:
+
+- `{"error":"the recipient cannot take <leg>: it is registered as <role>, and <leg> is answered by <roles>"}` (from shn-gateway v1.5.0, the network's deploy)
+
 **A leg its recipient does not take.** Between steps 3 and 4, for a leg the network
-marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0),
+marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0, and
+`cdex-attachment-request`, since 1.5.0),
 the Hub checks the recipient's `legs` (§2.3). A recipient whose list lacks the leg,
 `[]` included, or that declares no list — it registered with a build older than the
 declaration, and so older than the leg — is never contacted. The Hub appends a
@@ -1798,7 +1816,9 @@ leg by its flat name:
 - `{"error":"the recipient does not take <leg>: it declares no legs, and <leg> is since <release>"}`
 
 No other Hub refusal is a `422`, so the status and `X-SHN-Delivered: no` together say
-the network refused the leg on routing; the reason is for people, not for parsing.
+the network refused the leg on routing (from shn-gateway v1.5.0, the network's deploy, for
+either reason); the
+reason is for people, not for parsing.
 Every leg the network does not mark passes this step whatever the recipient
 declares.
 
@@ -2024,7 +2044,7 @@ caller gets back from the route that started the exchange. A leg is
 | `routed` | The leg was attempted: recipient resolved, contract line selected, seal → authorize (§4.1) → `POST {hub}/route` under way. Always followed by exactly one terminal outcome. | — |
 | `answered` | The counterpart answered and the response envelope verified end-to-end (§6.1 steps 6–8, `VerifyBound` §4.4). A frame-carried **non-2xx answer** is `answered`, not a failure: an application answer (§6.3 — an adjudication denial, a `422` validation reject, a partner payer's real `400`), and since shn-gateway v0.54.0 the counterpart gateway's own failure (§8, "Mechanical vs. application status" — its system unreachable, a record it could not read). The counterpart reports it, so it is not counted in your `LegError`; the counterpart's operators see it, and to the Hub, which cannot see inside the frame, the leg was answered. | The application response; a non-2xx answer is relayed **verbatim** with the recipient's own status, `Content-Type` and body. |
 | `denied` | The **Authorization Framework refused the request leg** — `403` from `POST {authz}/authorize` (§4.1: wrong role for the frame, or no consent on `federated-query-submit`). A policy decision, not an error; excluded from the operators' `LegError` alarm. | A `403` whose `error` carries `authorization denied` (a `502` before shn-gateway v0.54.0), from a route with no legitimate denied branch; a flow that has one treats it as a business outcome instead (the UC-05 federated query leaves the prior authorization pended with `consentDenied: true` rather than failing). |
-| `unreachable` | The **Hub leg did not complete**: the recipient was not reached, or, for a leg that timed out after your gateway sent it, may have been (the `504` says so): your gateway could not reach `POST {hub}/route`; or the Hub refused the leg — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), the `422` for a leg its recipient does not take, or the `502` it returns when the recipient is unknown, cannot be reached, or refuses the forward at its edge, on a payload-hash mismatch, or on an audit-append failure before the forward, or the `500` it returns when it cannot encode the envelope it would forward (`encode envelope failed`) or mint its transport assertion (`transport assertion encoding failed`), or the `503` it returns when it cannot reach its replay record (`replay guard unavailable`) or cannot hold a large envelope (`large envelope budget exhausted`, §5), or the `503` it relays when the recipient's gateway states that it refused the leg before acting, because it does not know your gateway yet or has no room for the envelope (`X-SHN-Not-Acted`, §6.1) (each marked `X-SHN-Delivered: no`); or a `4xx` with no `X-SHN-Delivered` marker, which did not come from the Hub (a load balancer in front of it). A recipient that does not frame its answers is refused at its edge in the Hub's eyes, so its `4xx` application answer reads this way too. Also the leg that produced **no answer within your gateway's wait** (the HTTP client timeout it posts to `POST {hub}/route` with — 30 seconds in the published Smart Gateway; the whole Hub → counterpart gateway → counterpart system path shares that budget). From shn-gateway v0.60.0, also a request leg whose **Authorization Framework did not answer**: `POST {authz}/authorize` was refused, reset or closed, or failed some other way, before any response, got no answer within your gateway's HTTP client timeout, or was answered `503` or `504` (the Framework never answers those itself: they come from a proxy or load balancer in front of it). Your gateway tries that call once more, with a fresh holder assertion, only when the first attempt failed with a refused, reset or closed connection before the request was written; after the write the Framework may have decided and recorded its decision, so it is not repeated. The leg is not sent to the Hub. | The Hub not reached: a `502` whose `error` is `hub routing failed`. The Hub's refusal, with `error` reading `hub refused the exchange: <the Hub's reason>`: a `409 … replay detected` keeps the Hub's status (and from shn-gateway v1.1.0, so does a `413 … request body too large`, §5); every other Hub `4xx` concerns your gateway's standing with the Hub (its registration, its token, its clock), not the caller's request, and is a `502` — e.g. `502 … stale or future timestamp`, `502 … unknown sender`; the Hub's `422` for a leg the recipient does not take (§6.1) concerns the recipient: from shn-gateway v1.1.0 your caller gets that `422` with the Hub's reason as it stands, `{"error":"the recipient does not take <leg>: …"}` (an OperationOutcome with code `not-supported` and the reason as its `diagnostics` on a FHIR operation route), and before that it is `502 … hub refused the exchange: the recipient does not take <leg>: …`; a Hub `5xx` keeps its status, e.g. `502 … unknown recipient` or `503 … replay guard unavailable`. A recipient gateway that refused the forward at its edge: `502 the recipient's gateway refused the exchange (403)`. Before shn-gateway v0.54.0, every one of these was `502 hub routing failed`. The timed-out leg: a `504` whose `error` reads `no answer on the hub leg within 30s (hub leg timeout)` (the number is the client's own timeout, which your gateway applies as its own deadline on the leg; `hub leg timed out` with no number when your own request deadline ended the wait first; either adds `the recipient may have received this request: check its outcome before resending` when the request had already been sent to the Hub; a connection or TLS handshake that gives up before the Hub is reached is not called a timeout and stays the `502`). Retry with a freshly sealed envelope (§6.1a). The Authorization Framework not answering (from shn-gateway v0.60.0): your gateway's own `503`, uncacheable, whose `error` reads `the authorization service could not be reached, so this leg was not sent to the payer` (an OperationOutcome with code `transient` on a FHIR operation route). A Da Vinci ingress call is one leg, so nothing reached the payer and resending it is safe; on a route that sends several legs, the earlier ones may have been sent. Before v0.60.0 it was a `502 authorization failed`, counted `failed`. The recipient's gateway not knowing yours yet (from shn-gateway v0.62.0): your gateway's own `503`, uncacheable, with the relayed `Retry-After`, whose `error` reads `the recipient's gateway has not read this gateway's registration yet and took no action on this leg; resend after <n>s` (an OperationOutcome with code `transient` on a FHIR operation route). A Da Vinci ingress call is one leg, so nothing reached the recipient and resending it after that wait is safe; on a route that sends several legs, the earlier ones may have been answered. Before v0.62.0 the recipient's gateway acted on the leg and then answered `500`, which read as `the recipient may have received this request`. |
+| `unreachable` | The **Hub leg did not complete**: the recipient was not reached, or, for a leg that timed out after your gateway sent it, may have been (the `504` says so): your gateway could not reach `POST {hub}/route`; or the Hub refused the leg — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), the `422` for a leg its recipient does not take or one for another role than the recipient's, or the `502` it returns when the recipient is unknown, cannot be reached, or refuses the forward at its edge, on a payload-hash mismatch, or on an audit-append failure before the forward, or the `500` it returns when it cannot encode the envelope it would forward (`encode envelope failed`) or mint its transport assertion (`transport assertion encoding failed`), or the `503` it returns when it cannot reach its replay record (`replay guard unavailable`) or cannot hold a large envelope (`large envelope budget exhausted`, §5), or the `503` it relays when the recipient's gateway states that it refused the leg before acting, because it does not know your gateway yet or has no room for the envelope (`X-SHN-Not-Acted`, §6.1) (each marked `X-SHN-Delivered: no`); or a `4xx` with no `X-SHN-Delivered` marker, which did not come from the Hub (a load balancer in front of it). A recipient that does not frame its answers is refused at its edge in the Hub's eyes, so its `4xx` application answer reads this way too. Also the leg that produced **no answer within your gateway's wait** (the HTTP client timeout it posts to `POST {hub}/route` with — 30 seconds in the published Smart Gateway; the whole Hub → counterpart gateway → counterpart system path shares that budget). From shn-gateway v0.60.0, also a request leg whose **Authorization Framework did not answer**: `POST {authz}/authorize` was refused, reset or closed, or failed some other way, before any response, got no answer within your gateway's HTTP client timeout, or was answered `503` or `504` (the Framework never answers those itself: they come from a proxy or load balancer in front of it). Your gateway tries that call once more, with a fresh holder assertion, only when the first attempt failed with a refused, reset or closed connection before the request was written; after the write the Framework may have decided and recorded its decision, so it is not repeated. The leg is not sent to the Hub. | The Hub not reached: a `502` whose `error` is `hub routing failed`. The Hub's refusal, with `error` reading `hub refused the exchange: <the Hub's reason>`: a `409 … replay detected` keeps the Hub's status (and from shn-gateway v1.1.0, so does a `413 … request body too large`, §5); every other Hub `4xx` concerns your gateway's standing with the Hub (its registration, its token, its clock), not the caller's request, and is a `502` — e.g. `502 … stale or future timestamp`, `502 … unknown sender`; the Hub's `422` for a leg the recipient does not take (§6.1) concerns the recipient: from shn-gateway v1.1.0 your caller gets that `422` with the Hub's reason as it stands, `{"error":"the recipient does not take <leg>: …"}`, and so it does for the Hub's `422` for a recipient of another role than the leg's, `{"error":"the recipient cannot take <leg>: it is registered as <role>, and <leg> is answered by <roles>"}` (an OperationOutcome with code `not-supported` and the reason as its `diagnostics` on a FHIR operation route), and before that it is `502 … hub refused the exchange: the recipient does not take <leg>: …`; a Hub `5xx` keeps its status, e.g. `502 … unknown recipient` or `503 … replay guard unavailable`. A recipient gateway that refused the forward at its edge: `502 the recipient's gateway refused the exchange (403)`. Before shn-gateway v0.54.0, every one of these was `502 hub routing failed`. The timed-out leg: a `504` whose `error` reads `no answer on the hub leg within 30s (hub leg timeout)` (the number is the client's own timeout, which your gateway applies as its own deadline on the leg; `hub leg timed out` with no number when your own request deadline ended the wait first; either adds `the recipient may have received this request: check its outcome before resending` when the request had already been sent to the Hub; a connection or TLS handshake that gives up before the Hub is reached is not called a timeout and stays the `502`). Retry with a freshly sealed envelope (§6.1a). The Authorization Framework not answering (from shn-gateway v0.60.0): your gateway's own `503`, uncacheable, whose `error` reads `the authorization service could not be reached, so this leg was not sent to the recipient` (before shn-gateway v1.5.0, `… not sent to the payer`) (an OperationOutcome with code `transient` on a FHIR operation route). A Da Vinci ingress call is one leg, so nothing reached the payer and resending it is safe; on a route that sends several legs, the earlier ones may have been sent. Before v0.60.0 it was a `502 authorization failed`, counted `failed`. The recipient's gateway not knowing yours yet (from shn-gateway v0.62.0): your gateway's own `503`, uncacheable, with the relayed `Retry-After`, whose `error` reads `the recipient's gateway has not read this gateway's registration yet and took no action on this leg; resend after <n>s` (an OperationOutcome with code `transient` on a FHIR operation route). A Da Vinci ingress call is one leg, so nothing reached the recipient and resending it after that wait is safe; on a route that sends several legs, the earlier ones may have been answered. Before v0.62.0 the recipient's gateway acted on the leg and then answered `500`, which read as `the recipient may have received this request`. |
 | `failed` | Anything else, on **your gateway's** side of the leg: the Authorization Framework erroring (a non-403 answer, or an answer your gateway cannot read; before shn-gateway v0.60.0 also no answer at all), a seal/encode failure. Also a leg **the recipient's gateway was reached for** whose answer was lost: the Hub marks its `502` with `X-SHN-Delivered` (`yes`: the recipient answered and the Hub could not read, decode, verify or audit the answer; `unknown`: the recipient answered `5xx`, the connection failed after the request was sent, or it did not answer before the forward gave up), a `5xx` with no marker (not from the Hub), a connection to the Hub that failed after your gateway sent the request, or the Hub returned `200` and the answer could not be read or fails your gateway's own verification (not an envelope, `VerifyBound`, correlation match, decrypt, frame decode). Counted in `LegError` with `unreachable`. | A `502` whose `error` names the reason — `authorization failed`, …. A leg the recipient was reached for reads `the recipient received this request and answered, but its answer was lost on the way back (…)` or `… its answer could not be accepted (…)`, or `the recipient may have received this request (…)`: the recipient may have acted on it, so check the request's outcome (for PAS, `$inquire`) before resending. A `2xx` answer whose frame declares a contract line other than the one the leg routed to (§6.3) is also refused after the recipient answered (from shn-gateway v0.62.0 only when your gateway sets `REQUIRE_SHARED_LINE=true`: by default it is relayed and the difference recorded, §8.6), and from shn-gateway v0.62.0 reads `the recipient received this request and answered, but its answer could not be accepted (response contract version mismatch: frame declares <token>, leg routed <token>); it may have acted on the request: check its outcome before resending`; before v0.62.0 it read only `response contract version mismatch: …`, without that advice, and the same check applied to it. |
 
 Two things are **not** leg outcomes:
@@ -2058,7 +2078,8 @@ Two things are **not** leg outcomes:
 
 ### 6.2 Holder inbound surface — receive a routed leg
 
-A holder that acts as a **responder** (payer, facility, PHG) must serve:
+A holder that acts as a **responder** (payer, facility, PHG, and from shn-gateway v1.5.0 a
+provider that takes the payer's attachment request) must serve:
 
 ```
 POST {holder}/substrate/inbound
@@ -2069,7 +2090,12 @@ Content-Type: application/json
 
 The endpoint must:
 
-1. Decode the envelope.
+1. Decode the envelope. A leg whose row (§4.3) names another role than yours for its
+   recipient is not yours to answer: the Hub routes it to no holder of your role.
+   From shn-gateway v1.5.0, a Smart Gateway that receives one anyway refuses it
+   before step 2, at every conformance level, with `422 {"error":"this gateway
+   cannot take <leg>: it is a <role> gateway, and <leg> is answered by <roles>"}`,
+   recorded as `routing`.
 2. Verify the authz token using `VerifyBound` with the expected response `frame`,
    the response `operation` (see §4.3), and the known `correlationId` for this
    exchange. Then look up the request's `sender` in your registry: your response
@@ -3260,14 +3286,17 @@ is read or carried (from shn-gateway v0.60.0).
 | Payer identity mapping | the payer's gateway, on the request to its payer (only when configured) | Only the payer identifier strings of each Coverage, and of a PAS Claim's insurer when it names the payer. A CDS Hooks or `$questionnaire-package` request that carries no Coverage has nothing to map and is sent as it arrived; from shn-gateway v0.60.0 that includes a CDS Hooks request, which earlier releases refused with `400`. |
 
 - **Signatures.** A signature inside the message (`Bundle.signature`, `Provenance.signature`, a
-  `Signature` element) travels untouched, with one exception. From shn-gateway v1.1.0 a
-  provider's gateway re-keys the `payer-url` of each Task in a PAS answer to its own
-  documentation return path even where a signature covers it (§7b.1a), so that the
-  documentation the provider sends stays on the network; that signature then no longer
-  verifies in the provider's copy, and the answer names the edit and the signature in
-  `X-SHN-Edited`. Every other edit that would change signed content is refused
-  with `422 signed content cannot be edited (<edit>, <signature>)`, naming the edit and the
-  signature that covers the content (`Bundle.signature`, `Provenance.signature`,
+  `Signature` element) travels untouched, with two exceptions, each at a `payer-url` only. From
+  shn-gateway v1.1.0 a provider's gateway re-keys the `payer-url` of each Task in a PAS
+  answer to its own documentation return path even where a signature covers it (§7b.1a), so
+  that the documentation the provider sends stays on the network; that signature then no
+  longer verifies in the provider's copy, and the answer names the edit and the signature in
+  `X-SHN-Edited`. From shn-gateway v1.5.0 it does the same to the one `payer-url` of a payer's
+  attachment-request Task (`cdex-attachment-request`) as it carries the Task to its own
+  system, and the forward names the edit and the signature in `X-SHN-Edited`
+  (`cdex-task-return-rekey; signed="<signatures>"`). Every other edit that would change
+  signed content is refused with `422 signed content cannot be edited (<edit>, <signature>)`,
+  naming the edit and the signature that covers the content (`Bundle.signature`, `Provenance.signature`,
   `Signature in <resource type>`, or `Signature` for one outside any resource or in one whose
   type is not a FHIR resource type name).
 - **No transport signatures.** HTTP-level signatures (signed header fields, a detached JWS)
@@ -3316,8 +3345,9 @@ is read or carried (from shn-gateway v0.60.0).
   to choose the payer is found under the system's own Patient id.
 - **Gateway-originated requests.** A request that a provider's gateway builds for its own
   workflow names the patient by the member id. It changes the system of record's `Patient.id`
-  and the patient reference on each carried record's patient path, and nothing else; the
-  change is checked byte for byte.
+  and the patient reference on each carried record's patient path, and, from shn-gateway
+  v1.6.0, a Coverage's `subscriber` or `policyHolder` naming the patient's own record (the
+  member their own subscriber), and nothing else; the change is checked byte for byte.
 - **Framed questionnaire requests.** A provider's gateway sends a `$questionnaire-package`
   request only as a framed operation (§6.3). A payer whose registration does not declare
   `"v1op"` therefore receives no questionnaire requests from a v0.44.0 provider gateway, which
@@ -3755,7 +3785,18 @@ and later.)
   `use=preauthorization`, patient, created, insurer, provider — an Organization or
   PractitionerRole — priority, insurance, and the items asked about with their trace
   numbers), followed by your Patient, Coverage, provider and insurer records, each
-  embedded as your exact bytes. The payer matches on the member identifier plus the
+  embedded as your exact bytes. From shn-sdk v1.6.0, a dependent's Coverage that names
+  a parent (its subscriber or policyHolder) as a Patient record of its own carries that
+  parent too, as a Patient entry of its own from your own record
+  (`PASInquiryInputs.CoverageParties`), as the submission does. The inquiry carries your
+  Coverage as its own bytes, so the parent's entry takes the fullUrl the Coverage's own
+  reference to it resolves to. A parent whose record you do not supply, or that cannot ride
+  as an entry of its own, is refused (`ErrPASCoveragePartyNotCarried`) and no inquiry is
+  built. Where the Coverage names such a parent, so is one whose reference resolves to no
+  entry, a Coverage whose beneficiary does not resolve to your Patient's entry (or names
+  another version of it), and a subscriber, policyHolder or beneficiary that spells its
+  reference member in another case. A Coverage naming no one beside the member is built as
+  before. The payer matches on the member identifier plus the
   provider identifier, so the Patient must carry the member id as an identifier with
   a system, typed `MB` (v2-0203) at every line: PAS 2.1.0 is the one line that slices
   it, but the reference payer refuses an untyped member identifier at 2.0 as well, and
@@ -4498,6 +4539,54 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-11-03 — From shn-gateway v1.6.0, a gateway-originated request names the member in a self-subscriber's Coverage slots (§7a.4).**
+  When the provider's system names the member's Patient by its own record id, a provider's
+  gateway names the patient by the member id in the requests it builds for its own workflow.
+  It now does so in a Coverage's `subscriber` and `policyHolder` that name the patient's own
+  record, as it does in the beneficiary. Before, such a Coverage on the CRD prefetch, in the
+  questionnaire-package request, and in the gateway's own PAS inquiry, named the subscriber
+  by the system's own record id, a record the request did not carry. A slot naming another
+  person (a dependent's parent) is unchanged.
+
+- **2026-11-03 — From shn-sdk v1.6.0, a dependent's inquiry carries the parent the Coverage names (§7b.2a).**
+  `BuildPASInquiryBundle` takes the Coverage's parties (`PASInquiryInputs.CoverageParties`,
+  and `PASInquiryRecords.CoverageParties` for `PriorAuthContinuation.InquiryInputs`): a
+  person the Coverage names as its subscriber or policyHolder by a literal reference to
+  another Patient record rides the inquiry as a Patient entry of its own, your record's own
+  bytes, at the fullUrl the Coverage's reference to it resolves to, since the inquiry carries
+  your Coverage unchanged. A parent whose record is not supplied, or cannot ride as an entry
+  of its own (as the submission reads it; by a reference naming no entry; under a
+  beneficiary that does not resolve to your Patient's entry or names another version of it;
+  or where a slot or the beneficiary spells its reference member in another case and could
+  so name a parent), is refused `ErrPASCoveragePartyNotCarried`, so an inquiry for a dependent
+  that names its parent now needs the parent's record. A member who is their own
+  subscriber, or a parent contained in the Coverage, is built as before.
+
+- **2026-11-03 — From shn-gateway v1.5.0, a leg goes only to a holder of the role its leg row names for the recipient (§2.3, §6.1, §6.2).**
+  The network's Hub and registrar enforce this from their deploy of shn-gateway v1.5.0's
+  release, for every gateway, whatever release it runs.
+  - **The Hub** (§6.1): from shn-gateway v1.5.0, the network's deploy, a recipient registered with another role than the
+    leg's row names for its recipient, or with none, is never contacted: `422` with
+    `X-SHN-Delivered: no`, `the recipient cannot take <leg>: it is registered as <role>, and
+    <leg> is answered by <roles>`. A requester's gateway from shn-gateway v1.1.0 reads it as it
+    reads a leg its recipient does not take, and answers its caller that `422`.
+  - **The registrar** (§2.3): from shn-gateway v1.5.0, the network's deploy, a registration, rotation or capabilities
+    declaration naming a leg its role does not answer is refused `400`.
+  - **The recipient's gateway** (§6.2): from shn-gateway v1.5.0, a Smart Gateway that
+    receives a leg whose row names another role refuses it `422` before reading its token, at
+    every conformance level, recorded as `routing`.
+  - **The Authorization Framework not answering** (§6.1b): from shn-gateway v1.5.0 the `503`
+    reads `… so this leg was not sent to the recipient`, where it named the payer.
+
+- **2026-11-02 — From shn-gateway v1.5.0, a payer's attachment-request Task's `payer-url` is re-keyed to the provider gateway's documentation return path (§4.3, §7a.4).**
+  As a provider's gateway carries a payer's attachment-request Task (`cdex-attachment-request`) to
+  its own system, it replaces the `valueUrl` of the Task's one `payer-url` input with its own
+  return path for the payer that sent the Task, so documentation sent there stays on the
+  network. It is made by default, even where a signature covers the `payer-url`, and the forward
+  names it in `X-SHN-Edited` (`cdex-task-return-rekey`). A `payer-url` in another form, several
+  `payer-url` inputs, or a payer that does not take the documentation submission leaves the Task
+  as sent, and the exchange records why. This is the second edit made to signed content, after
+  the PAS pend's re-key; every other edit of signed content is still refused `422`.
 - **2026-11-02 — From shn-gateway v1.4.0, a requester's gateway refuses a facility record about another patient on `POST /scenario/uc05` at `strict` only, unless the record is the claim update's evidence.**
   This applies to a provider gateway that builds the prior-authorization exchange for its
   participant (`ORIGINATION_PROFILE`).
@@ -6141,8 +6230,8 @@ property. Until then, build to the rule: preserve what you do not recognise.
   `ParseCoverageBeneficiary` also accept a Bundle of Coverages when every Coverage names
   the same payer (respectively beneficiary). `RunPriorAuth` reads the CRD answer with
   `ParseCRDResponse`, so it understands both answer shapes. Deprecated:
-  `BuildCards` / `BuildCardsAtLine` (output unchanged in this release; a later release
-  emits the `BuildCRDResponse` shape), `ParseCards` (now a wrapper that keeps its
+  `BuildCards` / `BuildCardsAtLine` (output unchanged in shn-sdk v0.50.0; from v0.50.1
+  they build nothing and return `ErrBuildCardsReplaced`), `ParseCards` (now a wrapper that keeps its
   earlier result for the card extension object and otherwise returns the first
   coverage information), `BuildConformantOrderSelectRequest` and
   `BuildConformantOrderDispatchRequest` (output unchanged; replaced by
@@ -6268,7 +6357,7 @@ property. Until then, build to the rule: preserve what you do not recognise.
   bare requests. A claim the receiver cannot both build and validate for is
   refused with a legible `422` (§6.3, ingress refusal) rather than silently
   answered at another line. `coverage-eligibility` is version-neutral and is
-  never framed. Also in this release: an SDK-based `Responder` can opt into
+  never framed. Also in shn-sdk v0.38.0: an SDK-based `Responder` can opt into
   stamping `contractVersion` on its framed success answers
   (`ResponderConfig.StampContractVersion`), and the SDK's own originators verify
   the stamp — the published-library parity for what SHN gateways have done since

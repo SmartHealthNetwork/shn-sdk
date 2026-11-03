@@ -56,13 +56,15 @@ type PriorAuthContinuation struct {
 
 // PASInquiryRecords are the requester's own records an inquiry embeds (see
 // PASInquiryInputs): the Patient (carrying the member identifier), the
-// Coverage, the requesting provider (Organization or PractitionerRole) and
-// the payer Organization.
+// Coverage, the people the Coverage names beside the member
+// (PASInquiryInputs.CoverageParties), the requesting provider (Organization or
+// PractitionerRole) and the payer Organization.
 type PASInquiryRecords struct {
-	Patient  []byte
-	Coverage []byte
-	Provider []byte
-	Insurer  []byte
+	Patient         []byte
+	Coverage        []byte
+	CoverageParties [][]byte
+	Provider        []byte
+	Insurer         []byte
 }
 
 // NewPriorAuthContinuation records the continuation facts of a submitted PAS
@@ -273,6 +275,7 @@ func (c PriorAuthContinuation) InquiryInputs(id string, identifier PASIdentifier
 		MemberID:        c.MemberID,
 		Patient:         records.Patient,
 		Coverage:        records.Coverage,
+		CoverageParties: records.CoverageParties,
 		Provider:        records.Provider,
 		Insurer:         records.Insurer,
 		Items:           items,

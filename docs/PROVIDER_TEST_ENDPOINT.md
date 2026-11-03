@@ -1157,7 +1157,7 @@ reason — for example `502 {"error":"hub refused the exchange: unknown recipien
 about the endpoint, not your request — and an authorization or consent denial is a
 `403 {"error":"authorization denied"}`. When the network's authorization service does not
 answer, the answer is a `503 {"error":"the authorization service could not be reached, so
-this leg was not sent to the payer"}` (an `OperationOutcome` with issue code
+this leg was not sent to the recipient"}` (from shn-gateway v1.5.0; before, `… the payer`) (an `OperationOutcome` with issue code
 `transient` on the FHIR operation routes): nothing reached the payer, and resending is
 safe. When the
 payer's gateway was reached but its answer was lost on the way back, the `502` says so —

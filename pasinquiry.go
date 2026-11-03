@@ -1,6 +1,7 @@
 package shnsdk
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,6 +102,32 @@ type PASInquiryInputs struct {
 	Patient []byte
 	// Coverage is the patient's Coverage (its beneficiary is Patient).
 	Coverage []byte
+	// CoverageParties are the participant's own Patient records of the people
+	// the Coverage names as subscriber or policyHolder who are not the member
+	// (a dependent's parent, the PAS IG's subscriber), read from its own
+	// system: the records ConformantClaimInputs.CoverageParties gave the
+	// submission. Each person a subscriber or policyHolder names by a literal
+	// reference to another Patient record rides the inquiry as a Patient entry
+	// of its own, carried as the record's own bytes, at the fullUrl the slot's
+	// own reference resolves to (BundleReferenceURL): the inquiry carries the
+	// Coverage as your own bytes, so its slot names that entry as it stands,
+	// and the person is the Coverage's party exactly by CoverageEntryParties'
+	// rule. A Coverage naming such a person whose record is not here, or that
+	// cannot ride, is refused with ErrPASCoveragePartyNotCarried: as the
+	// submission refuses it (among other reasons, the record contains other
+	// resources, makes a reference, or is another version than the slot names;
+	// or another element of the inquiry names it too), and, since nothing in
+	// the Coverage is re-pointed, when the slot's reference resolves to no
+	// entry, one person is named by references resolving to different URLs, the
+	// Coverage's beneficiary does not resolve to the Patient's entry (or names
+	// another version of it), or a subscriber, policyHolder or beneficiary
+	// spells its reference member in another case where, read leniently, a
+	// slot names a Patient other than the member. A Coverage naming no one
+	// beside the member builds as before. A slot's other members are carried
+	// as the record has them, as the rest of the Coverage is. Records the
+	// Coverage does not name are not carried.
+	// Optional: a member who is their own subscriber needs none.
+	CoverageParties [][]byte
 	// Provider is the requesting provider: an Organization or a
 	// PractitionerRole.
 	Provider []byte
@@ -120,7 +147,8 @@ type PASInquiryRequest struct {
 
 // PASInquiryCopiedSpan says that Body[At:At+(End-Start)] is a copy of bytes
 // [Start, End) of the input named by Input ("Patient", "Coverage",
-// "Provider" or "Insurer").
+// "Provider" or "Insurer", or "CoverageParties[i]" for the i-th of
+// PASInquiryInputs.CoverageParties).
 type PASInquiryCopiedSpan struct {
 	Input      string
 	Start, End int
@@ -131,8 +159,8 @@ var fhirDatePattern = regexp.MustCompile(`^\d{4}(-\d{2}(-\d{2})?)?$`)
 
 // BuildPASInquiryBundle builds the Da Vinci PAS inquiry request Bundle at a
 // PAS line ("2.0", "2.1", "2.2"): the inquiry Claim first, then the Patient,
-// Coverage, Provider and Insurer entries, each embedded as the caller's own
-// bytes. Each item carries its trace number and, when the payer gave them,
+// Coverage, the Coverage's parties (PASInquiryInputs.CoverageParties),
+// Provider and Insurer entries, each embedded as the caller's own bytes. Each item carries its trace number and, when the payer gave them,
 // its authorization and administration reference numbers (item extensions at
 // every line). No entry carries a request, response or search element.
 //
@@ -140,7 +168,9 @@ var fhirDatePattern = regexp.MustCompile(`^\d{4}(-\d{2}(-\d{2})?)?$`)
 // required input (see PASInquiryInputs); a Patient without the member
 // identifier (with a system, typed MB); a resource that is not one JSON object
 // of the expected type with an id; a Coverage for another patient; a Provider
-// that is not an Organization or PractitionerRole; an item without a positive
+// that is not an Organization or PractitionerRole; a person the Coverage names
+// beside the member who cannot ride the inquiry (ErrPASCoveragePartyNotCarried,
+// see PASInquiryInputs.CoverageParties); an item without a positive
 // sequence, a product code, or a trace number, or with a malformed service
 // date; repeated item sequences.
 func BuildPASInquiryBundle(line string, in PASInquiryInputs) (PASInquiryRequest, error) {
@@ -268,6 +298,17 @@ func buildPASInquiryBundle(line string, in PASInquiryInputs) (PASInquiryRequest,
 	if patientKey(beneficiary.Reference) != "Patient/"+patientID {
 		return PASInquiryRequest{}, fmt.Errorf("the Coverage beneficiary %q is not the Patient", beneficiary.Reference)
 	}
+	// The people the Coverage names beside the member, by the submit builder's
+	// own rule, so the inquiry carries what the submission carried about the
+	// same Coverage.
+	var patientMeta struct {
+		VersionID string `json:"versionId"`
+	}
+	_ = json.Unmarshal(pm["meta"], &patientMeta)
+	parties, err := inquiryCoverageParties(in.Coverage[coverage.start:coverage.end], cm, coverage.fullURL, patient.fullURL, patientMeta.VersionID, in.CoverageParties)
+	if err != nil {
+		return PASInquiryRequest{}, err
+	}
 	// The same set the submit builder checks, from the same one place: a request
 	// and the inquiry about it can never name parties of different types.
 	provider, _, err := inquiryInput("Provider", in.Provider, PASProviderTypes...)
@@ -391,7 +432,12 @@ func buildPASInquiryBundle(line string, in PASInquiryInputs) (PASInquiryRequest,
 	w.raw(`]}}`)
 
 	var copied []PASInquiryCopiedSpan
-	for _, r := range []inquiryResource{patient, coverage, provider, insurer} {
+	entries := []inquiryResource{patient, coverage}
+	for _, p := range parties {
+		entries = append(entries, p.resource)
+	}
+	entries = append(entries, provider, insurer)
+	for _, r := range entries {
 		w.raw(`,{"fullUrl":`)
 		w.str(r.fullURL)
 		w.raw(`,"resource":`)
@@ -400,5 +446,158 @@ func buildPASInquiryBundle(line string, in PASInquiryInputs) (PASInquiryRequest,
 		w.raw(`}`)
 	}
 	w.raw(`]}`)
-	return PASInquiryRequest{Body: w.b.Bytes(), Copied: copied}, nil
+	body := w.b.Bytes()
+	if len(parties) > 0 {
+		// As the submission confirms its own (checkPASCoverageEntryParties):
+		// each person carried beside the member is the Coverage's party
+		// exactly, at the entry it rides as, and named by nothing else.
+		var b map[string]any
+		if err := json.Unmarshal(body, &b); err != nil {
+			return PASInquiryRequest{}, fmt.Errorf("read the built inquiry: %w", err)
+		}
+		named := CoverageEntryParties(b)
+		for _, p := range parties {
+			if !named[p.resource.fullURL] {
+				return PASInquiryRequest{}, fmt.Errorf("%w: the Patient %s the Coverage names beside the member is not its party alone in the built inquiry (another element names it, or it shares an entry's fullUrl)", ErrPASCoveragePartyNotCarried, p.resource.fullURL)
+			}
+		}
+	}
+	return PASInquiryRequest{Body: body, Copied: copied}, nil
+}
+
+// inquiryParty is a person the Coverage names beside the member, ready to ride
+// the inquiry: the record prepared by the submission's rule, and the supplied
+// input it is embedded from.
+type inquiryParty struct {
+	party    pasEntryParty
+	resource inquiryResource
+}
+
+// inquiryCoverageParties is the submit builder's party rule (pasCoverageEntry)
+// for an inquiry, which carries the Coverage as the participant's own bytes and
+// so leaves its slots as they are: each subscriber or policyHolder naming, by a
+// literal reference, a Patient other than the member is the Coverage's party,
+// carried from the records supplied, as a Patient entry whose fullUrl is the
+// one the slot's own reference resolves to from the Coverage's entry
+// (BundleReferenceURL), so the Coverage names it as its party
+// (CoverageEntryParties) without a byte of it changed. A slot naming the
+// member, a contained party (which rides inside the Coverage), or no Patient
+// at all carries no one, as before; a slot's other members are carried as the
+// record has them, as the rest of the Coverage is. Every way a party cannot
+// ride is ErrPASCoveragePartyNotCarried: the submission's own
+// (pasCoverageSlotParty, pasCoverageSlotVersion), and, because nothing in the
+// Coverage is re-pointed, a slot whose reference resolves to no entry, one
+// person named by references that resolve to different entries, a
+// beneficiary that does not resolve to the member's entry or names another
+// version of it, and a slot or the beneficiary spelling its reference member in
+// another case where, read leniently, a slot names a Patient other than the
+// member.
+func inquiryCoverageParties(coverage []byte, cm map[string]json.RawMessage, coverageURL, patientURL, patientVersion string, supplied [][]byte) ([]inquiryParty, error) {
+	_, contained, _, err := coverageParties(coverage)
+	if err != nil {
+		return nil, err
+	}
+
+	var head struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(coverage, &head)
+	from := map[string]any{"fullUrl": coverageURL, "resource": map[string]any{"resourceType": "Coverage", "id": head.ID}}
+	beneficiaryRef := coverageReferenceOf(cm["beneficiary"])
+	beneficiaryKey := patientKey(beneficiaryRef)
+	var out []inquiryParty
+	for _, field := range pasCoverageSubjectReferences {
+		raw, ok := cm[field]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		if _, ok := coveragePartyNamed(raw, contained); ok {
+			continue
+		}
+		ref := coverageReferenceOf(raw)
+		// Whether a slot names a person beside the member is read from its
+		// reference member, and the beneficiary's, by their exact names, as
+		// the submission reads them. A slot spelling its reference member in
+		// another case cannot be read, and neither can a beneficiary so spelled
+		// when the slot names another Patient than the one it seems to: each
+		// could hide a person the inquiry would leave out, so it is refused, as
+		// the submission refuses such a Coverage.
+		lenientBeneficiary := patientKey(anyCaseReference(cm["beneficiary"]))
+		if lenientRef := anyCaseReference(raw); lenientRef != ref {
+			// Read leniently, the slot names the member or no Patient: no one
+			// beside the member could hide behind it, so it builds as before.
+			if k := patientKey(lenientRef); k == "" || k == lenientBeneficiary {
+				continue
+			}
+			return nil, fmt.Errorf("%w: your Coverage record's %s spells its reference member in another case, and could name a person beside the member (%s) this inquiry would leave out", ErrPASCoveragePartyNotCarried, field, patientKey(lenientRef))
+		}
+		slotKey := patientKey(ref)
+		if slotKey == "" {
+			continue
+		}
+		if lenient := lenientBeneficiary; lenient != beneficiaryKey && slotKey != lenient {
+			return nil, fmt.Errorf("%w: your Coverage record's beneficiary spells its reference member in another case, and its %s names %s, so whether that is the member cannot be read exactly", ErrPASCoveragePartyNotCarried, field, slotKey)
+		}
+		if beneficiaryKey == "" || slotKey == beneficiaryKey {
+			continue
+		}
+		notCarried := func(format string, args ...any) error {
+			return fmt.Errorf("%w: your Coverage record's %s names %s, %s", ErrPASCoveragePartyNotCarried, field, slotKey, fmt.Sprintf(format, args...))
+		}
+		target := BundleReferenceURL(from, ref)
+		if target == "" || !strings.HasSuffix(target, "/"+slotKey) ||
+			!(strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "urn:")) {
+			return nil, notCarried("by a reference (%q) that resolves to no entry this inquiry can carry: the inquiry carries your Coverage as its own bytes, so its reference must name the parent's entry as it stands", ref)
+		}
+		if BundleReferenceURL(from, beneficiaryRef) != patientURL {
+			return nil, notCarried("and its beneficiary (%q) does not resolve to the member's entry in this inquiry, so the person beside the member cannot ride as the Coverage's party: the inquiry carries your Coverage as its own bytes", beneficiaryRef)
+		}
+		if i := strings.LastIndex(beneficiaryRef, "/_history/"); i >= 0 && beneficiaryRef[i+len("/_history/"):] != patientVersion {
+			return nil, notCarried("and its beneficiary (%q) names another version of the member's record than the Patient carried, so the person beside the member cannot ride as the Coverage's party", beneficiaryRef)
+		}
+		at := slices.IndexFunc(out, func(p inquiryParty) bool { return "Patient/"+p.party.id == slotKey })
+		if at < 0 {
+			party, err := pasCoverageSlotParty(field, slotKey, supplied)
+			if err != nil {
+				return nil, err
+			}
+			i := slices.IndexFunc(supplied, func(rec []byte) bool { return bytes.Equal(rec, party.record) })
+			res, _, err := inquiryInput(fmt.Sprintf("CoverageParties[%d]", i), supplied[i], "Patient")
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrPASCoveragePartyNotCarried, err)
+			}
+			res.fullURL = target
+			out = append(out, inquiryParty{party: party, resource: res})
+			at = len(out) - 1
+		} else if out[at].resource.fullURL != target {
+			return nil, notCarried("by a reference (%q) that resolves to another entry than the one its other slot names (%s): one record rides as one entry", ref, out[at].resource.fullURL)
+		}
+		if err := pasCoverageSlotVersion(field, ref, out[at].party); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// anyCaseReference is the string a Reference element's reference member holds,
+// whatever case its name is spelled in, or "" when it has none: what a reader
+// folding member names would take the element to name.
+func anyCaseReference(raw json.RawMessage) string {
+	var elem map[string]json.RawMessage
+	if json.Unmarshal(raw, &elem) != nil {
+		return ""
+	}
+	if v, ok := elem["reference"]; ok {
+		var s string
+		_ = json.Unmarshal(v, &s)
+		return s
+	}
+	for k, v := range elem {
+		if strings.EqualFold(k, "reference") {
+			var s string
+			_ = json.Unmarshal(v, &s)
+			return s
+		}
+	}
+	return ""
 }
