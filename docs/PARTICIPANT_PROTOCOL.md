@@ -279,8 +279,8 @@ admitted at runtime (§2.3). The operator produces a
 }
 ```
 
-A holder entry's `payerIds` (payers only) and `contractVersions` are optional and
-omitted when unset.
+A holder entry's `payerIds` (payers only), `providerIds` (providers only, §2.4) and
+`contractVersions` are optional and omitted when unset.
 
 `manifest.json` is **public**. It is the network's trust root for the session:
 the network's own services read it at startup to populate their registry and to
@@ -380,6 +380,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `requestFrames` | **Optional** JSON array of the sealed request-frame versions this holder accepts (today `"v1"` and `"v1op"` — see §6.3). **Self-declared**, stamped by the SDK/gateway build like `messageFrames`, with the same limits (at most 8 tokens, each `^[a-z0-9]{1,16}$`). Omitted ⇒ requests to you are sent bare. Outside the PoP signing payload. |
 | `legs` | **Optional** JSON array of the request legs this holder takes as recipient, each named by its flat transaction type (`"cdex-attachment-submit"`, never a `pa.`-prefixed name). **Self-declared** by the system answering at `baseURL`: from shn-gateway v1.1.0, a Smart Gateway declares its own as it starts (`PUT /register/{id}/capabilities`, §2.4), and a registration the SDK builds leaves it absent. **Absent and empty differ.** Absent (or `null`) declares no list, the registration of a build older than this field; `[]` declares that the holder takes none. The Hub refuses a leg the network marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0, and `cdex-attachment-request`, since 1.5.0) to a recipient whose list lacks it, and to one that declares no list (§6.1). Every other leg is routed whatever the holder declares. On a rotation, absent `legs` keeps the legs held (§2.4). Each element must be a leg of the network, named once, whose row (§4.3) names the holder's `role` for its recipient: a payer declares no leg a provider answers, and the reverse. Outside the PoP signing payload. |
 | `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted**: on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). At admission the registrar checks only the role and this uniqueness; the entry-shape rules (count, both parts present, no whitespace or `\|`, no repeats) are applied by `PUT /register/{id}/payer-ids` and by the self-serve access request (§2.3a). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). Identities acquired **after** admission are attested through `PUT /register/{id}/payer-ids` (§2.4) — same authority — so a payer never re-onboards to become routable on a new one. |
+| `providerIds` | **Not accepted at registration.** A provider's organization NPIs are operator-attested through `PUT /register/{id}/provider-ids` (§2.4), each on the operator's recorded check; a registration carrying the field is refused (400 below). Served on `GET /holders` for `role=provider` only, and preserved across key rotation (§2.4). |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
 
 **Proof-of-possession (`pop`).** In addition to the Trust admin gate, the
@@ -423,6 +424,7 @@ Rejection cases:
 | `pop` does not verify against the submitted `signPub` | 401 (`"registration proof-of-possession failed"`) |
 | `id` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
 | `payerIds` present on a non-`payer` role | 400 (`"payerIds are only valid for role=payer"`) |
+| `providerIds` present at all, even `[]`: a provider's identifiers are attested only through `PUT /register/{id}/provider-ids` (§2.4) | 400 (`"providerIds are attested through PUT /register/{id}/provider-ids, never at registration"`) |
 | `id` already dynamically registered, or a `payerIds` entry already bound to another holder | 409 (`"id or payer-id already registered"`) |
 | `id` was registered before: its signing keys are kept, and a new holder under it would be authenticated as the old one | 409 (`"holder id has key history"`) |
 | `signPub` is marked compromised, for this holder or any other | 409 (`"signing key is marked compromised"`) |
@@ -441,8 +443,18 @@ republishes the holder's `messageFrames` and `contractVersions` **verbatim** —
 feed is the same self-declared value the holder registered or last rotated, not
 re-derived or re-validated beyond the admission-time shape check — its `legs` as the
 registrar holds them (absent for a holder that declares none, `[]` for one that takes
-none), its `attachmentMaxBytes` when its system declared one (§2.4) and, for payers,
-the operator-attested `payerIds`.
+none), its `attachmentMaxBytes` when its system declared one (§2.4), for payers,
+the operator-attested `payerIds`, and, for providers, the operator-attested
+`providerIds` (§2.4).
+
+From shn-sdk v1.7.0, the SDK decodes a row's `providerIds` into `Holder.ProviderIDs`: the
+organization identifiers a provider is operator-attested for, each a `{ "system", "value" }`
+pair (`ProviderIdentifier`, the shape of `payerIds`). It also carries a
+`RegistryEntry.ProviderIDs` field, for whoever fills a peer cache from the feed; the SDK does
+not fill one itself. A row without the field reads as attested for none. A reader that knows only
+`payerIds`, an SDK older than v1.7.0 among them, reads the row as before. The registrar
+serves the field for a provider an operator has attested through
+`PUT /register/{id}/provider-ids` (§2.4).
 
 **Registry merge rule:** `registry = manifest base ∪ dynamic`. Dynamic holders are
 appended; the **manifest base is immutable at runtime** (founding holders are never
@@ -688,6 +700,8 @@ rotate does) or repeat the set the registrar already holds, and the attested set
 carried forward untouched either way. A body carrying a *different* set is refused
 `403` rather than silently dropped; the route that changes them is
 `PUT /register/{id}/payer-ids` below.
+The same holds for a provider's `providerIds`: the route that changes them is
+`PUT /register/{id}/provider-ids` below.
 
 **Re-declaring without new keys.** A `PUT /register/{id}` whose `encPub` and
 `signPub` equal the registered keys is accepted the same way (the `pop` is signed
@@ -707,6 +721,7 @@ Rejection cases (checks are ordered):
 | `id` or `baseURL` contains a control character | 400 (`"id/baseURL must not contain control characters"`) |
 | `role` or `baseURL` differs from the existing record | 400 (`"rotation changes keys only; role/baseURL must match"`) |
 | `payerIds` present and different from the attested set | 403 (`"payerIds are operator-attested; a holder cannot change its own payer identities"`) |
+| `providerIds` present and different from the attested set (`[]` included) | 403 (`"providerIds are operator-attested; a holder cannot change its own provider identifiers"`) |
 | `messageFrames`, `contractVersions`, `requestFrames` or `legs` breaks its limits | 400 (the same messages as `POST /register`, §2.3) |
 | `attachmentMaxBytes` present and different from the value held | 400 (`"attachmentMaxBytes is declared by the holder's system (PUT /register/{id}/capabilities), not by a registration or rotation"`) |
 | New `encPub` / `signPub` malformed (not valid base64 / wrong length) | 400 (`"malformed encPub/signPub"`) |
@@ -775,6 +790,77 @@ Rejection cases (checks are ordered):
 
 The transition is audited as `payer-ids-attested` (§2.5), with the admin key's label
 in `scope` — so the record says which authority attested the change.
+
+**`PUT /register/{id}/provider-ids`** — operator-attested provider identifiers.
+
+A provider's identifiers are the organization NPIs (`http://hl7.org/fhir/sid/us-npi`)
+an operator has attested it for: the NPI system only, an NPI of an organization (an
+NPPES Type 2 entity) only, each bound to one holder. They are attested here and
+nowhere else: never at registration, never by the holder's own key. This route
+REPLACES the provider's attested set under the same Trust admin authority as
+`PUT /register/{id}/payer-ids`, and each identifier stands only on the operator's
+recorded check of it, which the registrar keeps with the attestation (the operator's
+provider-id view, `GET /admin/provider-ids`) and never serves on `GET /holders`.
+
+An NPI's digits do not say whether it was issued to an organization or to a person.
+The registrar checks the NPI's form only (10 digits whose last is the check digit
+over the other nine with the `80840` prefix). That the NPI names an organization is
+the operator's statement, made in the recorded check (`entityType`), after looking the
+NPI up in the NPPES registry.
+
+Auth: a **Trust admin** assertion, as for `PUT /register/{id}/payer-ids`. A holder's
+own assertion is refused `401`.
+
+```
+PUT /register/acme-provider/provider-ids
+X-Holder-Assertion: base64(json(assertion))   // Trust admin, audience="registrar"
+```
+
+```json
+{ "providerIds": [ { "system": "http://hl7.org/fhir/sid/us-npi", "value": "1234567893",
+                     "evidence": { "method": "nppes-manual", "entityType": "organization",
+                                   "name": "Acme Medical Group",
+                                   "checkedAt": "2026-11-04T15:00:00Z" } } ] }
+```
+
+Each entry's `evidence` is the record of the operator's check: `method` (`nppes-manual`,
+the operator's own NPPES lookup), `entityType` (`organization`, as the registry lists
+the NPI), `name` (the organization's name as the registry lists it, at most 200
+bytes, without control characters) and `checkedAt` (when the check was made, not
+after the attestation). The check is made through one verification step: a check that
+does not vouch the identifier, or that cannot be made, leaves the attested set as it
+was.
+
+The set is a REPLACE: an identifier the body omits is withdrawn, and `[]` withdraws
+all of them. An **absent** `providerIds` field is a malformed request. Success is 200,
+and `GET /holders` carries the new set at once.
+
+Rejection cases (checks are ordered):
+
+| Condition | Status |
+|---|---|
+| Missing or invalid Trust admin credential (including a holder's own assertion, or a replayed `jti`) | 401 (`"missing or invalid Trust admin credential"`) |
+| `{id}` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
+| Body is not valid JSON | 400 (`"bad request body"`) |
+| `providerIds` absent | 400 (`"providerIds required (an empty array withdraws every identifier)"`) |
+| More than 16 entries | 400 (`"too many providerIds"`) |
+| An entry's `system` is not exactly `http://hl7.org/fhir/sid/us-npi` (a TIN, or any other system) | 400 (`"providerIds admit only the NPI system (http://hl7.org/fhir/sid/us-npi)"`) |
+| An entry's `value` is not 10 digits with a valid check digit | 400 (`"providerIds value must be a 10-digit NPI with a valid check digit"`) |
+| The same entry twice | 400 (`"providerIds entries must be distinct"`) |
+| An entry without `evidence` | 400 (`"providerIds[<n>].evidence is required: the recorded check that vouches it"`) |
+| Registrar store read unavailable | 502 (`"store error"`) |
+| No such (dynamic) holder | 404 (`"no such holder"`) |
+| The holder's role is not `provider` | 400 (`"providerIds are only valid for role=provider"`) |
+| An identifier is already bound to a founding holder | 409 (`"provider-id already registered to another holder"`) |
+| The check could not be made | 502 (`"provider identifier verification failed"`) |
+| The check does not vouch an entry (its `evidence` is incomplete, names another method or entity type, or was made after now) | 400 (`"providerIds[<n>] is not vouched: <reason>"`), the reason naming the `evidence` field |
+| An identifier is already bound to ANOTHER dynamic holder | 409 (`"provider-id already registered to another holder"`) |
+| Registrar store write unavailable | 502 (`"store error"`) |
+| Lifecycle audit append failed (nothing is changed, fail-closed) | 502 (`"lifecycle audit failed"`) |
+| Success | 200 (OK) |
+
+The transition is audited as `provider-ids-attested` (§2.5), with the admin key's
+label in `scope`.
 
 **`PUT /register/{id}/capabilities`** — a holder's own declaration of its capabilities.
 
@@ -872,7 +958,7 @@ separately (§4 tokens are per-leg, per-operation — see the concept mapping in
 
 Every lifecycle transition — `registered`, `revoked`, `deregistered`, `rotated` (new keys),
 `redeclared` (a `PUT /register/{id}` that kept both keys, or a `PUT /register/{id}/capabilities`, §2.4), `payer-ids-attested`
-(a `PUT /register/{id}/payer-ids`, §2.4) — is signed
+(a `PUT /register/{id}/payer-ids`, §2.4), `provider-ids-attested` (a `PUT /register/{id}/provider-ids`, §2.4) — is signed
 by the registrar with its own signing key (public key = the manifest `registrarPub`,
 which the Audit Plane trusts as a signer; distinct from `auditSignPub`, the key the
 Hub signs routing records with) and appended to the canonical audit chain. A transition
@@ -1551,7 +1637,9 @@ legs, and from v0.62.0 a payer's gateway also names its own binding on an eligib
 level, it reads its own system of record to identify each other member a request
 carries (each Patient in it and each Patient reference, read as it reads the
 request's own patient; from shn-gateway v1.6.0, none it cannot identify
-under an identifier derived from an id alone, and a Coverage's `subscriber` or
+under an identifier derived from an id alone, on every leg but coverage eligibility
+only one it holds, on CRD, DTR and the PAS inquiry only one nothing the request
+carries ties to the request's own patient, and a Coverage's `subscriber` or
 `policyHolder` names no one), so the exchange is recorded under each of them. This is for the audit record only: it
 never refuses a request or records a finding, and the conformance checks decide
 as they do without it. It names at most 16 patients within 2 seconds per leg,
@@ -3611,6 +3699,24 @@ at PAS 2.0.1" below); earlier releases carry one at every line.
   | as for any system-of-record failure | as for any system-of-record failure | the read from the system of record fails |
   | `500` | `prepare supplemental report failed` | the gateway cannot prepare the report it read |
 
+  From shn-gateway v1.7.0, registered edit E-06 also covers the clinical records a
+  provider's gateway on the provider-data origination profile
+  (`ORIGINATION_PROFILE=provider-data`) reads from the provider's system of record to
+  complete a PAS submission or update it builds: each Condition, Observation,
+  ClinicalImpression, Goal or DiagnosticReport the request references. When that system
+  holds the member's Patient under its own id, a record whose own `subject.reference` is
+  exactly that Patient is re-pointed to `Patient/<member id>`, as the gateway names the
+  patient in the rest of the request; nothing else in it changes, and a resource contained
+  in it is not edited. A record naming anything else (another patient, `Patient/<member
+  id>` itself, a versioned or absolute reference) is refused with `502 PAS evidence
+  linkage failed`, and one a signature covers with `422 signed content cannot be edited
+  (E-06, <carrier>)`, both before the claim is sent. Before v1.7.0, a record about the
+  Patient the system holds the member under was refused with `502 PAS evidence linkage
+  failed`, after the CRD and questionnaire legs had gone out, and one naming
+  `Patient/<member id>` while the system holds the member under another id was carried.
+  In that system's own numbering `Patient/<member id>` is another record, so it is now
+  refused.
+
   An amendment the provider's own client sends is carried as sent, never edited this
   way.
 - A **`Provenance`** attributing the DiagnosticReport to its source. The payer's
@@ -4539,6 +4645,35 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-11-04 — The registrar attests a provider's organization NPIs (§2.3, §2.4, §2.5).**
+  `PUT /register/{id}/provider-ids`, under the Trust admin authority, replaces the NPIs a
+  provider is attested for, each on the operator's recorded check that it names an
+  organization, and `GET /holders` serves them on the provider's row as `providerIds`.
+  The registrar checks an NPI's form, never whom it was issued to: the operator states
+  that in the check. `POST /register` carrying `providerIds` answers `400`, and a
+  holder's own `PUT /register/{id}` carrying a different set answers `403`. Nothing
+  else you send changes.
+
+- **2026-11-04 — From shn-sdk v1.7.0, the SDK reads a provider's attested identifiers from the holder feed (§2.3).**
+  `Holder.ProviderIDs` decodes a row's `providerIds`: the organization identifiers a provider
+  is operator-attested for, as `ProviderIdentifier` `{ "system", "value" }` pairs in the shape
+  of `payerIds`. `RegistryEntry.ProviderIDs` is a field for whoever fills a peer cache from the
+  feed; the SDK does not fill one. A row without the field reads as attested for none, and a
+  reader that knows only `payerIds` is unaffected. The registrar serves the field for a
+  provider an operator has attested (§2.4).
+
+- **2026-11-04 — From shn-gateway v1.7.0, registered edit E-06 re-points the evidence a provider-data request carries (§7b.2).**
+  When a provider's system of record holds the member's Patient under its own id, the
+  clinical records a provider's gateway on the provider-data origination profile reads to
+  complete a PAS submission or update (each Condition, Observation, ClinicalImpression,
+  Goal or DiagnosticReport the request references) have their own `subject.reference`
+  re-pointed from that Patient to `Patient/<member id>`, as the supplemental report's is.
+  Before, every such request was refused with `502 PAS evidence linkage failed` after the
+  CRD and questionnaire legs. A record naming anything else is refused (`502`). That
+  includes a record naming `Patient/<member id>` while the system holds the member under
+  another id, which was carried before and in that system's numbering is another record.
+  One a signature covers is refused `422 signed content cannot be edited (E-06,
+  <carrier>)`.
 - **2026-11-03 — From shn-gateway v1.6.0, a gateway-originated request names the member in a self-subscriber's Coverage slots (§7a.4).**
   When the provider's system names the member's Patient by its own record id, a provider's
   gateway names the patient by the member id in the requests it builds for its own workflow.

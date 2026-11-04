@@ -12,16 +12,20 @@ import (
 // decoded, in-memory peer-cache entry keyed by id, carrying the keys as usable
 // values.
 type RegistryEntry struct {
-	ID               string
-	Role             string            // "provider" | "payer" | "facility" | "phg" | "partner" (role-based routing / audit-append trust)
-	EncPub           *[32]byte         // X25519 public key for envelope encryption
-	SignPub          ed25519.PublicKey // Ed25519 public key for signature verification
-	BaseURL          string
-	PayerIDs         []PayerIdentifier // operator-attested payer-identity claims (role=payer); FeedPayerRouter index source (FR-G41)
-	MessageFrames    []string          // advertised sealed message-frame versions ("v1"); absent ⇒ legacy bare payloads
-	ContractVersions []string          // declared exchange-contract version tokens ("pa.pas@2.0"); absent ⇒ pre-contract build
-	RequestFrames    []string          // declared sealed REQUEST-frame capabilities ("v1", "v1op"); absent ⇒ send this peer BARE requests
-	Legs             []string          // declared legs this peer takes as a recipient (Holder.Legs); nil ⇒ declares no list (predates every marked leg), empty ⇒ takes none
+	ID       string
+	Role     string            // "provider" | "payer" | "facility" | "phg" | "partner" (role-based routing / audit-append trust)
+	EncPub   *[32]byte         // X25519 public key for envelope encryption
+	SignPub  ed25519.PublicKey // Ed25519 public key for signature verification
+	BaseURL  string
+	PayerIDs []PayerIdentifier // operator-attested payer-identity claims (role=payer); FeedPayerRouter index source (FR-G41)
+	// ProviderIDs is a provider's operator-attested identifiers, for whoever
+	// fills the peer cache from the feed (Holder.ProviderIDs); the SDK does not
+	// fill a RegistryEntry itself.
+	ProviderIDs      []ProviderIdentifier
+	MessageFrames    []string // advertised sealed message-frame versions ("v1"); absent ⇒ legacy bare payloads
+	ContractVersions []string // declared exchange-contract version tokens ("pa.pas@2.0"); absent ⇒ pre-contract build
+	RequestFrames    []string // declared sealed REQUEST-frame capabilities ("v1", "v1op"); absent ⇒ send this peer BARE requests
+	Legs             []string // declared legs this peer takes as a recipient (Holder.Legs); nil ⇒ declares no list (predates every marked leg), empty ⇒ takes none
 	// AttachmentMaxBytes is the peer's declared attachment content limit
 	// (Holder.AttachmentMaxBytes); nil ⇒ none declared, apply only the sender's ceiling.
 	AttachmentMaxBytes *int64

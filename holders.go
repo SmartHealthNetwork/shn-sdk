@@ -24,6 +24,10 @@ type Holder struct {
 	// omitted otherwise). FeedPayerRouter indexes (system,value) → holder id for coverage-
 	// derived routing (FR-G41). Globally unique across holders (AI-G12).
 	PayerIDs []PayerIdentifier `json:"payerIds,omitempty"`
+	// ProviderIDs are the organization identifiers the holder, a provider, is
+	// operator-attested for. Absent means it is attested for none, and a reader
+	// that knows only PayerIDs reads the row as before.
+	ProviderIDs []ProviderIdentifier `json:"providerIds,omitempty"`
 	// MessageFrames are the sealed message-frame versions this holder's build
 	// negotiates (library-self-declared at registration; "v1" = the binary
 	// status+headers+body response frame). Absent ⇒ legacy bare payloads.
