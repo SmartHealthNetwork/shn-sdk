@@ -91,6 +91,29 @@ func SupportsRequestFrameV1Op(frames []string) bool {
 	return false
 }
 
+// RequestFrameV1OpSub is the capability token a holder advertises in its
+// registry entry (requestFrames) when it accepts the
+// FrameHeaderOperationSubpath header on a framed DTR operation. A receiver
+// that does not know that header drops it without error, so a requester
+// sends the header only to a holder that declares this token.
+//
+// SupportedRequestFrames does not list it: reading the header is the
+// receiver's own capability, which this library's codec does not supply by
+// itself, so a holder declares the token in its own registration.
+const RequestFrameV1OpSub = "v1opsub"
+
+// SupportsRequestFrameV1OpSub reports whether a holder's advertised request
+// frames include v1opsub. Absent means the holder does not accept
+// FrameHeaderOperationSubpath.
+func SupportsRequestFrameV1OpSub(frames []string) bool {
+	for _, f := range frames {
+		if f == RequestFrameV1OpSub {
+			return true
+		}
+	}
+	return false
+}
+
 // FrameHeaderOperation is the request-frame header naming the DTR operation
 // whose input is the frame body: FrameOperationQuestionnairePackage (the
 // body is the $questionnaire-package input Parameters) or
@@ -103,6 +126,35 @@ const FrameHeaderOperation = "operation"
 const (
 	FrameOperationQuestionnairePackage = "questionnaire-package"
 	FrameOperationNextQuestion         = "next-question"
+)
+
+// The headers of a framed DTR operation's address. Each sits inside the
+// sealed payload, so the Hub never sees it, and each is framed only for a
+// framed DTR operation (FrameHeaderOperation).
+const (
+	// FrameHeaderOperationSubpath is a request-frame header, beside
+	// FrameHeaderOperation, naming the address below the operation's own that
+	// the operation was called at: "/payer/<line>/<tag><remainder>" or
+	// "/fetch-server/<line>/<tag>". <line> is a contract line, <tag> is 22
+	// base64url characters, and <remainder> is empty or one or more segments,
+	// each "/" then one or more unreserved characters, none of them "." or
+	// "..". A requester sends it
+	// only to a holder that declares RequestFrameV1OpSub.
+	FrameHeaderOperationSubpath = "operationSubpath"
+
+	// FrameHeaderOperationBase is an answer-frame header, framed only for a 2xx
+	// answer: the base the answering side added the operation's path to, an
+	// absolute URL with no query, no fragment and no ending slash. It is the
+	// one header on the allowlist that is an address into a participant's
+	// system.
+	FrameHeaderOperationBase = "operationBase"
+
+	// FrameHeaderOperationAddressTags is an answer-frame header, framed only
+	// for a 2xx answer: one "<remainder>=<tag>" pair per address, separated by
+	// spaces. <remainder> is what the answer's body writes after
+	// FrameHeaderOperationBase, possibly empty, or "*" for an address the
+	// body states as the boolean true; <tag> is 22 base64url characters.
+	FrameHeaderOperationAddressTags = "operationAddressTags"
 )
 
 // ErrFramedDTRUnsupported: the payer has not declared RequestFrameV1Op, so a
@@ -133,7 +185,9 @@ type HTTPFrameHeader struct {
 const FrameHeaderContractVersion = "contractVersion"
 
 // The headers a producer may frame for a participant's 2xx answer. They describe
-// the answer; none is an address into the participant's system. A frame carries
+// the answer; none is an address into the participant's system. (The one answer
+// header that is such an address is FrameHeaderOperationBase, framed only for a
+// framed DTR operation's answer; see its comment.) A frame carries
 // a value as sent, and never judges it as a validator or a date. The codec reads
 // no status: keeping them to a 2xx answer is the producer's rule. A decoder keeps
 // a value as it came, so a consumer that writes one on checks it with
@@ -148,10 +202,13 @@ const (
 // arbitrary headers through the seal would be a smuggling vector (cookies,
 // hop-by-hop, internal headers). Widening it is a spec change — contractVersion
 // was added with the multi-version contracts design, operation with framed
-// DTR operations, and the answer's own headers above to carry a 2xx as sent.
+// DTR operations, the answer's own headers above to carry a 2xx as sent, and
+// the operation's address headers (operationSubpath, operationBase,
+// operationAddressTags) with framed DTR operations' addresses.
 var allowedFrameHeaders = map[string]bool{
 	"Content-Type": true, FrameHeaderContractVersion: true, FrameHeaderOperation: true,
 	FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true,
+	FrameHeaderOperationSubpath: true, FrameHeaderOperationBase: true, FrameHeaderOperationAddressTags: true,
 }
 
 // frameHeaderNames maps each allowlisted header's name, folded to ASCII lower
@@ -184,9 +241,14 @@ func asciiLower(s string) string {
 	return string(b)
 }
 
-// answerFrameHeaders are the three headers above, whose values a frame carries
-// as sent. Content-Type keeps the encoder's older rule.
-var answerFrameHeaders = map[string]bool{FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true}
+// exactFrameHeaders are the headers whose values a frame must carry exactly:
+// the three answer headers above, carried as sent, and the operation's address
+// headers, whose tags are read byte for byte. Content-Type keeps the encoder's
+// older rule.
+var exactFrameHeaders = map[string]bool{
+	FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true,
+	FrameHeaderOperationSubpath: true, FrameHeaderOperationBase: true, FrameHeaderOperationAddressTags: true,
+}
 
 // ErrFrameHeaderTooLarge is a header segment over the limit DecodeHTTPFrame
 // reads. The frame would not be readable, so it is not made.
@@ -200,8 +262,9 @@ var ErrFrameHeaderTooLarge = errors.New("shnsdk: frame header segment over the l
 // is that value.
 var ErrFrameHeaderDuplicate = errors.New("shnsdk: frame header given twice")
 
-// ErrFrameHeaderValue is an answer header's value a frame cannot carry exactly
-// (FrameCarriesHeaderValue). The frame's JSON would change it, so it is not made.
+// ErrFrameHeaderValue is a value of one of the answer headers, or of the
+// address headers, that a frame cannot carry exactly (FrameCarriesHeaderValue).
+// The frame's JSON would change it, so it is not made.
 var ErrFrameHeaderValue = errors.New("shnsdk: frame header value cannot be carried exactly")
 
 // FrameCarriesHeaderValue reports whether a frame's encoding keeps v exactly:
@@ -263,7 +326,8 @@ func EncodeHTTPFrame(status int, contentType string, body []byte) ([]byte, error
 // framed under the allowlist's spelling; two keys naming one header are an
 // error too. Empty-valued headers are omitted.
 // A header segment DecodeHTTPFrame would refuse is ErrFrameHeaderTooLarge, and
-// an answer header's value the frame would change is ErrFrameHeaderValue.
+// a value of one of the answer headers, or of the address headers, that the
+// frame would change is ErrFrameHeaderValue.
 func EncodeHTTPFrameHeaders(status int, headers map[string]string, body []byte) ([]byte, error) {
 	if status < 100 || status > 599 {
 		return nil, fmt.Errorf("shnsdk: frame status %d out of range", status)
@@ -280,7 +344,7 @@ func EncodeHTTPFrameHeaders(status int, headers map[string]string, body []byte) 
 			return nil, fmt.Errorf("%w: %s, as %q and %q", ErrFrameHeaderDuplicate, name, other, k)
 		}
 		named[name] = k
-		if answerFrameHeaders[name] && !FrameCarriesHeaderValue(v) {
+		if exactFrameHeaders[name] && !FrameCarriesHeaderValue(v) {
 			return nil, fmt.Errorf("%w: %s", ErrFrameHeaderValue, name)
 		}
 		if v == "" {
@@ -314,6 +378,13 @@ func EncodeHTTPFrameHeaders(status int, headers map[string]string, body []byte) 
 // spelling or two, is ErrFrameHeaderDuplicate. The remaining bytes are the
 // verbatim application body.
 func DecodeHTTPFrame(payload []byte) (HTTPFrameHeader, []byte, error) {
+	return decodeHTTPFrame(payload, frameHeaderNames)
+}
+
+// decodeHTTPFrame is DecodeHTTPFrame reading the allowlist names gives (each
+// name folded to ASCII lower case, mapped to its frame spelling), so a test
+// can decode as a release with another allowlist does.
+func decodeHTTPFrame(payload []byte, names map[string]string) (HTTPFrameHeader, []byte, error) {
 	if len(payload) < 6 || payload[0] != frameMagic {
 		return HTTPFrameHeader{}, nil, errors.New("shnsdk: not a message frame")
 	}
@@ -341,7 +412,7 @@ func DecodeHTTPFrame(payload []byte) (HTTPFrameHeader, []byte, error) {
 		}
 		named := make(map[string]string, len(pairs))
 		for _, kv := range pairs {
-			name, ok := frameHeaderName(kv[0])
+			name, ok := names[asciiLower(kv[0])]
 			if !ok {
 				continue
 			}

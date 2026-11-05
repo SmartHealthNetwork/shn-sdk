@@ -226,3 +226,103 @@ func TestAttachmentMaxBytesRoundTrip(t *testing.T) {
 		t.Fatalf("a limit: %s decoded as %v (%v)", b, h.AttachmentMaxBytes, err)
 	}
 }
+
+// A declaration's request frames round-trip as themselves: absent (nil) is
+// omitted and decodes to nil, null decodes to nil, and an empty list is sent
+// as [] and decodes to an empty list. Absent says nothing, so the registered
+// set stands; empty declares that the holder accepts none.
+func TestCapabilityDeclarationRequestFramesAbsentAndEmpty(t *testing.T) {
+	absent, _ := json.Marshal(CapabilityDeclaration{Legs: []string{}})
+	if string(absent) != `{"legs":[]}` {
+		t.Fatalf("absent request frames marshalled as %s, want the key omitted", absent)
+	}
+	var d CapabilityDeclaration
+	if err := json.Unmarshal(absent, &d); err != nil || d.RequestFrames != nil {
+		t.Fatalf("absent decoded as %#v (%v), want nil", d.RequestFrames, err)
+	}
+	d = CapabilityDeclaration{}
+	if err := json.Unmarshal([]byte(`{"legs":[],"requestFrames":null}`), &d); err != nil || d.RequestFrames != nil {
+		t.Fatalf("null decoded as %#v (%v), want nil", d.RequestFrames, err)
+	}
+	empty, _ := json.Marshal(CapabilityDeclaration{Legs: []string{}, RequestFrames: []string{}})
+	if string(empty) != `{"legs":[],"requestFrames":[]}` {
+		t.Fatalf("empty request frames marshalled as %s, want \"requestFrames\":[]", empty)
+	}
+	d = CapabilityDeclaration{}
+	if err := json.Unmarshal(empty, &d); err != nil || d.RequestFrames == nil || len(d.RequestFrames) != 0 {
+		t.Fatalf("empty decoded as %#v (%v), want a non-nil empty list", d.RequestFrames, err)
+	}
+	full, _ := json.Marshal(CapabilityDeclaration{Legs: []string{}, RequestFrames: []string{"v1", "v1op", "v1opsub"}})
+	d = CapabilityDeclaration{}
+	if err := json.Unmarshal(full, &d); err != nil || !slices.Equal(d.RequestFrames, []string{"v1", "v1op", "v1opsub"}) {
+		t.Fatalf("a set decoded as %#v (%v)", d.RequestFrames, err)
+	}
+	// A reader that predates the field (a declaration with only legs and the
+	// attachment limit, as a registrar before it reads it) ignores it.
+	var older struct {
+		Legs               *[]string       `json:"legs"`
+		AttachmentMaxBytes json.RawMessage `json:"attachmentMaxBytes"`
+	}
+	if err := json.Unmarshal(full, &older); err != nil || older.Legs == nil || len(*older.Legs) != 0 {
+		t.Fatalf("an older reader: %v %#v", err, older)
+	}
+}
+
+// DeclareCapabilities sends the request frames it is given, as given, and
+// only then; it refuses a set the registry would not hold before anything is
+// sent; and a registrar that does not read the field answers without it,
+// which is not an error: the registered set stands.
+func TestDeclareCapabilitiesRequestFrames(t *testing.T) {
+	id, err := GenerateIdentity("h-frames")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent []byte
+	var calls int
+	echo := func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		sent, _ = io.ReadAll(r.Body)
+		_, _ = w.Write(sent)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(echo))
+	defer srv.Close()
+	ctx := context.Background()
+	stored, err := id.DeclareCapabilities(ctx, srv.Client(), srv.URL, CapabilityDeclaration{Legs: []string{}, RequestFrames: []string{"v1op", "v1", "v1opsub"}})
+	if err != nil || string(sent) != `{"legs":[],"requestFrames":["v1op","v1","v1opsub"]}` || !slices.Equal(stored.RequestFrames, []string{"v1op", "v1", "v1opsub"}) {
+		t.Fatalf("a set: stored %+v (%v), body %s", stored, err, sent)
+	}
+	if stored, err := id.DeclareCapabilities(ctx, srv.Client(), srv.URL, CapabilityDeclaration{Legs: []string{}, RequestFrames: []string{}}); err != nil ||
+		string(sent) != `{"legs":[],"requestFrames":[]}` || stored.RequestFrames == nil || len(stored.RequestFrames) != 0 {
+		t.Fatalf("an empty set: stored %+v (%v), body %s", stored, err, sent)
+	}
+	if _, err := id.DeclareCapabilities(ctx, srv.Client(), srv.URL, CapabilityDeclaration{Legs: []string{}}); err != nil || string(sent) != `{"legs":[]}` {
+		t.Fatalf("no set: %v, body %s, want the key omitted", err, sent)
+	}
+	before := calls
+	for name, frames := range map[string][]string{
+		"nine tokens":       {"a", "b", "c", "d", "e", "f", "g", "h", "i"},
+		"an upper case":     {"V1"},
+		"an empty token":    {""},
+		"seventeen letters": {"abcdefghijklmnopq"},
+		"a hyphen":          {"v1-op"},
+		"a token twice":     {"v1", "v1"},
+	} {
+		if _, err := id.DeclareCapabilities(ctx, srv.Client(), srv.URL, CapabilityDeclaration{Legs: []string{}, RequestFrames: frames}); err == nil {
+			t.Errorf("%s: declared", name)
+		}
+	}
+	if calls != before {
+		t.Fatalf("a refused declaration reached the registrar")
+	}
+	if _, err := id.DeclareCapabilities(ctx, srv.Client(), srv.URL, CapabilityDeclaration{Legs: []string{}, RequestFrames: []string{"a", "b", "c", "d", "e", "f", "g", "abcdefghijklmnop"}}); err != nil {
+		t.Fatalf("eight tokens, one of sixteen letters: %v", err)
+	}
+	older := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"legs":[]}`))
+	}))
+	defer older.Close()
+	if stored, err := id.DeclareCapabilities(ctx, older.Client(), older.URL, CapabilityDeclaration{Legs: []string{}, RequestFrames: []string{"v1"}}); err != nil || stored.RequestFrames != nil {
+		t.Fatalf("a registrar that does not read the field: stored %+v (%v), want no error and no set", stored, err)
+	}
+}

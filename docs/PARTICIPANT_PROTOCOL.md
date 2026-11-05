@@ -377,7 +377,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `baseURL` | Where the Hub delivers inbound envelopes. Must be a publicly resolvable https URL — no userinfo, no ASCII control characters (< 0x20) — and must not redirect at /substrate/inbound (the Hub refuses redirects). Originator-only clients are never dialed but the URL must still validate. |
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. At most 8 tokens, each matching `^[a-z0-9]{1,16}$`. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
 | `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`). A current SDK or Smart Gateway build declares `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0` by default (shn-sdk v0.62.0 and gateways before v0.62.0 also declared `pa.pdex@2.1`; from shn-gateway v0.62.0 a gateway whose declared set names it refuses to boot, and from shn-sdk v0.63.0 the SDK refuses a set naming it); the lines the network's gateways can build or bridge are the discovery descriptor's `bridgedContractVersions` (§1a). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. An originating Smart Gateway reads the recipient's declaration to choose each leg's contract line (version-matched routing, §8.6). |
-| `requestFrames` | **Optional** JSON array of the sealed request-frame versions this holder accepts (today `"v1"` and `"v1op"` — see §6.3). **Self-declared**, stamped by the SDK/gateway build like `messageFrames`, with the same limits (at most 8 tokens, each `^[a-z0-9]{1,16}$`). Omitted ⇒ requests to you are sent bare. Outside the PoP signing payload. |
+| `requestFrames` | **Optional** JSON array of the sealed request-frame versions this holder accepts (today `"v1"`, `"v1op"` and, from shn-sdk v1.8.0, `"v1opsub"` — see §6.3). **Self-declared**, with the same limits as `messageFrames` (at most 8 tokens, each `^[a-z0-9]{1,16}$`). A current SDK/gateway build stamps `"v1"` and `"v1op"` by default, like `messageFrames`. This SDK never stamps `"v1opsub"`: only a holder whose own system honors `operationSubpath` declares it (§6.3). Omitted ⇒ requests to you are sent bare. Outside the PoP signing payload. |
 | `legs` | **Optional** JSON array of the request legs this holder takes as recipient, each named by its flat transaction type (`"cdex-attachment-submit"`, never a `pa.`-prefixed name). **Self-declared** by the system answering at `baseURL`: from shn-gateway v1.1.0, a Smart Gateway declares its own as it starts (`PUT /register/{id}/capabilities`, §2.4), and a registration the SDK builds leaves it absent. **Absent and empty differ.** Absent (or `null`) declares no list, the registration of a build older than this field; `[]` declares that the holder takes none. The Hub refuses a leg the network marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0, and `cdex-attachment-request`, since 1.5.0) to a recipient whose list lacks it, and to one that declares no list (§6.1). Every other leg is routed whatever the holder declares. On a rotation, absent `legs` keeps the legs held (§2.4). Each element must be a leg of the network, named once, whose row (§4.3) names the holder's `role` for its recipient: a payer declares no leg a provider answers, and the reverse. Outside the PoP signing payload. |
 | `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted**: on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). At admission the registrar checks only the role and this uniqueness; the entry-shape rules (count, both parts present, no whitespace or `\|`, no repeats) are applied by `PUT /register/{id}/payer-ids` and by the self-serve access request (§2.3a). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). Identities acquired **after** admission are attested through `PUT /register/{id}/payer-ids` (§2.4) — same authority — so a payer never re-onboards to become routable on a new one. |
 | `providerIds` | **Not accepted at registration.** A provider's organization NPIs are operator-attested through `PUT /register/{id}/provider-ids` (§2.4), each on the operator's recorded check; a registration carrying the field is refused (400 below). Served on `GET /holders` for `role=provider` only, and preserved across key rotation (§2.4). |
@@ -548,6 +548,43 @@ the registrar's `PUT /register/{id}/payer-ids` (§2.4) under the Accounts servic
 own admin credential; the registrar's refusals — notably `409` for an identity
 another holder already holds — come back verbatim, and your client's
 declared set is left as it was. The client must be `active` and `role=payer`.
+
+**Provider NPIs.** A provider is routed a payer's attachment-request Task by the
+organization NPIs the network attests it for (`PUT /register/{id}/provider-ids`,
+§2.4). A provider applicant may list them on its access request as `providerIds`, an
+array of `{ "system", "value" }` in the NPI system only
+(`http://hl7.org/fhir/sid/us-npi`), each a 10-digit NPI with a valid check digit,
+none twice, at most 16. A request that breaks this is refused
+`400 invalid providerIds: …`. Listing an NPI is a claim, never authority: it routes
+nothing. Once your organization is approved, the operator looks each NPI up in the
+NPPES registry, confirms that it names an organization, and vouches it for your
+organization with the record of that check. An NPI already vouched for another
+organization is not vouched for yours.
+
+Your provider client then publishes a set of its vouched NPIs with
+`PUT /clients/{id}/provider-ids` on the Accounts service, authenticated as the
+client's owner:
+
+```
+PUT /clients/<client id>/provider-ids
+Authorization: Bearer <developer token>
+
+{ "providerIds": [ { "system": "http://hl7.org/fhir/sid/us-npi", "value": "1234567893" } ] }
+```
+
+The set REPLACES the client's published NPIs (an explicit `[]` withdraws them all;
+an absent field is a `400`). Every NPI in it must be one an operator vouched for your
+organization, or it is refused
+`403 provider-id <system>|<value> is not granted to this org: an operator vouches it first`
+and nothing is forwarded. Accepted requests are forwarded to the registrar's
+`PUT /register/{id}/provider-ids` (§2.4), each with the record of the operator's
+check, under the Accounts service's own admin credential. The registrar's refusals
+come back verbatim. The client must be `active` and `role=provider`. When the
+operator withdraws a vouch, the NPI is withdrawn from your provider too. Changes to
+one organization's NPIs run one at a time: a request that arrives while another is
+in progress for too long is refused
+`503 another change to this organization's provider NPIs is in progress: nothing was changed; retry`,
+with `Retry-After`, and is safe to retry.
 
 ### 2.4 Credential lifecycle — revoke and deregister
 
@@ -809,7 +846,10 @@ the operator's statement, made in the recorded check (`entityType`), after looki
 NPI up in the NPPES registry.
 
 Auth: a **Trust admin** assertion, as for `PUT /register/{id}/payer-ids`. A holder's
-own assertion is refused `401`.
+own assertion is refused `401`. Participants reach this through the Accounts
+service's `PUT /clients/{id}/provider-ids` (§2.3a), which checks each NPI against the
+ones an operator vouched for that organization and forwards the record of each check
+with it.
 
 ```
 PUT /register/acme-provider/provider-ids
@@ -877,8 +917,14 @@ handlers it has (`Identity.DeclareCapabilities`):
   submission. Each FHIR Attachment with inline `data` counts on its own; an attachment
   by `url` is not measured. A whole number from 1 to 9007199254740991. Absent means
   the holder declares none. Stored and served exactly as declared.
+- `requestFrames` — **optional**, from shn-sdk v1.8.0
+  (`CapabilityDeclaration.RequestFrames`): the sealed request-frame versions the
+  holder's running system accepts (§2.3 `requestFrames`), its full set, each token
+  matching `^[a-z0-9]{1,16}$`, at most 8, each named once. Absent says nothing about
+  them; `[]` declares that the system accepts none. A registrar that predates the
+  field ignores it.
 
-The declaration REPLACES both, whatever set them before: one without
+The declaration REPLACES `legs` and `attachmentMaxBytes`, whatever set them before: one without
 `attachmentMaxBytes` declares no limit. A registration never carries the limit, and a
 rotation keeps both the limit and, unless its body carries a list, the legs: what a
 rotation does not state stays as the holder's system declared it, because clearing it
@@ -2426,14 +2472,16 @@ rest          body        raw bytes — no additional encoding
   is a different failure: it ends the read before a gateway sees the answer.
 - `headers` — an **allowlist**: `Content-Type`, `contractVersion` (version-matched
   routing, §8.6), for framed DTR operations `operation` (request frames only,
-  below) and, from shn-sdk v1.3.0, `ETag`, `Last-Modified` and `Retry-After`, which
-  describe an answer: a producer frames them only for a 2xx answer. A frame does not
+  below), from shn-sdk v1.3.0 `ETag`, `Last-Modified` and `Retry-After`, which
+  describe an answer (a producer frames them only for a 2xx answer), and from shn-sdk
+  v1.8.0 a framed DTR operation's address headers, `operationSubpath`,
+  `operationBase` and `operationAddressTags` (below). A frame does not
   judge such a value as a validator or a date. Both encoders refuse a header segment
   over 64 KiB, the most `DecodeHTTPFrame` reads, as `ErrFrameHeaderTooLarge`.
   `FrameCarriesHeaderValue` says whether a frame's encoding keeps a value exactly: an
   HTTP field value, in valid UTF-8 since the header segment is JSON.
-  `EncodeHTTPFrameHeaders` refuses one of these three it would change, as
-  `ErrFrameHeaderValue`. A decoder keeps a value as it came, so a consumer that writes
+  `EncodeHTTPFrameHeaders` refuses a value of one of those three, or of the address
+  headers, that it would change, as `ErrFrameHeaderValue`. A decoder keeps a value as it came, so a consumer that writes
   one on checks it first.
   No other header (hop-by-hop, cookie, or otherwise) is ever carried inside a
   frame. A header name is case-insensitive (RFC 9110 section 5.1): from shn-sdk
@@ -2682,6 +2730,29 @@ whose own input is the frame body:
     new key directory. The option accepts only tokens the build supports;
     `v1op` without `v1` is accepted with a warning, since requesters then
     frame only DTR operations to you and send your other requests bare.
+
+**A framed DTR operation's address (`operationSubpath`, `operationBase`,
+`operationAddressTags`, capability `v1opsub`).** From shn-sdk v1.8.0 three
+allowlisted headers carry the address a framed DTR operation was called at and
+the addresses its answer names. Each is framed only for a framed DTR operation,
+inside the sealed payload, so the Hub never sees it.
+
+| Header | Frame | Value |
+|---|---|---|
+| `operationSubpath` | request, beside `operation` | the address below the operation's own that the operation was called at: `/payer/<line>/<tag><remainder>` or `/fetch-server/<line>/<tag>`. `<line>` is a contract line, `<tag>` is 22 base64url characters, and `<remainder>` is empty or one or more segments, each `/` then one or more unreserved characters, none of them `.` or `..`. |
+| `operationBase` | 2xx answer | the base the answering side added the operation's path to: an absolute URL with no query, no fragment and no ending slash. It is the one header on the allowlist that is an address into a participant's system. |
+| `operationAddressTags` | 2xx answer | one `<remainder>=<tag>` pair per address, separated by spaces. `<remainder>` is what the answer's body writes after `operationBase`, possibly empty, or `*` for an address the body states as the boolean `true`; `<tag>` is 22 base64url characters. |
+
+- **Capability.** A holder that accepts `operationSubpath` declares the token
+  `"v1opsub"` in its `requestFrames` list. A receiver that does not know the
+  header drops it (above), so a requester sends it only to a holder that
+  declares `"v1opsub"` (this SDK: `RequestFrameV1OpSub`,
+  `SupportsRequestFrameV1OpSub`). `SupportedRequestFrames()` does not list
+  it: the codec alone does not read the header for a holder, so a registration
+  this SDK builds does not declare it.
+- **An older decoder** (before shn-sdk v1.8.0) drops all three headers without
+  error and reads the rest of the frame as before; a frame that carries none of
+  them is unchanged, byte for byte.
 
 The Smart Gateway additionally *honors* a well-formed claim it can both
 natively build and validate for (native ∩ laned);
@@ -4644,6 +4715,29 @@ property. Until then, build to the rule: preserve what you do not recognise.
 ## 9. Status and roadmap
 
 ### Changelog
+
+- **2026-11-05 — A provider's organization NPIs are vouched by an operator and published through the Accounts service (§2.3a).**
+  A provider applicant may list its organization NPIs on its access request as
+  `providerIds`, checked for form only: a claim that routes nothing. Once the
+  organization is approved, an operator vouches each NPI on the record of an NPPES
+  check, and the provider client publishes a set of its vouched NPIs with
+  `PUT /clients/{id}/provider-ids`, which forwards each with its check to
+  `PUT /register/{id}/provider-ids`. An NPI not vouched for the organization is refused
+  `403`. Withdrawing a vouch withdraws the published NPI. Nothing else you send changes.
+
+- **2026-11-05 — From shn-sdk v1.8.0, a capabilities declaration can carry the holder's request frames (§2.4).**
+  `CapabilityDeclaration.RequestFrames` is the full set of request-frame versions the
+  holder's running system accepts. Absent says nothing about them; `[]` declares none.
+  `Identity.DeclareCapabilities` refuses a set the registry would not hold before sending
+  it. A registrar that predates the field ignores it.
+
+- **2026-11-05 — From shn-sdk v1.8.0, a framed DTR operation's address headers (§6.3).**
+  A message frame's allowlist adds `operationSubpath` (request frames),
+  `operationBase` and `operationAddressTags` (2xx answer frames), each framed only for
+  a framed DTR operation, and the request-frame token `"v1opsub"` declares a holder
+  that accepts `operationSubpath`. `operationBase` is the one allowlisted header that
+  is an address into a participant's system. An older decoder drops the three, and
+  `SupportedRequestFrames()` does not list `"v1opsub"`.
 
 - **2026-11-04 — The registrar attests a provider's organization NPIs (§2.3, §2.4, §2.5).**
   `PUT /register/{id}/provider-ids`, under the Trust admin authority, replaces the NPIs a
