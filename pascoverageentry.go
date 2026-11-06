@@ -50,6 +50,14 @@ type pasEntryParty struct {
 //   - it makes a reference: nothing it could name rides the request, and a
 //     payer refuses a request whose graph names anything it cannot resolve.
 func pasCoverageSlotParty(field, key string, supplied [][]byte) (pasEntryParty, error) {
+	return pasCoverageSlotPartyAs(field, key, supplied, true)
+}
+
+// pasCoverageSlotPartyAs is pasCoverageSlotParty; with stripProfile false the
+// record keeps its meta.profile, for the carried builders
+// (BuildConformantClaimBundleCarried). Its JSON values ride unchanged; the
+// Bundle encoder writes it compact, as every entry it encodes.
+func pasCoverageSlotPartyAs(field, key string, supplied [][]byte, stripProfile bool) (pasEntryParty, error) {
 	notCarried := func(format string, args ...any) error {
 		return fmt.Errorf("%w: your Coverage record's %s names %s, %s", ErrPASCoveragePartyNotCarried, field, key, fmt.Sprintf(format, args...))
 	}
@@ -94,9 +102,13 @@ func pasCoverageSlotParty(field, key string, supplied [][]byte) (pasEntryParty, 
 	if refs := referencesIn("Patient", party); len(refs) > 0 {
 		return pasEntryParty{}, notCarried("whose record references records this request does not carry (%s): a payer refuses a request whose graph names anything it cannot resolve", strings.Join(refs, "; "))
 	}
-	out, err := stripMetaProfile(found)
-	if err != nil {
-		return pasEntryParty{}, fmt.Errorf("strip party meta: %w", err)
+	out := found
+	if stripProfile {
+		stripped, err := stripMetaProfile(found)
+		if err != nil {
+			return pasEntryParty{}, fmt.Errorf("strip party meta: %w", err)
+		}
+		out = stripped
 	}
 	version := ""
 	if meta, ok := party["meta"].(map[string]any); ok {

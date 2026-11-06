@@ -377,35 +377,30 @@ func (r *Responder) handlePASUpdate(plaintext []byte, tok Token, corr string, no
 	if len(facts.provenanceAgents) == 0 {
 		return fail(http.StatusForbidden, "ClaimUpdate Provenance missing agent")
 	}
-	var wantTarget string
+	wantType, wantID, wantVersion, wantURL := "QuestionnaireResponse", facts.qrID, facts.qrVersion, facts.qrFullURL
 	if facts.hasDR {
 		if facts.diagnosticReportID == "" {
 			return fail(http.StatusForbidden, "supplemental DiagnosticReport missing id")
 		}
-		wantTarget = "DiagnosticReport/" + facts.diagnosticReportID
-	} else {
-		if facts.qrID == "" {
-			return fail(http.StatusForbidden, "supplemental QuestionnaireResponse missing id")
-		}
-		wantTarget = "QuestionnaireResponse/" + facts.qrID
+		wantType, wantID, wantVersion, wantURL = "DiagnosticReport", facts.diagnosticReportID, facts.diagnosticReportVersion, facts.diagnosticReportFullURL
+	} else if facts.qrID == "" {
+		return fail(http.StatusForbidden, "supplemental QuestionnaireResponse missing id")
 	}
 	targeted := false
 	for _, ref := range facts.provenanceTargets {
-		// Tolerate the reference-payer-conformant lane's ABSOLUTE refs: absolutizeBundleRefs
-		// rewrites Provenance.target to its absolute fullUrl (".../DiagnosticReport/<id>") so a
-		// real Da Vinci payer can resolve it, while wantTarget is assembled from the bare id.
-		// Match the relative form OR any ref ending in "/<wantTarget>" — the same
-		// absolutization tolerance as pasMemberFromRef, and the same reasoning: the property is
-		// "the Provenance attributes THIS supplemental resource", not "the reference is spelled
-		// the way we assembled it". A Provenance targeting a different resource still fails,
-		// because the id differs; and the leading "/" keeps a longer type name (…SomeDiagnostic
-		// Report/<id>) from satisfying the suffix.
+		// ProvenanceTargetNames is the rule: the relative "<type>/<id>" or exactly the
+		// supplemental entry's own fullUrl (the absolute form absolutizeBundleRefs writes on the
+		// reference-payer lane), either one version-specific (".../_history/<version>") only at
+		// the resource's own meta.versionId. A reference under another base names another
+		// server's resource, whatever its path ends in, so it does not attribute this one.
 		//
-		// Identical to the Smart Gateway's conformantPASUpdateBind
-		// (its native PAS bind), which already carries this tolerance with its own
-		// regression guard. The two fences are twins and must decide the same bundle the same
-		// way — this one had been left behind.
-		if ref == wantTarget || strings.HasSuffix(ref, "/"+wantTarget) {
+		// The twin of the Smart Gateway's conformantPASUpdateBind (its native PAS bind), whose
+		// update Provenance check still reads a target by its spelling, matching any reference
+		// ending in "/<type>/<id>" and no version-specific one. It is a content check: not run
+		// at none, recorded at observe and structural, refused only at strict. Until the gateway
+		// reads targets through ProvenanceTargetNames too, the two differ on a foreign-base or a
+		// version-specific target at strict.
+		if ProvenanceTargetNames(ref, wantURL, wantType, wantID, wantVersion) {
 			targeted = true
 			break
 		}

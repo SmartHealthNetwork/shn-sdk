@@ -43,6 +43,14 @@ type pasPayerOrgRecord struct {
 // insurer entry named a different payer than the leg was routed to would be two
 // payers in one message.
 func pasPayerOrgEntry(record []byte, payer PayerIdentifier) (pasPayerOrgRecord, error) {
+	return pasPayerOrgEntryAs(record, payer, true)
+}
+
+// pasPayerOrgEntryAs is pasPayerOrgEntry; with stripProfile false the record
+// keeps its meta.profile, for the carried builders
+// (BuildConformantClaimBundleCarried). Its JSON values ride unchanged; the
+// Bundle encoder writes it compact, as every entry it encodes.
+func pasPayerOrgEntryAs(record []byte, payer PayerIdentifier, stripProfile bool) (pasPayerOrgRecord, error) {
 	if len(strings.TrimSpace(string(record))) == 0 {
 		return pasPayerOrgRecord{}, errPASInsurerRequired
 	}
@@ -75,6 +83,9 @@ func pasPayerOrgEntry(record []byte, payer PayerIdentifier) (pasPayerOrgRecord, 
 	if !carries {
 		return pasPayerOrgRecord{}, fmt.Errorf("your payer organization record carries no %s|%s identifier, and this exchange routed to that payer — a request whose insurer names one payer while the leg went to another names two",
 			payer.System, payer.Value)
+	}
+	if !stripProfile {
+		return pasPayerOrgRecord{id: head.ID, raw: record}, nil
 	}
 	out, err := stripMetaProfile(record)
 	if err != nil {

@@ -329,6 +329,7 @@ POST   /register                  — Trust-admin-gated holder admission
 GET    /holders                   — public holder feed (founding + dynamic), polled by Hub + Authorization Framework
 POST   /revoke                    — Trust-admin-gated holder revocation (§2.4)
 DELETE /register/{id}             — holder-initiated clean exit / deregistration (§2.4)
+GET    /register/{id}             — holder-initiated read of its own registration (§2.4)
 PUT    /register/{id}             — holder-initiated key-rotation (§2.4)
 PUT    /register/{id}/payer-ids   — Trust-admin-gated payer-identity update (§2.4)
 PUT    /register/{id}/capabilities — holder-initiated declaration of its capabilities (§2.4)
@@ -377,7 +378,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `baseURL` | Where the Hub delivers inbound envelopes. Must be a publicly resolvable https URL — no userinfo, no ASCII control characters (< 0x20) — and must not redirect at /substrate/inbound (the Hub refuses redirects). Originator-only clients are never dialed but the URL must still validate. |
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. At most 8 tokens, each matching `^[a-z0-9]{1,16}$`. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
 | `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`). A current SDK or Smart Gateway build declares `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0` by default (shn-sdk v0.62.0 and gateways before v0.62.0 also declared `pa.pdex@2.1`; from shn-gateway v0.62.0 a gateway whose declared set names it refuses to boot, and from shn-sdk v0.63.0 the SDK refuses a set naming it); the lines the network's gateways can build or bridge are the discovery descriptor's `bridgedContractVersions` (§1a). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. An originating Smart Gateway reads the recipient's declaration to choose each leg's contract line (version-matched routing, §8.6). |
-| `requestFrames` | **Optional** JSON array of the sealed request-frame versions this holder accepts (today `"v1"`, `"v1op"` and, from shn-sdk v1.8.0, `"v1opsub"` — see §6.3). **Self-declared**, with the same limits as `messageFrames` (at most 8 tokens, each `^[a-z0-9]{1,16}$`). A current SDK/gateway build stamps `"v1"` and `"v1op"` by default, like `messageFrames`. This SDK never stamps `"v1opsub"`: only a holder whose own system honors `operationSubpath` declares it (§6.3). Omitted ⇒ requests to you are sent bare. Outside the PoP signing payload. |
+| `requestFrames` | **Optional** JSON array of the sealed request-frame versions this holder accepts (today `"v1"`, `"v1op"` and, from shn-sdk v1.8.0, `"v1opsub"` — see §6.3). **Self-declared**, with the same limits as `messageFrames` (at most 8 tokens, each `^[a-z0-9]{1,16}$`). A current SDK/gateway build stamps `"v1"` and `"v1op"` by default, like `messageFrames`. This SDK never stamps `"v1opsub"`: only a holder whose own system honors `operationSubpath` declares it (§6.3). From shn-gateway v1.8.0 a payer's Smart Gateway declares it, with the request frames it serves, in the capability declaration it makes at each start (§2.4); a provider's declares no request frames of its own. Omitted ⇒ requests to you are sent bare. Outside the PoP signing payload. |
 | `legs` | **Optional** JSON array of the request legs this holder takes as recipient, each named by its flat transaction type (`"cdex-attachment-submit"`, never a `pa.`-prefixed name). **Self-declared** by the system answering at `baseURL`: from shn-gateway v1.1.0, a Smart Gateway declares its own as it starts (`PUT /register/{id}/capabilities`, §2.4), and a registration the SDK builds leaves it absent. **Absent and empty differ.** Absent (or `null`) declares no list, the registration of a build older than this field; `[]` declares that the holder takes none. The Hub refuses a leg the network marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0, and `cdex-attachment-request`, since 1.5.0) to a recipient whose list lacks it, and to one that declares no list (§6.1). Every other leg is routed whatever the holder declares. On a rotation, absent `legs` keeps the legs held (§2.4). Each element must be a leg of the network, named once, whose row (§4.3) names the holder's `role` for its recipient: a payer declares no leg a provider answers, and the reverse. Outside the PoP signing payload. |
 | `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted**: on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). At admission the registrar checks only the role and this uniqueness; the entry-shape rules (count, both parts present, no whitespace or `\|`, no repeats) are applied by `PUT /register/{id}/payer-ids` and by the self-serve access request (§2.3a). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). Identities acquired **after** admission are attested through `PUT /register/{id}/payer-ids` (§2.4) — same authority — so a payer never re-onboards to become routable on a new one. |
 | `providerIds` | **Not accepted at registration.** A provider's organization NPIs are operator-attested through `PUT /register/{id}/provider-ids` (§2.4), each on the operator's recorded check; a registration carrying the field is refused (400 below). Served on `GET /holders` for `role=provider` only, and preserved across key rotation (§2.4). |
@@ -445,7 +446,9 @@ re-derived or re-validated beyond the admission-time shape check — its `legs` 
 registrar holds them (absent for a holder that declares none, `[]` for one that takes
 none), its `attachmentMaxBytes` when its system declared one (§2.4), for payers,
 the operator-attested `payerIds`, and, for providers, the operator-attested
-`providerIds` (§2.4).
+`providerIds` (§2.4). A founding holder's row is its manifest record, with the
+`requestFrames` its own system declared when it declared a set
+(`PUT /register/{id}/capabilities`, §2.4).
 
 From shn-sdk v1.7.0, the SDK decodes a row's `providerIds` into `Holder.ProviderIDs`: the
 organization identifiers a provider is operator-attested for, each a `{ "system", "value" }`
@@ -458,7 +461,10 @@ serves the field for a provider an operator has attested through
 
 **Registry merge rule:** `registry = manifest base ∪ dynamic`. Dynamic holders are
 appended; the **manifest base is immutable at runtime** (founding holders are never
-overwritten or deleted by the poller). Dynamic holders can be **removed** via the
+overwritten or deleted by the poller). The one part of a founding holder's row that its
+own system sets is its request frames (§2.4): `GET /holders` serves the declared set,
+which is what every peer reads, while the Hub and Authorization Framework, which
+read no holder's request frames, keep the manifest's record. Dynamic holders can be **removed** via the
 lifecycle endpoints in §2.4; on the next poll the Hub and Authorization Framework
 converge to the registrar feed and drop the holder. A dynamic holder can also
 **rotate its keys in place** via `PUT /register/{id}` (§2.4); the new keys converge
@@ -586,6 +592,27 @@ in progress for too long is refused
 `503 another change to this organization's provider NPIs is in progress: nothing was changed; retry`,
 with `Retry-After`, and is safe to retry.
 
+`GET /clients/{id}/provider-ids`, authenticated the same way, reads your provider
+client's state:
+
+```json
+{ "granted":   [ { "system": "http://hl7.org/fhir/sid/us-npi", "value": "1234567893" } ],
+  "published": [],
+  "withheld":  { "reason": "removal-rolled-back", "at": "2026-11-05T17:12:15Z" } }
+```
+
+- `granted`: the NPIs an operator vouched for your organization, the ones a publish
+  may name.
+- `published`: the NPIs the registrar publishes for the client now (`[]` for none).
+- `withheld`: present only while the registrar withholds the client's NPIs after a
+  rolled-back removal (§2.4); publish your granted NPIs again to clear it.
+
+It is refused as the `PUT` is (`404` unknown client, `403` another organization's
+client, `400` not a provider). When the registrar can't be read, or its answer
+doesn't say whether the NPIs are withheld, it's refused
+`502 the registrar could not be read: nothing is known about the published set; retry`,
+never answered with the state left out.
+
 ### 2.4 Credential lifecycle — revoke and deregister
 
 A dynamically-registered holder can be removed two ways: the Trust operator can
@@ -620,7 +647,7 @@ Rejection cases:
 | `id` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
 | Registrar store read or removal unavailable | 502 (`"store error"`) |
 | No such (dynamic) holder | 404 (`"no such holder"`) |
-| Lifecycle audit append failed (the removal is rolled back, fail-closed) | 502 (`"lifecycle audit failed"`) |
+| Lifecycle audit append failed (the removal is rolled back, fail-closed; a provider's identifiers are withheld, below) | 502 (`"lifecycle audit failed"`) |
 | Success | 204 (No Content) |
 
 **`DELETE /register/{id}`** — holder-initiated clean exit (RFC 7592 client
@@ -645,12 +672,97 @@ Rejection cases:
 | No such (dynamic) holder | 404 (`"no such holder"`) |
 | Assertion missing, not signed by `{id}`'s `signPub`, `holderId != {id}`, or its `jti` already used | 403 (`"a holder may only deregister itself"`) |
 | Registrar store removal unavailable | 502 (`"store error"`) |
-| Lifecycle audit append failed (the removal is rolled back, fail-closed) | 502 (`"lifecycle audit failed"`) |
+| Lifecycle audit append failed (the removal is rolled back, fail-closed; a provider's identifiers are withheld, below) | 502 (`"lifecycle audit failed"`) |
 | Success | 204 (No Content) |
 
 Note: `{id}` existence is checked before authentication, so an unknown id returns
 404 rather than 403. This is intentional and matches RFC 7592 semantics — the
 `/holders` feed is already public, so the 404 leaks nothing new.
+
+**A rolled-back removal withholds a provider's identifiers.** A revoke or a
+deregistration whose lifecycle record cannot be appended is rolled back: the holder
+comes back with its keys, its declaration and its test-participant mark. It does not
+come back with its provider identifiers. The registrar captured them before the
+removal, and an NPI grant may have been revoked since: one withdrawn from the holder
+after the capture, or one revoked while the holder was out, when a revoke found no
+holder to withdraw it from. So the restored holder publishes no NPI, and its set is
+**withheld** until its next publish:
+- the operator's view of the holder, `GET /admin/holders/{id}`, serves
+  `providerIdsWithheld` (`reason`, today always `removal-rolled-back`, `at`,
+  `providerIds`, the identifiers the removal took out, and `removal`, which removal the
+  rollback undid: `revoked`, `revoked-compromised` or `deregistered`), so the set reads
+  as a republish owed, not as a published empty set. A mark from before the registrar
+  kept them has no `providerIds` and no `removal`. A compromised-key revoke rolled back
+  over a mark already there makes it `revoked-compromised`. `GET /holders` never carries
+  any of it;
+- the withholding is audited as `provider-ids-withheld` (§2.5). If that record cannot
+  be appended either, the mark in the registrar's store stands as its record;
+- the next successful `PUT /register/{id}/provider-ids` clears it, an empty set
+  included, and is audited as `provider-ids-attested`, not as a fence. A
+  `POST /register/{id}/provider-ids/fence` does not clear it. The Accounts service
+  checks that publish against the organization's grants as they stand: a publish that
+  names a revoked NPI is refused whole, and nothing is bound.
+
+The Accounts service republishes a withheld provider client's NPIs on its own, normally
+within a minute: the set the mark keeps, less each NPI whose grant to the client's
+organization does not stand at that moment, so an NPI revoked meanwhile, or granted
+since to another organization, is never bound again, and less each NPI another holder
+is bound to then; an empty set when none is left, which clears the mark. It publishes
+as `PUT /clients/{id}/provider-ids` does, made against the set's generation, and leaves
+a client whose publish it cannot complete for its next pass. It does not republish the
+set of a rolled-back compromised-key revoke, nor of a mark that does not name its
+removal: the Accounts service keeps those NPIs withheld from a key believed compromised
+until someone acts. Nor does it republish a test participant's. A hosted provider's
+NPIs are also republished by the hosting service from the tenant's record: the record's
+NPIs the organization still holds a grant for. The hosting service does not yet read
+the mark's removal: it does so whatever removal the mark names, a compromised-key
+revoke's included.
+A mark from before the registrar kept the set is the developer's to clear: read
+`GET /clients/{id}/provider-ids` (§2.3a), and send `PUT /clients/{id}/provider-ids` to
+the Accounts service again with the NPIs the organization holds a grant for. Until a
+republish, a payer's gateway refuses a Task addressed to them (`routing`).
+
+**`GET /register/{id}`** — a holder reads its own registration (RFC 7592
+client-configuration read).
+
+It answers what the registrar holds for the holder, with its request frames as the two
+sets the registrar keeps (`PUT /register/{id}/capabilities` below): `requestFrames`, the
+effective set `GET /holders` serves; `registeredRequestFrames`, the set its registration
+or its last rotation carried; and `declaredRequestFrames`, the set its own system
+declared, absent when it declared none of its own and `[]` when it declared that it
+accepts none. A caller that keeps the registration's set current compares and writes
+that set (a rotation), never the declared one. The answer carries no keys, and is sent
+with `Cache-Control: no-store`.
+
+Auth: holder-self, as for deregistration and rotation: the `X-Holder-Assertion` header
+must be signed by `{id}`'s **current** `signPub`, with `holderId` == `{id}`, audience
+`"registrar"`, unexpired, and its `jti` used once (§3.4). A holder reads only itself. A
+revoked or deregistered holder is no longer registered and is answered 404, and a
+retired key, whether superseded or compromised, no longer verifies.
+
+```
+GET /register/external-payer
+X-Holder-Assertion: base64(json(assertion))   // holderId="external-payer", audience="registrar", signed by external-payer's current signPub
+```
+
+```json
+{ "id": "external-payer", "role": "payer", "baseURL": "https://payer.example",
+  "messageFrames": ["v1"], "contractVersions": ["pa.pas@2.2"],
+  "requestFrames": ["v1", "v1op", "v1opsub"],
+  "registeredRequestFrames": ["v1", "v1op"],
+  "declaredRequestFrames": ["v1", "v1op", "v1opsub"] }
+```
+
+| Condition | Status |
+|---|---|
+| `{id}` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
+| Registrar store read unavailable | 502 (`"store error"`) |
+| No such (dynamic) holder, including a revoked or deregistered one | 404 (`"no such holder"`) |
+| Assertion missing, not signed by `{id}`'s current `signPub`, `holderId != {id}`, another audience, outside its validity, or its `jti` already used | 403 (`"a holder may only read its own registration"`) |
+| Success | 200 |
+
+As for deregistration, `{id}` existence is checked before authentication; the public
+`/holders` feed already reveals it.
 
 **`PUT /register/{id}`** — key-rotation (RFC 7592 client-configuration update).
 
@@ -854,6 +966,7 @@ with it.
 ```
 PUT /register/acme-provider/provider-ids
 X-Holder-Assertion: base64(json(assertion))   // Trust admin, audience="registrar"
+If-Match: "41"                                // the set's generation (below)
 ```
 
 ```json
@@ -875,12 +988,31 @@ The set is a REPLACE: an identifier the body omits is withdrawn, and `[]` withdr
 all of them. An **absent** `providerIds` field is a malformed request. Success is 200,
 and `GET /holders` carries the new set at once.
 
+**The precondition.** Each holder's attested set has a generation. Every change moves
+it, a fence's included (below), and no generation is ever given twice. The operator's
+view of the holder, `GET /admin/holders/{id}`, serves it as `providerIdsGeneration`,
+read in one snapshot with `providerIds`, and a successful update answers the new one
+as its `ETag`. Send it back as `If-Match: "<generation>"`. An update made against a
+generation the set has since moved past is refused `412`, with nothing changed, so an
+update computed before another change, one that arrives late included, cannot apply.
+`If-Match` must be one strong, quoted generation: `*`, a list, a weak tag or an
+unquoted value is refused `400`, and an update without `If-Match` is refused `428`,
+with nothing changed. A founding holder has no generation, and
+its update is refused `409` as before.
+
+An update that changes nothing, the same identifiers on the same evidence, is a fence:
+it moves the generation and is audited as `provider-ids-fenced`. An attestation is
+added to the record only for an identifier new to the set or on new evidence. One
+re-sent on the same evidence keeps the attestation that made it.
+
 Rejection cases (checks are ordered):
 
 | Condition | Status |
 |---|---|
 | Missing or invalid Trust admin credential (including a holder's own assertion, or a replayed `jti`) | 401 (`"missing or invalid Trust admin credential"`) |
 | `{id}` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
+| `If-Match` is not one strong, quoted generation (`*`, a list, a weak tag, unquoted) | 400 (`"If-Match must be one generation, quoted, as GET /admin/holders/{id} serves it in providerIdsGeneration: If-Match: \"<generation>\""`) |
+| No `If-Match` | 428 (`"If-Match is required: the generation, quoted, as GET /admin/holders/{id} serves it in providerIdsGeneration"`) |
 | Body is not valid JSON | 400 (`"bad request body"`) |
 | `providerIds` absent | 400 (`"providerIds required (an empty array withdraws every identifier)"`) |
 | More than 16 entries | 400 (`"too many providerIds"`) |
@@ -888,19 +1020,104 @@ Rejection cases (checks are ordered):
 | An entry's `value` is not 10 digits with a valid check digit | 400 (`"providerIds value must be a 10-digit NPI with a valid check digit"`) |
 | The same entry twice | 400 (`"providerIds entries must be distinct"`) |
 | An entry without `evidence` | 400 (`"providerIds[<n>].evidence is required: the recorded check that vouches it"`) |
+| A `test-attestation` entry under any admin credential but a Trust operator's (the Accounts service's included) | 403 (`"providerIds[<n>] is a test attestation, made by a Trust operator only"`) |
 | Registrar store read unavailable | 502 (`"store error"`) |
 | No such (dynamic) holder | 404 (`"no such holder"`) |
 | The holder's role is not `provider` | 400 (`"providerIds are only valid for role=provider"`) |
 | An identifier is already bound to a founding holder | 409 (`"provider-id already registered to another holder"`) |
 | The check could not be made | 502 (`"provider identifier verification failed"`) |
 | The check does not vouch an entry (its `evidence` is incomplete, names another method or entity type, or was made after now) | 400 (`"providerIds[<n>] is not vouched: <reason>"`), the reason naming the `evidence` field |
+| `If-Match` names a generation the set has moved past (nothing is changed) | 412 (`"the holder's provider identifiers changed since that generation: read them again (GET /admin/holders/{id}) and retry"`) |
 | An identifier is already bound to ANOTHER dynamic holder | 409 (`"provider-id already registered to another holder"`) |
 | Registrar store write unavailable | 502 (`"store error"`) |
 | Lifecycle audit append failed (nothing is changed, fail-closed) | 502 (`"lifecycle audit failed"`) |
+| Success | 200 (OK), with `ETag: "<generation>"` |
+
+The transition is audited as `provider-ids-attested`, or `provider-ids-fenced` for a
+fence (§2.5), with the admin key's label in `scope`.
+
+**Test attestations (a test participant's documentation-example NPI).** A test
+participant is a reference participant the network runs to prove its own routes. It
+has no NPPES record to check, so a second evidence method, `"method": "test-attestation"`,
+admits one documentation-example NPI for it, recorded as exactly that and never as an
+NPPES check. A test attestation stands only when all three hold:
+- the registrar admits test attestations, by its own configuration
+  (`REGISTRAR_TEST_ATTESTATIONS`). Production's registrar never does;
+- the holder carries the operator's test-participant mark (below);
+- the NPI is a published documentation example: today only `1234567893`, the
+  organization NPI of the CDex IG's example Tasks.
+
+Only a Trust operator makes a test attestation: under any other admin credential, the
+Accounts service's included, an entry with this method is refused `403` and nothing
+changes. The Accounts service forwards NPPES checks only.
+
+The record still names the example organization (`entityType` `organization`, `name`)
+and when the statement was made (`checkedAt`). Each missing condition is a `400`
+(`providerIds[<n>] is not vouched: <reason>`), and any other NPI never takes this path.
+A mark that cannot be read is a `502` (`provider identifier verification failed`), and
+the attestation does not stand. A mark cleared while the attestation is being made
+refuses it too: `400` (`a test attestation is not vouched: the holder is not marked a
+test participant`).
+`GET /holders` serves a test-attested NPI as any attested one. The operator's
+provider-id view shows its method.
+
+**`POST /register/{id}/provider-ids/fence`** — a fence of a provider's identifiers.
+
+It moves the holder's provider-identifier generation and nothing else: no identifier is
+bound or withdrawn, and nothing is added to the attestation record. An update computed
+against the generation before it is then refused `412`. The Accounts service fences
+each of an organization's provider clients when an operator revokes one of its NPI
+grants, so an update an earlier change left in flight cannot bind the revoked NPI
+afterwards. Auth: a **Trust admin** assertion, the Accounts service's included, since a
+fence changes no binding. `If-Match` is required. There is no body.
+
+```
+POST /register/acme-provider/provider-ids/fence
+X-Holder-Assertion: base64(json(assertion))   // Trust admin, audience="registrar"
+If-Match: "41"
+```
+
+| Condition | Status |
+|---|---|
+| Missing or invalid Trust admin credential (including a holder's own assertion) | 401 (`"missing or invalid Trust admin credential"`) |
+| `{id}` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
+| `If-Match` is not one strong, quoted generation | 400 (`"If-Match must be one generation, quoted, as GET /admin/holders/{id} serves it in providerIdsGeneration: If-Match: \"<generation>\""`) |
+| No `If-Match` | 428 (`"If-Match is required: the generation, quoted, as GET /admin/holders/{id} serves it in providerIdsGeneration"`) |
+| Registrar store unavailable | 502 (`"store error"`) |
+| No such (dynamic) holder | 404 (`"no such holder"`) |
+| `If-Match` names a generation the set has moved past (nothing is changed) | 412 (`"the holder's provider identifiers changed since that generation: read them again (GET /admin/holders/{id}) and retry"`) |
+| Lifecycle audit append failed (nothing is changed, fail-closed) | 502 (`"lifecycle audit failed"`) |
+| Success | 200 (OK), with `ETag: "<generation>"` |
+
+The transition is audited as `provider-ids-fenced` (§2.5), with the admin key's label
+in `scope`.
+
+**`PUT /register/{id}/test-participant`** — the operator's test-participant mark.
+
+The mark is an operator attribute of a dynamic holder: it makes the holder eligible for
+a test attestation and nothing else. Nothing else the network does reads it, and it
+never appears on `GET /holders`. The operator's view of the holder
+(`GET /admin/holders/{id}`) shows it as `testParticipant` (`setBy`, `setAt`). Body:
+`{"testParticipant": true}` marks the holder, and `false` clears the mark. Auth: a
+**Trust operator**'s admin assertion. Any other admin credential, the Accounts service's
+included, is refused `403`, a holder's own assertion is refused `401`, and registration
+never sets the mark. A key rotation keeps it, and it is dropped with the holder.
+
+| Condition | Status |
+|---|---|
+| Missing or invalid Trust admin credential (including a holder's own assertion) | 401 (`"missing or invalid Trust admin credential"`) |
+| An admin credential other than a Trust operator's | 403 (`"the test-participant mark is set by a Trust operator only"`) |
+| The registrar admits no test attestations | 409 (`"this registrar takes no test attestations"`) |
+| `{id}` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
+| Body is not valid JSON, or `testParticipant` is not a boolean | 400 (`"bad request body"`) |
+| `testParticipant` absent | 400 (`"testParticipant required (true marks the holder, false clears the mark)"`) |
+| No such (dynamic) holder | 404 (`"no such holder"`) |
+| Clearing the mark while the holder is bound to a test-attested NPI (withdraw the NPI first) | 409 (`"the holder is bound to a test-attested identifier: withdraw it (PUT /register/{id}/provider-ids) before clearing the mark"`) |
+| Lifecycle audit append failed (nothing is changed, fail-closed) | 502 (`"lifecycle audit failed"`) |
 | Success | 200 (OK) |
 
-The transition is audited as `provider-ids-attested` (§2.5), with the admin key's
-label in `scope`.
+The transition is audited as `test-participant-marked` or `test-participant-unmarked`
+(§2.5), with the admin key's label in `scope`.
 
 **`PUT /register/{id}/capabilities`** — a holder's own declaration of its capabilities.
 
@@ -920,11 +1137,45 @@ handlers it has (`Identity.DeclareCapabilities`):
 - `requestFrames` — **optional**, from shn-sdk v1.8.0
   (`CapabilityDeclaration.RequestFrames`): the sealed request-frame versions the
   holder's running system accepts (§2.3 `requestFrames`), its full set, each token
-  matching `^[a-z0-9]{1,16}$`, at most 8, each named once. Absent says nothing about
-  them; `[]` declares that the system accepts none. A registrar that predates the
-  field ignores it.
+  matching `^[a-z0-9]{1,16}$`, at most 8, each named once. Absent leaves the holder
+  no declared set, so its registration's set is its own again (below); `[]` declares
+  that the system accepts none. A registrar that predates the field ignores it.
 
-The declaration REPLACES `legs` and `attachmentMaxBytes`, whatever set them before: one without
+**Request frames: the declared set and the registration's.** The registrar keeps the
+set a holder's own system declares apart from the set its registration carried
+(`POST /register`, rotation), and serves one effective set everywhere it serves a
+holder's `requestFrames` (`GET /holders`, the Hub's feed, every peer): the declared set
+when the holder's system declared one, `[]` included, else the registration's. `GET
+/holders` omits an empty set, which a peer reads as one that accepts no request frame
+(§2.3). A
+declaration with `requestFrames` sets the declared set; one without them leaves the
+holder with no declared set, so the registration's set is its own again, as for a
+holder that never declared. A registration or rotation writes only the registration's
+set, so it never undoes a declaration. A gateway declares at each start, and a release
+that does not send `requestFrames` declares none of its own, so a system rolled back to
+such a release gives back, at its first start, any set a later release declared. The
+operator view (`GET /admin/holders/{id}`) shows both sets, as `registeredRequestFrames`
+and `declaredRequestFrames` (absent when none is declared, `[]` when it declares none),
+and so does the holder's own read of its registration (`GET /register/{id}` above).
+
+**A founding holder** declares its request frames the same way: what its running
+system accepts can differ from the set the manifest stamps for the network's build,
+and only that system can say. For a founding holder, only `requestFrames` is applied.
+The declaration's `legs` and `attachmentMaxBytes` are checked as for any holder and
+answered with the manifest's values, which stand: a gateway declares the legs its
+settings take, which can be fewer than the legs the manifest gives its role, and
+nothing narrows them. A declaration that states any other field of the holder's record
+(`id`, `role`, `encPub`, `signPub`, `baseURL`, `payerIds`, `providerIds`,
+`messageFrames`, `contractVersions`, `pop`) is refused `409`: the record is
+manifest-authoritative. The declared set is kept, served and given back exactly as a
+dynamic holder's is, and moves only forward, as below: a declaration without a token
+removes it, and one without `requestFrames`, as every gateway before shn-gateway v1.8.0
+sends, gives the manifest's set back. The operator view shows both sets once the
+holder's system has declared one. The assertion is verified against the manifest's
+`signPub` for `{id}`.
+
+The declaration REPLACES `legs` and `attachmentMaxBytes`, whatever set them before, and,
+as above, the declared request frames: one without
 `attachmentMaxBytes` declares no limit. A registration never carries the limit, and a
 rotation keeps both the limit and, unless its body carries a list, the legs: what a
 rotation does not state stays as the holder's system declared it, because clearing it
@@ -951,33 +1202,63 @@ fresh assertion, is refused `409` and cannot undo a newer one. Until the holder'
 system first declares, any declaration is newer; a rotation keeps the issue time of
 the declaration accepted before it.
 
-Success is 200 with what the registrar stored, the legs sorted:
-`{"legs":[...],"attachmentMaxBytes":N}`, without `attachmentMaxBytes` when none was
-declared. `GET /holders` carries it at once, and the Hub sees it on its next poll
+Success is 200 with what the registrar stored, the legs sorted (for a founding holder,
+the manifest's legs and limit with the declared request frames):
+`{"legs":[...],"attachmentMaxBytes":N,"requestFrames":[...]}`, without
+`attachmentMaxBytes` when none was declared, and without `requestFrames` when the
+declaration carried none (`[]` is answered as `[]`). `GET /holders` carries it at once, and the Hub sees it on its next poll
 (§2.3).
 
 Rejection cases (checks are ordered):
 
 | Condition | Status |
 |---|---|
-| `{id}` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
 | Body over 64 KiB | 413 (`"capabilities declaration too large"`) |
-| Registrar store read unavailable | 502 (`"store error"`) |
-| No such (dynamic) holder | 404 (`"no such holder"`) |
-| Assertion missing, not signed by `{id}`'s **current** `signPub`, `holderId != {id}`, for another audience, expired, its `jti` already used, or not bound to this exact body | 403 (`"a holder may only declare its own capabilities, in the body its assertion binds"`) |
+| Registrar store read unavailable (a dynamic holder) | 502 (`"store error"`) |
+| No such holder | 404 (`"no such holder"`) |
+| Assertion missing, not signed by `{id}`'s **current** `signPub` (a founding holder's: the manifest's), `holderId != {id}`, for another audience, expired, its `jti` already used, or not bound to this exact body | 403 (`"a holder may only declare its own capabilities, in the body its assertion binds"`) |
 | Body is not valid JSON | 400 (`"bad request body"`) |
+| A founding holder's declaration states a field of its record other than `legs`, `attachmentMaxBytes` and `requestFrames` | 409 (`"founding holder, manifest-authoritative"`) |
 | `legs` absent or `null` | 400 (`"legs required (an empty array declares it takes none)"`) |
 | `legs` breaks its rules | 400 (the `legs:` messages of `POST /register`, §2.3) |
 | `attachmentMaxBytes` is `null` | 400 (`"attachmentMaxBytes: null is not a size; omit it to declare none"`) |
 | `attachmentMaxBytes` is not a whole number (a fraction, an exponent, a string) | 400 (`"attachmentMaxBytes: must be a whole number of bytes"`) |
 | `attachmentMaxBytes` below 1 | 400 (`"attachmentMaxBytes: must be at least 1"`) |
 | `attachmentMaxBytes` above 9007199254740991 | 400 (`"attachmentMaxBytes: must be at most 9007199254740991"`) |
+| `requestFrames` is `null` | 400 (`"requestFrames: null is not a set; omit it to declare none of its own, or send [] to declare it accepts none"`) |
+| `requestFrames` is not a list of strings | 400 (`"requestFrames: must be a list of tokens"`) |
+| `requestFrames` has more than 8 tokens | 400 (`"too many requestFrames"`) |
+| A `requestFrames` token does not match `^[a-z0-9]{1,16}$` | 400 (`"requestFrames token must match ^[a-z0-9]{1,16}$"`) |
+| A `requestFrames` token is named twice | 400 (`"requestFrames: \"<token>\" is named twice"`) |
 | The assertion was issued at or before the one that carried the declaration held | 409 (`"a newer or the same capabilities declaration is already stored"`) |
 | Registrar store write unavailable | 502 (`"store error"`) |
 | Lifecycle audit append failed (the declaration is undone, fail-closed) | 502 (`"lifecycle audit failed"`) |
 | Success | 200 (OK) |
 
 The declaration is audited as `redeclared` (§2.5).
+
+**A Trust operator's clear of the declared request frames.** `DELETE
+/admin/holders/{id}/declared-request-frames`, with the Trust operator's admin
+credential, removes the set a holder's own system declared, so the registration's set is
+its own again. It is the remedy for a stale declared set the holder's system cannot
+replace itself: its declarations are refused `409` because its clock is behind the issue
+time of the one held, or it runs a release that does not declare its capabilities at
+all. A holder with no declared set is answered `204` too, and the clear is recorded
+either way. The registrar holds a lock on the holder while the lifecycle record is
+appended, so no declaration lands between the clear and its record, and keeps the clear
+only once the record is appended.
+
+| Condition | Status |
+|---|---|
+| No valid Trust admin credential | 401 (`"missing or invalid Trust admin credential"`) |
+| A Trust admin credential other than the operator's (the Accounts service's) | 403 (`"a declared set is cleared by a Trust operator only"`) |
+| `{id}` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
+| No such (dynamic) holder | 404 (`"no such holder"`) |
+| Lifecycle audit append failed (the clear is not kept) | 502 (`"lifecycle audit failed"`) |
+| Registrar store unavailable, before the record or after it (a retry records again) | 502 (`"store error"`) |
+| Success | 204 (No Content) |
+
+The clear is audited as `request-frames-cleared`, naming the credential's label (§2.5).
 
 **Operational note — propagation window.** A 200 only updates the registrar feed.
 The new keys propagate to the Hub and the Authorization Framework on their next
@@ -1004,7 +1285,11 @@ separately (§4 tokens are per-leg, per-operation — see the concept mapping in
 
 Every lifecycle transition — `registered`, `revoked`, `deregistered`, `rotated` (new keys),
 `redeclared` (a `PUT /register/{id}` that kept both keys, or a `PUT /register/{id}/capabilities`, §2.4), `payer-ids-attested`
-(a `PUT /register/{id}/payer-ids`, §2.4), `provider-ids-attested` (a `PUT /register/{id}/provider-ids`, §2.4) — is signed
+(a `PUT /register/{id}/payer-ids`, §2.4), `provider-ids-attested` (a `PUT /register/{id}/provider-ids`, §2.4),
+`provider-ids-fenced` (a fence: a `PUT /register/{id}/provider-ids` that changes nothing, or a `POST /register/{id}/provider-ids/fence`, §2.4),
+`provider-ids-withheld` (a rolled-back removal restored a provider without its identifiers, §2.4),
+`test-participant-marked` and `test-participant-unmarked` (a `PUT /register/{id}/test-participant`, §2.4),
+`request-frames-cleared` (a Trust operator's `DELETE /admin/holders/{id}/declared-request-frames`, §2.4) — is signed
 by the registrar with its own signing key (public key = the manifest `registrarPub`,
 which the Audit Plane trusts as a signer; distinct from `auditSignPub`, the key the
 Hub signs routing records with) and appended to the canonical audit chain. A transition
@@ -1198,7 +1483,7 @@ X-Holder-Assertion: base64(json(assertion))
 | Authorization Framework (`POST /authorize`) | `"authz"` |
 | Hub (`POST /route`) | `"hub"` |
 | Registrar (`POST /register`, `POST /revoke`, `PUT /register/{id}/payer-ids`) | `"registrar"` (Trust admin key) |
-| Registrar (`DELETE /register/{id}`, `PUT /register/{id}`) | `"registrar"` (the holder's **own** current `signPub`) |
+| Registrar (`DELETE /register/{id}`, `GET /register/{id}`, `PUT /register/{id}`) | `"registrar"` (the holder's **own** current `signPub`) |
 | A provider gateway's `/scenario` routes, from shn-gateway v0.63.0 | `"scenario:<the gateway's holder id>"` (a `/scenario` caller's own key, §3.4a) |
 
 The verifier rejects an assertion whose `audience` does not match what it expects.
@@ -1214,8 +1499,8 @@ are:
 - the **Authorization Framework** `POST /authorize` (an assertion mints one token,
   not many),
 - the **Registrar** `POST /register`, `POST /revoke`, `PUT /register/{id}/payer-ids`,
-  `DELETE /register/{id}`, `PUT /register/{id}` (each gated action consumes its
-  assertion once), and
+  `DELETE /register/{id}`, `GET /register/{id}`, `PUT /register/{id}` (each gated
+  action, the holder's own read included, consumes its assertion once), and
 - the **Hub** `POST /route` (a request whose assertion verifies, and whose envelope the
   Hub then reads, names that holder as its sender and carries its authority frame and
   correlation id, consumes it, even if the Hub then refuses the leg; a reused one is
@@ -1323,6 +1608,7 @@ narrower (no standing bearer token).
 | Per-operation `authz` token (§4) | **NOT** an OAuth bearer access token. It is a **sender-constrained, per-operation** grant — a strict **superset** of SMART system scopes: bound to one operation, one frame, one correlation, one subject PCI, one holder, and one payload (the ciphertext's hash) (no standing blanket capability that can be lifted or replayed across operations) |
 | Lifecycle — deregister (`DELETE /register/{id}`, §2.4) | RFC 7592 client-configuration DELETE |
 | Lifecycle — key-rotation (`PUT /register/{id}`, §2.4) | RFC 7592 client-configuration UPDATE (re-key) |
+| Lifecycle — a holder's read of its own registration (`GET /register/{id}`, §2.4) | RFC 7592 client-configuration READ |
 | Lifecycle — revoke (`POST /revoke`, §2.4) | Trust-operated client revocation (no self-serve OAuth token revocation; see §9) |
 
 Because authority is minted per leg and never standing, there is no long-lived
@@ -3788,6 +4074,28 @@ at PAS 2.0.1" below); earlier releases carry one at every line.
   In that system's own numbering `Patient/<member id>` is another record, so it is now
   refused.
 
+  From shn-gateway v1.8.0, when a provider's gateway builds the UC-05 amendment
+  itself, the `DiagnosticReport` is the facility's report the gateway read on the
+  federated-query leg, with the `Provenance` that attributes it. Once the gateway's
+  check shows the report and that Provenance are about the Claim's patient (the
+  report's subject names the member directly, or through a Patient the facility
+  carried with the member identifier), the only change it makes to the report's
+  content is registered edit E-14 (`facility-report-subject-rekey`): it replaces the
+  report's `subject.reference` with the Claim's patient reference, when the two
+  differ. The rest of the subject (`display`, `identifier`, `type`) and of the
+  report is the facility's as it reaches the build. A subject naming the member by
+  identifier alone, with no `reference`, is carried as the facility wrote it. A
+  report a signature covers (a `Signature` in the report, a signed `Provenance` it
+  contains that targets it, or the facility's signed `Provenance` that attributes
+  it) is refused when E-14 would change it, `422 signed content cannot be edited
+  (E-14, <carrier>)`, and no amendment is sent; a report about anyone else is
+  refused `422`, with no edit made. The SDK's PAS update builder then places the
+  report and the Provenance in the bundle as described above: each gets its
+  bundle-local id (the Provenance's `target` rewritten to match) and no
+  `meta.profile`, and is re-encoded, so a signature over either no longer verifies
+  in the amendment. Before v1.8.0 the gateway replaced the report's whole `subject`
+  with `{"reference":<the Claim's patient>}` and named no edit.
+
   An amendment the provider's own client sends is carried as sent, never edited this
   way.
 - A **`Provenance`** attributing the DiagnosticReport to its source. The payer's
@@ -4369,9 +4677,19 @@ Patient Access API.)
   ```
   and the `Claim` resource's `supportedProfile` names the PAS Claim profile
   (`profile-claim|<package version>`) once per declared PAS line.
-  `rest[0].resource` declares the three FHIR-REST operations the ingress edge
-  actually serves: `Claim.$submit` and `Claim.$inquire` (PAS) and
-  `Questionnaire.$questionnaire-package` (DTR). **CRD is CDS Hooks, not FHIR
+  `rest[0].resource` declares the FHIR-REST operations the ingress edge
+  actually serves: `Claim.$submit` and `Claim.$inquire` (PAS),
+  `Questionnaire.$questionnaire-package` (DTR) and
+  `CoverageEligibilityRequest.$submit`. From shn-sdk v1.9.0 and
+  shn-gateway v1.8.0 it also declares SDC's `Questionnaire.$next-question`
+  (`http://hl7.org/fhir/uv/sdc/OperationDefinition/Questionnaire-next-question`),
+  an adaptive questionnaire's rounds, which the ingress serves from that gateway
+  release on the package fetch's leg and credential. A round is called at the
+  adaptive address the package's answer names. Where the gateway re-keyed that
+  address to its own ingress, a round sent to the plain
+  `Questionnaire/$next-question` endpoint is routed by it, found in the round's
+  QuestionnaireResponse's contained Questionnaire. A round sent there is refused
+  when it carries no such address, or more than one distinct one. **CRD is CDS Hooks, not FHIR
   REST** — it is named in `implementationGuide` and the descriptive text only;
   its own discovery document is served separately at `/cds-services`. The
   statement's `implementation.description` reads `(CRD 2.0.1, DTR 2.0.1, PAS
@@ -4715,6 +5033,81 @@ property. Until then, build to the rule: preserve what you do not recognise.
 ## 9. Status and roadmap
 
 ### Changelog
+
+- **2026-11-06 — The provider ingress statement lists `$next-question` (§8.4).**
+  From shn-sdk v1.9.0 and shn-gateway v1.8.0, `BuildProviderIngressCapabilityStatement`
+  lists SDC's `Questionnaire.$next-question` beside `$questionnaire-package`, documented
+  as called at the adaptive address the package's answer names and, sent to the plain
+  endpoint, routed by that address in the round's contained Questionnaire where the
+  gateway re-keyed it, and refused when it carries no such address, or more than one
+  distinct one. From shn-sdk
+  v1.9.0, `CapabilityDeclaration.RequestFrames`' documentation says that a declaration
+  without request frames leaves the holder no declared set, so the set its registration
+  carried is its own again (§2.4). Nothing else you send changes.
+- **2026-11-06 — The Accounts service republishes a provider's withheld NPIs (§2.4).**
+  The registrar's withheld mark keeps the NPIs the rolled-back removal took out, on the
+  operator's view only (`providerIdsWithheld.providerIds`), and which removal the
+  rollback undid (`providerIdsWithheld.removal`). The Accounts service publishes them
+  again on its own, each checked against the organization's grant as it stands then
+  and left out when another holder is bound to it, so a revoked NPI is never bound
+  again. A rolled-back compromised-key revoke's NPIs stay withheld. A self-hosted
+  provider no longer republishes by hand, apart from a mark from before the set was
+  kept.
+- **2026-11-06 — A founding holder's own system declares its request frames (§2.4).**
+  `PUT /register/{id}/capabilities` for a founding holder, signed with the manifest's
+  key for it, sets its declared request frames, which `GET /holders` serves, and nothing
+  else: its legs and attachment limit are answered with the manifest's values, and a
+  declaration that states another field of its record is refused `409`. Before, every
+  founding holder's declaration was refused `409`. A declaration without
+  `requestFrames` gives the manifest's set back.
+- **2026-11-06 — From shn-gateway v1.8.0, registered edit E-14 re-points only the `subject.reference` of the facility's report a UC-05 amendment carries (§7b.2).**
+  A provider's gateway that builds the UC-05 amendment replaces only the facility
+  report's `subject.reference` with the Claim's patient reference, keeping the rest
+  of its subject, and names `E-14` in the access line's `relayEdits` and
+  `requestEdits`. Before, it replaced the whole `subject` and named no edit. A
+  subject naming the member by identifier alone is now carried as written, and a
+  report a signature covers is refused `422 signed content cannot be edited (E-14,
+  <carrier>)` when the edit would change it.
+- **2026-11-05 — A provider client reads its own provider-identifier state (§2.3a).**
+  `GET /clients/{id}/provider-ids` on the Accounts service answers the NPIs the
+  organization holds a grant for, the ones the registrar publishes for the client, and
+  whether they are withheld after a rolled-back removal. It is refused as the `PUT` is,
+  and `502` when the registrar can't be read. `GET /admin/holders/{id}` now always says
+  whether a dynamic holder's set is withheld: the mark, or `null`.
+
+- **2026-11-05 — A rolled-back removal withholds a provider's identifiers (§2.4, §2.5).**
+  A revoke or deregistration whose lifecycle record cannot be appended restores the
+  holder without its provider identifiers, withheld until its next publish:
+  `GET /admin/holders/{id}` serves `providerIdsWithheld`, and the withholding is audited
+  as `provider-ids-withheld`. The next successful provider-ids update clears it. A
+  self-hosted provider republishes through `PUT /clients/{id}/provider-ids`.
+
+- **2026-11-05 — A provider-ids update without `If-Match` is refused `428` (§2.4).**
+  `PUT /register/{id}/provider-ids` takes the set's generation as `If-Match` on every
+  update: one without it is refused `428`, with nothing changed. Read the generation from
+  `GET /admin/holders/{id}` (`providerIdsGeneration`) first.
+
+- **2026-11-05 — A provider's identifiers carry a generation, and an update takes it as its precondition (§2.4).**
+  `GET /admin/holders/{id}` serves `providerIdsGeneration` for a dynamic holder, and
+  `PUT /register/{id}/provider-ids` takes it as `If-Match`: an update made against a
+  generation the set has moved past is refused `412`, with nothing changed. A malformed
+  `If-Match` is refused `400`. An update without one is still applied for now; a later
+  change refuses it `428`. The new `POST /register/{id}/provider-ids/fence` moves the
+  generation and nothing else, and an update that changes nothing is audited as
+  `provider-ids-fenced`. A re-sent identifier on the same evidence adds no attestation.
+
+- **2026-11-05 — Only a Trust operator marks a test participant or makes a test attestation (§2.4).**
+  `PUT /register/{id}/test-participant` and a `test-attestation` entry on
+  `PUT /register/{id}/provider-ids` are refused `403` under any other admin credential,
+  the Accounts service's included. Nothing else you send changes.
+
+- **2026-11-05 — A test participant's documentation-example NPI can be test-attested (§2.4).**
+  An operator may mark a dynamic holder a test participant
+  (`PUT /register/{id}/test-participant`), on a registrar that admits test attestations.
+  Production's never does. A marked holder may then be attested for a published
+  documentation-example NPI (today only `1234567893`) on the evidence method
+  `test-attestation`, recorded as that. Any other NPI, an unmarked holder, or a registrar
+  without test attestations is refused `400`. Nothing else you send changes.
 
 - **2026-11-05 — A provider's organization NPIs are vouched by an operator and published through the Accounts service (§2.3a).**
   A provider applicant may list its organization NPIs on its access request as

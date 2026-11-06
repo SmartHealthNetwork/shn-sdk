@@ -608,6 +608,108 @@ func TestResponder_PASUpdate(t *testing.T) {
 			assertError(t, resp, readBody(t, resp), http.StatusForbidden, "ClaimUpdate Provenance does not target the supplemental data")
 		})
 	}
+	// A version-specific target (FHIR R4: a Provenance target usually is) names the report
+	// when its version is the report's meta.versionId; another version, or any version of a
+	// report carrying none, cannot resolve in the Bundle and is refused like any target that
+	// names something else, a reference under another base among them (ProvenanceTargetNames).
+	for _, tc := range []struct {
+		name, reportVersion, target string
+		accepted                    bool
+	}{
+		{"versioned-own-version", "2", "DiagnosticReport/{id}/_history/2", true},
+		{"versioned-absolute-own-version", "2", "https://shn.example/fhir/DiagnosticReport/{id}/_history/2", true},
+		{"versioned-report-without-version", "", "DiagnosticReport/{id}/_history/7", false},
+		{"versioned-other-version", "2", "DiagnosticReport/{id}/_history/3", false},
+		// A reference is matched as a whole: the report entry's own fullUrl names it, the
+		// same type and id under another server's base do not.
+		{"own-fullurl", "", "https://shn.example/fhir/DiagnosticReport/{id}", true},
+		{"foreign-base-same-id", "", "https://facility.example/fhir/DiagnosticReport/{id}", false},
+		{"foreign-base-same-id-versioned", "2", "https://facility.example/fhir/DiagnosticReport/{id}/_history/2", false},
+	} {
+		t.Run("provenance-targets-"+tc.name, func(t *testing.T) {
+			origCorr := "upd-orig-ver-" + tc.name
+			submit := buildConformantClaim(t, "MBR-001", origCorr, pendQR, h.now)
+			sEnv, sHdr := h.buildForwardEnv(t, "pas-claim", "pas-submit", origCorr, submit)
+			sResp := postInbound(t, srv, sEnv, sHdr)
+			sBody := readBody(t, sResp)
+			if sResp.StatusCode != http.StatusOK {
+				t.Fatalf("setup submit status = %d, want 200; body: %s", sResp.StatusCode, sBody)
+			}
+			corr := "upd-ver-" + tc.name
+			update := buildConformantUpdate(t, "MBR-001", corr, origCorr, pendQR, h.now)
+			update = setEntryVersion(t, update, "DiagnosticReport", tc.reportVersion)
+			update = retargetProvenance(t, update, strings.Replace(tc.target, "{id}", entryID(t, update, "DiagnosticReport"), 1))
+			envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-update", "pas-update-submit", corr, update)
+			resp := postInbound(t, srv, envBytes, hubHdr)
+			body := readBody(t, resp)
+			if !tc.accepted {
+				assertError(t, resp, body, http.StatusForbidden, "ClaimUpdate Provenance does not target the supplemental data")
+				return
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("update status = %d, want 200: the Provenance targets the report; body: %s", resp.StatusCode, body)
+			}
+		})
+	}
+}
+
+// entryID is the id of the one entry of resourceType in bundleJSON.
+func entryID(t *testing.T, bundleJSON []byte, resourceType string) string {
+	t.Helper()
+	var bundle struct {
+		Entry []struct {
+			Resource struct {
+				ResourceType string `json:"resourceType"`
+				ID           string `json:"id"`
+			} `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundleJSON, &bundle); err != nil {
+		t.Fatalf("entryID: %v", err)
+	}
+	for _, e := range bundle.Entry {
+		if e.Resource.ResourceType == resourceType {
+			return e.Resource.ID
+		}
+	}
+	t.Fatalf("entryID: no %s entry", resourceType)
+	return ""
+}
+
+// setEntryVersion sets (or, with "", removes) meta.versionId on the one entry of resourceType
+// in bundleJSON — one mutation on top of a real builder's output.
+func setEntryVersion(t *testing.T, bundleJSON []byte, resourceType, version string) []byte {
+	t.Helper()
+	var bundle map[string]any
+	if err := json.Unmarshal(bundleJSON, &bundle); err != nil {
+		t.Fatalf("setEntryVersion: unmarshal: %v", err)
+	}
+	found := false
+	for _, e := range bundle["entry"].([]any) {
+		r, _ := e.(map[string]any)["resource"].(map[string]any)
+		if r["resourceType"] != resourceType {
+			continue
+		}
+		found = true
+		meta, _ := r["meta"].(map[string]any)
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		if version == "" {
+			delete(meta, "versionId")
+		} else {
+			meta["versionId"] = version
+		}
+		r["meta"] = meta
+	}
+	if !found {
+		t.Fatalf("setEntryVersion: no %s entry", resourceType)
+	}
+	out, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // retargetProvenance rewrites the Provenance entry's target[0].reference — one mutation on top

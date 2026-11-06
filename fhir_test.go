@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -343,9 +344,9 @@ func TestBuildEligibilityResponse_InsurerIsThePayers(t *testing.T) {
 
 // TestBuildProviderIngressCapabilityStatement_Shape pins the provider Da Vinci
 // ingress statement (FR-37 gap closed: per-role CapabilityStatements): the
-// versioned CRD/DTR/PAS 2.0.1 IG canonicals, the two FHIR operations the
+// versioned CRD/DTR/PAS 2.0.1 IG canonicals, the FHIR operations the
 // ingress serves (PAS Claim/$submit and Claim/$inquire, DTR
-// $questionnaire-package), and
+// $questionnaire-package and SDC $next-question), and
 // determinism under a fixed clock. CRD is CDS Hooks (not FHIR REST) — it
 // appears via its IG canonical and the rest documentation, never as a
 // rest.resource.
@@ -381,6 +382,7 @@ func TestBuildProviderIngressCapabilityStatement_Shape(t *testing.T) {
 		"OperationDefinition/Claim-submit",
 		"OperationDefinition/Claim-inquiry",
 		"OperationDefinition/questionnaire-package",
+		"OperationDefinition/Questionnaire-next-question",
 	} {
 		if !strings.Contains(raw, must) {
 			t.Fatalf("statement missing operation %q", must)
@@ -422,6 +424,56 @@ func TestBuildProviderIngressCapabilityStatement_Eligibility(t *testing.T) {
 		}
 		if len(cs.Rest[0].Interaction) != 0 {
 			t.Fatalf("declared %v: the statement claims interactions %+v", declared, cs.Rest[0].Interaction)
+		}
+	}
+}
+
+// TestBuildProviderIngressCapabilityStatement_QuestionnaireOperations pins the
+// Questionnaire operations the ingress serves, exactly and in order, whatever
+// lines are declared: DTR's $questionnaire-package and SDC's $next-question
+// (an adaptive questionnaire's rounds, on the package fetch's leg), the round
+// documented as called at the questionnaire's own adaptive address and, sent
+// to the plain endpoint, routed by that address where the gateway re-keyed
+// it. The statement has exactly one Questionnaire entry.
+func TestBuildProviderIngressCapabilityStatement_QuestionnaireOperations(t *testing.T) {
+	at := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	for _, declared := range [][]string{SupportedContractVersions(), nil} {
+		b, err := BuildProviderIngressCapabilityStatement(at, declared)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cs fhir.CapabilityStatement
+		if err := json.Unmarshal(b, &cs); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		var nextDoc *string
+		entries := 0
+		for _, r := range cs.Rest[0].Resource {
+			if r.Type != fhir.ResourceTypeQuestionnaire {
+				continue
+			}
+			entries++
+			for _, op := range r.Operation {
+				got = append(got, op.Name+" "+op.Definition)
+				if op.Name == "next-question" {
+					nextDoc = op.Documentation
+				}
+			}
+		}
+		want := []string{
+			"questionnaire-package http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/questionnaire-package",
+			"next-question http://hl7.org/fhir/uv/sdc/OperationDefinition/Questionnaire-next-question",
+		}
+		if entries != 1 || !slices.Equal(got, want) {
+			t.Fatalf("declared %v: %d Questionnaire entries, operations\n  %q\nwant one entry with\n  %q", declared, entries, got, want)
+		}
+		if nextDoc == nil || !strings.Contains(*nextDoc, "questionnaireAdaptive") || !strings.Contains(*nextDoc, "contained Questionnaire") ||
+			!strings.Contains(*nextDoc, "re-keyed") || !strings.Contains(*nextDoc, "more than one distinct") {
+			t.Fatalf("declared %v: $next-question documentation %v does not say where a round is called and how one sent to the plain endpoint is routed", declared, nextDoc)
+		}
+		if !strings.Contains(*cs.Rest[0].Documentation, "$next-question") {
+			t.Fatalf("declared %v: the rest documentation does not name $next-question", declared)
 		}
 	}
 }

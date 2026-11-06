@@ -523,8 +523,10 @@ func TestPriorAuthContinuation_RecordsCreated(t *testing.T) {
 		t.Errorf("PASPriorClaimOf Claim = %s, want the submitted Claim's bytes as sent", p.Claim)
 	}
 	// An empty record (a handle written before v0.62.0 carries none) is refused.
-	if _, err := (PASPriorClaim{}).carried("convergence-pas-submit-0001"); !errors.Is(err, ErrPASPriorClaimNotCarried) {
-		t.Errorf("an empty record: %v, want it refused", err)
+	for _, asWritten := range []bool{false, true} {
+		if _, err := (PASPriorClaim{}).carried("convergence-pas-submit-0001", asWritten); !errors.Is(err, ErrPASPriorClaimNotCarried) {
+			t.Errorf("an empty record (as written %v): %v, want it refused", asWritten, err)
+		}
 	}
 }
 

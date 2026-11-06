@@ -47,6 +47,9 @@ without deploying anything of your own.
 | `GET /cds-services` | no | CDS Hooks discovery — the services and prefetch templates below |
 | `POST /cds-services/{id}` | yes | CRD — invoke one of the services in §1.2 |
 | `POST /Questionnaire/$questionnaire-package` | yes | DTR — fetch a questionnaire package |
+| `POST /dtr/payer/{payer}/{line}/{tag}/…/Questionnaire/$next-question` | yes | DTR — an adaptive questionnaire's next round, at the address the package you fetched here names, re-keyed to this endpoint by the gateway behind it (below; from shn-gateway v1.8.0) |
+| `POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question` | yes | DTR — the same, for a questionnaire whose adaptive address is the payer's base (from shn-gateway v1.8.0) |
+| `POST /Questionnaire/$next-question` | yes | DTR — an adaptive round, routed by the adaptive address its QuestionnaireResponse carries (below; from shn-gateway v1.8.0) |
 | `POST /Claim/$submit` | yes | PAS — submit a prior-authorization request |
 | `POST /Claim/$inquire` | yes | PAS — ask the payer for the decision it holds on a submission (§1.6) |
 | `POST /CoverageEligibilityRequest/$submit` | yes | Coverage eligibility (IHE FAIS ITI-124) — ask the payer about a member's coverage (§1.7) |
@@ -55,12 +58,23 @@ without deploying anything of your own.
 | `GET /cdex/payers` | yes | CDex — the payers that take the submission, each with its return path (§5.4) |
 | `GET /healthz` | no | Liveness |
 
+**An adaptive questionnaire's rounds.** From shn-gateway v1.8.0 on this endpoint's gateway, a
+round is reachable here only at an address the gateway behind it re-keyed to this endpoint:
+the `questionnaireAdaptive` value of the package you fetched through this endpoint, when it
+starts with this endpoint's own base followed by `/dtr/`. Call that address
+as given, with `/Questionnaire/$next-question` after it, or send the round to the plain
+`/Questionnaire/$next-question` with the QuestionnaireResponse the package gave you, which
+carries that address. When the package names any other address, it is the payer's own,
+outside the network, and its rounds are not offered here. The address is under this endpoint
+only when the gateway behind it re-keys the payer's address to it: once the payer's gateway
+restores adaptive addresses, and its own system issues the address at or under its gateway's
+base.
+
 **Not offered on this endpoint:**
 
 - PAS subscriptions and notifications: a payer's later decision is not pushed to you; ask for
   it with `Claim/$inquire` (§1.6);
-- DTR `Questionnaire/$next-question` (the next questions of an adaptive questionnaire) and
-  `Questionnaire/$populate`;
+- DTR `Questionnaire/$populate` (and, before shn-gateway v1.8.0, DTR `$next-question`);
 - the CDS Hooks `order-dispatch`, `appointment-book`, `encounter-start` and
   `encounter-discharge` hooks.
 
@@ -2443,7 +2457,7 @@ curl -s "https://pa-test.shn-preview.org/Questionnaire/\$questionnaire-package" 
 
 Expected answer: `HTTP 200` and a `Parameters` resource: `packagebundle` carries the `BariatricSurgery` Questionnaire as an adaptive questionnaire (`dtr-questionnaire-adapt`) holding only its first group, "Eligibility" (body mass index, and months of medically supervised diet completed), and an in-progress QuestionnaireResponse (`dtr-questionnaireresponse-adapt`) that names its contained Questionnaire (`#contained-questionnaire`); `outcome` carries the payer's prepopulation warning from §5.2 (the Coverage in `dtr-00301.json` carries no `subscriberId` or `beneficiary.identifier`).
 
-The remaining questions (comorbidities and evaluation, and a shorter-diet follow-up asked only when fewer than six months are answered) come from DTR `$next-question`, which is not offered here (§1.1), so the completed adaptive answers cannot be produced through this endpoint.
+The remaining questions (comorbidities and evaluation, and a shorter-diet follow-up asked only when fewer than six months are answered) come from DTR `$next-question`, at the address the package's `questionnaireAdaptive` names. From shn-gateway v1.8.0 that address is this endpoint's only when the gateway behind it re-keys the payer's address to this endpoint (§1.1); until then it is the payer's own, the rounds are not offered here, and the completed adaptive answers cannot be produced through this endpoint.
 
 **PAS without documentation.**
 

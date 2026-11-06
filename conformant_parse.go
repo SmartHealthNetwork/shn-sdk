@@ -256,13 +256,17 @@ func conformantBundleMember(cs conformantClaimSubmit) string {
 // parseConformantClaimSubmit does NOT surface. Mirrors the Smart Gateway's own
 // conformantUpdateFacts (its native PAS bind) for the conformant shape.
 type conformantUpdateFacts struct {
-	provenanceJSON     []byte   // the Provenance resource bytes, or nil (FR-32: REQUIRED on the update leg)
-	provenanceAgents   []string // Provenance.agent[].who.reference
-	provenanceTargets  []string // Provenance.target[].reference
-	hasDR              bool     // a DiagnosticReport entry is present (DR-variant supplemental data)
-	diagnosticReportID string   // DiagnosticReport.id
-	qrID               string   // QuestionnaireResponse.id (the QR-variant supplemental data)
-	relatedClaim       string   // Claim.related[0].claim.identifier.value (the amendment's distinguishing field, FR-21)
+	provenanceJSON          []byte   // the Provenance resource bytes, or nil (FR-32: REQUIRED on the update leg)
+	provenanceAgents        []string // Provenance.agent[].who.reference
+	provenanceTargets       []string // Provenance.target[].reference
+	hasDR                   bool     // a DiagnosticReport entry is present (DR-variant supplemental data)
+	diagnosticReportID      string   // DiagnosticReport.id
+	diagnosticReportVersion string   // DiagnosticReport.meta.versionId, or ""
+	diagnosticReportFullURL string   // the DiagnosticReport entry's fullUrl
+	qrID                    string   // QuestionnaireResponse.id (the QR-variant supplemental data)
+	qrVersion               string   // QuestionnaireResponse.meta.versionId, or ""
+	qrFullURL               string   // the QuestionnaireResponse entry's fullUrl
+	relatedClaim            string   // Claim.related[0].claim.identifier.value (the amendment's distinguishing field, FR-21)
 }
 
 // parseConformantUpdateFacts does ONE pass over a CONFORMANT amended-re-POST Bundle, extracting the
@@ -275,6 +279,7 @@ func parseConformantUpdateFacts(body []byte) (conformantUpdateFacts, bool) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 		Entry        []struct {
+			FullURL  string          `json:"fullUrl"`
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
@@ -310,6 +315,8 @@ func parseConformantUpdateFacts(body []byte) (conformantUpdateFacts, bool) {
 			}
 			_ = json.Unmarshal(e.Resource, &qr)
 			f.qrID = qr.Id
+			f.qrVersion = resourceVersionID(e.Resource)
+			f.qrFullURL = e.FullURL
 		case "DiagnosticReport":
 			var dr struct {
 				Id string `json:"id"`
@@ -317,6 +324,8 @@ func parseConformantUpdateFacts(body []byte) (conformantUpdateFacts, bool) {
 			_ = json.Unmarshal(e.Resource, &dr)
 			f.hasDR = true
 			f.diagnosticReportID = dr.Id
+			f.diagnosticReportVersion = resourceVersionID(e.Resource)
+			f.diagnosticReportFullURL = e.FullURL
 		case "Provenance":
 			f.provenanceJSON = e.Resource
 			var prov struct {

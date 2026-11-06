@@ -331,7 +331,8 @@ const pasProfileClaimBase = "http://hl7.org/fhir/us/davinci-pas/StructureDefinit
 // per declared PAS line). A declared token for an unrelated contract (a future
 // workstream's) is ignored — this statement is CRD/DTR/PAS-only.
 func BuildProviderIngressCapabilityStatement(created time.Time, declared []string) ([]byte, error) {
-	doc := "Da Vinci ingress for foreign EHR/CDS clients: PAS Claim/$submit and Claim/$inquire, DTR $questionnaire-package and coverage eligibility CoverageEligibilityRequest/$submit (FHIR operations below), and CRD CDS Hooks discovered at /cds-services. Version-specific endpoint codes are published at /.well-known/davinci-configuration (HRex 1.2.0)."
+	doc := "Da Vinci ingress for foreign EHR/CDS clients: PAS Claim/$submit and Claim/$inquire, DTR $questionnaire-package and its adaptive rounds ($next-question), coverage eligibility CoverageEligibilityRequest/$submit (FHIR operations below), and CRD CDS Hooks discovered at /cds-services. Version-specific endpoint codes are published at /.well-known/davinci-configuration (HRex 1.2.0)."
+	nextQuestionDoc := "An adaptive questionnaire's rounds. Call the address the questionnaire's questionnaireAdaptive extension names. Where the gateway re-keyed that address, it is this ingress's own address for the payer, and a round sent here instead is routed by it, found in the round's QuestionnaireResponse's contained Questionnaire. A round sent here is refused when it carries no such address, or more than one distinct one. An address the gateway did not re-key is the one the payer wrote, outside this ingress."
 	eligibilityDoc := "Carries the input to the payer its request names, exactly as sent, and relays the payer's answer exactly: a CoverageEligibilityRequest, a Bundle of one request with the resources it references, or a Parameters whose one resource parameter holds either. A batch Bundle of at most 17 requests is carried too, but answered only by a payer whose own endpoint answers batches: a payer gateway answering from the payer's records answers one request at a time and refuses a batch 501."
 	sec := "SMART Backend Services (client_credentials, private_key_jwt); configuration at /.well-known/smart-configuration."
 	var igs, pasProfiles []string
@@ -401,6 +402,9 @@ func BuildProviderIngressCapabilityStatement(created time.Time, declared []strin
 					Type: fhir.ResourceTypeQuestionnaire,
 					Operation: []fhir.CapabilityStatementRestResourceOperation{
 						{Name: "questionnaire-package", Definition: "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/questionnaire-package"},
+						// SDC's adaptive rounds, on the package fetch's leg
+						// and credential.
+						{Name: "next-question", Definition: "http://hl7.org/fhir/uv/sdc/OperationDefinition/Questionnaire-next-question", Documentation: &nextQuestionDoc},
 					},
 				},
 				{

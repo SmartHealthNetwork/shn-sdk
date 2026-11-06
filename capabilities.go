@@ -25,8 +25,9 @@ const declaredAttachmentMaxBytes = 1<<53 - 1
 // CapabilityDeclaration is what a holder's own system declares to the
 // registrar about itself (Identity.DeclareCapabilities), each time it starts.
 // It replaces the Legs and AttachmentMaxBytes the registrar holds for the
-// holder, together. RequestFrames is sent only when present; a registrar that
-// predates the field ignores it.
+// holder, together, and the request frames its system declared: RequestFrames
+// is sent only when present, and a declaration without it leaves the holder
+// no declared set. A registrar that predates the field ignores it.
 type CapabilityDeclaration struct {
 	// Legs are the legs the holder takes as a recipient (Holder.Legs): the
 	// flat transaction types of the request legs its system answers. Always
@@ -37,11 +38,17 @@ type CapabilityDeclaration struct {
 	// documentation submission (Holder.AttachmentMaxBytes); nil declares none.
 	AttachmentMaxBytes *int64 `json:"attachmentMaxBytes,omitempty"`
 	// RequestFrames are the sealed request-frame versions the holder's
-	// running system accepts (Holder.RequestFrames), as its full set. Absent
-	// (nil) is not sent and says nothing about them; an empty list is sent as
-	// [] and declares that the system accepts none. A registrar that predates
-	// the field ignores it. Each token matches ^[a-z0-9]{1,16}$, at most 8,
-	// each named once.
+	// running system accepts (Holder.RequestFrames), as its full set. The
+	// registrar keeps them apart from the set the holder's registration
+	// carried, and serves them in its place while there is one. Absent (nil)
+	// is not sent, and the registrar then holds no declared set for the
+	// holder, so the set its registration carried (for a holder founded with
+	// the network, the network's own record of it) is its own again: a system
+	// rolled back to a release that declares its capabilities without request
+	// frames drops, at its first start, a set a later release declared. An empty list is sent as [] and
+	// declares that the system accepts none. A registrar that predates the
+	// field ignores it. Each token matches ^[a-z0-9]{1,16}$, at most 8, each
+	// named once.
 	RequestFrames []string `json:"requestFrames,omitzero"`
 }
 
@@ -54,8 +61,10 @@ const maxDeclaredRequestFrames = 8
 // compiled catalog, a Responder's Legs), when its system has one, the largest
 // single inline attachment it accepts, and, when given, the request frames it
 // accepts (RequestFrames). It replaces Legs and AttachmentMaxBytes as the
-// registrar holds them for the holder, and sends RequestFrames only when
-// given; a registrar that predates that field ignores it. The registrar keeps
+// registrar holds them for the holder, and the declared request frames: it
+// sends RequestFrames only when given, and a declaration without them leaves
+// the holder no declared set, so its registration's set is its own again. A
+// registrar that predates that field ignores it. The registrar keeps
 // a declaration only when it is newer than the one it holds, so a system
 // declares its capabilities each time it starts. Legs must name each leg once
 // by its flat name; an empty, non-nil list declares that the holder takes

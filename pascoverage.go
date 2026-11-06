@@ -153,6 +153,13 @@ var (
 // references this package owns are pointed at this Bundle's own entries, and a
 // record making any OTHER reference is refused.
 func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgRecord, supplied [][]byte) (pasCoverageRecord, error) {
+	return pasCoverageEntryAs(record, patientRef, payerOrg, supplied, true)
+}
+
+// pasCoverageEntryAs is pasCoverageEntry; with stripProfile false the
+// Coverage and the persons it names keep their meta.profile, for the carried
+// builders (BuildConformantClaimBundleCarried).
+func pasCoverageEntryAs(record []byte, patientRef string, payerOrg pasPayerOrgRecord, supplied [][]byte, stripProfile bool) (pasCoverageRecord, error) {
 	cov, err := readPASCoverage(record)
 	if err != nil {
 		return pasCoverageRecord{}, err
@@ -218,7 +225,7 @@ func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgReco
 			}
 			at := slices.IndexFunc(entryParties, func(p pasEntryParty) bool { return "Patient/"+p.id == slotKey })
 			if at < 0 {
-				party, err := pasCoverageSlotParty(field, slotKey, supplied)
+				party, err := pasCoverageSlotPartyAs(field, slotKey, supplied, stripProfile)
 				if err != nil {
 					return pasCoverageRecord{}, err
 				}
@@ -239,9 +246,10 @@ func pasCoverageEntry(record []byte, patientRef string, payerOrg pasPayerOrgReco
 	if err != nil {
 		return pasCoverageRecord{}, err
 	}
-	out, err = stripMetaProfile(out)
-	if err != nil {
-		return pasCoverageRecord{}, fmt.Errorf("strip coverage meta: %w", err)
+	if stripProfile {
+		if out, err = stripMetaProfile(out); err != nil {
+			return pasCoverageRecord{}, fmt.Errorf("strip coverage meta: %w", err)
+		}
 	}
 	// The payer Organization rides as a resolvable bundle ENTRY — the
 	// participant's own record — and the reference payer's payor lookup reads

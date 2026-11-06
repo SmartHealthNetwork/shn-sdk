@@ -470,6 +470,8 @@ func addPASLineRelatedRelationship(claimJSON []byte, def PASDef) ([]byte, error)
 // refs and refs that do not match any bundle entry are left untouched. When false (the
 // default) the bundle keeps relative references. Set true ONLY for the
 // reference-payer origination lane (targetsBrPayer: ORIGINATION_PROFILE=provider-data, and the Kit's conformant rows).
+// It has no effect on BuildConformantClaimBundleCarried and its AtLine form, which
+// write no reference in absolute form.
 type ConformantClaimInputs struct {
 	QR []byte
 	SR []byte
@@ -623,24 +625,63 @@ type ConformantClaimInputs struct {
 // BuildConformantClaimBundleExact speaks PAS line 2.0 — it is BuildConformantClaimBundleAtLineExact("2.0", in),
 // byte-identical (regression-fenced by the platform's SDK parity suite). Use BuildConformantClaimBundleAtLineExact to
 // target 2.1/2.2 (PAS package differential: Claim.item certificationType/requestType/location[x]).
+//
+// Deprecated: use BuildConformantClaimBundleCarried, which carries the participant's
+// records with their meta.profile and never writes a reference in absolute form. This
+// builder keeps its bytes: it drops meta.profile from the order, the Coverage, the
+// persons the Coverage names and the payer's Organization, and with AbsoluteRefs it
+// writes references to entries in absolute form.
 func BuildConformantClaimBundleExact(in ConformantClaimInputs) ([]byte, error) {
 	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
-	return buildConformantClaimBundle(def, in)
+	return buildConformantClaimBundle(def, in, false)
 }
 
 // BuildConformantClaimBundleAtLineExact is BuildConformantClaimBundleExact parameterized by PAS
 // line ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed — never a silent 2.0
 // fallback). ONE code path: the line-conditional sections are driven entirely by the
 // resolved PASDef (see addPASLineItemDetail), not inline per-line branches.
+//
+// Deprecated: use BuildConformantClaimBundleAtLineCarried; see
+// BuildConformantClaimBundleExact for what this builder changes.
 func BuildConformantClaimBundleAtLineExact(line string, in ConformantClaimInputs) ([]byte, error) {
 	def, ok := PASLineDef(line)
 	if !ok {
 		return nil, fmt.Errorf("shnsdk: BuildConformantClaimBundleAtLineExact: unknown PAS line %q", line)
 	}
-	return buildConformantClaimBundle(def, in)
+	return buildConformantClaimBundle(def, in, false)
 }
 
-func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, error) {
+// BuildConformantClaimBundleCarried builds the same PAS submission as
+// BuildConformantClaimBundleExact at PAS line 2.0, except that the order, the
+// Coverage, the persons the Coverage names and the payer's Organization keep
+// their meta.profile, and no reference is written in absolute form: a relative
+// "<resourceType>/<id>" resolves against the root of its entry's RESTful
+// fullUrl (FHIR R4 Bundle resolution), and AbsoluteRefs has no effect. The
+// records are built into the request as the Exact builder builds them
+// otherwise: the order and the QuestionnaireResponse are given the bundle's own
+// ids and the QuestionnaireResponse's context is pointed at them, the Coverage's
+// payor and beneficiary are pointed at the request's own entries, and every
+// record is re-encoded compact with the Bundle.
+func BuildConformantClaimBundleCarried(in ConformantClaimInputs) ([]byte, error) {
+	def, _ := PASLineDef("2.0")
+	return buildConformantClaimBundle(def, in, true)
+}
+
+// BuildConformantClaimBundleAtLineCarried is BuildConformantClaimBundleCarried
+// at PAS line ("2.0"|"2.1"|"2.2"). An unknown line is refused.
+func BuildConformantClaimBundleAtLineCarried(line string, in ConformantClaimInputs) ([]byte, error) {
+	def, ok := PASLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: BuildConformantClaimBundleAtLineCarried: unknown PAS line %q", line)
+	}
+	return buildConformantClaimBundle(def, in, true)
+}
+
+// buildConformantClaimBundle builds a PAS submission. asWritten is the Carried
+// builders' placement of the participant's records (meta.profile kept, no
+// reference written in absolute form); false is the Exact builders', whose
+// bytes are pinned (TestPASExactBuilders_KeepTheirBytes).
+func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs, asWritten bool) ([]byte, error) {
 	// --- Claim: reuse the byte-parity-locked buildPASClaim, then post-process to carry
 	// the order's own productOrService code (buildPASClaim natively emits X12 1365
 	// "Medical Care" there; setClaimItemProductFromSR below overrides it unconditionally) +
@@ -693,7 +734,7 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	// the payer its member's Coverage names, carried as a resolvable entry that the
 	// Claim's insurer and the Coverage's payor both name. A caller that cannot supply
 	// one is refused — see pasPayerOrgEntry for what naming a minted one cost.
-	payerOrg, err := pasPayerOrgEntry(in.Insurer, in.Payer)
+	payerOrg, err := pasPayerOrgEntryAs(in.Insurer, in.Payer, !asWritten)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
@@ -727,7 +768,7 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if in.MemberID == "" {
 		return nil, fmt.Errorf("shnsdk: MemberID is required (bare member id; see the v0.42.0 identifier-semantics release note)")
 	}
-	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg, in.CoverageParties)
+	coverage, err := pasCoverageEntryAs(in.Coverage, in.PatientRef, payerOrg, in.CoverageParties, !asWritten)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: %w", err)
 	}
@@ -748,9 +789,11 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant submit: id order: %w", err)
 	}
-	srJSON, err = stripMetaProfile(srJSON)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant submit: strip order meta: %w", err)
+	if !asWritten {
+		srJSON, err = stripMetaProfile(srJSON)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant submit: strip order meta: %w", err)
+		}
 	}
 
 	// --- Patient: the member, named by the identifier the participant's own
@@ -841,7 +884,7 @@ func buildConformantClaimBundle(def PASDef, in ConformantClaimInputs) ([]byte, e
 	// Reference-payer lane only: rewrite internal refs to their absolute fullUrl form so real
 	// payers that do not resolve relative refs against absolute entry fullUrls accept the
 	// bundle (HAPI-1094). Default false keeps relative references.
-	if in.AbsoluteRefs {
+	if in.AbsoluteRefs && !asWritten {
 		bundleOut, err = absolutizeBundleRefs(bundleOut)
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant submit: absolutize refs: %w", err)
@@ -1402,6 +1445,10 @@ func absolutizeBundleRefs(bundleJSON []byte) ([]byte, error) {
 // empty. Used by an external facility to make the disclosure provably consent-anchored
 // in a federated-query prior-auth flow. Promoted from the platform's Provenance builder;
 // parity-tested in the platform's SDK parity suite.
+//
+// Deprecated: use BuildProvenanceRecord, whose Provenance carries an id and so can
+// ride BuildConformantClaimUpdateBundleCarried. This builder keeps its bytes: its
+// Provenance has no id.
 func BuildProvenanceWithPolicy(targetRef, agentWho, policyRef, purposeOfUse string, recorded time.Time) ([]byte, error) {
 	prov := fhir.Provenance{
 		Target:   []fhir.Reference{{Reference: strPtr(targetRef)}},
@@ -1443,6 +1490,9 @@ func (source ProvenanceIdentifier) validate() error {
 // BuildProvenanceWithIdentifier attributes supplemental evidence to a logical
 // source identifier, such as a registered holder id or an NPI. It does not invent
 // an Organization resource or reinterpret a literal resource reference.
+//
+// Deprecated: use BuildProvenanceRecord with AgentIdentifier; see
+// BuildProvenanceWithPolicy.
 func BuildProvenanceWithIdentifier(targetRef string, source ProvenanceIdentifier, recorded time.Time) ([]byte, error) {
 	if err := source.validate(); err != nil {
 		return nil, err
@@ -1463,6 +1513,8 @@ func BuildProvenanceWithIdentifier(targetRef string, source ProvenanceIdentifier
 // (FR-32) — the no-policy form used for local supplemental evidence (no consent URI).
 // Reimplements the platform's Provenance builder standalone; the platform's SDK
 // parity suite asserts byte-identity. recorded is injected (deterministic).
+//
+// Deprecated: use BuildProvenanceRecord; see BuildProvenanceWithPolicy.
 func BuildProvenance(targetRef, agentWho string, recorded time.Time) ([]byte, error) {
 	return BuildProvenanceWithPolicy(targetRef, agentWho, "", "", recorded)
 }
@@ -1662,19 +1714,35 @@ type pasCarriedPriorClaim struct {
 // no id or no items, or is another submission's: its first identifier is not
 // urn:shn:correlation|originalCorr, which the amendment's related claim names
 // and by which a payer finds the authorization it holds.
-func (p PASPriorClaim) carried(originalCorr string) (pasCarriedPriorClaim, error) {
+//
+// asWritten is the Carried builders' where the amendment carries the prior
+// Claim (from PAS 2.1): the bytes exactly as the submission sent them, read by
+// exact member name, which the amendment's build splices into its Bundle
+// (pasCarry), so no encoder touches them.
+func (p PASPriorClaim) carried(originalCorr string, asWritten bool) (pasCarriedPriorClaim, error) {
 	if pasFactIsAbsent(p.Claim) {
 		return pasCarriedPriorClaim{}, pasPriorClaimNotCarried("the recorded submission carries no Claim (a record written by shn-sdk v1.0.0 or earlier records none): resubmit the request instead of amending it")
 	}
-	// The bytes as the amendment's bundle encodes them: compact, with <, > and &
-	// in strings written as \u003c, \u003e and \u0026, as encoding/json writes
-	// every bundle (a submission the SDK built is already in this form). No
-	// member, value or order changes.
-	var compact, buf bytes.Buffer
-	if err := json.Compact(&compact, p.Claim); err != nil {
-		return pasCarriedPriorClaim{}, pasPriorClaimNotCarried("the recorded Claim is not JSON: " + err.Error())
+	var buf bytes.Buffer
+	if asWritten {
+		raw, err := pasCarriedObject("the recorded Claim", "Claim", p.Claim)
+		if err != nil {
+			// The prior Claim's own refusal names why, once: not the record
+			// sentence pasCarriedObject leads with.
+			return pasCarriedPriorClaim{}, pasPriorClaimNotCarried(strings.TrimPrefix(err.Error(), ErrPASRecordNotCarried.Error()+": "))
+		}
+		buf.Write(raw)
+	} else {
+		// The bytes as the amendment's bundle encodes them: compact, with <, > and &
+		// in strings written as \u003c, \u003e and \u0026, as encoding/json writes
+		// every bundle (a submission the SDK built is already in this form). No
+		// member, value or order changes.
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, p.Claim); err != nil {
+			return pasCarriedPriorClaim{}, pasPriorClaimNotCarried("the recorded Claim is not JSON: " + err.Error())
+		}
+		json.HTMLEscape(&buf, compact.Bytes())
 	}
-	json.HTMLEscape(&buf, compact.Bytes())
 	var cl struct {
 		ResourceType string `json:"resourceType"`
 		ID           string `json:"id"`
@@ -1684,7 +1752,19 @@ func (p PASPriorClaim) carried(originalCorr string) (pasCarriedPriorClaim, error
 		} `json:"identifier"`
 		Item []json.RawMessage `json:"item"`
 	}
-	if json.Unmarshal(buf.Bytes(), &cl) != nil || cl.ResourceType != "Claim" {
+	var read error
+	if asWritten {
+		// Read by exact member name, as FHIR JSON names them (pasCarriedResource).
+		read = readPriorClaimExact(buf.Bytes(), &cl.ResourceType, &cl.ID, &cl.Item, func(system, value string) {
+			cl.Identifier = append(cl.Identifier, struct {
+				System string `json:"system"`
+				Value  string `json:"value"`
+			}{system, value})
+		})
+	} else {
+		read = json.Unmarshal(buf.Bytes(), &cl)
+	}
+	if read != nil || cl.ResourceType != "Claim" {
 		return pasCarriedPriorClaim{}, pasPriorClaimNotCarried("the recorded resource is not a Claim")
 	}
 	if !fhirIDPattern.MatchString(cl.ID) {
@@ -1697,6 +1777,40 @@ func (p PASPriorClaim) carried(originalCorr string) (pasCarriedPriorClaim, error
 		return pasCarriedPriorClaim{}, pasPriorClaimNotCarried("the recorded Claim has no items to compare the amendment's items with")
 	}
 	return pasCarriedPriorClaim{raw: buf.Bytes(), id: cl.ID, items: cl.Item}, nil
+}
+
+// readPriorClaimExact reads a recorded Claim's resourceType, id, identifiers
+// and items by exact member name; a member spelled in another case is not
+// read. A member that is absent reads as empty.
+func readPriorClaimExact(raw []byte, resourceType, id *string, items *[]json.RawMessage, identifier func(system, value string)) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return err
+	}
+	for k, dst := range map[string]any{"resourceType": resourceType, "id": id, "item": items} {
+		if v, ok := m[k]; ok {
+			if err := json.Unmarshal(v, dst); err != nil {
+				return err
+			}
+		}
+	}
+	var idents []map[string]json.RawMessage
+	if v, ok := m["identifier"]; ok {
+		if err := json.Unmarshal(v, &idents); err != nil {
+			return err
+		}
+	}
+	for _, ident := range idents {
+		var system, value string
+		if v, ok := ident["system"]; ok && json.Unmarshal(v, &system) != nil {
+			return errors.New("identifier.system is not a string")
+		}
+		if v, ok := ident["value"]; ok && json.Unmarshal(v, &value) != nil {
+			return errors.New("identifier.value is not a string")
+		}
+		identifier(system, value)
+	}
+	return nil
 }
 
 // checkPriorClaimCarried checks the built amendment carries the prior Claim
@@ -2004,6 +2118,7 @@ func applyInfoChangedMarks(claimJSON []byte, marks map[int]string) ([]byte, erro
 // AbsoluteRefs: same semantics as ConformantClaimInputs.AbsoluteRefs — set true for the
 // reference-payer lane so update bundle internal refs are absolute. Out-of-bundle refs (e.g.
 // Provenance.agent Organization/provider or Practitioner/<npi>) are left untouched.
+// It has no effect on BuildConformantClaimUpdateBundleCarried and its AtLine form.
 type ConformantClaimUpdateInputs struct {
 	QR []byte
 	SR []byte
@@ -2136,30 +2251,91 @@ type ConformantClaimUpdateInputs struct {
 // BuildConformantClaimUpdateBundleAtLineExact("2.0", in), byte-identical (regression-fenced
 // by the platform's SDK parity suite). Use BuildConformantClaimUpdateBundleAtLineExact to target 2.1/2.2
 // (PAS package differential: Claim.item line-detail + Claim.related.relationship).
+//
+// Deprecated: use BuildConformantClaimUpdateBundleCarried, which carries the
+// participant's report and the Provenance attributing it as written, under their own
+// ids. This builder keeps its bytes: it gives the report and the Provenance
+// bundle-local ids, drops their meta.profile and the order's, the Coverage's, the
+// persons' it names and the payer Organization's, re-encodes the report, the
+// Provenance and the prior Claim, re-points the Provenance target to the report's
+// bundle-local id, and with AbsoluteRefs writes references to entries in absolute form.
 func BuildConformantClaimUpdateBundleExact(in ConformantClaimUpdateInputs) ([]byte, error) {
 	def, _ := PASLineDef("2.0") // always present — pinned by manifest + parity-tested
-	return buildConformantClaimUpdateBundle(def, in)
+	return buildConformantClaimUpdateBundle(def, in, false)
 }
 
 // BuildConformantClaimUpdateBundleAtLineExact is BuildConformantClaimUpdateBundleExact
 // parameterized by PAS line ("2.0"|"2.1"|"2.2"). Unknown line errors (fail-closed).
+//
+// Deprecated: use BuildConformantClaimUpdateBundleAtLineCarried; see
+// BuildConformantClaimUpdateBundleExact for what this builder changes.
 func BuildConformantClaimUpdateBundleAtLineExact(line string, in ConformantClaimUpdateInputs) ([]byte, error) {
 	def, ok := PASLineDef(line)
 	if !ok {
 		return nil, fmt.Errorf("shnsdk: BuildConformantClaimUpdateBundleAtLineExact: unknown PAS line %q", line)
 	}
-	return buildConformantClaimUpdateBundle(def, in)
+	return buildConformantClaimUpdateBundle(def, in, false)
 }
 
-func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs) ([]byte, error) {
+// BuildConformantClaimUpdateBundleCarried builds the same PAS update as
+// BuildConformantClaimUpdateBundleExact at PAS line 2.0, except:
+//   - The supplemental report and the Provenance that attributes it ride byte
+//     for byte, under their own ids, each at an entry whose fullUrl is built
+//     from that id, meta.profile included. They are spliced into the encoded
+//     Bundle, never re-encoded; so is the prior Claim from PAS 2.1.
+//   - The Provenance target is carried as written, never rewritten or judged
+//     here: whether it names the report is the payer side's content check
+//     (ProvenanceTargetNames).
+//   - The order, the Coverage, the persons it names and the payer's
+//     Organization keep their meta.profile and are otherwise built as on
+//     BuildConformantClaimBundleCarried, and no reference is written in
+//     absolute form; AbsoluteRefs has no effect.
+//
+// With a report, a report or Provenance it cannot carry so is refused with
+// ErrPASRecordNotCarried, the fidelity of SHN's own build: one with no id
+// (its entry's fullUrl is built from it, and the build never mints one), one
+// that is not exactly one JSON object (a member named twice, or spelled in
+// another case, among them), one that is not UTF-8 or holds a lone surrogate
+// escape, one past the build's own limits (16 MiB, nesting 64 deep, 1,000,000
+// JSON tokens), and a bundle in which two entries of one type share an id
+// (FHIR bdl-7). A prior Claim it cannot carry is refused with
+// ErrPASPriorClaimNotCarried. The PAS update leg's sealed request is capped at
+// 8 MiB (MaxRequestBytes), below the record limit. Build the Provenance with
+// BuildProvenanceRecord, which gives it an id.
+//
+// An update with no report is not carried as written: its Provenance attributes
+// the amended QuestionnaireResponse, which this builder gives a bundle-local id
+// as BuildConformantClaimUpdateBundleExact does, so the Provenance takes a
+// bundle-local id too and its target is pointed at that QuestionnaireResponse.
+// Only the meta.profile drops differ from the Exact builder.
+func BuildConformantClaimUpdateBundleCarried(in ConformantClaimUpdateInputs) ([]byte, error) {
+	def, _ := PASLineDef("2.0")
+	return buildConformantClaimUpdateBundle(def, in, true)
+}
+
+// BuildConformantClaimUpdateBundleAtLineCarried is
+// BuildConformantClaimUpdateBundleCarried at PAS line ("2.0"|"2.1"|"2.2"). An
+// unknown line is refused.
+func BuildConformantClaimUpdateBundleAtLineCarried(line string, in ConformantClaimUpdateInputs) ([]byte, error) {
+	def, ok := PASLineDef(line)
+	if !ok {
+		return nil, fmt.Errorf("shnsdk: BuildConformantClaimUpdateBundleAtLineCarried: unknown PAS line %q", line)
+	}
+	return buildConformantClaimUpdateBundle(def, in, true)
+}
+
+// buildConformantClaimUpdateBundle builds a PAS update. asWritten is the
+// Carried builders' placement of the participant's records; false is the Exact
+// builders', whose bytes are pinned (TestPASExactBuilders_KeepTheirBytes).
+func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs, asWritten bool) ([]byte, error) {
 	// The builder is deterministic: build once unmarked, derive which items
 	// differ from the recorded submission (the bytes as they go out, both
 	// sides), and build again with those items marked.
-	unmarked, err := buildConformantClaimUpdateBundleMarked(def, in, nil)
+	unmarked, err := buildConformantClaimUpdateBundleMarked(def, in, nil, asWritten)
 	if err != nil {
 		return nil, err
 	}
-	prior, err := in.PriorClaim.carried(in.OriginalCorr)
+	prior, err := in.PriorClaim.carried(in.OriginalCorr, asWritten && def.UpdateCarriesPriorClaim)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
@@ -2170,10 +2346,10 @@ func buildConformantClaimUpdateBundle(def PASDef, in ConformantClaimUpdateInputs
 	if len(marks) == 0 {
 		return unmarked, nil
 	}
-	return buildConformantClaimUpdateBundleMarked(def, in, marks)
+	return buildConformantClaimUpdateBundleMarked(def, in, marks, asWritten)
 }
 
-func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdateInputs, marks map[int]string) ([]byte, error) {
+func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdateInputs, marks map[int]string, asWritten bool) ([]byte, error) {
 	// --- Claim: reuse buildPASUpdateClaim (emits related[] by OriginalCorr), then
 	// conformantize (extension-requestedService; productOrService is set from the order
 	// below, unconditionally) and restamp id to the update-specific conformant id. ---
@@ -2186,7 +2362,7 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
-	prior, err := in.PriorClaim.carried(in.OriginalCorr)
+	prior, err := in.PriorClaim.carried(in.OriginalCorr, asWritten && def.UpdateCarriesPriorClaim)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
@@ -2233,7 +2409,7 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	// The payer this amendment names — the participant's own record, the same one
 	// the submission named, carried as the entry the insurer names. Same as
 	// BuildConformantClaimBundleExact; see pasPayerOrgEntry.
-	payerOrg, err := pasPayerOrgEntry(in.Insurer, in.Payer)
+	payerOrg, err := pasPayerOrgEntryAs(in.Insurer, in.Payer, !asWritten)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
@@ -2246,8 +2422,18 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	// the supplemental resource this amendment's Provenance attributes: the
 	// report when there is one, else the amended QR — each with the
 	// bundle-local id it rides under below.
+	//
+	// On the Carried builders the report is a participant's own record, carried
+	// as written under its own id (pasCarriedResource).
+	var carry pasCarry
+	var reportRaw []byte
+	var reportID string
 	answer, err := withResourceID(in.QR, conformantPASUpdateQRID)
-	if in.DiagnosticReport != nil {
+	switch {
+	case in.DiagnosticReport != nil && asWritten:
+		reportRaw, reportID, err = pasCarriedResource("the supplemental report", in.DiagnosticReport, "DiagnosticReport")
+		answer = reportRaw
+	case in.DiagnosticReport != nil:
 		answer, err = withResourceID(in.DiagnosticReport, conformantPASDRID)
 	}
 	if err != nil {
@@ -2309,7 +2495,7 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	if in.MemberID == "" {
 		return nil, fmt.Errorf("shnsdk: MemberID is required (bare member id; see the v0.42.0 identifier-semantics release note)")
 	}
-	coverage, err := pasCoverageEntry(in.Coverage, in.PatientRef, payerOrg, in.CoverageParties)
+	coverage, err := pasCoverageEntryAs(in.Coverage, in.PatientRef, payerOrg, in.CoverageParties, !asWritten)
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
@@ -2324,9 +2510,11 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	if err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: id sr: %w", err)
 	}
-	srJSON, err = stripMetaProfile(srJSON)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant update: strip sr meta: %w", err)
+	if !asWritten {
+		srJSON, err = stripMetaProfile(srJSON)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: strip sr meta: %w", err)
+		}
 	}
 
 	// --- Patient: identical to the submit builder — the member, named. ---
@@ -2355,21 +2543,37 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	// 403 "Provenance does not target the supplemental data". rewriteProvenanceTarget makes the
 	// builder SELF-CONSISTENT — the same dangling-ref-hazard close as rewriteQRContextRefs for
 	// qr-context (the builder OWNS the bundle-local refs). ---
-	provJSON, err := withResourceID(in.Provenance, conformantPASProvID)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant update: id provenance: %w", err)
-	}
-	provJSON, err = stripMetaProfile(provJSON)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant update: strip provenance meta: %w", err)
-	}
-	wantTarget := "QuestionnaireResponse/" + conformantPASUpdateQRID
-	if in.DiagnosticReport != nil {
-		wantTarget = "DiagnosticReport/" + conformantPASDRID
-	}
-	provJSON, err = rewriteProvenanceTarget(provJSON, wantTarget)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant update: rewrite provenance target: %w", err)
+	//
+	// On the Carried builders, with a report, the Provenance that attributes it is
+	// a participant's own record too, carried as written under its own id, its
+	// target included: never rewritten, and not judged here (the payer side's
+	// content check reads it, ProvenanceTargetNames).
+	var provRaw, provJSON []byte
+	var provID string
+	if in.DiagnosticReport != nil && asWritten {
+		provRaw, provID, err = pasCarriedResource("the Provenance attributing the report", in.Provenance, "Provenance")
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+		}
+	} else {
+		provJSON, err = withResourceID(in.Provenance, conformantPASProvID)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: id provenance: %w", err)
+		}
+		if !asWritten {
+			provJSON, err = stripMetaProfile(provJSON)
+			if err != nil {
+				return nil, fmt.Errorf("shnsdk: conformant update: strip provenance meta: %w", err)
+			}
+		}
+		wantTarget := "QuestionnaireResponse/" + conformantPASUpdateQRID
+		if in.DiagnosticReport != nil {
+			wantTarget = "DiagnosticReport/" + conformantPASDRID
+		}
+		provJSON, err = rewriteProvenanceTarget(provJSON, wantTarget)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: rewrite provenance target: %w", err)
+		}
 	}
 
 	// Derive resolvable absolute fullUrls (FHIR bdl-7 / AI-11), mirror BuildClaimBundle;
@@ -2400,7 +2604,7 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	// identifier is urn:shn:correlation|OriginalCorr, what a payer searches the stored
 	// authorization on). The operative update Claim's related.reference resolves to it.
 	// Not at PAS 2.0, whose request Bundle allows one Claim.
-	if def.UpdateCarriesPriorClaim {
+	if def.UpdateCarriesPriorClaim && !asWritten {
 		baseResources = append(baseResources, prior.raw)
 	}
 	for _, rj := range baseResources {
@@ -2410,9 +2614,20 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 		}
 		entries = append(entries, e)
 	}
+	// On the Carried builders a participant's record carried as written rides
+	// as its bytes, spliced in after the Bundle is encoded (pasCarry), under a
+	// fullUrl built from its own id.
+	carried := func(rt, id string, raw []byte) fhir.BundleEntry {
+		return fhir.BundleEntry{FullUrl: strPtr(pasBundleBaseURL + "/" + rt + "/" + id), Resource: carry.hold(raw)}
+	}
+	if def.UpdateCarriesPriorClaim && asWritten {
+		entries = append(entries, carried("Claim", prior.id, prior.raw))
+	}
 
 	// DiagnosticReport entry is optional (nil on QR-targeted paths).
-	if in.DiagnosticReport != nil {
+	if in.DiagnosticReport != nil && asWritten {
+		entries = append(entries, carried("DiagnosticReport", reportID, reportRaw))
+	} else if in.DiagnosticReport != nil {
 		drJSON, err := withResourceID(in.DiagnosticReport, conformantPASDRID)
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant update: id dr: %w", err)
@@ -2429,11 +2644,15 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	}
 
 	// Provenance is always last.
-	provEntry, err := entryFor(provJSON)
-	if err != nil {
-		return nil, err
+	if in.DiagnosticReport != nil && asWritten {
+		entries = append(entries, carried("Provenance", provID, provRaw))
+	} else {
+		provEntry, err := entryFor(provJSON)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, provEntry)
 	}
-	entries = append(entries, provEntry)
 
 	bundle := fhir.Bundle{
 		Type:       fhir.BundleTypeCollection,
@@ -2441,18 +2660,28 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 		Timestamp:  strPtr(in.Created.UTC().Format(time.RFC3339)),
 		Entry:      entries,
 	}
-	raw, err := json.Marshal(bundle)
-	if err != nil {
-		return nil, fmt.Errorf("shnsdk: conformant update: marshal bundle: %w", err)
+	encode := func() ([]byte, error) {
+		raw, err := json.Marshal(bundle)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: marshal bundle: %w", err)
+		}
+		return pasInjectResourceType(raw, "Bundle")
 	}
-	bundleOut, err := pasInjectResourceType(raw, "Bundle")
-	if err != nil {
+	// On the Carried builders the records held above are spliced in as
+	// written (pasCarry.encode).
+	var bundleOut []byte
+	if asWritten {
+		bundleOut, err = carry.encode(encode)
+		if err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+		}
+	} else if bundleOut, err = encode(); err != nil {
 		return nil, err
 	}
 	// Reference-payer lane only: same absolute-ref rewrite as BuildConformantClaimBundleExact.
 	// Out-of-bundle refs (e.g. Provenance.agent Organization/provider or
 	// Practitioner/<npi>) are left untouched — they don't appear in the entry set.
-	if in.AbsoluteRefs {
+	if in.AbsoluteRefs && !asWritten {
 		bundleOut, err = absolutizeBundleRefs(bundleOut)
 		if err != nil {
 			return nil, fmt.Errorf("shnsdk: conformant update: absolutize refs: %w", err)
@@ -2482,7 +2711,32 @@ func buildConformantClaimUpdateBundleMarked(def PASDef, in ConformantClaimUpdate
 	if err := checkPASCoverageEntryParties(bundleOut, coverage.parties); err != nil {
 		return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
 	}
+	// Checked last, so a more specific refusal above names the cause first.
+	if asWritten {
+		if err := checkPASEntriesUnique(entries); err != nil {
+			return nil, fmt.Errorf("shnsdk: conformant update: %w", err)
+		}
+	}
 	return bundleOut, nil
+}
+
+// checkPASEntriesUnique refuses entries two of which share a fullUrl. Each
+// entry's fullUrl is its type and id under one base, so a repeated fullUrl is
+// two resources of one type sharing an id, one standing for the other (FHIR
+// bdl-7): a participant's report carried under an id another entry has, say.
+// Refused, never silently overwritten.
+func checkPASEntriesUnique(entries []fhir.BundleEntry) error {
+	seen := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.FullUrl == nil {
+			continue
+		}
+		if seen[*e.FullUrl] {
+			return pasRecordNotCarried("an entry", "repeats "+*e.FullUrl+": two resources of one type share an id, and one would stand for the other (FHIR bdl-7)")
+		}
+		seen[*e.FullUrl] = true
+	}
+	return nil
 }
 
 // ParsePendedResponse classifies the uniquely selected ClaimResponse by decision
