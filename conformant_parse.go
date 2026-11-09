@@ -211,9 +211,9 @@ func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg strin
 
 // pasMemberFromRef reads the bare member id out of a patient reference in EITHER spelling a
 // conformant PAS bundle may legally carry: the relative "Patient/<member>", or the absolute
-// "<base>/Patient/<member>" that BuildConformantClaimBundleExact emits under AbsoluteRefs (a real Da
-// Vinci payer resolves relative references against its OWN server base, so bundle-internal ones
-// must be absolute for it to find them at all).
+// "<base>/Patient/<member>" that BuildConformantClaimBundleExact emits under AbsoluteRefs (a payer whose
+// own system resolves relative references against its OWN server base needs bundle-internal ones
+// absolute to find them).
 //
 // That absolutization is deliberately NOT uniform, and cannot be made so: the patient-compartment
 // ANCHOR references — Coverage.beneficiary and ServiceRequest/DeviceRequest.subject — stay

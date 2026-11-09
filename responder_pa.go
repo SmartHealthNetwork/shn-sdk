@@ -389,17 +389,21 @@ func (r *Responder) handlePASUpdate(plaintext []byte, tok Token, corr string, no
 	targeted := false
 	for _, ref := range facts.provenanceTargets {
 		// ProvenanceTargetNames is the rule: the relative "<type>/<id>" or exactly the
-		// supplemental entry's own fullUrl (the absolute form absolutizeBundleRefs writes on the
-		// reference-payer lane), either one version-specific (".../_history/<version>") only at
-		// the resource's own meta.versionId. A reference under another base names another
-		// server's resource, whatever its path ends in, so it does not attribute this one.
+		// supplemental entry's own fullUrl (in whatever form that fullUrl takes, the absolute
+		// one a requester that writes references in absolute form gives it included), either
+		// one version-specific (".../_history/<version>") only at the resource's own
+		// meta.versionId. A reference under another base names another server's resource,
+		// whatever its path ends in, so it does not attribute this one.
 		//
 		// The twin of the Smart Gateway's conformantPASUpdateBind (its native PAS bind), whose
-		// update Provenance check still reads a target by its spelling, matching any reference
-		// ending in "/<type>/<id>" and no version-specific one. It is a content check: not run
-		// at none, recorded at observe and structural, refused only at strict. Until the gateway
-		// reads targets through ProvenanceTargetNames too, the two differ on a foreign-base or a
-		// version-specific target at strict.
+		// update Provenance check reads a target by the same rule from shn-gateway v1.8.0. It is
+		// a content check there: not run at none, recorded at observe and structural, refused
+		// only at strict. Earlier gateways read a target by its spelling, matching exactly
+		// "<type>/<id>" or any reference ending in "/<type>/<id>", and no version-specific one,
+		// so they differ from this Responder at strict on a target under another base that ends
+		// in "/<type>/<id>", a version-specific one at the resource's own meta.versionId, and one
+		// equal to the entry's own fullUrl that does not end in "/<type>/<id>" (a urn:uuid: one,
+		// say).
 		if ProvenanceTargetNames(ref, wantURL, wantType, wantID, wantVersion) {
 			targeted = true
 			break

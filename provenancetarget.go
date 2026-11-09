@@ -41,7 +41,8 @@ func targetVersionAgrees(version, versionID string) bool {
 // nothing there. A reference under any other base names another server's
 // resource, whatever its path ends in, and an empty type or id names nothing.
 // The match is the reference as a whole, never a part of its text. It is the
-// payer side's content rule: the SDK's Responder reads a target by it. The
+// payer side's content rule: the SDK's Responder reads a target by it, and so,
+// from shn-gateway v1.8.0, does a payer's Smart Gateway. The
 // carried update builder carries a target as written and never judges it.
 func ProvenanceTargetNames(ref, fullURL, resourceType, id, versionID string) bool {
 	if resourceType == "" || id == "" {

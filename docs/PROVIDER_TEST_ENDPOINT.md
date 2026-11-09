@@ -44,11 +44,13 @@ without deploying anything of your own.
 | `GET /.well-known/smart-configuration` | no | SMART discovery: token endpoint, auth methods, signing algorithms |
 | `POST /register` | no | Self-service client registration (§2) |
 | `POST /oauth/token` | no | Token endpoint, `client_credentials` only (§3) |
+| `GET /metadata` | no | FHIR capabilities: the CapabilityStatement of the gateway behind this endpoint, naming its PAS, DTR and coverage eligibility operations, where CRD's discovery is, and the implementation guide of each CRD, DTR and PAS version it declares |
+| `GET /.well-known/davinci-configuration` | no | Da Vinci endpoint discovery (HRex): this endpoint's base for each CRD, DTR and PAS version the gateway behind it declares, and for CDex |
 | `GET /cds-services` | no | CDS Hooks discovery — the services and prefetch templates below |
 | `POST /cds-services/{id}` | yes | CRD — invoke one of the services in §1.2 |
 | `POST /Questionnaire/$questionnaire-package` | yes | DTR — fetch a questionnaire package |
-| `POST /dtr/payer/{payer}/{line}/{tag}/…/Questionnaire/$next-question` | yes | DTR — an adaptive questionnaire's next round, at the address the package you fetched here names, re-keyed to this endpoint by the gateway behind it (below; from shn-gateway v1.8.0) |
-| `POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question` | yes | DTR — the same, for a questionnaire whose adaptive address is the payer's base (from shn-gateway v1.8.0) |
+| `POST /dtr/payer/{payer}/{line}/{tag}/…/Questionnaire/$next-question` | yes | DTR — an adaptive questionnaire's next round, at the address the package you fetched here names, re-keyed to this endpoint by the gateway behind it: the payer's adaptive address under its DTR base, the base itself included, in which case `…` is empty (below; from shn-gateway v1.8.0) |
+| `POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question` | yes | DTR — the same, for a questionnaire that marks itself adaptive with `true` instead of naming an address (from shn-gateway v1.8.0) |
 | `POST /Questionnaire/$next-question` | yes | DTR — an adaptive round, routed by the adaptive address its QuestionnaireResponse carries (below; from shn-gateway v1.8.0) |
 | `POST /Claim/$submit` | yes | PAS — submit a prior-authorization request |
 | `POST /Claim/$inquire` | yes | PAS — ask the payer for the decision it holds on a submission (§1.6) |
@@ -67,7 +69,7 @@ as given, with `/Questionnaire/$next-question` after it, or send the round to th
 carries that address. When the package names any other address, it is the payer's own,
 outside the network, and its rounds are not offered here. The address is under this endpoint
 only when the gateway behind it re-keys the payer's address to it: once the payer's gateway
-restores adaptive addresses, and its own system issues the address at or under its gateway's
+restores adaptive addresses, and its own system issues the address at or under its DTR
 base.
 
 **Not offered on this endpoint:**
@@ -88,8 +90,10 @@ operation's (`/fhir/ExplanationOfBenefit/$submit`) is not served. A
 `POST /cds-services/{id}` with an id this endpoint does not advertise, whose body `hook`
 is one an advertised service carries — `order-sign-crd` with `"hook":"order-sign"` — is
 served by that service (`shn-order-sign`). `/fhir/$submit-attachment` is served as the plain
-`POST /$submit-attachment`; a return path under a base (`/fhir/cdex/payer/{payer}`), or a path
-under one that the table does not list, is not aliased, and is answered `404`. An aliased answer is the payer's answer
+`POST /$submit-attachment`, and `GET /fhir/metadata` (or `/fhir/R4/metadata`) as `GET /metadata`,
+though not under a resource type (`/Patient/metadata` reads a Patient); a return path under a
+base (`/fhir/cdex/payer/{payer}`), or a path under one that the table does not list, is not
+aliased, and is answered `404`. An aliased answer is the payer's answer
 unchanged, plus two headers naming the canonical form:
 `Link: </Claim/$submit>; rel="canonical"` (or `</cds-services/shn-order-sign>`) and a
 `Warning: 299` that says the same in words. The canonical forms are the table above and
@@ -295,7 +299,8 @@ submission it holds that matches, since its last clearing (§1.5), for the same 
 requesting provider (and, on route `00301`, the same order), another participant's included.
 A pend that asked for documentation stays pended: its later answer is not pushed, and an
 inquiry keeps returning the pend. On route `00301`, CDex `$submit-attachment` carries the
-documentation for it, and the next inquiry returns the decision it reached (§5.4). A new
+documentation for it, and the next inquiry returns the decision it reached; on route `00300`
+it is delivered and the pend stays (§5.4). A new
 submission that carries the documentation is decided on its own and leaves the pend as it was
 (§10.4).
 
@@ -794,10 +799,11 @@ is your `TrackingId`, since an inquiry can return others. It read `A4` before th
 
 This endpoint's 5 MiB body limit applies to the submission (§8).
 
-**Route `00300` does not take the submission.** `GET /cdex/payers` does not list it, and a
-submission naming it is answered `HTTP 422`, an `OperationOutcome` with code `not-supported`:
-`the recipient does not take cdex-attachment-submit: it declares no legs, and
-cdex-attachment-submit is since 1.1.0`. Its pend's `Task` keeps the payer's own `payer-url` (§6.4).
+**Route `00300` takes the submission; the payer system behind it does not implement it.**
+`GET /cdex/payers` lists it, and its pend's `Task` names that return path as its `payer-url`
+(§6.4). A submission to it is delivered to the payer, whose own system answers `HTTP 400` with
+code `not-supported`, and you receive that answer as the payer sent it. The documentation does
+not resolve the pend on this route.
 
 ---
 
@@ -992,7 +998,9 @@ This payer pends an oxygen-concentrator order. Take the §6.3 request and change
 action `A4` "Pending", plus a `Task` (`status` `requested`, code
 `attachment-request-questionnaire`): the PAS 2.0 pended model, in which the payer asks for
 documentation through a `Task` rather than the `CommunicationRequest` of §5.3. Its `payer-url`
-input is the payer's own address, carried as the payer sent it (§5.4). The `G0151`
+input is not the payer's own address: the gateway behind this endpoint re-keys it to the
+route's return path here, the `returnBase` `GET /cdex/payers` lists for `00300`, and the answer's
+`X-SHN-Edited` header names the edit, `pas-pend-return-rekey` (§5.4). The `G0151`
 home-health order of §5, sent to this route, is answered `A3` "Not certified" — a denial,
 and this payer's decision for that order.
 
@@ -2457,7 +2465,24 @@ curl -s "https://pa-test.shn-preview.org/Questionnaire/\$questionnaire-package" 
 
 Expected answer: `HTTP 200` and a `Parameters` resource: `packagebundle` carries the `BariatricSurgery` Questionnaire as an adaptive questionnaire (`dtr-questionnaire-adapt`) holding only its first group, "Eligibility" (body mass index, and months of medically supervised diet completed), and an in-progress QuestionnaireResponse (`dtr-questionnaireresponse-adapt`) that names its contained Questionnaire (`#contained-questionnaire`); `outcome` carries the payer's prepopulation warning from §5.2 (the Coverage in `dtr-00301.json` carries no `subscriberId` or `beneficiary.identifier`).
 
-The remaining questions (comorbidities and evaluation, and a shorter-diet follow-up asked only when fewer than six months are answered) come from DTR `$next-question`, at the address the package's `questionnaireAdaptive` names. From shn-gateway v1.8.0 that address is this endpoint's only when the gateway behind it re-keys the payer's address to this endpoint (§1.1); until then it is the payer's own, the rounds are not offered here, and the completed adaptive answers cannot be produced through this endpoint.
+The remaining questions (comorbidities and evaluation, and a shorter-diet follow-up asked only when fewer than six months are answered) come from DTR `$next-question`, at the address the package's `questionnaireAdaptive` names. From shn-gateway v1.8.0, on route `00301`, that address is this endpoint's own: the gateway behind it re-keys the payer's address to `https://pa-test.shn-preview.org/dtr/payer/…` (§1.1), and the answer says so in `X-SHN-Edited: dtr-adaptive-address-rekey`. Send each round to that address followed by `/Questionnaire/$next-question`, with your QuestionnaireResponse as the body and the same token as the package request. Or send it to the plain `/Questionnaire/$next-question` with the QuestionnaireResponse the package gave you, which carries that address.
+
+Save the package answer first: add `-o tc05-package.json -D tc05-package.hdr` to the DTR request above.
+
+```bash
+jq '[.. | objects | select(.resourceType? == "QuestionnaireResponse")][0]
+    | del(.id)
+    | .item = [{linkId: "1", item: [{linkId: "1.1", answer: [{valueDecimal: 41.2}]}, {linkId: "1.2", answer: [{valueInteger: 6}]}]}]' \
+  tc05-package.json > tc05-next.json
+ADDR=$(jq -r '[.. | objects | select(.url? == "http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-questionnaireAdaptive") | .valueUrl][0]' tc05-package.json)
+
+curl -s -o tc05-next-answer.json -D tc05-next.hdr "$ADDR/Questionnaire/\$next-question" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/fhir+json' \
+  -d @tc05-next.json
+```
+
+Answered `HTTP 200` when it was run here (2026-11-08): the payer's next form, with the next group (comorbidities and evaluation, since six months of supervised diet were answered), and `X-SHN-Edited: dtr-adaptive-address-rekey` (in `tc05-next.hdr`). Each further round goes to the same address with the answers so far.
 
 **PAS without documentation.**
 

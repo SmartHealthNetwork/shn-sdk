@@ -54,7 +54,8 @@ type PriorAuthResult struct {
 	ProcessNotes []PASProcessNote
 	// ReviewAction is the payer's review action that decided the outcome
 	// (the A3 or A2 action of a denial, the A2 action of a partial approval,
-	// the A1 action of an approval), with its X12 886 reasons, exactly as
+	// the A1 action of an approval, else its A6 (modified) action, from
+	// shn-sdk v1.10.0), with its X12 886 reasons, exactly as
 	// sent. When several items carry review actions, it is the first action
 	// carrying that code, in item and adjudication order, across all items.
 	// Nil when the payer stated none.
@@ -63,6 +64,13 @@ type PriorAuthResult struct {
 	// remittance advice remark (RARCSystem) codes on the payer's item
 	// adjudications, in order, exactly as sent. Nil when there are none.
 	DenialReasons []PASCoding
+	// OtherReasons holds every other coding on the payer's item adjudication
+	// reasons (a reason the payer codes in its own system, or in none, among
+	// them), in
+	// order, each with its own system, exactly as sent, on an approval as on a
+	// denial. Nil when there are none. From shn-sdk v1.10.0; earlier releases
+	// dropped them.
+	OtherReasons []PASCoding
 }
 
 // NeededItem is one supplemental item the payer's FR-20 Task asks for on a pended
@@ -465,11 +473,16 @@ func addPASLineRelatedRelationship(claimJSON []byte, def PASDef) ([]byte, error)
 // AbsoluteRefs: when true every internal reference whose value matches a bundle-entry
 // relative form ("<resourceType>/<id>") is rewritten to its absolute fullUrl
 // (pasBundleBaseURL + "/" + "<resourceType>/<id>"). This makes the bundle self-consistent
-// for real payers (e.g. real br-payer HAPI-1094 "not found") that do not resolve relative
-// refs against absolute entry fullUrls in a $submit collection bundle. Contained #fragment
-// refs and refs that do not match any bundle entry are left untouched. When false (the
-// default) the bundle keeps relative references. Set true ONLY for the
-// reference-payer origination lane (targetsBrPayer: ORIGINATION_PROFILE=provider-data, and the Kit's conformant rows).
+// for a payer whose own system does not resolve relative refs against absolute entry
+// fullUrls in a $submit collection bundle (it answers such a reference "not found").
+// Contained #fragment refs and refs that do not match any bundle entry are left untouched.
+// When false (the default) the bundle keeps relative references. Set it toward such a
+// payer; RunPriorAuth and ResumePriorAuth, which keep their bytes, set it on every request.
+// Before shn-gateway v1.8.0 a provider's Smart Gateway set it on every PAS submission and
+// amendment it built on the origination profiles that relay the reference payer's bytes;
+// from shn-gateway v1.8.0 the gateway builds with the Carried builders and writes no
+// reference in absolute form, and a payer's system that cannot resolve relative
+// references answers with its own refusal, carried as sent.
 // It has no effect on BuildConformantClaimBundleCarried and its AtLine form, which
 // write no reference in absolute form.
 type ConformantClaimInputs struct {
@@ -548,10 +561,10 @@ type ConformantClaimInputs struct {
 	// Deprecated: from shn-sdk v0.59.0 the payer always rides as the Insurer entry
 	// (see Insurer); no request names a contained payer Organization.
 	ContainedInsurer bool
-	AbsoluteRefs     bool // reference-payer lane only; false = relative references
+	AbsoluteRefs     bool // toward a payer whose system cannot resolve relative references (see AbsoluteRefs above); false = relative references
 	// PayerOrgEntry has no effect: the payer always rides as the resolvable Insurer
-	// entry that Coverage.payor and Claim.insurer name, which is what a real Da Vinci
-	// PAS payer (br-payer) reads (its payor resolution, PayorIdentifierUtil →
+	// entry that Coverage.payor and Claim.insurer name, which is what the HL7 Da Vinci
+	// reference payer reads (its payor resolution, PayorIdentifierUtil →
 	// ResourceResolver.findInBundle, reads bundle ENTRIES only).
 	//
 	// Deprecated: from shn-sdk v0.59.0 every request carries the payer this way.
@@ -2115,8 +2128,9 @@ func applyInfoChangedMarks(claimJSON []byte, marks map[int]string) ([]byte, erro
 // (PriorClaim). At PAS 2.0 it carries none: the update names its prior by identifier alone
 // (PASDef.UpdateCarriesPriorClaim).
 //
-// AbsoluteRefs: same semantics as ConformantClaimInputs.AbsoluteRefs — set true for the
-// reference-payer lane so update bundle internal refs are absolute. Out-of-bundle refs (e.g.
+// AbsoluteRefs: same semantics as ConformantClaimInputs.AbsoluteRefs — set true toward a
+// payer whose system cannot resolve relative references, so update bundle internal refs are
+// absolute (ResumePriorAuth sets it on every request). Out-of-bundle refs (e.g.
 // Provenance.agent Organization/provider or Practitioner/<npi>) are left untouched.
 // It has no effect on BuildConformantClaimUpdateBundleCarried and its AtLine form.
 type ConformantClaimUpdateInputs struct {
@@ -2152,7 +2166,7 @@ type ConformantClaimUpdateInputs struct {
 	//
 	// Deprecated: as ConformantClaimInputs.ContainedInsurer.
 	ContainedInsurer bool
-	AbsoluteRefs     bool // reference-payer lane only; false = relative references
+	AbsoluteRefs     bool // toward a payer whose system cannot resolve relative references (see ConformantClaimInputs.AbsoluteRefs); false = relative references
 	// PayerOrgEntry has no effect: the payer always rides as the Insurer entry and, from
 	// PAS 2.1, the submitted Claim as the entry the update Claim's related claim names.
 	//
@@ -3322,7 +3336,7 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 	// actions keeps, per decision code, the first review action that carried
 	// it, with that action's reasons.
 	actions := map[string]*PASReviewAction{}
-	var denialReasons []PASCoding
+	var denialReasons, otherReasons []PASCoding
 	for _, it := range probe.Item {
 		decision := decisions[it.ItemSequence]
 		if decision == nil {
@@ -3334,6 +3348,8 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 				for _, c := range adj.Reason.Coding {
 					if c.System == CARCSystem || c.System == RARCSystem {
 						denialReasons = append(denialReasons, c)
+					} else {
+						otherReasons = append(otherReasons, c)
 					}
 				}
 			}
@@ -3458,7 +3474,7 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 	}
 	// detail adds the payer's decision detail to a terminal result.
 	detail := func(r PriorAuthResult, code string) PriorAuthResult {
-		r.ProcessNotes, r.ReviewAction, r.DenialReasons = typedNotes, actions[code], denialReasons
+		r.ProcessNotes, r.ReviewAction, r.DenialReasons, r.OtherReasons = typedNotes, actions[code], denialReasons, otherReasons
 		return r
 	}
 
@@ -3522,7 +3538,13 @@ func parsePASClaimDecision(data []byte) (PriorAuthResult, error) {
 		if probe.PreAuthPeriod != nil {
 			validUntil = probe.PreAuthPeriod.End
 		}
-		return detail(PriorAuthResult{Outcome: "approved", PreAuthRef: preAuthRef, ValidUntil: validUntil}, "A1"), nil
+		// The approving action the payer stated: A1 (certified in total), else
+		// A6 (modified).
+		approving := "A1"
+		if actions["A1"] == nil && actions["A6"] != nil {
+			approving = "A6"
+		}
+		return detail(PriorAuthResult{Outcome: "approved", PreAuthRef: preAuthRef, ValidUntil: validUntil}, approving), nil
 	}
 
 	// Anything else is ambiguous — fail loud rather than guess.
