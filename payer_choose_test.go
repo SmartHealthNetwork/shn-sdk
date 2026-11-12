@@ -512,3 +512,121 @@ func TestCoveragePayerCandidatesDeclaredTypeAndInline(t *testing.T) {
 		}
 	})
 }
+
+// TestCoveragePayerCandidatesSeveralEntries: in a Bundle, a payor reference that
+// several entries answer picks none of them. Several Organizations name every
+// identifier they name, in document order, each once, for the registry to
+// decide among, as a Smart Gateway reads them; several that are not all
+// Organizations name no payer and are never passed to resolveRef.
+// ParseCoveragePayer still reads the first entry.
+func TestCoveragePayerCandidatesSeveralEntries(t *testing.T) {
+	org := func(ids ...PayerIdentifier) string {
+		var list []string
+		for _, id := range ids {
+			list = append(list, `{"system":"`+id.System+`","value":"`+id.Value+`"}`)
+		}
+		return `{"resource":{"resourceType":"Organization","id":"p","identifier":[` + strings.Join(list, ",") + `]}}`
+	}
+	bundle := func(payor string, entries ...string) []byte {
+		return []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Coverage","id":"c1","payor":[` +
+			payor + `]}},` + strings.Join(entries, ",") + `]}`)
+	}
+	const byRef = `{"reference":"Organization/p"}`
+	other := PayerIdentifier{cmsPayerSystem, "99999"}
+
+	t.Run("two Organizations naming two registered payers: ambiguous", func(t *testing.T) {
+		b := bundle(byRef, org(npi, payer301), org(npi, ein, payer300))
+		got, err := CoveragePayerCandidates(b, nil)
+		if err != nil || len(got) != 1 || !slices.Equal(got[0], []PayerIdentifier{npi, payer301, ein, payer300}) {
+			t.Fatalf("got %v, %v, want the union", got, err)
+		}
+		if _, _, err := ChooseRegisteredPayer(got, dir); !errors.Is(err, ErrAmbiguousCoveragePayer) {
+			t.Fatalf("choose: %v, want ambiguous", err)
+		}
+		if pid, err := ParseCoveragePayer(b, nil); err != nil || pid != npi {
+			t.Fatalf("ParseCoveragePayer: %v, %v, want the first entry's first identifier", pid, err)
+		}
+	})
+	t.Run("two Organizations naming one payer beside unregistered identifiers: that payer", func(t *testing.T) {
+		got, err := CoveragePayerCandidates(bundle(byRef, org(npi, payer301), org(payer301, other)), nil)
+		if err != nil || len(got) != 1 || !slices.Equal(got[0], []PayerIdentifier{npi, payer301, other}) {
+			t.Fatalf("got %v, %v", got, err)
+		}
+		if pid, holder, err := ChooseRegisteredPayer(got, dir); err != nil || holder != "payer-22" || pid != payer301 {
+			t.Fatalf("choose: %v %q %v, want payer-22 by 00301", pid, holder, err)
+		}
+	})
+	t.Run("an Organization naming no identifier beside one that names some: the latter", func(t *testing.T) {
+		got, err := CoveragePayerCandidates(bundle(byRef, org(), org(payer301)), nil)
+		if err != nil || len(got) != 1 || !slices.Equal(got[0], []PayerIdentifier{payer301}) {
+			t.Fatalf("got %v, %v", got, err)
+		}
+	})
+	t.Run("the same entry twice: as one", func(t *testing.T) {
+		got, err := CoveragePayerCandidates(bundle(byRef, org(npi, payer301), org(npi, payer301)), nil)
+		if err != nil || len(got) != 1 || !slices.Equal(got[0], []PayerIdentifier{npi, payer301}) {
+			t.Fatalf("got %v, %v", got, err)
+		}
+	})
+	const urn = "urn:uuid:5e7a0c1d-0000-4000-8000-0000000000a1"
+	mixed := []string{
+		`{"fullUrl":"` + urn + `","resource":{"resourceType":"Organization","id":"o","identifier":[{"system":"` + cmsPayerSystem + `","value":"00301"}]}}`,
+		`{"fullUrl":"` + urn + `","resource":{"resourceType":"Patient","id":"m"}}`,
+	}
+	read := false
+	never := func(string) ([]byte, bool) {
+		read = true
+		return []byte(`{"resourceType":"Organization","identifier":[{"system":"` + cmsPayerSystem + `","value":"00301"}]}`), true
+	}
+	t.Run("an Organization and a resource that is not one: the payor is unknown, and resolveRef is never asked", func(t *testing.T) {
+		_, err := CoveragePayerCandidates(bundle(`{"reference":"`+urn+`"}`, mixed...), never)
+		var unresolved *UnresolvedPayorError
+		if !errors.As(err, &unresolved) || unresolved.Index != 0 || unresolved.Reference != urn {
+			t.Fatalf("got %v, want the payor unresolved", err)
+		}
+		if read {
+			t.Fatal("resolveRef was asked for a reference the Bundle answers")
+		}
+	})
+	t.Run("the same, beside an inline identifier: known by it", func(t *testing.T) {
+		got, err := CoveragePayerCandidates(bundle(`{"reference":"`+urn+`","identifier":{"system":"`+cmsPayerSystem+`","value":"00300"}}`, mixed...), never)
+		if err != nil || len(got) != 1 || !slices.Equal(got[0], []PayerIdentifier{payer300}) {
+			t.Fatalf("got %v, %v, want the inline identifier alone", got, err)
+		}
+		if read {
+			t.Fatal("resolveRef was asked for a reference the Bundle answers")
+		}
+	})
+}
+
+// An entry carrying no resource member answers no reference, beside an
+// Organization that does, in either order, as a Smart Gateway reads it; one whose
+// resource is null answers it as a resource that is no Organization, so the payor
+// is unknown, as the gateway reads that too.
+func TestCoveragePayerCandidatesSeveralEntriesResourceless(t *testing.T) {
+	const urn = "urn:uuid:5e7a0c1d-0000-4000-8000-0000000000a2"
+	org := `{"fullUrl":"` + urn + `","resource":{"resourceType":"Organization","id":"o","identifier":[{"system":"` + cmsPayerSystem + `","value":"00301"}]}}`
+	empty := `{"fullUrl":"` + urn + `"}`
+	for name, entries := range map[string][]string{"the Organization first": {org, empty}, "the empty entry first": {empty, org}} {
+		t.Run(name, func(t *testing.T) {
+			b := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Coverage","id":"c1","payor":[{"reference":"` + urn + `"}]}},` +
+				entries[0] + `,` + entries[1] + `]}`)
+			got, err := CoveragePayerCandidates(b, nil)
+			if err != nil || len(got) != 1 || !slices.Equal(got[0], []PayerIdentifier{payer301}) {
+				t.Fatalf("got %v, %v, want the Organization's identifier", got, err)
+			}
+		})
+	}
+	null := `{"fullUrl":"` + urn + `","resource":null}`
+	for name, entries := range map[string][]string{"a null resource after the Organization": {org, null}, "a null resource first": {null, org}} {
+		t.Run(name, func(t *testing.T) {
+			b := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Coverage","id":"c1","payor":[{"reference":"` + urn + `"}]}},` +
+				entries[0] + `,` + entries[1] + `]}`)
+			_, err := CoveragePayerCandidates(b, nil)
+			var unresolved *UnresolvedPayorError
+			if !errors.As(err, &unresolved) {
+				t.Fatalf("got %v, want the payor unknown", err)
+			}
+		})
+	}
+}

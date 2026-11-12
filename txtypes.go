@@ -16,6 +16,7 @@ var prefixedTransactionTypes = map[string]string{
 	"patient-dtr":             "pa.patient-dtr",
 	"cdex-attachment-submit":  "pa.cdex-attachment-submit",
 	"cdex-attachment-request": "pa.cdex-attachment-request",
+	"cdex-task-status":        "pa.cdex-task-status",
 	"federated-query":         "fqs.federated-query",
 }
 
@@ -26,6 +27,49 @@ var prefixedTransactionTypes = map[string]string{
 var transactionTypeSince = map[string]string{
 	"cdex-attachment-submit":  "1.1.0",
 	"cdex-attachment-request": "1.5.0",
+	"cdex-task-status":        "1.12.0",
+}
+
+// Answer envelope values (TransactionTypeAnswerEnvelope).
+const (
+	// AnswerEnvelopeFHIR: a refusal the answering side writes itself is an
+	// OperationOutcome, application/fhir+json, as a client of the leg's FHIR
+	// operation reads one.
+	AnswerEnvelopeFHIR = "fhir"
+	// AnswerEnvelopeJSON: such a refusal is {"error": …}, application/json
+	// (the CDS Hooks legs and the patient-authored DTR exchange).
+	AnswerEnvelopeJSON = "json"
+)
+
+// transactionTypeAnswerEnvelope is each leg's answer envelope, by flat name:
+// the taxonomy row's answerEnvelope. Every leg in the table has one.
+var transactionTypeAnswerEnvelope = map[string]string{
+	"coverage-eligibility":    AnswerEnvelopeFHIR,
+	"crd-order-select":        AnswerEnvelopeJSON,
+	"crd-order-dispatch":      AnswerEnvelopeJSON,
+	"dtr-questionnaire-fetch": AnswerEnvelopeFHIR,
+	"pas-claim":               AnswerEnvelopeFHIR,
+	"pas-claim-update":        AnswerEnvelopeFHIR,
+	"pas-claim-inquire":       AnswerEnvelopeFHIR,
+	"patient-dtr":             AnswerEnvelopeJSON,
+	"cdex-attachment-submit":  AnswerEnvelopeFHIR,
+	"cdex-attachment-request": AnswerEnvelopeFHIR,
+	"federated-query":         AnswerEnvelopeFHIR,
+	// A FHIR read and vread; stated here until its taxonomy row comes.
+	"cdex-task-status": AnswerEnvelopeFHIR,
+}
+
+// TransactionTypeAnswerEnvelope is the envelope of a refusal the answering
+// side writes itself on the leg named, in either form: AnswerEnvelopeFHIR or
+// AnswerEnvelopeJSON. ok is false for a name no leg has. A participant's own
+// answer is carried as it was sent on every leg. From shn-sdk v1.11.0.
+func TransactionTypeAnswerEnvelope(name string) (string, bool) {
+	flat, ok := FlatTransactionType(name)
+	if !ok {
+		return "", false
+	}
+	envelope, ok := transactionTypeAnswerEnvelope[flat]
+	return envelope, ok
 }
 
 // TransactionTypeSince is the release that brings the leg named, in either

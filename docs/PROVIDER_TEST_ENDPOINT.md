@@ -147,8 +147,9 @@ each history, and no `_include`:
 What the endpoint does with your request:
 
 - It **removes `fhirServer` and `fhirAuthorization`** — the payer never gets a route into
-  your systems. The endpoint may first use them to read your Coverage (and at most one payor
-  Organization) to choose the payer (next bullets and §8.1); it never calls back into your
+  your systems. The endpoint may first use them to read your Coverage (and the payor
+  Organizations routing needs: from shn-gateway v1.9.0 at most five, before it at most one)
+  to choose the payer (next bullets and §8.1); it never calls back into your
   systems otherwise. The Coverage it read that way, with its payor Organization, is carried to
   the payer as `prefetch.coverage`, since the payer cannot read it once `fhirServer` is
   removed.
@@ -216,10 +217,14 @@ The payer's answer body is relayed to you as the payer sent it. In particular:
 - **DTR and PAS answers are the payer's own bytes**, relayed as received.
 - HTTP-level signatures are not carried. A CRD response carries the media type the payer's
   system stated, as sent: route `00301` answers
-  `text/json;charset=UTF-8`. When the payer states none, or states
-  `application/fhir+json`, it is served as `application/json`. So read a CRD response
-  as JSON whatever its media type says. DTR and PAS responses are served as
-  `application/fhir+json`.
+  `text/json;charset=UTF-8`. When the payer states none, it is served as
+  `application/json`, and so is `application/fhir+json` from a payer whose gateway does
+  not advertise the `v1opsub` request frame (shn-gateway v1.8.0 and later do); from
+  shn-gateway v1.10.0 a payer's `application/fhir+json` is served as stated when its
+  gateway advertises it. So read a CRD response as JSON whatever its media type says.
+  DTR and PAS responses are served as `application/fhir+json` before shn-gateway
+  v1.10.0, and from it with the media type the payer's system stated
+  (`application/fhir+json` when it states none).
 - **A PAS review action's code and display can disagree.** The X12 code set
   (`https://codesystem.x12.org/005010/306`) defines `A1` "Certified in total", `A2` "Certified –
   partial", `A3` "Not Certified" and `A4` "Pended". The route `00301` reference payer answers an
@@ -1031,21 +1036,35 @@ Nothing here is silently dropped, translated or invented. Every refusal is expli
 
 ### 8.1 Routing and membership
 
-- **Unknown payer identifier → `422`.** If `Coverage.payor[0].identifier.value` names no
-  payer registered on the network, the request is rejected with `422 Unprocessable Entity`
-  (`no registered payer for identifier …`) rather than silently going nowhere. The routes
-  in §1.5 are the ones documented here with test members.
-- **No payer identifier → `422`.** The endpoint routes a PAS Bundle by its first
-  Coverage's `payor`: an identifier on the payor itself, a contained
+- **Unknown payer identifier → `422`.** If no identifier the Coverage's payors name (each
+  payor's own identifier, or any identifier of the Organization it references) names a payer
+  registered on the network, the request is rejected with `422 Unprocessable Entity` (`no
+  registered payer for identifier …`, naming each identifier and how a payer is named) rather
+  than silently going nowhere. From shn-gateway v1.9.0 the endpoint reads every payor of the
+  Coverage and finds the registered identifier wherever it is listed, so an Organization that
+  lists an NPI or an EIN before its payer identifier, or a registered payor after another, is
+  routed by the registered identifier; before, it read only the first identifier of
+  `payor[0]` and refused such a request naming the NPI. Identifiers that name two different
+  payers are refused as ambiguous. A payor after `payor[0]` that carries no inline
+  identifier and names no payer the gateway can read (its reference resolves to nothing, to
+  an Organization with no identifier, or to another kind of resource) is refused `422`
+  naming it, since the payer it names is unknown; a Patient or RelatedPerson payor
+  (self-pay) is passed over. The routes in §1.5 are the ones documented
+  here with test members.
+- **No payer identifier → `422`.** The endpoint routes a PAS Bundle by its Coverage's
+  `payor` (from shn-gateway v1.9.0, every payor, as above): an identifier on the payor
+  itself, a contained
   Organization, or an Organization that is an entry of the Bundle. An absolute reference
   (a URL, or a `urn:uuid`) names the entry whose `fullUrl` equals it, and a relative
   `Organization/<id>` the entry with that type and id, whatever its `fullUrl`; a
   reference several entries answer is refused unless they all name the same payer
-  identifier. The endpoint never looks the Organization up on your server. When none
+  identifier (before shn-gateway v1.9.0); from shn-gateway v1.9.0, when every one of
+  them is an Organization, it names every identifier they name, and the registered
+  one decides, as across payors (two registered payers are refused as ambiguous). The endpoint never looks the Organization up on your server. When none
   of that yields an identifier with both a system and a value (a NAIC code or payer id),
   the request is refused with `422` (`no payer identifier on member coverage: …`), and the
   text after the colon says which part failed: a reference that matches no entry, or
-  several that do not name one payer; a reference to something that is not an
+  several that are not all Organizations; a reference to something that is not an
   Organization; or an Organization with no such identifier.
 - **Unknown member → carried with the id you send.** The endpoint first resolves the member
   against its own synthetic roster. A CRD request whose `context.patientId`, a PAS bundle
@@ -1160,11 +1179,12 @@ refused; you then see a `502`:
   while also naming an authorization number, or decision detail outside the code systems the
   decision record binds;
 - the payer's PAS response Bundle names a resource it does not carry. The body says which
-  (from shn-gateway v0.62.0 without the `engine: ` prefix that earlier releases put first):
-  `{"error":"invalid native PAS response Bundle: PAS response graph: entry 6
-  (ServiceRequest/1810) /subject references Patient \"https://…/Patient/MBR-COVERED\",
+  (from shn-gateway v0.62.0 without the `engine: ` prefix that earlier releases put first;
+  from shn-gateway v1.10.0 at the payer's gateway as an `OperationOutcome`'s `diagnostics`,
+  before as `{"error": …}`): `invalid native PAS response Bundle: PAS response graph: entry 6
+  (ServiceRequest/1810) /subject references Patient "https://…/Patient/MBR-COVERED",
   which is no entry of the Bundle; the payer's system received and answered this request:
-  check its outcome before resending"}` — the entry that made the reference, the element,
+  check its outcome before resending` — the entry that made the reference, the element,
   the reference as the payer wrote it, and why it does not resolve. The payer's system has
   answered and may have acted, so check the outcome with `$inquire` before resending. The
   answer is refused whole, never completed or trimmed on the way through; the payer's own
@@ -1192,7 +1212,9 @@ leg to the payer produced no answer within the 30 seconds the exchange allows it
 everything on the payer's side, the payer's own system included), the body is
 `{"error":"no answer on the hub leg within 30s (hub leg timeout)"}`, carried as an
 `OperationOutcome` with issue code `timeout` on the FHIR operation routes. The `504` may
-instead carry the payer side's own body, as JSON on every route. When the payer's own system did not
+instead carry the payer side's own body: from shn-gateway v1.10.0 at the payer's gateway, an
+`OperationOutcome` (issue code `timeout`) on the FHIR operation routes and JSON on CDS Hooks;
+before, JSON on every route. The texts below are its message. When the payer's own system did not
 answer within its gateway's deadline for it (25 seconds unless the payer set another), the
 body is `{"error":"the payer's system received this request but did not answer in time; it
 may have acted on it: check its outcome before resending"}`, or `{"error":"the payer's
@@ -1226,7 +1248,11 @@ reusing it is never refused (§8.5).
 
 **A refusal the payer side itself produces is not a `502`.** A member the payer does
 not hold, a request with no order to decide on, a validation failure: these come back with
-the payer's own status and error text — for example
+the payer's own status and error text. From shn-gateway v1.10.0 at the payer's gateway, a
+refusal it makes itself on a FHIR operation route (`$questionnaire-package`, `$next-question`,
+`Claim/$submit`, `Claim/$inquire`, eligibility, `$submit-attachment`) is an `OperationOutcome`
+whose first issue's `diagnostics` is that text, as the endpoint's own refusals there are; on
+CDS Hooks it stays `{"error": …}`. For example
 `400 {"error":"no order (ServiceRequest or DeviceRequest) in draftOrders"}` for an
 `order-sign` request whose `draftOrders` is empty. So do the payer gateway's own
 failures: `502 {"error":"the payer's system could not be reached"}` when the payer's
@@ -1465,11 +1491,11 @@ curl -s -w '\nHTTP %{http_code}\n' https://pa-test.shn-preview.org/cds-services/
 Expected answer:
 
 ```
-{"error":"no registered payer for identifier urn:oid:2.16.840.1.113883.6.300|00999"}
+{"error":"no registered payer for identifier urn:oid:2.16.840.1.113883.6.300|00999: name the payer by an identifier the network registers for that payer, on the Organization that Coverage.payor references (see the Participant Wire Protocol §1a, Participant directory)"}
 HTTP 422
 ```
 
-The identifier is matched exactly, system and value. A payer's name or label used as the
+Before shn-gateway v1.9.0 the answer ended after the identifier. The identifier is matched exactly, system and value. A payer's name or label used as the
 identifier value, a misspelled value, or a value under another identifier system is refused
 the same way; the endpoint does not guess which payer was meant. A payor with no identifier
 at all is refused with `no payer identifier on member coverage` instead (§1.3, §8.1).
@@ -1500,7 +1526,7 @@ HTTP 422
 ```
 
 The Coverages in the request have to agree on one payer. A single Coverage is routed by its
-first `payor` (§8.1).
+first `payor` before shn-gateway v1.9.0, and by every payor from shn-gateway v1.9.0 (§8.1).
 
 ### 10.2 TC-05 — a PAS bundle with a broken internal reference
 

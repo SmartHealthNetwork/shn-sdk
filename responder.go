@@ -239,7 +239,9 @@ func (r *Responder) Handler() http.Handler {
 //     otherwise);
 //   - app error ⇒ appStatus non-2xx + errMsg, and OPTIONALLY the adjudicator's
 //     own answer (participantBody: payload, possibly empty, and contentType,
-//     possibly empty) — else handleInbound builds {"error":errMsg}.
+//     possibly empty) — else handleInbound builds the leg's refusal
+//     (refusalBody: an OperationOutcome on a FHIR leg, {"error":errMsg}
+//     otherwise).
 //
 // commit runs AFTER the response leg seals + authorizes successfully (the ledger
 // state mutation — pend record / update finalize — must not happen until the
@@ -274,6 +276,36 @@ func adjudicatorError(err error) handlerResult {
 		return handlerResult{appStatus: ae.Status, errMsg: fmt.Sprintf("adjudicator answered %d", ae.Status), payload: ae.Body, contentType: ae.ContentType, participantBody: true}
 	}
 	return handlerResult{appStatus: http.StatusUnprocessableEntity, errMsg: err.Error()}
+}
+
+// refusalBody is the body and media type of a refusal this Responder writes
+// itself on leg, once the leg is authenticated: on a leg whose answer envelope
+// is FHIR, an OperationOutcome with one error issue whose code follows the
+// status and whose diagnostics is msg (application/fhir+json); otherwise
+// {"error": msg} (application/json). It is the Smart Gateway's own refusal on
+// the leg, byte for byte.
+func refusalBody(leg string, status int, msg string) ([]byte, string) {
+	if envelope, _ := TransactionTypeAnswerEnvelope(leg); envelope != AnswerEnvelopeFHIR {
+		b, _ := json.Marshal(map[string]string{"error": msg})
+		return b, "application/json"
+	}
+	code := "processing"
+	switch status {
+	case http.StatusBadRequest:
+		code = "invalid"
+	case http.StatusUnauthorized:
+		code = "login"
+	case http.StatusForbidden:
+		code = "forbidden"
+	case http.StatusUnprocessableEntity:
+		code = "not-supported"
+	case http.StatusServiceUnavailable:
+		code = "transient"
+	case http.StatusGatewayTimeout:
+		code = "timeout"
+	}
+	b, _ := json.Marshal(map[string]any{"resourceType": "OperationOutcome", "issue": []map[string]string{{"severity": "error", "code": code, "diagnostics": msg}}})
+	return b, "application/fhir+json"
 }
 
 // respondErr writes a JSON {"error": msg} body with the given HTTP status code.
@@ -496,13 +528,18 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 	// run for the framed error too (mirrors the engine's respondLegError). Success
 	// (appStatus 0, payload non-nil) is framed(200, contentType) or bare.
 	if res.appStatus != 0 && res.appStatus/100 != 2 {
+		// The Responder's own refusal is written in the leg's answer envelope
+		// (refusalBody): an OperationOutcome on a FHIR leg, {"error"} on CDS
+		// Hooks — the payer gateway's body, byte for byte.
 		if !framed {
-			respondErr(w, res.appStatus, res.errMsg) // pre-frame contract, byte-identical
+			body, ct := refusalBody(leg, res.appStatus, res.errMsg)
+			w.Header().Set("Content-Type", ct)
+			w.WriteHeader(res.appStatus)
+			_, _ = w.Write(append(body, '\n')) // the bare answer's json.Encoder framing
 			return
 		}
 		if !res.participantBody {
-			res.payload, _ = json.Marshal(map[string]string{"error": res.errMsg})
-			res.contentType = "application/json"
+			res.payload, res.contentType = refusalBody(leg, res.appStatus, res.errMsg)
 		}
 	} else if res.payload == nil {
 		// Defensive: a handler returned neither an answer nor an error.

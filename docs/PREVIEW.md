@@ -519,8 +519,9 @@ The example listens on plain HTTP — in deployment, terminate TLS in front of i
 > 64 bytes), `enc.key` (std-base64 X25519 private key, 32 bytes), and `manifest.json`
 > (`{"id":"<holderID>","role":"payer","encPub":"...","signPub":"...","baseURL":"..."}`).
 > It returns a `Bundle` holding the parsed `Manifest` and the `Identity` to sign and
-> decrypt with; the identity's encryption public key is the `encPub` the manifest
-> records, and the signing public key is derived from `sign.key`.
+> decrypt with; the signing public key is derived from `sign.key`. From shn-sdk
+> v1.11.0, the identity's encryption public key is the key `enc.key` derives, and
+> `Bundle.EncKeyCheck()` reports how the manifest's `encPub` compares with it.
 
 **Supported operations today:** six transaction types — `coverage-eligibility`,
 `crd-order-select`, `dtr-questionnaire-fetch`, `pas-claim` and `pas-claim-update`, handled

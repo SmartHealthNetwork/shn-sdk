@@ -52,7 +52,13 @@ type Envelope struct {
 // Seal encrypts payload to recipientEncPub using an anonymous sealed box
 // (box.SealAnonymous). The sender needs only the recipient's public key and
 // shares no secret with the Hub. Ported from the network's envelope sealer.
+//
+// A recipient key of small order, or a nil one, is refused with ErrLowOrderKey before
+// anything is sealed: anyone could open what was sealed to a key of small order.
 func Seal(meta Metadata, payload []byte, recipientEncPub *[32]byte) (Envelope, error) {
+	if lowOrderKey(recipientEncPub) {
+		return Envelope{}, ErrLowOrderKey
+	}
 	ct, err := box.SealAnonymous(nil, payload, recipientEncPub, rand.Reader)
 	if err != nil {
 		return Envelope{}, err

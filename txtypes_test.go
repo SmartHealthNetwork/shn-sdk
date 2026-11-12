@@ -8,8 +8,8 @@ import (
 
 func TestTransactionTypeNames(t *testing.T) {
 	all := PrefixedTransactionTypes()
-	if len(all) != 11 {
-		t.Fatalf("%d legs, want 11", len(all))
+	if len(all) != 12 {
+		t.Fatalf("%d legs, want 12", len(all))
 	}
 	for flat, prefixed := range all {
 		ws, name, ok := strings.Cut(prefixed, ".")
@@ -45,5 +45,28 @@ func TestTransactionTypeNames(t *testing.T) {
 func TestWireProtocolVersionsNamesTheVersionSpoken(t *testing.T) {
 	if !slices.Contains(WireProtocolVersions(), WireProtocolVersion) {
 		t.Fatalf("WireProtocolVersions() = %v lacks WireProtocolVersion %q", WireProtocolVersions(), WireProtocolVersion)
+	}
+}
+
+// TestTransactionTypeAnswerEnvelope: every leg in the table has an answer
+// envelope, read by either of its names; a name no leg has has none. The
+// platform's parity suite holds each value to the taxonomy's row.
+func TestTransactionTypeAnswerEnvelope(t *testing.T) {
+	for flat, prefixed := range PrefixedTransactionTypes() {
+		a, okA := TransactionTypeAnswerEnvelope(flat)
+		b, okB := TransactionTypeAnswerEnvelope(prefixed)
+		if !okA || !okB || a != b || (a != AnswerEnvelopeFHIR && a != AnswerEnvelopeJSON) {
+			t.Errorf("%s / %s: answer envelope %q,%v / %q,%v, want one closed value by either name", flat, prefixed, a, okA, b, okB)
+		}
+	}
+	for flat, want := range map[string]string{"pas-claim": AnswerEnvelopeFHIR, "crd-order-select": AnswerEnvelopeJSON, "patient-dtr": AnswerEnvelopeJSON, "federated-query": AnswerEnvelopeFHIR} {
+		if got, _ := TransactionTypeAnswerEnvelope(flat); got != want {
+			t.Errorf("%s: answer envelope %q, want %q", flat, got, want)
+		}
+	}
+	for _, name := range []string{"", "pa.", "toy-echo", "PAS-CLAIM", "pa.pas-claim.x"} {
+		if got, ok := TransactionTypeAnswerEnvelope(name); ok || got != "" {
+			t.Errorf("%q: answer envelope %q, %v, want none", name, got, ok)
+		}
 	}
 }

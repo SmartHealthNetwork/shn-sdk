@@ -346,9 +346,13 @@ each CRD coverage assertion it sends), `ParsePayerIdentifier` / `ParseCoveragePa
 (a Coverage's payer identity by position: the payor's first identifier, from a Coverage or a Bundle of
 Coverages naming one payer; not a routing decision), `CoveragePayerCandidates` / `ChooseRegisteredPayer` /
 `OrganizationIdentifiers` / `NoRegisteredPayerError` / `UnresolvedPayorError` (from shn-sdk v1.10.0: route a
-coverage by the payer identifier a registry resolves, on any payor, wherever it is listed), `FetchHolders`
+coverage by the payer identifier a registry resolves, on any payor, wherever it is listed; from shn-sdk
+v1.11.0, a reference several Bundle entries answer, when every one is an Organization, names every identifier
+they name, as a Smart Gateway reads it; when not every one is, it names no payer), `FetchHolders`
 / `NewFeedEncResolver` (registry-feed holder + encryption-key resolution),
-`FetchHubTransportKey`, and `WriteBundle` / `LoadBundle` (registration-bundle I/O).
+`FetchHubTransportKey`, and `WriteBundle` / `LoadBundle` (registration-bundle I/O; from shn-sdk v1.11.0,
+`LoadBundle`'s `Identity.EncPub` is the key `enc.key` derives, and `Bundle.EncKeyCheck()` reports how `manifest.json`'s
+`encPub` compares). From shn-sdk v1.11.0, `Seal` refuses a recipient key of small order (`ErrLowOrderKey`).
 
 ## Accounts package (`shn-sdk/accounts`)
 

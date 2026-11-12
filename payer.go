@@ -178,6 +178,12 @@ func (e *UnresolvedPayorError) Is(target error) bool {
 // type is neither Organization nor self-pay) makes the payer unknown: an *UnresolvedPayorError.
 // ErrNoCoveragePayer when the value holds no Coverage, or a Coverage names no identifier (for
 // example a self-pay Coverage).
+//
+// In a Bundle, a reference that several entries answer picks none of them: when every one is an
+// Organization, the payor names every identifier they name, in document order, each once, and the
+// registry decides among them (ChooseRegisteredPayer); when not every one is an Organization, the
+// reference names no payer and is not passed to resolveRef. ParseCoveragePayer still reads the
+// first entry.
 func CoveragePayerCandidates(coverageJSON []byte, resolveRef func(ref string) ([]byte, bool)) ([][]PayerIdentifier, error) {
 	return coverageCandidateLists(coverageJSON, resolveRef)
 }
@@ -269,6 +275,60 @@ func bundleResolver(entries []coverageBundleEntry, resolveRef func(ref string) (
 	}
 }
 
+// bundleUnionResolver resolves a payor reference among a Bundle's entries as routing reads
+// them: no entry is picked over another. The entries that answer it are those bundleResolver
+// matches (a fullUrl equal to it, or a Type/id equal to a relative reference). One answers as
+// itself. Several that are all Organizations answer as one Organization naming every identifier
+// they name, in document order, each once, so the registry decides among them as it does across
+// payors. Several that are not all Organizations answer, and name no payer: the reference is not
+// looked up further, and the payor is unknown unless it carries an identifier of its own. A
+// reference no entry answers goes to resolveRef, when given.
+//
+// bundleResolver, which ParseCoveragePayer keeps, reads the first entry that answers.
+func bundleUnionResolver(entries []coverageBundleEntry, resolveRef func(ref string) ([]byte, bool)) func(ref string) ([]byte, bool) {
+	return func(ref string) ([]byte, bool) {
+		var answers []coverageBundleEntry
+		for _, e := range entries {
+			// An entry with no resource member answers nothing, as the gateway reads it;
+			// one whose resource is null answers as a resource that names no payer.
+			if len(e.Resource) == 0 {
+				continue
+			}
+			if (e.FullURL != "" && e.FullURL == ref) || (e.head.ResourceType != "" && e.head.ID != "" && ref == e.head.ResourceType+"/"+e.head.ID) {
+				answers = append(answers, e)
+			}
+		}
+		switch len(answers) {
+		case 0:
+			if resolveRef != nil {
+				return resolveRef(ref)
+			}
+			return nil, false
+		case 1:
+			return answers[0].Resource, true
+		}
+		var ids []identifier
+		for _, a := range answers {
+			if a.head.ResourceType != "Organization" {
+				return nil, true
+			}
+			for _, p := range orgIdentifiers(a.Resource, "") {
+				if !slices.Contains(ids, identifier{p.System, p.Value}) {
+					ids = append(ids, identifier{p.System, p.Value})
+				}
+			}
+		}
+		merged, err := json.Marshal(struct {
+			ResourceType string       `json:"resourceType"`
+			Identifier   []identifier `json:"identifier"`
+		}{"Organization", ids})
+		if err != nil {
+			return nil, true
+		}
+		return merged, true
+	}
+}
+
 // coverageCandidateLists is CoveragePayerCandidates: one non-empty list per Coverage, at least one.
 func coverageCandidateLists(coverageJSON []byte, resolveRef func(ref string) ([]byte, bool)) ([][]PayerIdentifier, error) {
 	entries, isBundle, err := coverageBundleEntries(coverageJSON)
@@ -285,7 +345,7 @@ func coverageCandidateLists(coverageJSON []byte, resolveRef func(ref string) ([]
 		}
 		return nil, ErrNoCoveragePayer
 	}
-	inBundle := bundleResolver(entries, resolveRef)
+	inBundle := bundleUnionResolver(entries, resolveRef)
 	var lists [][]PayerIdentifier
 	for _, e := range entries {
 		if e.head.ResourceType != "Coverage" {

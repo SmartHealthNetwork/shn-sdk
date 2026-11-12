@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/crypto/curve25519"
 )
 
 // Manifest is the public (no private keys) metadata `shn register`/`shn keygen` writes
@@ -63,7 +65,10 @@ func WriteBundle(dir string, id Identity, role, baseURL string) error {
 	return nil
 }
 
-// LoadBundle parses manifest.json + sign.key + enc.key from dir back into a Bundle.
+// LoadBundle parses manifest.json + sign.key + enc.key from dir back into a Bundle. The
+// Identity's EncPub is the public key enc.key derives, whatever manifest.json states
+// (Bundle.EncKeyCheck compares them); a missing or malformed enc.key or sign.key is an
+// error.
 func LoadBundle(dir string) (Bundle, error) {
 	var b Bundle
 	manRaw, err := os.ReadFile(filepath.Join(dir, bundleManifestFile))
@@ -95,10 +100,15 @@ func LoadBundle(dir string) (Bundle, error) {
 	var encPriv [32]byte
 	copy(encPriv[:], encRaw)
 	sp := ed25519.PrivateKey(signPriv)
-	var encPub [32]byte
-	if epRaw, e := base64.StdEncoding.DecodeString(b.Manifest.EncPub); e == nil && len(epRaw) == 32 {
-		copy(encPub[:], epRaw)
+	// The identity's public encryption key is always the private key's own, derived,
+	// never manifest.json's: the identity holds no key that is not provably its own.
+	// The manifest's stays in Manifest, as read; EncKeyCheck compares the two.
+	derived, err := curve25519.X25519(encPriv[:], curve25519.Basepoint)
+	if err != nil {
+		return b, fmt.Errorf("%s: bad X25519 private key: %v", bundleEncKeyFile, err)
 	}
+	var encPub [32]byte
+	copy(encPub[:], derived)
 	b.Identity = Identity{
 		HolderID: b.Manifest.ID,
 		SignPriv: sp,

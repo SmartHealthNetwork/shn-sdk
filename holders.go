@@ -1,6 +1,7 @@
 package shnsdk
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -57,6 +59,81 @@ type Holder struct {
 	// a sender then applies only its own ceiling. It is the holder's statement,
 	// served as declared: a sender applies the smaller of it and its ceiling.
 	AttachmentMaxBytes *int64 `json:"attachmentMaxBytes,omitempty"`
+	// CDSServicesDigest is the row's cdsServicesDigest: the digest
+	// (DigestCDSServices) naming the CDS Hooks service listing the holder's
+	// own system declared (CapabilityDeclaration.CDSServices). A reader fetches
+	// the listing it names (FetchCDSServices) when the digest changes. Empty
+	// (absent) means the row names no listing.
+	CDSServicesDigest string `json:"cdsServicesDigest,omitempty"`
+}
+
+// ErrNoCDSServices is FetchCDSServices's answer when the registrar answers
+// 404: it serves no CDS service listing for the holder. Read the holder's row
+// again for the digest it names now.
+var ErrNoCDSServices = errors.New("shnsdk: the registrar holds no CDS service listing for the holder")
+
+// ErrCDSServicesIntegrity is FetchCDSServices's answer when what the
+// registrar served is not the listing the digest names: other bytes, an ETag
+// (strong or weak) naming another digest, more than any listing can be, or
+// not a listing in its compact form. Nothing it served is returned. It can
+// also mean the holder declared again after the caller read its row: read the
+// row again and fetch the digest it names now.
+var ErrCDSServicesIntegrity = errors.New("shnsdk: the CDS service listing served is not the one its digest names")
+
+// FetchCDSServices fetches holderID's CDS service listing from the registrar
+// at registrarURL: GET {registrarURL}/holders/{id}/cds-services. It returns
+// the listing's bytes, unchanged and in compact form, only once they are
+// verified against digest, the digest the caller read from the holder's row
+// (Holder.CDSServicesDigest); ErrCDSServicesIntegrity otherwise, and
+// ErrNoCDSServices when the registrar answers 404. A nil c uses
+// http.DefaultClient.
+func FetchCDSServices(ctx context.Context, c *http.Client, registrarURL, holderID, digest string) (json.RawMessage, error) {
+	if !validCDSServicesDigest(digest) {
+		return nil, fmt.Errorf("shnsdk: FetchCDSServices: %.80q is not a CDS service listing's digest", digest)
+	}
+	if holderID == "" {
+		return nil, errors.New("shnsdk: FetchCDSServices: no holder id")
+	}
+	if c == nil {
+		c = http.DefaultClient
+	}
+	u := strings.TrimRight(registrarURL, "/") + "/holders/" + url.PathEscape(holderID) + "/cds-services"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return nil, ErrNoCDSServices
+	case resp.StatusCode != http.StatusOK:
+		return nil, fmt.Errorf("shnsdk: FetchCDSServices: registrar answered %d", resp.StatusCode)
+	}
+	// The ETag, when it names a digest, names the listing's: one naming
+	// another, strong or weak (W/), is another listing. An ETag naming no
+	// digest (an intermediary's, rewritten) is left to the content checks.
+	if named := strings.Trim(strings.TrimPrefix(resp.Header.Get("ETag"), "W/"), `"`); validCDSServicesDigest(named) && named != digest {
+		return nil, fmt.Errorf("%w: its ETag names another digest", ErrCDSServicesIntegrity)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDeclaredCDSServicesBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxDeclaredCDSServicesBytes {
+		return nil, fmt.Errorf("%w: it is larger than any listing", ErrCDSServicesIntegrity)
+	}
+	if DigestCDSServices(body) != digest {
+		return nil, fmt.Errorf("%w: its digest differs", ErrCDSServicesIntegrity)
+	}
+	listing, err := compactDeclaredCDSServices(body)
+	if err != nil || !bytes.Equal(listing, body) {
+		return nil, fmt.Errorf("%w: it is not a listing in its compact form", ErrCDSServicesIntegrity)
+	}
+	return listing, nil
 }
 
 // EncKey decodes the holder's X25519 public key.

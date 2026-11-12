@@ -47,14 +47,17 @@ func TestAnswerHeaders_RoundTripAsSent(t *testing.T) {
 	}
 }
 
-// The allowlist widened by exactly the three answer headers, and then by the
-// three operation address headers: an HTTP address into the payer's system (a
-// Location), a credential and a cookie are still neither produced nor
-// consumed, in any case (frame_headercase_test.go holds the allowlisted
-// names' cases).
+// The allowlist widened by exactly the three answer headers, then by the
+// three operation address headers, then by the CDex Task's two headers, and
+// then by the CDS service a CDS Hooks request names: an HTTP address into the
+// payer's system (a Location: taskLocation carries only a Task's path, never
+// the provider's address), a credential and a cookie are still neither
+// produced nor consumed, in any case (frame_headercase_test.go holds the
+// allowlisted names' cases).
 func TestAnswerHeaders_NothingElseCrosses(t *testing.T) {
 	want := []string{"Content-Type", FrameHeaderContractVersion, FrameHeaderETag, FrameHeaderLastModified, FrameHeaderOperation, FrameHeaderRetryAfter,
-		FrameHeaderOperationSubpath, FrameHeaderOperationBase, FrameHeaderOperationAddressTags}
+		FrameHeaderOperationSubpath, FrameHeaderOperationBase, FrameHeaderOperationAddressTags,
+		FrameHeaderReadPath, FrameHeaderTaskLocation, FrameHeaderCDSService}
 	if got := slices.Sorted(maps.Keys(allowedFrameHeaders)); !slices.Equal(got, slices.Sorted(slices.Values(want))) {
 		t.Fatalf("allowlist %q, want %q", got, want)
 	}

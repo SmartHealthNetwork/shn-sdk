@@ -200,7 +200,8 @@ func postDecryptionRefusals() []postDecryptionRefusal {
 // frame-capable requester as its answer — HTTP 200 to the Hub carrying a
 // response leg sealed to the requester, of the request's transaction type and
 // correlation, authorized for that leg's response operation; inside it exactly
-// frame(status, application/json, {"error": msg}), unstamped even though the
+// frame(status, the leg's refusal: an OperationOutcome on a FHIR leg,
+// {"error": msg} on CDS Hooks — wantRefusal), unstamped even though the
 // Responder stamps its successes, and the request never reached the
 // Adjudicator.
 func TestSDKResponder_PostDecryptionRefusalsFramed(t *testing.T) {
@@ -234,8 +235,8 @@ func TestSDKResponder_PostDecryptionRefusalsFramed(t *testing.T) {
 				t.Fatalf("the response leg is not authorized for %s: %v", responseOp(row.txType), err)
 			}
 
-			body, _ := json.Marshal(map[string]string{"error": row.msg(t, payload)})
-			want, err := EncodeHTTPFrame(row.status, "application/json", body)
+			body, ct := wantRefusal(t, row.txType, row.status, row.msg(t, payload))
+			want, err := EncodeHTTPFrame(row.status, ct, body)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -270,9 +271,9 @@ func TestSDKResponder_PostDecryptionRefusalsBareToLegacyRequester(t *testing.T) 
 				envBytes, hubHdr := h.buildForwardEnv(t, row.txType, row.op, "legacy-refusal-"+hex.EncodeToString([]byte{byte(i)}), payload)
 				resp := postInbound(t, srv, envBytes, hubHdr)
 				raw := readBody(t, resp)
-				var want bytes.Buffer
-				_ = json.NewEncoder(&want).Encode(map[string]string{"error": row.msg(t, payload)})
-				if resp.StatusCode != row.status || !bytes.Equal(raw, want.Bytes()) {
+				body, ct := wantRefusal(t, row.txType, row.status, row.msg(t, payload))
+				want := bytes.NewBuffer(append(body, '\n'))
+				if resp.StatusCode != row.status || !bytes.Equal(raw, want.Bytes()) || resp.Header.Get("Content-Type") != ct {
 					t.Fatalf("HTTP %d %q, want the bare %d %q", resp.StatusCode, raw, row.status, want.Bytes())
 				}
 				if n := adj.calls.Load(); n != 0 {
@@ -478,4 +479,29 @@ func assertBare(t *testing.T, status int, raw []byte, wantStatus int, msg string
 	if status != wantStatus || !bytes.Equal(raw, want.Bytes()) {
 		t.Fatalf("HTTP %d %q, want the bare %d %q", status, raw, wantStatus, want.Bytes())
 	}
+}
+
+// wantRefusal is the exact body and media type of the Responder's own refusal
+// on leg tx, written out here rather than read from the code under test: on a
+// leg whose answer envelope is FHIR (from shn-sdk v1.11.0), an OperationOutcome
+// with one error issue whose code follows the status and whose diagnostics is
+// msg, application/fhir+json; on the CDS Hooks leg, {"error": msg},
+// application/json. It is the payer gateway's body, byte for byte
+// (test/sdkparity).
+func wantRefusal(t *testing.T, tx string, status int, msg string) ([]byte, string) {
+	t.Helper()
+	switch tx {
+	case "crd-order-select", "crd-order-dispatch", "patient-dtr":
+		b, _ := json.Marshal(map[string]string{"error": msg})
+		return b, "application/json"
+	case "coverage-eligibility", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-update", "pas-claim-inquire":
+	default:
+		t.Fatalf("wantRefusal: no refusal pinned for %q", tx)
+	}
+	code := map[int]string{400: "invalid", 401: "login", 403: "forbidden", 422: "not-supported", 503: "transient", 504: "timeout"}[status]
+	if code == "" {
+		code = "processing"
+	}
+	b, _ := json.Marshal(map[string]any{"resourceType": "OperationOutcome", "issue": []map[string]string{{"severity": "error", "code": code, "diagnostics": msg}}})
+	return b, "application/fhir+json"
 }

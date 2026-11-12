@@ -49,8 +49,9 @@ func (h *paTestHarness) makeFramedResponderSrv(t *testing.T, responderIdent Iden
 func framesV1(string) []string { return []string{MessageFrameV1} }
 
 // TestResponderFramesAppErrorForCapableRequester: an adjudication error
-// (PriorAuth → 422) arrives at a capable requester as a sealed frame(422,
-// {"error":...}, ct=application/json), relayed HTTP 200 to the Hub (the framed
+// (PriorAuth → 422) arrives at a capable requester as a sealed frame(422, the
+// leg's refusal: an OperationOutcome, application/fhir+json, on pas-claim),
+// relayed HTTP 200 to the Hub (the framed
 // error rides the success response leg — seal+authorize run for it too).
 func TestResponderFramesAppErrorForCapableRequester(t *testing.T) {
 	h, responderIdent, _ := newPAHarness(t)
@@ -74,10 +75,12 @@ func TestResponderFramesAppErrorForCapableRequester(t *testing.T) {
 	if hdr.Status != http.StatusUnprocessableEntity {
 		t.Errorf("frame status = %d, want 422", hdr.Status)
 	}
-	if hdr.Headers["Content-Type"] != "application/json" {
-		t.Errorf("frame Content-Type = %q, want application/json", hdr.Headers["Content-Type"])
+	// pas-claim's answer envelope is FHIR: the Responder's own refusal is an
+	// OperationOutcome.
+	wantBody, wantCT := wantRefusal(t, "pas-claim", http.StatusUnprocessableEntity, "adjudication unavailable")
+	if hdr.Headers["Content-Type"] != wantCT {
+		t.Errorf("frame Content-Type = %q, want %s", hdr.Headers["Content-Type"], wantCT)
 	}
-	wantBody, _ := json.Marshal(map[string]string{"error": "adjudication unavailable"})
 	if !bytes.Equal(fbody, wantBody) {
 		t.Errorf("frame body = %s, want %s", fbody, wantBody)
 	}
@@ -151,8 +154,8 @@ func TestResponderLegacyWhenNoResolver(t *testing.T) {
 		}
 	})
 
-	// App error: nil ResolveFrames ⇒ a bare HTTP 422 {"error":...}\n written by
-	// respondErr — byte-identical to json.NewEncoder(w).Encode (trailing newline).
+	// App error: nil ResolveFrames ⇒ a bare HTTP 422 carrying the leg's refusal
+	// (an OperationOutcome on pas-claim), with json.Encoder's trailing newline.
 	t.Run("app error stays bare byte-identical", func(t *testing.T) {
 		srv := h.makeFramedResponderSrv(t, responderIdent, &errPriorAuthAdjudicator{}, nil)
 		qr := answeredQR(t, "MBR-001", ClinicalContext{ConservativeTherapyWeeks: 8}, h.now)
@@ -163,10 +166,11 @@ func TestResponderLegacyWhenNoResolver(t *testing.T) {
 		if resp.StatusCode != http.StatusUnprocessableEntity {
 			t.Fatalf("HTTP status = %d, want 422; body: %s", resp.StatusCode, body)
 		}
-		var want bytes.Buffer
-		_ = json.NewEncoder(&want).Encode(map[string]string{"error": "adjudication unavailable"})
-		if !bytes.Equal(body, want.Bytes()) {
-			t.Errorf("legacy error body = %q, want %q (respondErr byte-identical)", body, want.Bytes())
+		// The leg's refusal (an OperationOutcome on pas-claim), with the
+		// bare answer's trailing newline.
+		wantBody, wantCT := wantRefusal(t, "pas-claim", http.StatusUnprocessableEntity, "adjudication unavailable")
+		if want := append(wantBody, '\n'); !bytes.Equal(body, want) || resp.Header.Get("Content-Type") != wantCT {
+			t.Errorf("legacy error body = %q %q, want %q %q", resp.Header.Get("Content-Type"), body, wantCT, want)
 		}
 	})
 }

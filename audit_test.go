@@ -308,10 +308,23 @@ func TestInvolvementVocabularies(t *testing.T) {
 			t.Errorf("LegacyInvolvement(%q) = %q, want it unchanged", v1[i], got)
 		}
 	}
-	for _, v := range []string{InvolvementResponderHeld, InvolvementResponderDerived, "", "other"} {
+	for _, v := range []string{InvolvementResponderHeld, InvolvementResponderDerived, InvolvementRequesterHeld, InvolvementRequesterDerived, "", "other"} {
 		if ValidInvolvementV1(v) || ValidInvolvement(v) {
 			t.Errorf("%q is a valid version 1 value", v)
 		}
+	}
+	// The requester-side values are version 2 only: valid there, with no
+	// version 1 form, so neither mapping changes them.
+	for _, v := range []string{InvolvementRequesterHeld, InvolvementRequesterDerived} {
+		if !ValidInvolvementV2(v) {
+			t.Errorf("%q is not a valid version 2 value", v)
+		}
+		if NeutralInvolvement(v) != v || LegacyInvolvement(v) != v {
+			t.Errorf("%q is mapped: %q / %q", v, NeutralInvolvement(v), LegacyInvolvement(v))
+		}
+	}
+	if InvolvementRequesterHeld != "requester-held" || InvolvementRequesterDerived != "requester-derived" {
+		t.Errorf("requester-side values %q, %q", InvolvementRequesterHeld, InvolvementRequesterDerived)
 	}
 	for _, v := range []string{InvolvementPayerHeld, InvolvementPayerDerived, "", "other"} {
 		if ValidInvolvementV2(v) {

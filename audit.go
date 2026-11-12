@@ -365,6 +365,21 @@ const (
 	InvolvementResponderDerived = "responder-derived"
 )
 
+// The requester-side involvement values, version 2 only: a requester's own
+// binding of the patient an answer discloses, on a leg whose request names no
+// patient (a payer's read of its CDex Task). The requester binds the patient
+// the answer names through its own records and reports the binding, so the
+// exchange is recorded under it beside the responder's. They have no
+// version 1 form.
+const (
+	// InvolvementRequesterHeld: the requester's own binding of the patient
+	// the answer discloses, from a record its system holds.
+	InvolvementRequesterHeld = "requester-held"
+	// InvolvementRequesterDerived: the same, for a patient its records do not
+	// hold.
+	InvolvementRequesterDerived = "requester-derived"
+)
+
 // ValidInvolvement reports whether v is one of the version 1 involvement
 // values; it is ValidInvolvementV1.
 //
@@ -383,10 +398,12 @@ func ValidInvolvementV1(v string) bool {
 }
 
 // ValidInvolvementV2 reports whether v is an involvement value a version 2
-// record may carry: request-named, responder-held or responder-derived.
+// record may carry: request-named, responder-held, responder-derived,
+// requester-held or requester-derived.
 func ValidInvolvementV2(v string) bool {
 	switch v {
-	case InvolvementRequestNamed, InvolvementResponderHeld, InvolvementResponderDerived:
+	case InvolvementRequestNamed, InvolvementResponderHeld, InvolvementResponderDerived,
+		InvolvementRequesterHeld, InvolvementRequesterDerived:
 		return true
 	}
 	return false

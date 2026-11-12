@@ -685,6 +685,10 @@ func TestResponder_RejectionRows(t *testing.T) {
 		hubHeader func(jti string) string
 		wantCode  int
 		wantError string
+		// fhir: the refusal is the Responder's own once the leg is open, on
+		// coverage eligibility, whose answer envelope is FHIR; every other row
+		// is a refusal before it, bare {"error"}.
+		fhir bool
 	}
 
 	hubHdr := func(jti string) string {
@@ -785,6 +789,7 @@ func TestResponder_RejectionRows(t *testing.T) {
 			hubHeader: hubHdr,
 			wantCode:  http.StatusBadRequest,
 			wantError: "parse member failed",
+			fhir:      true,
 		},
 		{
 			name:      "requester key not resolvable (unknown sender)",
@@ -806,14 +811,12 @@ func TestResponder_RejectionRows(t *testing.T) {
 			if resp.StatusCode != tc.wantCode {
 				t.Errorf("status = %d, want %d; body: %s", resp.StatusCode, tc.wantCode, respBody)
 			}
-			var errResp struct {
-				Error string `json:"error"`
+			wantType := map[bool]string{true: "application/fhir+json", false: "application/json"}[tc.fhir]
+			if ct := resp.Header.Get("Content-Type"); ct != wantType {
+				t.Errorf("Content-Type = %q, want %s", ct, wantType)
 			}
-			if err := json.Unmarshal(respBody, &errResp); err != nil {
-				t.Fatalf("unmarshal error body %q: %v", respBody, err)
-			}
-			if errResp.Error != tc.wantError {
-				t.Errorf("error = %q, want %q", errResp.Error, tc.wantError)
+			if got := refusalMessage(t, resp.Header.Get("Content-Type"), respBody); got != tc.wantError {
+				t.Errorf("error = %q, want %q", got, tc.wantError)
 			}
 		})
 	}
@@ -1260,15 +1263,42 @@ func assertError(t *testing.T, resp *http.Response, body []byte, wantStatus int,
 	if resp.StatusCode != wantStatus {
 		t.Errorf("status = %d, want %d; body: %s", resp.StatusCode, wantStatus, body)
 	}
-	var errResp struct {
-		Error string `json:"error"`
+	if got := refusalMessage(t, resp.Header.Get("Content-Type"), body); got != wantMsg {
+		t.Errorf("error = %q, want %q", got, wantMsg)
 	}
-	if err := json.Unmarshal(body, &errResp); err != nil {
-		t.Fatalf("unmarshal error body %q: %v", body, err)
+}
+
+// refusalMessage reads a refusal's message by its media type, holding each
+// to its exact shape: an OperationOutcome (application/fhir+json, the
+// Responder's own refusal on a FHIR leg from shn-sdk v1.11.0) with one error
+// issue, or {"error": msg} (application/json: a pre-authentication refusal,
+// or one on the CDS Hooks leg). Which a leg gets is pinned by wantRefusal's
+// rows.
+func refusalMessage(t *testing.T, contentType string, body []byte) string {
+	t.Helper()
+	switch contentType {
+	case "application/fhir+json":
+		var o struct {
+			ResourceType string
+			Issue        []struct{ Severity, Code, Diagnostics string }
+		}
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&o); err != nil || o.ResourceType != "OperationOutcome" || len(o.Issue) != 1 || o.Issue[0].Severity != "error" || o.Issue[0].Code == "" {
+			t.Fatalf("refusal %s is not one OperationOutcome error issue: %v", body, err)
+		}
+		return o.Issue[0].Diagnostics
+	case "application/json":
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(body, &errResp); err != nil {
+			t.Fatalf("unmarshal error body %q: %v", body, err)
+		}
+		return errResp.Error
 	}
-	if errResp.Error != wantMsg {
-		t.Errorf("error = %q, want %q", errResp.Error, wantMsg)
-	}
+	t.Fatalf("refusal media type %q, want application/fhir+json or application/json (body %s)", contentType, body)
+	return ""
 }
 
 // ---- TestResponder_CRD ----
@@ -1780,12 +1810,13 @@ func TestSDKResponder_ErrorContentTypePassedThrough(t *testing.T) {
 	}
 	// A participant error with a non-error status is refused, not relayed.
 	hdr, body := framedAnswer(t, appAnswerAdjudicator{answer: &AppAnswerError{Status: http.StatusOK, ContentType: "application/json", Body: []byte(`{}`)}}, "ct-200")
-	if hdr.Status != http.StatusInternalServerError || hdr.Headers["Content-Type"] != "application/json" || !bytes.Contains(body, []byte("non-error status")) {
+	if hdr.Status != http.StatusInternalServerError || hdr.Headers["Content-Type"] != "application/fhir+json" || !bytes.Contains(body, []byte("non-error status")) {
 		t.Errorf("2xx error answer: status=%d type=%q body=%s", hdr.Status, hdr.Headers["Content-Type"], body)
 	}
-	// The Responder's own refusal is JSON.
+	// The Responder's own refusal on pas-claim is an OperationOutcome (the
+	// leg's answer envelope).
 	hdr, body = framedAnswer(t, &errPriorAuthAdjudicator{}, "ct-own")
-	if hdr.Status != http.StatusUnprocessableEntity || hdr.Headers["Content-Type"] != "application/json" || !bytes.Contains(body, []byte(`"error"`)) {
+	if hdr.Status != http.StatusUnprocessableEntity || hdr.Headers["Content-Type"] != "application/fhir+json" || refusalMessage(t, hdr.Headers["Content-Type"], body) != "adjudication unavailable" {
 		t.Errorf("own refusal: status=%d type=%q body=%s", hdr.Status, hdr.Headers["Content-Type"], body)
 	}
 	// A PAS answer is FHIR JSON.

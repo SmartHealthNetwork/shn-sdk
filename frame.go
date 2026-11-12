@@ -114,6 +114,61 @@ func SupportsRequestFrameV1OpSub(frames []string) bool {
 	return false
 }
 
+// RequestFrameCDexLoc is the capability token a provider's holder advertises
+// in its registry entry (requestFrames) when its answer to a payer's CDex
+// attachment-request Task frames FrameHeaderTaskLocation on every 2xx answer
+// whose Location lies under the provider's own Task endpoint. A payer's
+// gateway reads the token to tell a provider that framed no location for a
+// reason of its own from one whose gateway predates the header.
+//
+// SupportedRequestFrames does not list it: framing the header is the
+// answering side's own capability, which this library's codec does not supply
+// by itself, so a holder declares the token in its own registration.
+const RequestFrameCDexLoc = "cdexloc"
+
+// SupportsRequestFrameCDexLoc reports whether a holder's advertised request
+// frames include cdexloc. Absent means the holder does not frame
+// FrameHeaderTaskLocation.
+func SupportsRequestFrameCDexLoc(frames []string) bool {
+	for _, f := range frames {
+		if f == RequestFrameCDexLoc {
+			return true
+		}
+	}
+	return false
+}
+
+// RequestFrameV1CDS is the capability token a holder advertises in its
+// registry entry (requestFrames) when it accepts FrameHeaderCDSService on a
+// framed CDS Hooks request, and calls the service that header names. A
+// receiver that does not know the header drops it without error and would
+// choose a service by the request's hook instead, so a requester sends the
+// header only to a holder that declares this token.
+//
+// SupportedRequestFrames does not list it: calling the named service is the
+// receiver's own capability, which this library's codec does not supply by
+// itself, so a holder declares the token in its own declaration.
+const RequestFrameV1CDS = "v1cds"
+
+// SupportsRequestFrameV1CDS reports whether a holder's advertised request
+// frames include v1cds. Absent means the holder does not accept
+// FrameHeaderCDSService.
+func SupportsRequestFrameV1CDS(frames []string) bool {
+	for _, f := range frames {
+		if f == RequestFrameV1CDS {
+			return true
+		}
+	}
+	return false
+}
+
+// FrameHeaderCDSService is the request-frame header naming the recipient's
+// own CDS service a CDS Hooks request is for: an id from the listing the
+// recipient's system declared (CapabilityDeclaration.CDSServices). It sits
+// inside the sealed payload, so the Hub never sees it, and is sent only to a
+// holder that declares RequestFrameV1CDS.
+const FrameHeaderCDSService = "cdsService"
+
 // FrameHeaderOperation is the request-frame header naming the DTR operation
 // whose input is the frame body: FrameOperationQuestionnairePackage (the
 // body is the $questionnaire-package input Parameters) or
@@ -155,6 +210,28 @@ const (
 	// FrameHeaderOperationBase, possibly empty, or "*" for an address the
 	// body states as the boolean true; <tag> is 22 base64url characters.
 	FrameHeaderOperationAddressTags = "operationAddressTags"
+)
+
+// The headers of a payer's CDex Task at a provider. Each sits inside the
+// sealed payload, so the Hub never sees it. Each is a path relative to a base
+// the receiving gateway supplies, never an address into a participant's
+// system (FrameHeaderOperationBase stays the one header that is).
+// ParseCDexTaskReadPath and ParseCDexTaskLocation read their values.
+const (
+	// FrameHeaderReadPath is a request-frame header, framed only on the
+	// cdex-task-status leg, whose request has no body: the path of the
+	// payer system's read below its base, "Task/<id>" or
+	// "Task/<id>/_history/<vid>", then "?" and the query as sent, if the
+	// read had one. <id> and <vid> are FHIR ids.
+	FrameHeaderReadPath = "readPath"
+
+	// FrameHeaderTaskLocation is an answer-frame header, framed only for a
+	// 2xx answer to a payer's CDex attachment-request Task: the tail of the
+	// Location the provider's system answered, "Task/<id>" or
+	// "Task/<id>/_history/<vid>", when that Location lies under the
+	// provider's own Task endpoint. <id> and <vid> are FHIR ids. A provider's
+	// holder that frames it declares RequestFrameCDexLoc.
+	FrameHeaderTaskLocation = "taskLocation"
 )
 
 // ErrFramedDTRUnsupported: the payer has not declared RequestFrameV1Op, so a
@@ -202,13 +279,16 @@ const (
 // arbitrary headers through the seal would be a smuggling vector (cookies,
 // hop-by-hop, internal headers). Widening it is a spec change — contractVersion
 // was added with the multi-version contracts design, operation with framed
-// DTR operations, the answer's own headers above to carry a 2xx as sent, and
-// the operation's address headers (operationSubpath, operationBase,
-// operationAddressTags) with framed DTR operations' addresses.
+// DTR operations, the answer's own headers above to carry a 2xx as sent, the
+// operation's address headers (operationSubpath, operationBase,
+// operationAddressTags) with framed DTR operations' addresses, the CDex
+// Task's headers (readPath, taskLocation) with a payer's read of its Task, and
+// cdsService with a CDS Hooks request naming the recipient's own service.
 var allowedFrameHeaders = map[string]bool{
 	"Content-Type": true, FrameHeaderContractVersion: true, FrameHeaderOperation: true,
 	FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true,
 	FrameHeaderOperationSubpath: true, FrameHeaderOperationBase: true, FrameHeaderOperationAddressTags: true,
+	FrameHeaderReadPath: true, FrameHeaderTaskLocation: true, FrameHeaderCDSService: true,
 }
 
 // frameHeaderNames maps each allowlisted header's name, folded to ASCII lower
@@ -242,12 +322,14 @@ func asciiLower(s string) string {
 }
 
 // exactFrameHeaders are the headers whose values a frame must carry exactly:
-// the three answer headers above, carried as sent, and the operation's address
-// headers, whose tags are read byte for byte. Content-Type keeps the encoder's
-// older rule.
+// the three answer headers above, carried as sent, the operation's address
+// headers, whose tags are read byte for byte, the CDex Task's headers, a
+// path a gateway sends on as it reads it, and cdsService, a service id the
+// recipient's system declared. Content-Type keeps the encoder's older rule.
 var exactFrameHeaders = map[string]bool{
 	FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true,
 	FrameHeaderOperationSubpath: true, FrameHeaderOperationBase: true, FrameHeaderOperationAddressTags: true,
+	FrameHeaderReadPath: true, FrameHeaderTaskLocation: true, FrameHeaderCDSService: true,
 }
 
 // ErrFrameHeaderTooLarge is a header segment over the limit DecodeHTTPFrame
@@ -262,8 +344,9 @@ var ErrFrameHeaderTooLarge = errors.New("shnsdk: frame header segment over the l
 // is that value.
 var ErrFrameHeaderDuplicate = errors.New("shnsdk: frame header given twice")
 
-// ErrFrameHeaderValue is a value of one of the answer headers, or of the
-// address headers, that a frame cannot carry exactly (FrameCarriesHeaderValue).
+// ErrFrameHeaderValue is a value of one of the answer headers, of the
+// address headers, or of the CDex Task's headers, that a frame cannot carry
+// exactly (FrameCarriesHeaderValue).
 // The frame's JSON would change it, so it is not made.
 var ErrFrameHeaderValue = errors.New("shnsdk: frame header value cannot be carried exactly")
 
@@ -326,8 +409,9 @@ func EncodeHTTPFrame(status int, contentType string, body []byte) ([]byte, error
 // framed under the allowlist's spelling; two keys naming one header are an
 // error too. Empty-valued headers are omitted.
 // A header segment DecodeHTTPFrame would refuse is ErrFrameHeaderTooLarge, and
-// a value of one of the answer headers, or of the address headers, that the
-// frame would change is ErrFrameHeaderValue.
+// a value of one of the answer headers, of the address headers, of the CDex
+// Task's headers, or of cdsService, that the frame would change is
+// ErrFrameHeaderValue.
 func EncodeHTTPFrameHeaders(status int, headers map[string]string, body []byte) ([]byte, error) {
 	if status < 100 || status > 599 {
 		return nil, fmt.Errorf("shnsdk: frame status %d out of range", status)
