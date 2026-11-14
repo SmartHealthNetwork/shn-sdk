@@ -18,6 +18,11 @@ var prefixedTransactionTypes = map[string]string{
 	"cdex-attachment-request": "pa.cdex-attachment-request",
 	"cdex-task-status":        "pa.cdex-task-status",
 	"federated-query":         "fqs.federated-query",
+	// A topic Subscription's legs, ahead of
+	// their taxonomy rows: until a row comes, the network routes the leg
+	// nowhere.
+	"cdex-task-subscribe": "pa.cdex-task-subscribe",
+	"cdex-task-signal":    "pa.cdex-task-signal",
 }
 
 // transactionTypeSince is the release each leg added after shn-sdk v1.0.0
@@ -28,6 +33,9 @@ var transactionTypeSince = map[string]string{
 	"cdex-attachment-submit":  "1.1.0",
 	"cdex-attachment-request": "1.5.0",
 	"cdex-task-status":        "1.12.0",
+	// The release that will carry each one's taxonomy row.
+	"cdex-task-subscribe": "1.13.0",
+	"cdex-task-signal":    "1.13.0",
 }
 
 // Answer envelope values (TransactionTypeAnswerEnvelope).
@@ -55,8 +63,12 @@ var transactionTypeAnswerEnvelope = map[string]string{
 	"cdex-attachment-submit":  AnswerEnvelopeFHIR,
 	"cdex-attachment-request": AnswerEnvelopeFHIR,
 	"federated-query":         AnswerEnvelopeFHIR,
-	// A FHIR read and vread; stated here until its taxonomy row comes.
-	"cdex-task-status": AnswerEnvelopeFHIR,
+	"cdex-task-status":        AnswerEnvelopeFHIR,
+	// A Subscription's interactions at the notifier and a REST-hook
+	// notification at the subscriber's endpoint, each a FHIR interaction;
+	// stated here until their taxonomy rows come.
+	"cdex-task-subscribe": AnswerEnvelopeFHIR,
+	"cdex-task-signal":    AnswerEnvelopeFHIR,
 }
 
 // TransactionTypeAnswerEnvelope is the envelope of a refusal the answering

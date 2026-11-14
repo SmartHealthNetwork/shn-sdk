@@ -1205,7 +1205,14 @@ safe. When the
 payer's gateway was reached but its answer was lost on the way back, the `502` says so —
 `the recipient received this request and answered, but its answer was lost …` or `the
 recipient may have received this request …` — because the payer may have acted on it:
-check the outcome (for PAS, `$inquire`) before resending.
+check the outcome (for PAS, `$inquire`) before resending. From shn-gateway v1.12.0 such an
+answer, and a `504` whose text says the payer may have received the request, also says so by
+structure: `X-SHN-Delivered: yes` (the payer answered) or `unknown` (it may have received the
+request); on CRD an `application/json` body whose `error` member keeps the text, followed by
+problem details members whose `type` is `tag:smarthealthnetwork.org,2026:gateway/delivered/yes`
+or `…/unknown`; on the
+FHIR operation routes an `OperationOutcome` whose issue carries a `details` coding with system
+`tag:smarthealthnetwork.org,2026:gateway/delivered` and code `yes` or `unknown`.
 
 A `504` is an exchange failure the endpoint names rather than leaving generic. When the
 leg to the payer produced no answer within the 30 seconds the exchange allows it (shared by
@@ -1281,7 +1288,8 @@ A body over the cap is refused before any of it is forwarded, with
 
 An answer over the network's limit is never relayed cut short. The payer answered, but the network
 refuses its answer for size: `502` with `X-SHN-Delivered: yes`, and on a FHIR operation an
-`OperationOutcome` whose `diagnostics` is `response body too large`. Check the request's outcome
+`OperationOutcome` whose `diagnostics` is `response body too large` (from shn-gateway v1.12.0,
+with the delivered coding above; on CRD, the problem details above). Check the request's outcome
 before resending it. The network's own envelope around the answer counts toward the limit, so the
 exact figure varies slightly from call to call: plan for just under 6 MiB. This endpoint records at most 5 MiB of one answer: a larger answer it relays
 is shown on the call's page as answered with its body not captured whole, and that call is not

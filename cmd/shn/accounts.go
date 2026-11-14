@@ -14,10 +14,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -281,6 +284,18 @@ func cmdRotate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Copy the signing key being replaced aside before anything is sent, so a
+	// copy that fails changes nothing; it becomes <out>/predecessor/ only once
+	// the registrar accepts the new keys. A staging directory an interrupted
+	// run left is removed first.
+	sweepStaging(*out)
+	staged, err := stagePredecessor(*out)
+	if err != nil {
+		fmt.Fprintf(stderr, "shn rotate: keep the current keys: %v\n", err)
+		return 1
+	}
+	defer os.RemoveAll(staged)
+
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, strings.TrimRight(*registrar, "/")+"/register/"+id, bytes.NewReader(body))
 	if err != nil {
 		fmt.Fprintf(stderr, "shn rotate: build request: %v\n", err)
@@ -300,12 +315,109 @@ func cmdRotate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Persist the NEW keys only after the registrar accepted them, so a rejected
-	// rotation does not strand the holder with keys the registrar never recorded.
+	// Keep the signing key being replaced in <out>/predecessor/, then persist
+	// the NEW keys, both only after the registrar accepted them, so a rejected
+	// rotation does not strand the holder with keys the registrar never
+	// recorded. A predecessor that cannot be kept does not stop the new keys
+	// being written: the registrar already holds them. That case exits
+	// exitRotatedPredecessorNotKept, so a script can tell it from a failed
+	// rotation.
+	pred := filepath.Join(*out, predecessorDir)
+	replaced, keepErr := installPredecessor(staged, pred)
 	if err := writeIdentity(*out, next, role, baseURL); err != nil {
 		fmt.Fprintf(stderr, "shn rotate: persist new keys: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "rotated %s. New keys in %s.\n", id, *out)
+	if keepErr != nil {
+		fmt.Fprintf(stderr, "shn rotate: the new keys are in place, but the replaced signing key was not kept in %s: %v\n", pred, keepErr)
+		return exitRotatedPredecessorNotKept
+	}
+	if replaced {
+		fmt.Fprintf(stdout, "The replaced signing key is in %s, with the manifest naming its holder, replacing what an earlier rotation kept there.\n", pred)
+	} else {
+		fmt.Fprintf(stdout, "The replaced signing key is in %s, with the manifest naming its holder.\n", pred)
+	}
+	fmt.Fprintf(stdout, "For the overlap window, set IDENTITY_PREDECESSOR_DIR=%s on your Smart Gateway (from shn-gateway v1.13.0), so the topic Subscriptions made under the replaced key keep working; once it ends, unset it and remove %s.\n", pred, pred)
 	return 0
+}
+
+// predecessorDir is the subdirectory of a key directory where shn rotate keeps
+// the signing key it replaces, for a Smart Gateway's IDENTITY_PREDECESSOR_DIR
+// during a rotation's overlap.
+const predecessorDir = "predecessor"
+
+// exitRotatedPredecessorNotKept is shn rotate's exit code when the registrar
+// accepted the new keys and they are written, but the replaced signing key
+// could not be kept in <out>/predecessor.
+const exitRotatedPredecessorNotKept = 3
+
+// predecessorFiles are what shn rotate keeps of the identity it replaces: the
+// signing key, from which a gateway derives the keys it opens and verifies
+// with during the overlap, and the manifest, which names the holder. Never
+// the encryption key, which nothing needs after a rotation.
+var predecessorFiles = []string{signKeyFile, manifestFile}
+
+// sweepStaging removes the staging directories an interrupted rotation left
+// in dir. One it cannot remove is left; staging makes a new one beside it.
+func sweepStaging(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "."+predecessorDir+"-") {
+			_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+		}
+	}
+}
+
+// stagePredecessor copies the predecessor files of dir into a new staging
+// directory inside it, each readable and writable by its owner alone, and
+// returns that directory.
+func stagePredecessor(dir string) (string, error) {
+	staged, err := os.MkdirTemp(dir, "."+predecessorDir+"-")
+	if err != nil {
+		return "", err
+	}
+	for _, name := range predecessorFiles {
+		if err := copyKeyFile(filepath.Join(dir, name), filepath.Join(staged, name)); err != nil {
+			os.RemoveAll(staged)
+			return "", err
+		}
+	}
+	return staged, nil
+}
+
+// copyKeyFile copies src to a new file dst with src's permission bits
+// narrowed to its owner's (perm & 0o600): a kept key is never readable by
+// anyone else, whatever its original allowed.
+func copyKeyFile(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	perm := info.Mode().Perm() & 0o600
+	if err := os.WriteFile(dst, b, perm); err != nil {
+		return err
+	}
+	return os.Chmod(dst, perm) // the umask cannot narrow them further
+}
+
+// installPredecessor makes staged the predecessor directory pred, replacing
+// any directory already there, and reports whether one was.
+func installPredecessor(staged, pred string) (replaced bool, err error) {
+	if _, err := os.Lstat(pred); err == nil {
+		replaced = true
+		if err := os.RemoveAll(pred); err != nil {
+			return true, err
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	return replaced, os.Rename(staged, pred)
 }

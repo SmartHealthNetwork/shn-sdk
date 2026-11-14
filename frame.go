@@ -234,6 +234,78 @@ const (
 	FrameHeaderTaskLocation = "taskLocation"
 )
 
+// The headers of a topic Subscription and its notifications, which cross the
+// network sealed. Each sits inside the
+// sealed payload, so the Hub never sees it, and each is carried exactly. Each
+// is framed only on a subscription's subscribe or signal leg, so
+// taking the leg implies them and no request-frame token declares them.
+const (
+	// FrameHeaderSubscriptionEndpoint is a request-frame header. On a
+	// subscribe leg's create or update, it is the subscriber's
+	// channel.endpoint sealed by its gateway, "<kid>.<sealed>", with <kid> 11
+	// base64url characters and <sealed> base64url; on a search by url during
+	// a sealing-key overlap, two such values separated by one space. On a
+	// signal leg, it is the sealed endpoint read from the
+	// notification address the notifier's system posted to.
+	FrameHeaderSubscriptionEndpoint = "subscriptionEndpoint"
+
+	// FrameHeaderSubscriptionChannel is a request-frame header: the
+	// subscriber's channel.header values, sealed by its gateway beside the
+	// sealed endpoint, "<kid>.<sealed>". It is framed on a subscribe leg's
+	// create or update, and on every notification.
+	FrameHeaderSubscriptionChannel = "subscriptionChannel"
+
+	// FrameHeaderStatedBase is the notifier's FHIR base that a message's
+	// absolute addresses lie under, an absolute URL with no query, no
+	// fragment and no ending slash, carried exactly. It is framed in two
+	// places: as an answer-frame header for a 2xx answer on a subscribe leg,
+	// whose absolute addresses (an entry's fullUrl, a paging link) it names
+	// the base of; and as a request-frame header on a signal leg, for the
+	// notification's absolute addresses. The subscriber's gateway decides
+	// which absolute addresses it re-keys to its per-counterpart base by a
+	// match against this base at a path segment's boundary, never by text.
+	// This library reads no shape into the value: checking it is the
+	// gateway's. Like FrameHeaderOperationBase, it is an address into a
+	// participant's system.
+	FrameHeaderStatedBase = "statedBase"
+
+	// FrameHeaderSubscriptionLocation is an answer-frame header, framed only
+	// for a 2xx answer to a subscribe leg's create or update: the tail of the
+	// Location the notifier's system answered, "Subscription/<id>" or
+	// "Subscription/<id>/_history/<vid>", when that Location lies under the
+	// notifier's own base, matched at a path segment's boundary and never as
+	// a string prefix. Deciding that is the notifier's gateway's; otherwise it
+	// frames no location. <id> and <vid> are FHIR ids, and
+	// ParseSubscriptionLocation reads the value. Like FrameHeaderTaskLocation,
+	// it is a path relative to a base the receiving gateway supplies, never
+	// an address into a participant's system.
+	FrameHeaderSubscriptionLocation = "subscriptionLocation"
+
+	// FrameHeaderSubscriptionRequest is a request-frame header, framed on
+	// every request of a subscription's subscribe leg: the interaction the
+	// subscriber's system made at its per-counterpart base, as the method,
+	// one space, and the path below that base with its query, from a closed
+	// set (ParseSubscriptionRequest reads it): "POST Subscription",
+	// "GET Subscription/<id>[?<query>]",
+	// "GET Subscription/<id>/_history/<vid>[?<query>]",
+	// "PUT Subscription/<id>", "DELETE Subscription/<id>",
+	// "GET Subscription/<id>/$status", "GET Subscription?<query>" and
+	// "GET ?_getpages=<x>…". A search's query never carries url: the
+	// endpoint travels only sealed, in FrameHeaderSubscriptionEndpoint, and
+	// the notifier's gateway writes the url (ParseSubscriptionSearch writes
+	// the value from the subscriber's own search). Like FrameHeaderReadPath,
+	// it is a path relative to a base the receiving gateway supplies, never
+	// an address into a participant's system.
+	FrameHeaderSubscriptionRequest = "subscriptionRequest"
+)
+
+// FrameHeaderIfMatch is a request-frame header, framed only on a
+// subscription's subscribe leg's update and delete: the If-Match the
+// subscriber's system sent, carried exactly as sent. The network adds none. Like the answer headers, it is spelled as the
+// HTTP field it carries, and a frame carries the value, it does not judge it
+// as a validator.
+const FrameHeaderIfMatch = "If-Match"
+
 // ErrFramedDTRUnsupported: the payer has not declared RequestFrameV1Op, so a
 // framed DTR operation is not sent to it.
 var ErrFramedDTRUnsupported = errors.New("payer gateway does not support framed DTR operations (upgrade required)")
@@ -282,13 +354,18 @@ const (
 // DTR operations, the answer's own headers above to carry a 2xx as sent, the
 // operation's address headers (operationSubpath, operationBase,
 // operationAddressTags) with framed DTR operations' addresses, the CDex
-// Task's headers (readPath, taskLocation) with a payer's read of its Task, and
-// cdsService with a CDS Hooks request naming the recipient's own service.
+// Task's headers (readPath, taskLocation) with a payer's read of its Task,
+// cdsService with a CDS Hooks request naming the recipient's own service, and
+// a topic Subscription's headers (subscriptionEndpoint, subscriptionChannel,
+// statedBase, subscriptionRequest, subscriptionLocation) and If-Match with
+// notifications across the network.
 var allowedFrameHeaders = map[string]bool{
 	"Content-Type": true, FrameHeaderContractVersion: true, FrameHeaderOperation: true,
 	FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true,
 	FrameHeaderOperationSubpath: true, FrameHeaderOperationBase: true, FrameHeaderOperationAddressTags: true,
 	FrameHeaderReadPath: true, FrameHeaderTaskLocation: true, FrameHeaderCDSService: true,
+	FrameHeaderSubscriptionEndpoint: true, FrameHeaderSubscriptionChannel: true, FrameHeaderStatedBase: true,
+	FrameHeaderSubscriptionRequest: true, FrameHeaderSubscriptionLocation: true, FrameHeaderIfMatch: true,
 }
 
 // frameHeaderNames maps each allowlisted header's name, folded to ASCII lower
@@ -324,12 +401,16 @@ func asciiLower(s string) string {
 // exactFrameHeaders are the headers whose values a frame must carry exactly:
 // the three answer headers above, carried as sent, the operation's address
 // headers, whose tags are read byte for byte, the CDex Task's headers, a
-// path a gateway sends on as it reads it, and cdsService, a service id the
-// recipient's system declared. Content-Type keeps the encoder's older rule.
+// path a gateway sends on as it reads it, cdsService, a service id the
+// recipient's system declared, a topic Subscription's headers, sealed
+// values, a base, an interaction and a location read byte for byte, and
+// If-Match, carried as sent. Content-Type keeps the encoder's older rule.
 var exactFrameHeaders = map[string]bool{
 	FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true,
 	FrameHeaderOperationSubpath: true, FrameHeaderOperationBase: true, FrameHeaderOperationAddressTags: true,
 	FrameHeaderReadPath: true, FrameHeaderTaskLocation: true, FrameHeaderCDSService: true,
+	FrameHeaderSubscriptionEndpoint: true, FrameHeaderSubscriptionChannel: true, FrameHeaderStatedBase: true,
+	FrameHeaderSubscriptionRequest: true, FrameHeaderSubscriptionLocation: true, FrameHeaderIfMatch: true,
 }
 
 // ErrFrameHeaderTooLarge is a header segment over the limit DecodeHTTPFrame
