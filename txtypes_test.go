@@ -8,8 +8,8 @@ import (
 
 func TestTransactionTypeNames(t *testing.T) {
 	all := PrefixedTransactionTypes()
-	if len(all) != 14 {
-		t.Fatalf("%d legs, want 14", len(all))
+	if len(all) != 17 {
+		t.Fatalf("%d legs, want 17", len(all))
 	}
 	for flat, prefixed := range all {
 		ws, name, ok := strings.Cut(prefixed, ".")
@@ -71,9 +71,9 @@ func TestTransactionTypeAnswerEnvelope(t *testing.T) {
 	}
 }
 
-// A CDex Task subscription's two legs are in the table ahead of their taxonomy
-// rows, each a pa leg marked with the release that will carry its row, 1.13.0,
-// with a FHIR answer envelope, by either name.
+// A CDex Task subscription's two legs are in the table, each a pa leg marked
+// with the release that carries its taxonomy row, 1.13.0, with a FHIR answer
+// envelope, by either name.
 func TestTransactionTypes_SubscriptionLegs(t *testing.T) {
 	for _, flat := range []string{"cdex-task-subscribe", "cdex-task-signal"} {
 		prefixed := "pa." + flat
@@ -83,6 +83,29 @@ func TestTransactionTypes_SubscriptionLegs(t *testing.T) {
 		for _, name := range []string{flat, prefixed} {
 			if since, ok := TransactionTypeSince(name); !ok || since != "1.13.0" {
 				t.Errorf("%s: since %q %v, want 1.13.0", name, since, ok)
+			}
+			if env, ok := TransactionTypeAnswerEnvelope(name); !ok || env != AnswerEnvelopeFHIR {
+				t.Errorf("%s: answer envelope %q %v, want %q", name, env, ok, AnswerEnvelopeFHIR)
+			}
+		}
+	}
+}
+
+// A PAS topic Subscription's three legs are in the table ahead of their
+// taxonomy rows, each a pa leg marked with the shn-gateway release that will
+// carry its row, 1.16.0, with a FHIR answer envelope, by either name.
+func TestTransactionTypes_PASSubscriptionLegs(t *testing.T) {
+	for _, flat := range []string{"pas-subscription-subscribe", "pas-subscription-notify", "pas-subscription-signal"} {
+		prefixed := "pa." + flat
+		if p, ok := PrefixedTransactionType(flat); !ok || p != prefixed {
+			t.Errorf("%s: prefixed %q %v, want %q", flat, p, ok, prefixed)
+		}
+		if f, ok := FlatTransactionType(prefixed); !ok || f != flat {
+			t.Errorf("%s: flat %q %v, want %q", prefixed, f, ok, flat)
+		}
+		for _, name := range []string{flat, prefixed} {
+			if since, ok := TransactionTypeSince(name); !ok || since != "1.16.0" {
+				t.Errorf("%s: since %q %v, want 1.16.0", name, since, ok)
 			}
 			if env, ok := TransactionTypeAnswerEnvelope(name); !ok || env != AnswerEnvelopeFHIR {
 				t.Errorf("%s: answer envelope %q %v, want %q", name, env, ok, AnswerEnvelopeFHIR)

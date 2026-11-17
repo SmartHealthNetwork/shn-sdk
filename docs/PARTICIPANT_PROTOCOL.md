@@ -405,7 +405,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. At most 8 tokens, each matching `^[a-z0-9]{1,16}$`. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
 | `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`). A current SDK or Smart Gateway build declares `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0` by default (shn-sdk v0.62.0 and gateways before v0.62.0 also declared `pa.pdex@2.1`; from shn-gateway v0.62.0 a gateway whose declared set names it refuses to boot, and from shn-sdk v0.63.0 the SDK refuses a set naming it); the lines the network's gateways can build or bridge are the discovery descriptor's `bridgedContractVersions` (§1a). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. An originating Smart Gateway reads the recipient's declaration to choose each leg's contract line (version-matched routing, §8.6). |
 | `requestFrames` | **Optional** JSON array of the sealed request-frame versions this holder accepts (today `"v1"`, `"v1op"`, from shn-sdk v1.8.0 `"v1opsub"`, and from shn-sdk v1.11.0 `"cdexloc"` and `"v1cds"` — see §6.3). **Self-declared**, with the same limits as `messageFrames` (at most 8 tokens, each `^[a-z0-9]{1,16}$`). A current SDK/gateway build stamps `"v1"` and `"v1op"` by default, like `messageFrames`. This SDK never stamps `"v1opsub"`: only a holder whose own system honors `operationSubpath` declares it (§6.3). From shn-gateway v1.8.0 a payer's Smart Gateway declares `"v1opsub"`, with the request frames it serves, in the capability declaration it makes at each start (§2.4); a provider's declares none of its own, until, from shn-gateway v1.12.0, a provider's Smart Gateway that takes the payer's attachment request (its participant sets `PROVIDER_CDEX_TASK_URL`) declares `"cdexloc"` there, with the request frames it serves, which replaces the set its registration carried. This SDK does not stamp `"cdexloc"` or `"v1cds"` either: only a provider's holder that frames `taskLocation` declares `"cdexloc"`, and only a holder whose own system calls the CDS service `cdsService` names declares `"v1cds"` (§6.3). Omitted ⇒ requests to you are sent bare. Outside the PoP signing payload. |
-| `legs` | **Optional** JSON array of the request legs this holder takes as recipient, each named by its flat transaction type (`"cdex-attachment-submit"`, never a `pa.`-prefixed name). **Self-declared** by the system answering at `baseURL`: from shn-gateway v1.1.0, a Smart Gateway declares its own as it starts (`PUT /register/{id}/capabilities`, §2.4), and a registration the SDK builds leaves it absent. **Absent and empty differ.** Absent (or `null`) declares no list, the registration of a build older than this field; `[]` declares that the holder takes none. The Hub refuses a leg the network marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0, `cdex-attachment-request`, since 1.5.0, and `cdex-task-status`, since 1.12.0) to a recipient whose list lacks it, and to one that declares no list (§6.1). Every other leg is routed whatever the holder declares. On a rotation, absent `legs` keeps the legs held (§2.4). Each element must be a leg of the network, named once, whose row (§4.3) names the holder's `role` for its recipient: a payer declares no leg a provider answers, and the reverse. Outside the PoP signing payload. |
+| `legs` | **Optional** JSON array of the request legs this holder takes as recipient, each named by its flat transaction type (`"cdex-attachment-submit"`, never a `pa.`-prefixed name). **Self-declared** by the system answering at `baseURL`: from shn-gateway v1.1.0, a Smart Gateway declares its own as it starts (`PUT /register/{id}/capabilities`, §2.4), and a registration the SDK builds leaves it absent. **Absent and empty differ.** Absent (or `null`) declares no list, the registration of a build older than this field; `[]` declares that the holder takes none. The Hub refuses a leg the network marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0, `cdex-attachment-request`, since 1.5.0, `cdex-task-status`, since 1.12.0, and `cdex-task-subscribe` and `cdex-task-signal`, each since 1.13.0) to a recipient whose list lacks it, and to one that declares no list (§6.1). Every other leg is routed whatever the holder declares. On a rotation, absent `legs` keeps the legs held (§2.4). Each element must be a leg of the network, named once, whose row (§4.3) names the holder's `role` for its recipient: a payer declares no leg a provider answers, and the reverse. Outside the PoP signing payload. |
 | `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted**: on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). At admission the registrar checks only the role and this uniqueness; the entry-shape rules (count, both parts present, no whitespace or `\|`, no repeats) are applied by `PUT /register/{id}/payer-ids` and by the self-serve access request (§2.3a). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). Identities acquired **after** admission are attested through `PUT /register/{id}/payer-ids` (§2.4) — same authority — so a payer never re-onboards to become routable on a new one. |
 | `providerIds` | **Not accepted at registration.** A provider's organization NPIs are operator-attested through `PUT /register/{id}/provider-ids` (§2.4), each on the operator's recorded check; a registration carrying the field is refused (400 below). Served on `GET /holders` for `role=provider` only, and preserved across key rotation (§2.4). |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
@@ -892,10 +892,14 @@ the owner alone, once the registrar accepts the new keys, replacing what an earl
 kept there. Its output says to set the Smart Gateway's `IDENTITY_PREDECESSOR_DIR` to that
 directory for the overlap window and to remove the directory once the window ends. From
 shn-gateway v1.13.0 the gateway reads and checks that setting at start (shn-gateway
-`docs/CONFIGURATION.md`); the topic Subscription legs that use the replaced key are served from
-the release that serves them. A rotation the registrar refuses keeps nothing, and one that
-cannot copy the key aside (a key directory it cannot write) sends nothing. One the registrar
-accepted whose replaced key cannot be kept still writes the new keys, and exits 3.
+`docs/CONFIGURATION.md`); from that release a provider's gateway that takes a payer's
+Subscription to its Tasks' changes (`cdex-task-subscribe`) verifies its notification credential
+under it, and the other topic Subscription legs that use it are served from the release that
+serves them. A rotation the registrar refuses keeps nothing, and one that cannot copy the key
+aside (a key directory it cannot write) sends nothing. One the registrar accepted whose
+replaced key cannot be kept still writes the new keys, and exits 3. Run one rotation of a key
+directory at a time: two run at once on one directory can each remove the other's staging, and
+leave neither replaced key kept.
 
 **Rotation refreshes `messageFrames` from the submitted body** — unlike the
 operator-attested fields, the capability declaration is a property of the *current*
@@ -1806,12 +1810,11 @@ in one direction for one correlation.
   request's `subjectPCI` is absent, and one that names a patient gets the same 400; its
   response's names the patient the answer discloses, or is absent for an answer that
   discloses no patient's data. From the network's deploy, a leg that names no patient on
-  either side (its taxonomy row's `subject` is `none`, such as a notification's signal; no
-  leg is marked yet; the first marked legs are planned to ship with shn-gateway v1.13.0) is
-  the other: its request's and its response's `subjectPCI` are absent, one that names a
-  patient gets the same 400, and so does a request with an `involvement`, since the leg
-  involves no patient. On every other leg, a request with an `involvement` always names its
-  patient.
+  either side (its taxonomy row's `subject` is `none`; today `cdex-task-subscribe` and
+  `cdex-task-signal`, from shn-gateway v1.13.0) is the other: its request's and its
+  response's `subjectPCI` are absent, one that names a patient gets the same 400, and so
+  does a request with an `involvement`, since the leg involves no patient. On every other
+  leg, a request with an `involvement` always names its patient.
 - `correlationId` absent → 400 `{"error":"missing correlationId"}`
 - `operation` empty, or not lower-case ASCII letters, digits and hyphens starting with a letter or
   digit, at most 64 characters (`^[a-z0-9][a-z0-9-]{0,63}$`) → 400
@@ -1967,12 +1970,16 @@ list of transaction types and the authority each side needs: the Hub and the
 authorization policy enforce it, the discovery descriptor's operations derive
 from it, and a new transaction type is added there. Each transaction type belongs to
 one workstream: `federated-query` to Federated Query Services (`fqs`), the others to
-Prior Authorization (`pa`). Every leg is a provider's request but two: from shn-gateway
+Prior Authorization (`pa`). Every leg is a provider's request but three: from shn-gateway
 v1.5.0, `cdex-attachment-request` is the payer's, a CDex 2.1.0 Task Attachment Request for the
 provider's own Task endpoint, routed only to a provider whose registry entry lists the leg
-(§2.3 `legs`); and from shn-gateway v1.12.0, `cdex-task-status` is the payer's FHIR read or
+(§2.3 `legs`); from shn-gateway v1.12.0, `cdex-task-status` is the payer's FHIR read or
 vread of a Task it created that way, routed the same way. Its request names no patient: the
-answer's does (§4.1, §6.1c).
+answer's does (§4.1, §6.1c). And from shn-gateway v1.13.0, `cdex-task-subscribe` is the
+payer's topic Subscription to the changes of its Tasks at the provider, on the HRex Task topic,
+routed the same way: its create, read, vread, update, delete, search and instance `$status` at
+the provider's own Subscription endpoint (§6.3). Neither its request nor its answer names a
+patient (§4.1, §6.1).
 
 Each transaction type has a second name: its workstream's prefix, a dot, and the name
 the table lists (`pa.pas-claim`, `fqs.federated-query`). Wire protocol 2.0.0 names a leg
@@ -1987,7 +1994,7 @@ lists. From shn-sdk v1.0.0, the SDK's originators (`RunEligibility`, `RunPriorAu
 answers under the name the request used. The token's `operation` is the same whichever
 name the envelope uses.
 
-Under the Smart Gateway's stability promise (shn-gateway `STABILITY.md`), the `coverage-eligibility`, `patient-dtr` and `federated-query` legs are evolving at shn-gateway v1.0, the `cdex-attachment-submit` leg is evolving from shn-gateway v1.1.0, the release that adds it, the `cdex-attachment-request` leg is evolving from shn-gateway v1.5.0, the release that adds it, and the `cdex-task-status` leg is evolving from shn-gateway v1.12.0, the release that adds it, while this protocol's own versioning still governs their names.
+Under the Smart Gateway's stability promise (shn-gateway `STABILITY.md`), the `coverage-eligibility`, `patient-dtr` and `federated-query` legs are evolving at shn-gateway v1.0, the `cdex-attachment-submit` leg is evolving from shn-gateway v1.1.0, the release that adds it, the `cdex-attachment-request` leg is evolving from shn-gateway v1.5.0, the release that adds it, and the `cdex-task-status` leg is evolving from shn-gateway v1.12.0, the release that adds it, and the `cdex-task-subscribe` and `cdex-task-signal` legs are evolving from shn-gateway v1.13.0, the release that adds them, while this protocol's own versioning still governs their names.
 
 | `transactionType` (envelope) | Request `operation` | Response `operation` |
 |---|---|---|
@@ -2003,6 +2010,8 @@ Under the Smart Gateway's stability promise (shn-gateway `STABILITY.md`), the `c
 | `cdex-attachment-submit` (from shn-gateway v1.1.0) | `cdex-attachment-submit` | `cdex-attachment-submit-response` |
 | `cdex-attachment-request` (from shn-gateway v1.5.0) | `cdex-attachment-request` | `cdex-attachment-request-response` |
 | `cdex-task-status` (from shn-gateway v1.12.0) | `cdex-task-read` | `cdex-task-read-response` |
+| `cdex-task-subscribe` (from shn-gateway v1.13.0) | `cdex-task-subscribe` | `cdex-task-subscribe-response` |
+| `cdex-task-signal` (from shn-gateway v1.13.0) | `cdex-task-signal` | `cdex-task-signal-response` |
 
 From shn-gateway v1.10.0, and from shn-sdk v1.11.0 for the SDK's `Responder`, the body a Smart
 Gateway writes when it refuses a leg itself, with no answer from its participant's system to carry
@@ -2010,8 +2019,8 @@ Gateway writes when it refuses a leg itself, with no answer from its participant
 leg's answer envelope, which the network's leg taxonomy names for each transaction type. It is an
 `OperationOutcome` (`application/fhir+json`) on `coverage-eligibility`, `dtr-questionnaire-fetch`,
 `pas-claim`, `pas-claim-update`, `pas-claim-inquire`, `federated-query`, `cdex-attachment-submit`,
-`cdex-attachment-request` and `cdex-task-status`, whose clients reach them through a FHIR
-operation or interaction; and
+`cdex-attachment-request`, `cdex-task-status`, `cdex-task-subscribe` and `cdex-task-signal`, whose clients reach
+them through a FHIR operation or interaction; and
 `{"error": …}` (`application/json`) on `crd-order-select`, `crd-order-dispatch` and `patient-dtr`.
 Earlier releases write `{"error": …}` on every leg, so while a counterpart runs one, a client of a
 FHIR operation can receive either body: read an `OperationOutcome` first. A participant's own
@@ -2024,13 +2033,16 @@ Standard authority frames:
 | Provider → payer (eligibility, CRD, DTR, PAS submit, update and inquire; from shn-gateway v1.1.0, CDex `$submit-attachment`) | `provider-tpo` | `payer-coverage` |
 | Provider → facility (federated query) | `provider-tpo` | `facility-disclosure` |
 | Provider → PHG (patient-authored DTR, `patient-dtr`) | `provider-tpo` | `patient-authorship` |
-| Payer → provider (from shn-gateway v1.5.0, a CDex attachment-request Task; from shn-gateway v1.12.0, the payer's read of that Task) | `payer-payment` | `provider-disclosure` |
+| Payer → provider (from shn-gateway v1.5.0, a CDex attachment-request Task; from shn-gateway v1.12.0, the payer's read of that Task; from shn-gateway v1.13.0, the payer's Subscription to its Tasks' changes) | `payer-payment` | `provider-disclosure` |
+| Provider → payer (from shn-gateway v1.13.0, a notification of a change to the payer's CDex Tasks) | `provider-disclosure` | `payer-payment` |
 
 The policy also checks the caller's registered role: a `provider-tpo` request comes
 from a `provider`, a `payer-coverage` response from a `payer`, a
 `facility-disclosure` response from a `facility`, and a `patient-authorship`
 response from the `phg`; from shn-gateway v1.5.0, a `payer-payment` request comes from a
-`payer`, and a `provider-disclosure` response from a `provider`. Every operation rides an envelope.
+`payer`, and a `provider-disclosure` response from a `provider`; from shn-gateway v1.13.0, a
+`provider-disclosure` request comes from a `provider`, and a `payer-payment` response from a
+`payer`. Every operation rides an envelope.
 
 ### 4.4 Per-leg token verification — `VerifyBound`
 
@@ -2177,11 +2189,17 @@ token's patient and again under each involved patient, marked with how that
 patient is involved. On a request that is each `routed`, `unreachable` or
 `failed` record; on the answer, the `answered` record, under the patients the
 request named and the payer's own binding (a patient named on both is recorded
-once). A request refused before the Hub can read `involved` (a payload that does
-not match its token) is recorded under the leg token's patient only, and from
-the network's deploy, only when that patient fits the leg
-(below): a token whose patient does not fit the leg is refused with nothing
-recorded. The Hub
+once). A `failed` record that closes a leg is filed under the request's
+patients, and, from the network's deploy, under the answer's too once its
+`answered` record may have been written (§6.1a): the answer token's patient on
+a leg that takes its patient from the answer, and, after that record was
+written, the payer's own binding. A request refused before the Hub can read
+`involved` (a payload that does not match its token) is recorded under the leg
+token's patient only, and from the network's deploy, only when that token
+authorizes the leg in every other respect: it verifies, is for the leg's
+frame, operation, `correlationId` and holder (the sender), carries no
+`involvement`, and names a patient that fits the leg (below). Any other token
+is refused with nothing recorded. The Hub
 removes `involved` from the envelope before forwarding the request and before
 returning the answer, so neither gateway receives the other patients' identifiers
 from it. Each holder's own view of its audit records includes the records
@@ -2244,17 +2262,25 @@ The Hub enforces:
   deploy, this is checked before the payload hash on every leg: a
   token whose patient does not fit the leg, over a payload its hash does not
   match, is refused the same 403 with nothing recorded, never recorded `denied`.
+  So, from the network's deploy, are the token's other bindings: one that
+  verifies but is for another frame, operation, `correlationId` or holder, or
+  carries an `involvement`, over a payload its hash does not match, is refused
+  403 `authz token verification failed` with nothing recorded, where the Hub had
+  recorded it `denied` under the token's patient and answered 502. Only a token
+  that authorizes the leg in every respect but the payload reaches the 502
+  `payload hash mismatch` and its `denied` record.
 - From the network's deploy, a leg that names no patient on either side (its
-  taxonomy row's `subject` is `none`, such as a notification's signal; no leg is
-  marked yet; the first marked legs are planned to ship with shn-gateway v1.13.0) is
-  held to the same rule on both sides, at every conformance level. A request token
-  that names a patient is refused 403 as above. An answer whose token names a
-  patient is refused as the Hub refuses an answer: 502 `authz token's patient does
-  not fit the leg`, marked `X-SHN-Delivered: yes` (the recipient answered), the
-  answer not delivered and no `answered` record written. Such a leg involves no
-  patient: an `involved` list on its request is refused (400 `involved patients
-  refused`), one on its answer is dropped and never recorded, and every record of
-  the exchange names no patient. It has no requester-side binding record (§6.1c).
+  taxonomy row's `subject` is `none`; today `cdex-task-subscribe` and
+  `cdex-task-signal`, from shn-gateway v1.13.0) is held to the same rule on both
+  sides, at every
+  conformance level. A request token that names a patient is refused 403 as above.
+  An answer whose token names a patient is refused as the Hub refuses an answer:
+  502 `authz token's patient does not fit the leg`, marked `X-SHN-Delivered: yes`
+  (the recipient answered), the answer not delivered and no `answered` record
+  written. Such a leg involves no patient: an `involved` list on its request is
+  refused (400 `involved patients refused`), one on its answer is dropped and never
+  recorded, and every record of the exchange names no patient. It has no
+  requester-side binding record (§6.1c).
 - The envelope must not have been routed while its token lives (409 replay
   rejection). The Hub keys this on the pair the token binds — the
   `correlationId` and the ciphertext's hash — so exactly a byte-identical
@@ -2463,7 +2489,8 @@ request record and answers `422` with `X-SHN-Delivered: no`:
 **A leg its recipient does not take.** Between steps 3 and 4, for a leg the network
 marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0,
 `cdex-attachment-request`, since 1.5.0, and, from shn-gateway v1.12.0,
-`cdex-task-status`),
+`cdex-task-status`, and from shn-gateway v1.13.0, `cdex-task-subscribe` and
+`cdex-task-signal`),
 the Hub checks the recipient's `legs` (§2.3). A recipient whose list lacks the leg,
 `[]` included, or that declares no list — it registered with a build older than the
 declaration, and so older than the leg — is never contacted. The Hub appends a
@@ -2688,15 +2715,36 @@ captured envelope + assertion — they are the same bytes, and rejecting them is
 the point of the guard (§5.1). Nor can the Hub know whether a failed forward
 actually reached the recipient (a timeout can fire after delivery). Never
 releasing an envelope keeps each one to at most one routed attempt, never two
-`routed` records for the same bytes: `routed` + `answered`, `routed` + `failed`,
-or `routed` alone. When the Hub refuses an answer envelope the recipient
-returned (it cannot decode, verify or record it: a `502`
-marked `X-SHN-Delivered: yes`, §6.1), it closes the leg `failed`. A `routed`
-record stands alone only when the Hub cannot write that closing record either.
-One leg can also carry both terminal records, `answered` and then `failed`: when
-the Audit Plane wrote the `answered` record but the Hub did not learn it had
-(the acknowledgement was lost), the Hub refuses the answer it could not record
-and closes the leg `failed`. The later record is what the requester got.
+`routed` records for the same bytes. Its leg is closed by `answered` or
+`failed`. When the Hub refuses an answer envelope the recipient returned (it
+cannot decode, verify or record it: a `502` marked `X-SHN-Delivered: yes`,
+§6.1), it closes the leg `failed`. A `routed` record stands alone only when the
+Hub cannot write that closing record either.
+
+An append whose outcome the Hub cannot know may still have been written: the
+Audit Plane may have taken a record it did not acknowledge. From the network's
+deploy, an append is known not written only when the Audit Plane refused it (a
+`4xx` other than `408` and `429`); one that got no answer, timed out or met a
+`5xx` or `429` may have been. So one leg can carry:
+
+- `failed` alone, or `routed` and `failed`: the leg's `routed` record may have
+  been written when the Hub refused the leg before the forward (the `503`
+  marked `X-SHN-Delivered: no`, §6.1), and the Hub closes it `failed` (from the
+  network's deploy). Under the request's patients, `failed` alone is a leg
+  refused before its forward.
+- `answered` and `failed`: the `answered` record may have been written when
+  the Hub refused the answer it could not record, or the Hub wrote it and then
+  could not return the answer (a `500` marked `X-SHN-Delivered: yes`; closed
+  from the network's deploy).
+
+Each close is filed under every patient the leg's records may name (§5.1),
+from the network's deploy the answer's own among them. Under a patient only the
+answer names, a `failed` record can stand alone: the leg was forwarded, and
+that patient's `answered` record was not written after all. A leg's records
+reach the chain in the order the Audit Plane took them, which need not be the order the
+Hub wrote them in, so read a leg by the set of its records: when it holds a
+`failed` record, that is what the requester got, whichever record the chain
+holds first.
 
 **A retry is a new exchange.** It gets its own audit trail and its own
 processing at the recipient, which may see the same `correlationId` more than
@@ -2785,18 +2833,24 @@ Two things are **not** leg outcomes:
   `unreachable` for an unknown recipient, `routed` +
   `failed` for a forward that did not reach the recipient or a transport
   assertion the Hub could not mint), or no record at all when the Hub refused
-  the envelope at verification or as a replay, could not write its `routed`
-  record, or could not encode the envelope. A leg your gateway reports as
+  the envelope at verification or as a replay, or could not encode the
+  envelope. When the Hub could not write all its `routed` records, each one
+  written is closed, `routed` + `failed`, and from the network's deploy so is
+  each whose outcome is unknown (`failed` alone if it was not written after
+  all, §6.1a); when the Audit Plane refused the leg's own `routed` record, the
+  chain holds none of the leg's records. A leg your gateway reports as
   `failed` because the Hub could not accept the recipient's answer
   (`X-SHN-Delivered: yes`: it could not read, decode, verify or record it) is
   `routed` + `failed`, and so is one the recipient may have received
   (`unknown`). A `failed` record closing a refused answer is the request's own
   record with only its outcome, time and record id changed: nothing in it
   comes from the answer.
-  The leg's own `routed` record is followed by its `answered` or `failed`
+  The leg's own `routed` record is closed by its `answered` or `failed`
   record, also when your gateway stopped waiting for the Hub, unless an append
   fails (the Hub then answers `audit append failed`, if your gateway is still
-  waiting). An involved patient's paired `answered` record can be missing
+  waiting). The chain holds a leg's records in the order the Audit Plane took
+  them, so a `failed` record can come first: read a leg by the set of its
+  records (§6.1a). An involved patient's paired `answered` record can be missing
   (§5.1, "The Hub enforces").
 
 ### 6.1c Requester-side binding record — `POST /requester-binding`
@@ -2813,8 +2867,7 @@ binding here, after it has delivered the answer, so the Hub records the read und
 beside the responder's.
 
 From the network's deploy, a leg that names no patient on either side (its row's `subject`
-is `none`; no leg is marked yet; the first marked legs are planned to ship with
-shn-gateway v1.13.0) has no such record: its answer discloses no patient to bind, so the
+is `none`; today `cdex-task-subscribe` and `cdex-task-signal`, from shn-gateway v1.13.0) has no such record: its answer discloses no patient to bind, so the
 Hub refuses a record for it 403, as for any leg whose patient is not bound from its
 answer.
 
@@ -3545,7 +3598,7 @@ or signal leg, from the release that serves that leg: taking the leg implies the
 no `requestFrames` token declares them.
 
 - **`subscriptionRequest`**, a request-frame header. From shn-sdk v1.12.0, and only from the
-  release that serves the leg (the leg table marks each subscribe leg from shn-gateway v1.13.0),
+  release that serves the leg (the leg table marks `cdex-task-subscribe` from shn-gateway v1.13.0),
   on every request of a subscribe leg: the interaction the
   subscriber's system made at its per-counterpart base, as the method, one space, and the path
   below that base with its query, one of `POST Subscription` (create),
@@ -3594,8 +3647,8 @@ no `requestFrames` token declares them.
   values, sealed by its gateway beside the sealed endpoint, `<kid>.<sealed>`. An empty set is
   sealed too.
 - **`statedBase`**, an answer-frame header and a request-frame header. From shn-sdk v1.12.0,
-  and only from the release that serves the leg (the leg table marks each subscribe and signal
-  leg from shn-gateway v1.13.0): the notifier's FHIR base that a message's absolute addresses
+  and only from the release that serves the leg (the leg table marks `cdex-task-subscribe`
+  and `cdex-task-signal` from shn-gateway v1.13.0): the notifier's FHIR base that a message's absolute addresses
   lie under, an absolute URL with no query, no fragment and no ending slash, carried exactly.
   It is framed on a subscribe leg's 2xx answer, for the answer's absolute addresses (an entry's
   `fullUrl`, a paging `link`), and on a signal leg's request, for the notification's. The
@@ -3604,7 +3657,7 @@ no `requestFrames` token declares them.
   shape into the value; checking it is the gateway's. Like `operationBase`, it is an address
   into a participant's system.
 - **`subscriptionLocation`**, an answer-frame header. From shn-sdk v1.12.0, and only from the
-  release that serves the leg (the leg table marks each subscribe leg from shn-gateway v1.13.0),
+  release that serves the leg (the leg table marks `cdex-task-subscribe` from shn-gateway v1.13.0),
   on a subscribe leg's `2xx` answer to a create or an update: the tail of the `Location` the
   notifier's system answered, `Subscription/<id>` or `Subscription/<id>/_history/<vid>`, where
   `<id>` and `<vid>` are FHIR ids other than `.` and `..`. It is framed only when that `Location`
@@ -3616,6 +3669,292 @@ no `requestFrames` token declares them.
   subscriber's gateway that sealed them; no other party reads them.
 - **An older decoder** (before shn-sdk v1.12.0) drops all six without error and reads the
   rest of the frame as before; a frame that carries none of them is unchanged, byte for byte.
+- **Only on a subscribe or signal leg.** From shn-gateway v1.13.0 a gateway of any role refuses,
+  at every conformance level and before its leg's handler runs, a request whose frame names
+  `subscriptionRequest` or `If-Match` on a leg other than a subscribe leg, `subscriptionEndpoint`
+  or `subscriptionChannel` on a leg other than a subscribe or signal leg, or `statedBase` on a
+  leg other than a signal leg: `400 a topic Subscription's frame headers are not defined for this
+  transaction type`, recorded on message `integrity`.
+
+**A payer's Subscription at the provider's gateway (`cdex-task-subscribe`).** From shn-gateway
+v1.13.0 a provider's gateway whose participant sets `PROVIDER_CDEX_SUBSCRIPTION_SCOPE` serves
+the notifier's half of the leg at the provider's own Subscription endpoint, at the FHIR base its
+Task endpoint is under (shn-gateway `docs/CONFIGURATION.md`). The payer's half and the
+notifications, from the same release, are below. Every rule here is a network rule, the
+same at every conformance level. The gateway makes two registered edits on the leg, both on the
+request it forwards to its own system:
+
+| Edit, from shn-gateway v1.13.0 | When | What changes |
+|---|---|---|
+| E-19 `subscription-endpoint-rekey` | from shn-gateway v1.13.0, a create, or an update, once the Subscription is within the closed shape | `channel.endpoint` becomes the gateway's own notification address for the authenticated payer and the topic, naming the sealed endpoint the payer's gateway framed: written when the body states none (the payer's gateway sends the endpoint only sealed), and written over one the body states; `channel.header` becomes exactly the gateway's credential for that address (`Authorization: Bearer …`) and the payer's sealed headers (`X-SHN-Channel: …`). Made even where a signature covers the channel (Signatures, §7a.4), and named in `X-SHN-Edited`, after the payer's gateway's E-18 `subscription-header-seal`: `X-SHN-Edited: subscription-header-seal, subscription-endpoint-rekey`, each with `; signed="<carriers>"` where a signature covered the channel. The provider's gateway reads E-18 from the request's frame, never the body: a create's or an update's `subscriptionEndpoint` and `subscriptionChannel` are E-18's output by this frame contract, and a request missing either is refused. |
+| E-21 `subscription-url-search-rekey` | from shn-gateway v1.13.0, a search | the gateway writes the `url` its system is searched by, first, before the search's other parameters byte for byte as framed: the notification address E-19 writes for each sealed endpoint the payer's gateway framed in `subscriptionEndpoint` (two during that gateway's key overlap, one comma-separated value). The relay checks that the value names only this gateway's notification addresses for the payer the Hub authenticated. The search as framed names no `url`. Named in `X-SHN-Edited`. It changes the query, never signed content. |
+
+A read's or a vread's `_elements` and `_summary`, and a page's trailing `_elements`, are carried
+to the provider's system as sent; a page's `_elements`, and a search's, must keep `channel`. An
+update's or a delete's `If-Match` is carried as the HTTP `If-Match` of that forward, never of the
+gateway's own read before it, and is refused on any other interaction. An update of a
+Subscription the provider's system holds, a delete and an instance `$status` are forwarded only
+after the gateway reads the Subscription with the same token and finds it the payer's: its
+`channel.endpoint` is the gateway's notification address for that payer and topic, and the
+credential beside it verifies. A read's or vread's `2xx` is delivered only when it is such a
+Subscription, and a create's or an update's `2xx` that carries a Subscription only when it is
+the payer's, the network's `404` otherwise. The ownership test reads only `channel.endpoint` and the credential beside it, so only
+a subset that hides the channel (an `_elements` without `channel`, or `_summary=true`, which leaves
+out `channel.header`) is the network's `404`; one that hides the criteria or the filter is still the
+owner's own Subscription, and is delivered. A search's or a page's `2xx` is delivered only when
+every Subscription in it is the payer's. Every `2xx` is first held to the shape of the
+interaction it answers: a read or a vread, a Subscription; a create or an update, a Subscription,
+no body, or an OperationOutcome; a delete, an OperationOutcome or no body; a search or a page, a
+searchset Bundle whose entries are only Subscriptions and OperationOutcomes; an instance
+`$status`, a `searchset` (the Backport IG STU 1.1's) or `history` Bundle holding exactly one
+SubscriptionStatus Parameters whose `subscription` references the Subscription asked for, and
+whose `notification-event` parts reference only what the topic's notification shape declares: a
+`focus` is a Task (by its reference, relative or absolute; a `type`, when stated, must agree), and
+the HRex Task topic declares no `additional-context`, so any is refused; a reference whose type
+cannot be read one way only (`#x`, a urn, no reference) is refused too. A `$status` answer on
+this leg is held to the Backport SubscriptionStatus shape, and anything outside it is refused
+`502` on authority: every member at every depth is one that shape defines, of its type, so it
+carries no extension; no reference but the subscription's (a Subscription, by its reference and
+any type) and the focus's; its topic the topic's own canonical; and no address in its Bundle (an
+entry's `fullUrl`, `request.url` or `response.location`, a link's `url`), read with its
+percent-escapes decoded, names a resource type but Subscription or Parameters. A
+shape valid only for another interaction is refused, and nothing in any of them holds a
+resource but each Bundle entry's own. A delivered answer is carried as the provider's system
+sent it, framed with `statedBase`, the provider's base. From shn-gateway v1.13.0 a create's or
+an update's `2xx` is also framed with `subscriptionLocation`, the tail of the provider's
+`Location` (`Subscription/<id>` or `Subscription/<id>/_history/<vid>`), only when exactly one
+`Location`, resolved against the URL the answer came from, lies under the provider's base by the
+segment-boundary match the created Task's `taskLocation` is framed by, with no query or
+fragment, and its tail is what `ParseSubscriptionLocation` reads; otherwise none is framed and
+the answer is delivered as ever, and the gateway records why: `subscriptionLocation:no-location`
+(no `Location`) or `subscriptionLocation:not-under-base`.
+Nothing else frames one.
+
+From shn-gateway v1.13.0, every body on the leg is judged by its structure, never by the media type it is labelled with:
+FHIR JSON is a JSON object with a `resourceType`
+member, its name read in any case, after an optional byte order mark and whitespace, and a JSON
+object or array that is no resource itself but holds one anywhere is judged as FHIR JSON too;
+FHIR XML is an XML document whose root element is in the namespace `http://hl7.org/fhir`, and XML
+whose root is outside it but that holds an element in it anywhere, below the root or after it, is
+judged as FHIR XML too (the namespace is FHIR XML's marker, as `resourceType` is JSON's, and an
+element is in it only by an `xmlns` attribute in a tag naming it: XML that is not well-formed and
+declares it in a tag anywhere, or that declares it inside a comment, a processing instruction, a
+directive or a CDATA section holding markup, cannot be read one way only, and is refused as such,
+as is XML that names one attribute twice, has an element named `xmlns`, names a DTD a reader would
+fetch other than the W3C's HTML and XHTML ones while it declares the FHIR namespace anywhere (an
+error page naming a DTD of its own and declaring no FHIR namespace, such as Drupal's XHTML+RDFa
+page, is judged as if it named none; an HTML page's public id alone, such as Apache httpd's, names
+nothing to fetch and is read past), or declares an encoding outside the registry of those that
+read ASCII as ASCII, UTF-8 and the WHATWG Encoding Standard's single-byte encodings, Shift_JIS,
+EUC-JP, EUC-KR, GBK, GB18030 and Big5, each by any of its WHATWG labels (so UTF-7, EBCDIC,
+ISO-2022-JP and a label the standard does not name are refused; in an encoding the registry reads,
+the markup is read where its bytes show it, a character beyond ASCII in text or an attribute value
+is text, and a name holding one, which could read as another name differing only there, is read
+no further, as XML that is not well-formed);
+text that only contains the namespace, a link or escaped markup, declares nothing);
+a body of no bytes or whitespace only is no body; anything else (an HTML page, plain text, XML
+outside the FHIR namespace whose root is not a FHIR resource type and that holds no element in it,
+such as XHTML, a SOAP envelope, or an error naming `<Endpoint>` or `<Patient>` in no namespace, a
+JSON value holding no resource, text that decodes as no JSON value, a run of JSON strings, numbers,
+`true`, `false` or `null` followed by anything that is not FHIR JSON, such as `404 Not Found` or
+`404 {"error":"x"}`, a JSON object or array holding no resource followed by text that is no JSON
+value, such as `[404] Not Found` or an error object followed by a server's warning in HTML, and
+text that is no JSON value, whatever follows it, such as
+`Error: {"resourceType":"Patient"}`) is not FHIR. A body of JSON values in sequence is judged by
+its first: an OperationOutcome followed by text that is no JSON value is judged as that
+OperationOutcome. A body that begins with a UTF-16 or UTF-32 byte order mark or
+holds a NUL byte anywhere, a JSON object or array nested past the network's depth bound, FHIR
+JSON, or JSON that cannot be read one way only, after a first JSON value (such as
+`[{}] [{"resourceType":"Patient"}]`, or `1 {"resourceType":"Patient"}` after a run of JSON
+strings, numbers, `true`, `false` or `null`), XML whose DOCTYPE holds an internal subset, and XML whose root is named,
+case-exact, as a FHIR R4 resource type (a code of `http://hl7.org/fhir/ValueSet/resource-types`,
+such as `<Patient>`; not `<html>` or `<patient>`) outside the FHIR namespace (in none, another,
+or under a prefix bound to none) are not judged, and are refused wherever a body is judged, never carried.
+A `2xx` that is FHIR XML is
+refused, since the network reads only JSON and cannot check it, as is one that is not FHIR. The
+provider's own answers that are not a `2xx`, to the interaction or to the gateway's own read
+before it, are carried as sent once they pass one check: FHIR JSON passes only as an
+OperationOutcome holding no resource, FHIR XML only as an OperationOutcome root with no element
+below it named `contained`, or named as a FHIR resource type, at any depth, and one that is not FHIR (in UTF-8), or no body, is carried. The limit of
+these checks: the network judges the structure a conforming FHIR reader, JSON or XML, would see in
+the provider's answer, the differences between such readers included; it does not police the
+provider system's free text, so patient data a provider writes into prose is outside any
+structural check. A create or an update
+carries a Subscription as FHIR JSON: FHIR JSON or FHIR XML of another type is refused on
+authority, and a FHIR XML Subscription or any other body the gateway cannot read is the
+unreadable Subscription. The leg names no
+patient on either side, so a create or an update whose Subscription holds a resource (a
+`contained` member, or any object with a `resourceType` below the Subscription, whatever its
+type) is refused. The
+network carries no `Prefer` header on any leg: a subscriber's `Prefer` does not reach the
+provider's system, which answers a create or an update by its own default. The gateway refuses:
+
+| Refusal, from shn-gateway v1.13.0 | Status | Recorded |
+|---|---|---|
+| from shn-gateway v1.13.0, an instance's `_history` or the type-level `$status`, which are outside the leg's authority | `403` | `authority` |
+| from shn-gateway v1.13.0, a `PATCH`: the network re-keys a Subscription's channel only in a whole Subscription | `405` | `fidelity` |
+| from shn-gateway v1.13.0, any other interaction outside `subscriptionRequest`'s closed set, an id or version that is not a FHIR id, a read's or vread's query outside its set, or no `subscriptionRequest` | `400` | `routing` |
+| from shn-gateway v1.13.0, a read, delete, `$status`, search or page that carries a body; an `If-Match` on an interaction other than an update or a delete | `400` | `integrity` |
+| from shn-gateway v1.13.0, a create or update outside the closed shape (a topic Subscription on the HRex Task topic, `rest-hook`, `application/fhir+json`, `id-only`, the Backport IG's allowlisted extensions only, no `modifierExtension`), a filter without exactly one `requester:identifier` naming only identifiers the network attests for the payer, each as `system|value` (a bare value, which names no system and so matches that value in every system, is refused), or with a parameter other than `owner:identifier`, `code` or `status` | `403` | `authority` |
+| from shn-gateway v1.13.0, a create or update whose Subscription holds a resource; a create or update whose body is FHIR JSON or FHIR XML of another type, or a JSON object or array holding a resource | `403` | `authority` |
+| from shn-gateway v1.13.0, a search or page query outside its set (a `url` framed among them), a create, update or search without the sealed values E-19 or E-21 needs, or with values that are not sealed values; a search or page answer holding another's Subscription | `403` | `authority` |
+| from shn-gateway v1.13.0, a read, vread, update, delete or `$status` of a Subscription that is not the payer's, or a create's or an update's `2xx` carrying another's: the network's `404`, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"not-found","diagnostics":"Subscription not found"}]}`, the same bytes in every case | `404` | `authority` |
+| from shn-gateway v1.13.0, a `2xx` answer that is not the shape of the interaction it answers, FHIR XML included; an answer that is not a `2xx` and is FHIR other than an OperationOutcome holding no resource (FHIR XML: one with a `contained` element at any depth), or a body never judged | `502` | `authority` |
+| from shn-gateway v1.13.0, a create or update the gateway cannot read to re-key, by its body's structure: a FHIR XML Subscription, FHIR XML it cannot read, or another body that is not JSON (`415`); no body, a JSON value holding no resource, FHIR JSON not one unambiguous Subscription, or a body in UTF-16 or UTF-32 (`400`) | `415` or `400` | the fidelity of its own edit |
+| from shn-gateway v1.13.0, a provider whose participant sets no subscription scope (the Hub routes none to it, refusing `422 the recipient does not take …`) | `422` | `routing` |
+
+Three behaviours of the leg are intended, from shn-gateway v1.13.0:
+
+- **A known limit, metadata only: whether an id holds a Subscription.** From shn-gateway v1.13.0,
+  a read, vread, update, delete or instance `$status` of a Subscription that is another payer's
+  is answered the network's `404` above, while a read, vread, delete or `$status` of an id the
+  provider's system holds no Subscription at is answered by that system's own `404` or `410`,
+  carried as sent once it passes the check above (an update of such an id is the create below).
+  The answers differ, so a payer can tell an id, or a version, that holds another payer's
+  Subscription from one that holds none. Where the provider's system assigns Subscription ids in
+  sequence, a payer can count other payers' Subscriptions at that provider and see them appear
+  and disappear, and by a vread of successive versions count one's versions. It learns nothing
+  of their content: not whose they are, their filter, their endpoint, their headers or any
+  patient.
+  The network does not answer an absent id in the provider's place, since that would replace an
+  answer the network carries as sent. A provider for which that count matters assigns
+  Subscription ids that are not sequential.
+- **An update of an id that holds no Subscription is carried as a create.** From shn-gateway
+  v1.13.0, when the gateway's read finds no Subscription at the id (`404` or `410`), the update
+  gets every check a create gets and is forwarded as a create is, its channel re-keyed (E-19), as
+  an update at the id the payer chose: the provider's system creates the payer's Subscription
+  there, or answers as it would a payer integrated directly when it does not take
+  client-assigned ids.
+- **A known limit, metadata only: an empty page of another payer's search.** From shn-gateway
+  v1.13.0, a page (`_getpages`) is delivered only when every Subscription in it is the payer's, so
+  a page that holds none is delivered without that test, byte for byte, with its `total` and its
+  `link`s as the provider's system wrote them. A payer that holds the page id of another payer's
+  search can ask for an empty page of it (`_count=0`, or a `_getpagesoffset` past its end) and
+  learn that search's `total`, how many of the other payer's Subscriptions it matched. Where the
+  provider's system writes the search's `url` into a page's links, a link names the other payer's
+  notification address (its network identity, its key id and its sealed endpoint value) and the
+  search's other parameters as that payer sent them (`status`, `_id`, `_count`, `_elements`; an
+  `_id` is one of its Subscription ids). The payer's own gateway does not restore that `url` (it
+  names no address of this payer) and, from shn-gateway v1.14.0, records
+  `E-20:link-url-not-restored`. The sealed endpoint opens only under the other payer's gateway's
+  key, so its endpoint and headers stay sealed, and
+  no credential, filter, Subscription content or patient is in the page. The address cannot be
+  used: a create, update or search names only the sender's own address, which the provider's
+  gateway writes for the payer the Hub authenticated; framed as a sealed value it is refused `403`
+  on `authority`; and the notification route accepts only the provider gateway's credential for
+  that exact address. This is accepted as closest to a direct connection, where the same page
+  would show that payer's endpoint in the clear. Page ids are not guessable by default (HAPI
+  FHIR's are random); a provider for which the count matters keeps them so.
+
+**A payer's Subscription at its own gateway (`cdex-task-subscribe`, the subscriber's half).**
+From shn-gateway v1.13.0 a payer's gateway with its ingress enabled serves its own system's
+topic Subscription to a provider's Tasks' changes at that provider's base on the gateway,
+`[ingress]/cdex/provider/{provider}`, the base its Tasks are created and read at
+(`/cdex/providers` lists them): the payer's system configures that base as the provider's FHIR
+base for `Subscription` and changes nothing else. It serves `POST [base]/Subscription`
+(create), `GET [base]/Subscription/<id>` (read, with `_elements` and `_summary` carried as
+sent), `GET [base]/Subscription/<id>/_history/<vid>` (vread), `PUT [base]/Subscription/<id>`
+(update), `DELETE [base]/Subscription/<id>` (delete), `GET [base]/Subscription/<id>/$status`,
+`GET [base]/Subscription?url=<endpoint>[&…]` (search) and the search's pages at the links its
+answer names, `GET [base]/Subscription?_getpages=…`; a `HEAD` is served as its `GET`. The
+gateway carries each interaction to that provider on the leg, as its `subscriptionRequest`,
+and makes three registered edits:
+
+| Edit, from shn-gateway v1.13.0 | When | What changes |
+|---|---|---|
+| E-18 `subscription-header-seal` | from shn-gateway v1.13.0, a create, or an update, once its `channel.endpoint` passes the delivery rule below | the channel is sealed: `channel.endpoint` and `channel.header` are removed from the body the gateway sends, and travel only sealed, in `subscriptionEndpoint` and `subscriptionChannel`, under a key only this gateway holds (an absent header is sealed as an empty set). Neither the payer's endpoint nor its header values cross the network in clear; the provider's gateway writes its own address there (E-19) and names E-18 beside E-19 on its forward. Made even where a signature covers the channel (Signatures, §7a.4). |
+| E-20 `subscription-endpoint-restore` | from shn-gateway v1.13.0, every `2xx` answer with a body | each Subscription in it whose `channel.endpoint` ends in a notification address for this payer and the topic (`…/notify/<topic>/<payer>/<kid>/<sealed>`; what comes before is not read), and whose sealed endpoint and sealed headers open under this gateway's key for the provider that answered, reads back the `channel.endpoint` and `channel.header` the payer's system wrote (`channel.header` removed when it wrote none); each search entry's `fullUrl` and each paging link under the base the provider's gateway stated (`statedBase`) is re-keyed to the payer's base for the provider, a page link at that base itself to `[base]/Subscription?_getpages=…`, and a paging link's `url` parameter, which the provider's server echoes as the notification address E-21 wrote, is restored to the payer's own endpoint, so following the link repeats the payer's search, when each address in it leads to that one endpoint: on the answer to a search by `url`, an address that ends in a notification address for this payer and the topic, with a key id and sealed value that are one of the values the payer's gateway sealed that search's endpoint to, leads to the endpoint the payer's system searched by (from shn-gateway v1.14.0, whatever Subscriptions the answer holds, an empty searchset and a key rotation's overlap included); an address that is the `channel.endpoint` of a Subscription in the same answer that E-20 restored leads to that Subscription's endpoint. The gateway's core checks that the restored value is that endpoint and that every other parameter is unchanged; a link `url` that names a notification address, or cannot be read, and is not restored (a link outside the stated base included) is carried as written, and recorded `E-20:link-url-not-restored`. An address whose path below the stated base holds a `.` or `..` segment, raw or percent-encoded, or a segment that decodes to one holding `/` or `\`, is not re-keyed, since it could resolve above the payer's base. A Subscription that does not open (another provider's, tampered, or sealed under a key past its rotation's overlap) is carried as the provider sent it, and why is recorded. Made even where a signature covers what it changes, and named in `X-SHN-Edited` (`subscription-endpoint-restore; signed="<signatures>"` then); the provider's `ETag` is left out. |
+| E-23 `subscription-location-rekey` | from shn-gateway v1.13.0, a create's or an update's `2xx` whose answer frame carries `subscriptionLocation` | a `Location` naming the Subscription at the payer's base for the provider, that base then the framed tail (`Subscription/<id>` or `Subscription/<id>/_history/<vid>`). An answer with none framed carries no `Location`; one framed that `ParseSubscriptionLocation` does not read is not written, and why is recorded. Named in `X-SHN-Edited`. It writes a header, never signed content. |
+
+From shn-gateway v1.13.0, a search is read with `ParseSubscriptionSearch`: its one `url` names the payer's own endpoint,
+which the gateway seals (under its current key and, during a rotation's overlap, its
+predecessor's too, both in `subscriptionEndpoint`), and frames the rest of the query without
+`url`, so the payer's endpoint never leaves its gateway and the search finds exactly the
+Subscriptions it made, as it would directly. A page is framed in its page form,
+`GET ?_getpages=…`, its query as sent. An update's or a delete's `If-Match` is framed as sent;
+the network carries no `Prefer` header on any leg. Every rule here is a network rule, the same
+at every conformance level, and the gateway refuses, with nothing sent:
+
+| Refusal, from shn-gateway v1.13.0 | Status | Recorded |
+|---|---|---|
+| from shn-gateway v1.13.0, a bearer whose scopes permit no such interaction on Subscription (create `c`; read, vread or `$status` `r`; update `u`; delete `d`; search or page `s`; v1's `read`, `write` and `*` as SMART defines them; a scope with a query permits nothing): `insufficient_scope`, with a `WWW-Authenticate` challenge | `403` | `authority` |
+| from shn-gateway v1.13.0, a `PATCH` | `405` | the fidelity of its own edit |
+| from shn-gateway v1.13.0, an instance `_history`; a type-level `$status`; a search with no `url`, a search or page parameter outside its set or with a modifier | `403` | `authority` |
+| from shn-gateway v1.13.0, an interaction outside the closed set, an id or version that is not a FHIR id, a read's or vread's query outside its set; a search whose `url` names more than one endpoint (only one sealed endpoint can be carried); a base naming no registered provider (`404`, `422` for a create) | `400` | `routing` |
+| from shn-gateway v1.13.0, a read, vread, delete, `$status`, search or page that carries a body; an `If-Match` a frame cannot carry | `400` | `integrity` |
+| from shn-gateway v1.13.0, a create or update whose `channel.endpoint` is not an absolute `https` URL with no userinfo, fragment, space or backslash, or states none | `422` | `integrity` |
+| from shn-gateway v1.13.0, a create or update whose `channel.endpoint` is itself a notification address (its path holds `notify`, a topic, a registered participant and a key id, in that order), or a search whose `url` is one | `422` | `routing` |
+| from shn-gateway v1.13.0, a create or update whose body, judged by its structure and never its `Content-Type`, is FHIR JSON or FHIR XML of another resource type, or a Subscription that holds a resource (a `contained` member, or any object with a `resourceType` below it) | `403` | `authority` |
+| from shn-gateway v1.13.0, a create or update whose `channel.header` holds a value the gateway could never present to the endpoint as an HTTP field (`name: value`, a token for the name); the value is never named | `422` | the fidelity of its own edit |
+| from shn-gateway v1.13.0, a create or update the gateway cannot read or seal (FHIR XML, a body that is not JSON, no body, JSON that cannot be read one way only or in UTF-16 or UTF-32, a `channel.header` that is not an array of strings, a `channel._header` or `channel._endpoint`, a `channel.header` named in another case, an endpoint too long to seal) | `415` or `400` | the fidelity of its own edit |
+
+From shn-gateway v1.13.0, at the plain base, which names no provider, `POST /Subscription` is refused `422`, and
+`GET /Subscription` and `GET /Subscription/<…>` `404`, each with an OperationOutcome naming
+`/cdex/providers` and recorded `routing`, once the bearer is admitted, as the plain Task read
+is: sending a Subscription to every provider would tell providers the payer never chose that it
+subscribes. A provider whose gateway does not take the leg is refused by the Hub (routing), and
+its refusal is carried as on every leg; the provider's own answers, and its gateway's refusals,
+are carried as sent. Each provider's base declares `Subscription` in its CapabilityStatement
+(create, read, vread, update, delete, search-type with exactly `url`, `status` and `_id`, and
+the instance `$status`) only when that provider takes the leg; it names no SubscriptionTopic.
+
+**A notification of a payer's CDex Tasks' changes (`cdex-task-signal`).** From shn-gateway
+v1.13.0 a provider's gateway that takes `cdex-task-subscribe` mounts the notification route its
+system posts each notification of the HRex Task topic to, at the address E-19 wrote into the
+payer's Subscription, `POST [ingress]/notify/cdex-task/<payer>/<kid>/<sealed>`, with the two
+`channel.header` values E-19 wrote (`Authorization: Bearer <kid>.<tag>` and `X-SHN-Channel`), as
+a Subscriptions Backport IG rest-hook posts. The gateway sends the notification, its bytes as the
+system posted them, on `cdex-task-signal` to the payer the address names. The request frame
+carries `subscriptionEndpoint` (the sealed value the address names, `<kid>.<sealed>`),
+`subscriptionChannel` (the `X-SHN-Channel` value) and `statedBase` (the provider's FHIR base, the
+base of its Task endpoint). The leg names no patient on either side: every CDex notification is a
+handshake, a heartbeat or an `id-only` event notification, which disclose no patient's data. The
+answer is the payer's endpoint's own, carried back to the provider's system as it answered, or a
+refusal. A retry is a new notification in a new frame, never refused as a replay. On the route,
+the provider's gateway refuses, at every conformance level, with nothing sent; it checks the
+credential, which the address and the headers carry, before it reads the body, so a sender with
+none is refused `401` whatever the body's size or coding:
+
+| Refusal (from shn-gateway v1.13.0) | Status | Recorded |
+|---|---|---|
+| no `Authorization` or no `X-SHN-Channel`, either given twice, a credential that does not verify for the address and that `X-SHN-Channel` value under the gateway's key or, during a rotation's overlap, its predecessor's, or an address the gateway never writes (another topic, a query) (from shn-gateway v1.13.0) | `401` | `authentication` |
+| a body that, judged by its structure, is not FHIR JSON, or not a Bundle whose first entry is a SubscriptionStatus Parameters naming the HRex Task topic, with or without a `\|version` (from shn-gateway v1.13.0) | `400` | `routing` |
+| a notification that is not no-content: any object in it, at any depth, other than the Bundle and its SubscriptionStatus Parameters, is a resource (has a `resourceType`, its name compared without case), any object has a `contained` member, or an entry has a `response.outcome` (from shn-gateway v1.13.0) | `403` | `authority` |
+
+From shn-gateway v1.13.0 a payer's gateway takes `cdex-task-signal`, with no setting. It opens
+the sealed endpoint and headers under its own key, with this payer, the provider the Hub
+authenticated and the topic as their associated data, holds the endpoint to the delivery rule a
+Subscription is held to at create, and delivers the notification by `POST` to that endpoint, its
+path and query as the payer's system wrote them, with the payer's own header values (each
+`name: value` as an HTTP field) and no credential of the network's, by the rules of every forward
+to a participant's own system. It makes one registered edit:
+
+| Edit (from shn-gateway v1.13.0) | When | What changes |
+|---|---|---|
+| E-17 `cdex-task-notification-address-rekey` (from shn-gateway v1.13.0) | every notification it delivers | each absolute address into the provider's server, under the `statedBase` the provider's gateway framed (matched at a path segment's boundary, never as a string prefix), is written at the payer's base for that provider: that base, then the address's path below the stated base in its escaped form (percent-encoding kept, any other byte outside the URL's allowed set percent-encoded), then its query as sent. An address whose path below the stated base holds a `.` or `..` segment, raw or percent-encoded in any case, or a segment that decodes to one holding `/` or `\`, is not under it. The places are the Bundle's `link` `url`s, the SubscriptionStatus's `subscription` reference and each `notification-event` `focus` reference, each entry's `request.url` and `response.location` (an entry carries no `link`: the closed shape refuses one), and each entry's `fullUrl` that is not a `urn:uuid`: every locator the notification's closed shape admits, chosen by element. The shape's identity members (a canonical such as `meta.profile`, and a uri that names rather than locates: `implicitRules`, `meta.source`, a coding's `system`, a reference's `type`) are carried as sent, never re-keyed, never refused and recorded nowhere, since re-keying one would change what it asserts. An `http` or `https` address, or a network-path reference (`//`), at one of these places that is not an absolute URL naming its server plainly, the same server to every URL reader (no host; userinfo; a host other than dot-separated labels of ASCII letters, digits, hyphens and underscores, or a canonical IP address; a trailing dot; a port with a leading zero, an empty port or one above 65535, an IPv4-mapped IPv6 address, a last host label that opens with a digit and is not a canonical IPv4 address; a backslash, a tab or line break, or a space or control character at either end; or a value that does not parse as a URL), is not read one way only, and both gateways refuse the notification `422` on routing, nothing sent or delivered. A notification the payer's gateway could not read one way only at these places (JSON the network cannot read unambiguously, such as a lone surrogate in a string) is refused on the fidelity of SHN's own edit, `400` by the provider's gateway and `502` by the payer's, nothing sent or delivered. An address into the provider's own server (the stated base's scheme, host and port, read from the parsed address) that is not under the stated base (a fragment, a dot segment, or a path outside the base, escaped or not) cannot be written either, and both gateways refuse it `422` on routing. A relative reference, which already resolves against the payer's base for the provider, is carried. An address on another server, every address when no base is stated, and every address when the payer's gateway has no base for the provider, are carried as sent, and why is recorded. Both gateways first hold the notification to the closed shape an instance `$status` answer is held to, as a `history` Bundle: the SubscriptionStatus as its first entry, each later entry carrying no resource, every member at every depth one the Backport SubscriptionStatus defines, no extension and no signature anywhere, each `focus` a Task, no `additional-context`, no reference but the subscription's and each focus's, and no address naming another resource type in a path segment below the stated base (each segment split at every character a FHIR id never holds, so a Task id such as `Patient-1` names nothing); a notification outside it is refused on authority, `403` by the provider's gateway and `502` by the payer's, nothing sent or delivered. A provider that signs its notifications cannot use this leg yet. Named in `X-SHN-Edited`. |
+
+From shn-gateway v1.13.0 the payer's system then reads the Task the notification names at its
+base for the provider. A redirect the endpoint answers with is followed only within its origin and
+never to `http`; a `301`, `302` or `303` within its origin, which would turn the `POST` into a
+`GET`, is not followed, and that `3xx`, with its body, is the endpoint's answer, carried back as any other; a
+redirect of the `POST` to another origin, or to `http`, is refused. The endpoint's answer, at every status, is judged by its structure: FHIR passes only as an
+OperationOutcome holding no resource, since the leg names no patient, and an answer that is not
+FHIR, or has no body, is carried. The payer's gateway refuses, at every conformance level, with
+nothing delivered:
+
+| Refusal (from shn-gateway v1.13.0) | Status | Recorded |
+|---|---|---|
+| a sealed endpoint or sealed headers missing, or that do not open: altered, sealed for another provider, topic or endpoint, or under a key past its rotation's overlap (from shn-gateway v1.13.0) | `403` | `authority` |
+| a sealed endpoint that opens to one failing the delivery rule: not an absolute `https` URL with no userinfo or fragment (`integrity`), or itself a notification address (`routing`) (from shn-gateway v1.13.0) | `422` | `integrity` or `routing` |
+| a message that is not a notification of the HRex Task topic, or carries content (from shn-gateway v1.13.0) | `403` | `authority` |
+| a header value the payer's system wrote that is not an HTTP field (`name: value`); the value is never named (from shn-gateway v1.13.0) | `422` | the fidelity of the delivery |
+| an endpoint answer, at any status, that is FHIR other than an OperationOutcome holding no resource, or FHIR that cannot be read one way only (from shn-gateway v1.13.0) | `502` | `authority` |
+| its own registered edit of the notification failing its own verification (from shn-gateway v1.13.0) | `502` | the fidelity of its own edit |
+| a gateway that holds no subscription keys, so cannot open the sealed values (from shn-gateway v1.13.0) | `500` | its own failure, not a refusal |
+
+A payer's gateway on a release before shn-gateway v1.13.0 does not list the leg, and the Hub refuses the
+notification on routing (`422 the recipient does not take cdex-task-signal: …`), as it refuses
+every marked leg to a recipient that does not take it.
 
 The Smart Gateway additionally *honors* a well-formed claim it can both
 natively build and validate for (native ∩ laned);
@@ -4313,19 +4652,43 @@ payer's system handles every payer identifier the payer registers on the network
 edit E-03 is retired and never reused.
 
 - **Signatures.** A signature inside the message (`Bundle.signature`, `Provenance.signature`, a
-  `Signature` element) travels untouched, with two exceptions, each at a `payer-url` only. From
-  shn-gateway v1.1.0 a provider's gateway re-keys the `payer-url` of each Task in a PAS
-  answer to its own documentation return path even where a signature covers it (§7b.1a), so
+  `Signature` element) travels untouched, with these exceptions, each at its own place. From
+  shn-gateway v1.15.0 a `Signature` element is found by its place as FHIR R4 types it: any place
+  R4 types `Signature` (such as `Contract.signer.signature`, a Task input's or a Parameters
+  parameter's `valueSignature`, an extension's `valueSignature` at any depth), the member
+  names on its path read in any case. An object at a place R4 types as something else (an
+  element of another type) is not one, whatever its members. Where no R4 type describes a
+  place (outside any resource, in a resource whose type is not an R4 resource type, in a
+  member R4 does not define there, or a value of another kind than its place's type), an
+  object with a `Signature`'s required members (`type`, `when`, `who`, in any case) is read as
+  one. Before shn-gateway v1.15.0 any object with those members was read as one, wherever it
+  was. From shn-gateway v1.15.0, in finding what a signature in a message covers, a Bundle's or
+  a Provenance's own signature in that message is read under its member's name in any case, as
+  `Bundle.signature` or `Provenance.signature`; before, one named in another case was read as
+  a `Signature` in that resource, and a Provenance's then covered only the Provenance, not its
+  targets. From shn-gateway v1.1.0 a provider's gateway re-keys the `payer-url` of each Task in
+  a PAS answer to its own documentation return path even where a signature covers it (§7b.1a), so
   that the documentation the provider sends stays on the network; that signature then no
   longer verifies in the provider's copy, and the answer names the edit and the signature in
   `X-SHN-Edited`. From shn-gateway v1.5.0 it does the same to the one `payer-url` of a payer's
   attachment-request Task (`cdex-attachment-request`) as it carries the Task to its own
   system, and the forward names the edit and the signature in `X-SHN-Edited`
-  (`cdex-task-return-rekey; signed="<signatures>"`). Every other edit that would change
+  (`cdex-task-return-rekey; signed="<signatures>"`). From shn-gateway v1.13.0 a provider's
+  gateway re-keys a payer's topic Subscription's `channel.endpoint` and `channel.header` (E-19,
+  §6.3) even where a signature covers them, so that its system delivers every notification to the
+  gateway and never holds the payer's secret, and the forward names the edit and the signature
+  (`subscription-endpoint-rekey; signed="<signatures>"`); and the payer's own gateway seals that
+  Subscription's channel before it leaves (E-18) and restores it, with the answer's addresses,
+  on the answers its system reads (E-20, §6.3), even where a signature covers them, the answer
+  naming the restore and the signature (`subscription-endpoint-restore; signed="<signatures>"`).
+  A provider's CDex Task notification that carries a signature is refused (§6.3), so E-17, which
+  stays in the exempt set, is never made on signed content on that leg.
+  Every other edit that would change
   signed content is refused with `422 signed content cannot be edited (<edit>, <signature>)`,
   naming the edit and the signature that covers the content (`Bundle.signature`, `Provenance.signature`,
   `Signature in <resource type>`, or `Signature` for one outside any resource or in one whose
-  type is not a FHIR resource type name).
+  type is not an R4 resource type; before shn-gateway v1.15.0, one whose type is not a FHIR
+  resource type name).
 - **No transport signatures.** HTTP-level signatures (signed header fields, a detached JWS)
   are not carried. Each Smart Gateway terminates HTTP, and a message frame (§6.3) carries only
   the headers on its allowlist, none of them a signature. A participant that needs an
@@ -5044,7 +5407,10 @@ and later.)
   final result. What this network offers is the inquiry: the manual status check, made
   when you choose to make it, plus an opt-in bounded wait that stands in for the
   notification path — never a claim that the bounded wait is what the guide
-  prescribes.
+  prescribes. From shn-gateway v1.13.0 the network carries the Subscriptions Backport
+  IG's topic Subscription and its rest-hook notifications for one topic only, CDex's HRex
+  Task topic (a payer following the attachment-request Tasks it created, §6.3); PAS's
+  Subscription is still not offered.
 - **Updating an authorization the payer has already decided.** Not supported here. An
   amendment is for a request the payer is still holding: `shnsdk.Responder` refuses an
   update to a decided claim with `409` and its reason, and a payer that behaves
@@ -5184,8 +5550,16 @@ applicable IG profiles. The network enforces a **two-gate** posture:
      these rules there. Either way, an answer it cannot read, or one without
      coverage information, stops the exchange (`502`) at every level.
    - A PAS request carried from the participant's own system (the `$submit`
-     ingress) is not `$validate`d, by either gateway; only the content checks
-     and the network rules below apply to it. A PAS submit or update a gateway
+     ingress) is not `$validate`d by the requester's gateway; only the content
+     checks and the network rules below apply to it there. From shn-gateway
+     v1.13.0, the payer's gateway at `structural` or `strict` checks a carried
+     `$submit`, update or `$inquire` before its system sees it, at the payer's
+     own level: against what it declares, or, declaring none, its line's request
+     Bundle profile (`profile-pas-request-bundle`, or
+     `profile-pas-inquiry-request-bundle` on an `$inquire`), valid when any
+     candidate line accepts it. It refuses `422 ingress validation failed` with
+     the issues (`500` when its check cannot run at `strict`), and never changes
+     the request. A PAS submit or update a gateway
      builds from its participant's records is validated: the Bundle for base R4
      shape, and its QuestionnaireResponse attachments against the DTR profile.
      From shn-gateway v1.8.0 the records it builds in keep the profiles your
@@ -5773,6 +6147,152 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-11-17 — From shn-sdk v1.13.0, §2.3's `legs` row and §6.1 list `cdex-task-signal` among the marked legs.**
+  Documented, with no change in behaviour: their lists of the legs the network marks with the
+  release that brings them omitted `cdex-task-signal`, marked since shn-gateway v1.13.0 like
+  `cdex-task-subscribe`. The Hub refuses it, as every marked leg, to a recipient whose `legs`
+  list lacks it and to one that declares no list. Its recipient is the payer: a payer's Smart
+  Gateway declares it from shn-gateway v1.13.0, with no setting; a provider does not.
+
+- **2026-11-17 — From the network's deploy, the Hub closes a leg whose audit record may have been written, under every patient it may name, and a leg is read by the set of its records (§5.1, §6.1a).**
+  An append to the Audit Plane is known not written only when the Plane refuses it (a `4xx`
+  other than `408` and `429`); one that got no answer, timed out or met a `5xx` or `429` may have
+  been. A request leg refused before its forward (`503 audit append failed`, `X-SHN-Delivered:
+  no`, unchanged) is now closed `failed` when its `routed` record may have been written, so it
+  reads `routed` and `failed`, or `failed` alone. A leg closed after its `answered` record may
+  have been written is closed under the answer's own patient too, on a leg that takes its patient
+  from the answer. A leg whose `answered` record is written and whose answer the Hub cannot
+  return (`500 encode response envelope failed`, `X-SHN-Delivered: yes`, unchanged) is now
+  closed `failed`; when that close cannot be written, the Hub answers `502 audit append failed`,
+  marked `yes`. A leg's records reach the chain in the order the Audit Plane took them, so a
+  `failed` record can come before the record it closes: a leg with a `failed` record failed,
+  whichever the chain holds first. This is a rule on the audit primitive, the same at every
+  conformance level.
+
+- **2026-11-17 — From shn-sdk v1.13.0, CDex fulfillment reads a signature's member names in any case.**
+  `shnsdk.BuildCDexQueryResult` and `shnsdk.BuildCDexFulfillment` read a `Provenance`'s and
+  the records `Bundle`'s own `signature` member under its name in any case (`Signature`,
+  `SIGNATURE`), and a `Signature` element by its shape (`type`, `when` or `_when`, and `who`)
+  with each name in any case. These are refused with `ErrCDexSignedContent`, where earlier
+  releases could read them as unsigned and extend the `Task`: a `Provenance` signed under such
+  a name that targets the request `Task`, in the `Task` or among the records; a `Signature` so
+  named in the request `Task`; and, when the records `Bundle` would need its id written, its own
+  signature under such a name, a `Signature` so named in it outside any resource it holds, or a
+  `Provenance` among the records signed under such a name that targets it.
+
+- **2026-11-16 — `cdex-task-subscribe`: an empty page of another payer's search, a known metadata-only limit, documented (§6.3).**
+  Documented, from shn-gateway v1.13.0, with no change in behaviour: a page that holds no
+  Subscription is delivered without the ownership test, with its `total` and its links as the
+  provider's system wrote them, so a payer holding another payer's page id learns that search's
+  `total` and, where the provider's system writes the search's `url` into a page's links, the
+  other payer's notification address (its identity, key id and sealed endpoint value, never its
+  endpoint or headers, which stay sealed) and that search's other parameters, an `_id` among them.
+  The address cannot be used to subscribe, search or notify as that payer. Accepted as closest to
+  a direct connection.
+
+- **2026-11-16 — From shn-sdk v1.13.0, the leg table names a PAS topic Subscription's three legs, ahead of their taxonomy rows.**
+  Added: the leg table names `pas-subscription-subscribe`, `pas-subscription-notify` and
+  `pas-subscription-signal` (each with the `pa.` prefix), each marked with the shn-gateway
+  release planned to carry its taxonomy row (`TransactionTypeSince`), and each with the answer
+  envelope `fhir`. The subscribe leg carries a provider's Subscription interaction to a payer,
+  the notify leg a notification that carries content, and the signal leg one that carries none.
+  Until a leg's taxonomy row, the network routes it nowhere, and no gateway frames or serves it;
+  §4.3 lists each leg once its row lands.
+
+- **2026-11-16 — `cdex-task-subscribe`: a known metadata-only limit and update-as-create, documented (§6.3).**
+  Documented, from shn-gateway v1.13.0, with no change in behaviour: a payer can tell an id that
+  holds another payer's Subscription (the network's `404`) from one that holds none (the provider
+  system's own `404` or `410`, carried as sent), and so count such Subscriptions, see them appear
+  and disappear, and count their versions, but learns nothing of their content; a provider for
+  which that matters assigns Subscription ids that are not sequential. An update of an id that
+  holds no Subscription gets every check a create gets and is forwarded as a create is (E-19), at
+  the payer's id, as intended. Clarified, with no change in behaviour: E-20's row states that,
+  from shn-gateway v1.14.0, a search answer's link `url` is restored when each address in it leads
+  to the payer's endpoint, either from the search the payer's gateway framed or from a
+  Subscription restored in the same answer, a link naming addresses of both kinds included.
+
+- **2026-11-15 — From shn-gateway v1.14.0, a payer's gateway restores a Subscription search's links from the search its system made, so an empty answer's self link repeats the search (§6.3).**
+  Changed: E-20 (`subscription-endpoint-restore`) restores a search answer's link `url`, which the provider's server echoes as the notification addresses E-21 wrote, from the search the payer's gateway framed: each address must end in a notification address for this payer and the topic whose key id and sealed value are one the gateway sealed the search's endpoint to, and the value becomes the endpoint the payer's system searched by. Before, it was restored only from a Subscription the same answer carried, so an empty searchset's self link, and during a key rotation's overlap a link naming both keys' addresses, kept the provider gateway's address, and a payer's system following it was refused on routing: `422` for an empty searchset's self link, `400` for a link naming both keys' addresses. The gateway's core holds the restore to that search. A link `url` that names a notification address, or cannot be read, and is not restored (a link outside the stated base included) is carried as written, and recorded `E-20:link-url-not-restored`.
+
+- **2026-11-15 — From the network's deploy, the Hub decides a request token's authority over its leg before it records a payload-hash mismatch (§5.1).**
+  A request token that verifies but is for another frame, operation, `correlationId` or
+  holder than its envelope's, or carries an `involvement`, is refused `403` `authz token
+  verification failed`, marked `X-SHN-Delivered: no`, with nothing recorded, even when its
+  payload hash does not match the envelope; before, it was answered `502` `payload hash
+  mismatch` and recorded `denied` under its patient. A token that does not verify was, and
+  is, refused `403` with nothing recorded. A token that authorizes the leg in every respect but the payload is still answered
+  `502` `payload hash mismatch` and recorded `denied`, as before. This is a rule on per-leg
+  authority, the same at every conformance level.
+
+- **2026-11-13 — From shn-gateway v1.13.0, a provider's CDex Task notifications reach the payer's own endpoint through both gateways (`cdex-task-signal`), with E-17 (§4.3, §6.3).**
+  Added: the leg taxonomy gains `cdex-task-signal` (`pa.cdex-task-signal`): the request
+  `cdex-task-signal` under `provider-disclosure` from a `provider`, the response
+  `cdex-task-signal-response` under `payer-payment` from a `payer`, the scope
+  `task-notification`, no consent conjunct, `subject: none`. A payer's gateway from v1.13.0
+  takes it with no setting. A provider's gateway that takes `cdex-task-subscribe` mounts
+  `POST [ingress]/notify/cdex-task/<payer>/<kid>/<sealed>`, where its system posts each
+  handshake, heartbeat and `id-only` event notification with the two header values E-19 wrote:
+  its credential is verified (`401` on authentication), the body held to the route's structural
+  minimum (`400` on routing), and a notification that carries content, or a
+  `notification-event` part named `additional-context` (the topic declares none), or one outside the
+  closed notification shape (a signed one among them), refused (`403` on authority), as is one holding, at one of E-17's places, an `http` or `https` address no URL
+  reader reads one way only, or an address into the provider's own server outside its base (`422`
+  on routing), or one the payer's gateway could not read one way only at those places
+  (`400` on the fidelity of SHN's own edit). The notification is sent with `subscriptionEndpoint`, `subscriptionChannel` and
+  `statedBase` framed. The payer's gateway opens the sealed values for the provider the Hub
+  authenticated (`403` on authority otherwise), holds the endpoint to the delivery rule (`422`),
+  refuses a message that carries content or an `additional-context` part (`403`), or is outside
+  the closed notification shape (`502` on authority), and one holding, at one of E-17's places, an
+  address no URL reader reads one way only or one into the provider's own server outside its base
+  (`422` on routing) or
+  that it cannot read one way only there (`502` on the fidelity of its own edit), and delivers it to the payer's own endpoint
+  with the payer's own header values. Registered edit E-17
+  (`cdex-task-notification-address-rekey`) writes the notification's addresses into the
+  provider's server at the payer's base for that provider, and joins the signed-content exempt
+  set; a signed notification is refused, so it is never made on signed content on this leg. The endpoint's answer is carried back, at every
+  status, once it holds no resource but an OperationOutcome's own (`502` on authority
+  otherwise). A retry is delivered again, never refused as a replay. `statedBase` is also a
+  request-frame header on a signal leg; a frame naming it on another leg's request is refused
+  `400`.
+
+- **2026-11-13 — From shn-gateway v1.13.0, a payer's gateway serves its own system's topic Subscription to a provider's CDex Tasks' changes, at that provider's base on the gateway (§6.3).**
+  Added: at `[ingress]/cdex/provider/{provider}`, `POST Subscription` (create),
+  `GET Subscription/<id>` and its vread, `PUT Subscription/<id>` (update),
+  `DELETE Subscription/<id>`, `GET Subscription/<id>/$status`, `GET Subscription?url=…` (search)
+  and the search's pages carry the payer system's interaction on `cdex-task-subscribe`, admitted on a bearer granted a
+  `system/Subscription` scope that permits the interaction. Registered edits E-18
+  (`subscription-header-seal`: the channel is sealed, `channel.endpoint` and `channel.header`
+  travelling only sealed), E-20 (`subscription-endpoint-restore`: the answer's Subscriptions read
+  back as the payer wrote them, its addresses at the payer's base) and E-23
+  (`subscription-location-rekey`: a create's or update's `Location` at the payer's base). E-18
+  and E-20 are made even on signed content, and join the signed-content exempt set. A search
+  names exactly one endpoint. At the plain base a create is refused `422` and a read or search
+  `404`, on routing. Each provider's base declares `Subscription` only when that provider takes
+  the leg.
+
+- **2026-11-13 — From shn-gateway v1.13.0, a provider's gateway serves a payer's topic Subscription to the changes of its CDex Tasks (`cdex-task-subscribe`), the first leg that names no patient on either side (§4.3, §6.3).**
+  Added: the leg taxonomy gains `cdex-task-subscribe` (`pa.cdex-task-subscribe`): the request
+  `cdex-task-subscribe` under `payer-payment` from a `payer`, the response
+  `cdex-task-subscribe-response` under `provider-disclosure` from a `provider`, the scope
+  `task-subscription`, no consent conjunct, `subject: none`. It is routed only to a provider
+  whose registry entry lists it, and a provider's gateway lists it when its participant sets
+  `PROVIDER_CDEX_SUBSCRIPTION_SCOPE`. That gateway serves the leg's create, read, vread,
+  update, delete, search, the search's pages and the instance `$status` at the provider's own
+  Subscription endpoint, with registered edits E-19 (`subscription-endpoint-rekey`, made even
+  on signed content) and E-21 (`subscription-url-search-rekey`, which writes the search's
+  `url` from the sealed endpoint alone), the ownership test on what it reads back, and the
+  refusals §6.3 lists, each a network rule at every conformance level: among them, a
+  Subscription that holds a resource is refused `403` on authority, each `2xx` answer is held
+  to the shape of the interaction it answers, and an answer that is not a `2xx` and is FHIR
+  JSON or XML passes only as an OperationOutcome holding no resource (`502` on authority), each
+  body judged by its structure, never its media type. The forward discloses E-19, the provider's
+  gateway's own edit, after the payer's gateway's E-18, read from the frame's sealed values. The network
+  carries no `Prefer` header, so the provider's system answers by its own default. A create's
+  or an update's `2xx` is framed with `subscriptionLocation` when the provider's `Location`
+  lies under its base. The payer's half and the notifications are served from the same
+  release (the entries above). A request frame naming a topic
+  Subscription's header or `If-Match` on any other leg is refused `400`, on message integrity.
+
 - **2026-11-13 — From shn-sdk v1.12.0, the message frame's allowlist adds `subscriptionRequest`, `subscriptionLocation` and `If-Match`, the SDK reads a subscribe leg's interaction and a Subscription's location, `WithSubscription` declares `Subscription` in a CapabilityStatement, and the leg table names a CDex Task subscription's two legs (§6.3).**
   Added: `subscriptionRequest`, a request-frame header naming the interaction a subscribe leg
   carries, from a closed set: create, read, vread, update, delete, instance `$status`, search
@@ -5837,6 +6357,12 @@ property. Until then, build to the rule: preserve what you do not recognise.
   is for any leg but one whose patient is bound from its answer `403`, as before; the reason
   now reads `requester-side binding refused: request token is not for a leg whose patient is
   bound from its answer`.
+
+- **2026-11-13 — From shn-gateway v1.13.0, a payer's gateway at `structural` or `strict` checks the PAS request it receives at its own level before its system sees it (§8.1).**
+  A carried `$submit`, update or `$inquire` is checked against what it declares or, declaring
+  none, its line's request Bundle profile, valid when any candidate line accepts it; a
+  refusal is `422 ingress validation failed` with the issues, or `500` when the check cannot
+  run at `strict`. The request is never changed, and `none` and `observe` do not check it.
 
 - **2026-11-13 — From the network's deploy, the registrar's refusals answer `application/problem+json`, with the `error` member unchanged (§2.3, §2.3a).**
   Changed: every refusal a registrar route answers is `Content-Type:

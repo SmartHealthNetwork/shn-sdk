@@ -18,24 +18,33 @@ var prefixedTransactionTypes = map[string]string{
 	"cdex-attachment-request": "pa.cdex-attachment-request",
 	"cdex-task-status":        "pa.cdex-task-status",
 	"federated-query":         "fqs.federated-query",
-	// A topic Subscription's legs, ahead of
-	// their taxonomy rows: until a row comes, the network routes the leg
-	// nowhere.
+	// A CDex topic Subscription's legs.
 	"cdex-task-subscribe": "pa.cdex-task-subscribe",
 	"cdex-task-signal":    "pa.cdex-task-signal",
+	// A PAS topic Subscription's legs, ahead of their taxonomy rows: until a
+	// row comes, the network routes the leg nowhere. The subscribe leg carries
+	// a provider's Subscription to a payer, the notify leg a notification that
+	// carries content, and the signal leg one that carries none.
+	"pas-subscription-subscribe": "pa.pas-subscription-subscribe",
+	"pas-subscription-notify":    "pa.pas-subscription-notify",
+	"pas-subscription-signal":    "pa.pas-subscription-signal",
 }
 
-// transactionTypeSince is the release each leg added after shn-sdk v1.0.0
-// carries, by flat name: the taxonomy row's since. A recipient that declares
-// no legs list (RegistryEntry.Legs absent) predates every leg here, so the
-// network does not route one to it.
+// transactionTypeSince is, for each leg added after shn-sdk v1.0.0, the
+// shn-gateway release that carries its taxonomy row, by flat name: the
+// taxonomy row's since. A recipient that declares no legs list
+// (RegistryEntry.Legs absent) predates every leg here, so the network does
+// not route one to it.
 var transactionTypeSince = map[string]string{
 	"cdex-attachment-submit":  "1.1.0",
 	"cdex-attachment-request": "1.5.0",
 	"cdex-task-status":        "1.12.0",
+	"cdex-task-subscribe":     "1.13.0",
+	"cdex-task-signal":        "1.13.0",
 	// The release that will carry each one's taxonomy row.
-	"cdex-task-subscribe": "1.13.0",
-	"cdex-task-signal":    "1.13.0",
+	"pas-subscription-subscribe": "1.16.0",
+	"pas-subscription-notify":    "1.16.0",
+	"pas-subscription-signal":    "1.16.0",
 }
 
 // Answer envelope values (TransactionTypeAnswerEnvelope).
@@ -65,10 +74,15 @@ var transactionTypeAnswerEnvelope = map[string]string{
 	"federated-query":         AnswerEnvelopeFHIR,
 	"cdex-task-status":        AnswerEnvelopeFHIR,
 	// A Subscription's interactions at the notifier and a REST-hook
-	// notification at the subscriber's endpoint, each a FHIR interaction;
-	// stated here until their taxonomy rows come.
+	// notification at the subscriber's endpoint, each a FHIR interaction.
 	"cdex-task-subscribe": AnswerEnvelopeFHIR,
 	"cdex-task-signal":    AnswerEnvelopeFHIR,
+	// A Subscription's interactions at the payer, and a REST-hook
+	// notification at the provider's endpoint, each a FHIR interaction;
+	// stated here until their taxonomy rows come.
+	"pas-subscription-subscribe": AnswerEnvelopeFHIR,
+	"pas-subscription-notify":    AnswerEnvelopeFHIR,
+	"pas-subscription-signal":    AnswerEnvelopeFHIR,
 }
 
 // TransactionTypeAnswerEnvelope is the envelope of a refusal the answering

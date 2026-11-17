@@ -297,7 +297,10 @@ func parseNarrowQuery(raw, forRef string) (CDexQuery, error) {
 // ErrCDexSignedContent reports a fulfillment refused because it would extend
 // signed content: the request Task carries a Signature element, a signed
 // Provenance among the supplied documents targets the Task, or a signed
-// records Bundle would need its id written.
+// records Bundle would need its id written. A Provenance's or the records
+// Bundle's own signature member is read under its name in any case
+// (`signature`, `Signature`, `SIGNATURE`), and a Signature element by its
+// shape (type, when or _when, and who) with each name in any case.
 var ErrCDexSignedContent = errors.New("cdex: signed content cannot be extended")
 
 // ErrCDexTaskStatus reports a request Task whose status does not allow

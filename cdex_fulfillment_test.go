@@ -571,3 +571,118 @@ func TestExtractCDexEvidence_ProvenanceTargetsTheReport(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildCDexQueryResult_OwnSignatureInAnyCase: a Provenance's or the
+// records Bundle's own signature member is read in any case: one named `Signature`, `SIGNATURE` or
+// `ſignature` (U+017F folds to s) refuses as `signature` does, and a member
+// of another name is no signature. The records Bundle's signature value is
+// an empty object here, so only its member's name can refuse it.
+func TestBuildCDexQueryResult_OwnSignatureInAnyCase(t *testing.T) {
+	task := `{"resourceType":"Task","id":"t1","status":"requested"}`
+	prov := func(member string) string {
+		return `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Provenance","id":"sp","target":[{"reference":"Task/t1"}],"` + member + `":[` + cdexSig + `]}}]}`
+	}
+	contained := func(member string) string {
+		return `{"resourceType":"Task","id":"t1","status":"requested","contained":[{"resourceType":"Provenance","id":"p","target":[{"reference":"#"}],"` + member + `":[{"display":"not shaped"}]}]}`
+	}
+	root := func(member string) string {
+		return `{"resourceType":"Bundle","type":"searchset","` + member + `":{}}`
+	}
+	// The records Bundle's id r1 is taken in the Task, so it must be written.
+	collides := `{"resourceType":"Task","id":"t1","status":"requested","contained":[{"resourceType":"Patient","id":"r1"}]}`
+	provOnRecords := func(member string) string {
+		return `{"resourceType":"Bundle","id":"r1","type":"searchset","entry":[{"resource":{"resourceType":"Provenance","id":"sp","target":[{"reference":"Bundle/r1"}],"` + member + `":[{"display":"not shaped"}]}}]}`
+	}
+	plain := `{"resourceType":"Bundle","type":"searchset"}`
+	for _, member := range []string{"signature", "Signature", "SIGNATURE", "ſignature"} {
+		for _, row := range []struct {
+			name, task, records, carrier string
+		}{
+			{"a supplied Provenance targets the Task", task, prov(member), "a signed Provenance in the records targets the request Task"},
+			{"a Provenance contained in the Task targets it", contained(member), plain, "a signed Provenance in the request Task targets it"},
+			{"the records Bundle's own signature", task, root(member), "Bundle.signature on the records"},
+			{"a supplied Provenance targets the records Bundle", collides, provOnRecords(member), "a signed Provenance in the records targets the records Bundle"},
+		} {
+			t.Run(member+"/"+row.name, func(t *testing.T) {
+				out, err := shnsdk.BuildCDexQueryResult([]byte(row.task), []byte(row.records))
+				if !errors.Is(err, shnsdk.ErrCDexSignedContent) || !strings.Contains(err.Error(), row.carrier) {
+					t.Fatalf("want ErrCDexSignedContent naming %q, got err=%v out=%s", row.carrier, err, out)
+				}
+				if out != nil {
+					t.Fatalf("a refusal must not return a Task: %s", out)
+				}
+			})
+		}
+	}
+	// Controls: a member whose name only resembles the signature's is not one.
+	for _, member := range []string{"signatures", "sig", "xsignature"} {
+		for _, row := range []struct{ name, task, records string }{
+			{"a supplied Provenance targets the Task", task, prov(member)},
+			{"a Provenance contained in the Task targets it", contained(member), plain},
+			{"the records Bundle", task, root(member)},
+			{"a supplied Provenance targets the records Bundle", collides, provOnRecords(member)},
+		} {
+			t.Run("control "+member+"/"+row.name, func(t *testing.T) {
+				if _, err := shnsdk.BuildCDexQueryResult([]byte(row.task), []byte(row.records)); err != nil {
+					t.Fatalf("want a fulfillment, got %v", err)
+				}
+			})
+		}
+	}
+}
+
+// TestBuildCDexQueryResult_SignatureShapeInAnyCase: an object shaped as a
+// Signature (type, when or _when, and who) is read with each member's name in
+// any case: in the request Task, or in the records Bundle when its id must be
+// written, it refuses as the exact-case shape does. A shape that lacks a
+// member, or whose names only resemble them, is no Signature.
+func TestBuildCDexQueryResult_SignatureShapeInAnyCase(t *testing.T) {
+	const typ, when, who = `[{"system":"urn:iso-astm:E1762-95:2013","code":"1.2.840.10065.1.12.1.1"}]`, `"2026-06-04T00:00:00Z"`, `{"display":"payer"}`
+	shape := func(tn, wn, on string) string {
+		return `{"` + tn + `":` + typ + `,"` + wn + `":` + when + `,"` + on + `":` + who + `}`
+	}
+	inTask := func(sig string) string {
+		return `{"resourceType":"Task","id":"t1","status":"requested","extension":[{"url":"x","valueSignature":` + sig + `}]}`
+	}
+	inRecords := func(sig string) string {
+		return `{"resourceType":"Bundle","type":"searchset","meta":{"extension":[{"url":"x","valueSignature":` + sig + `}]}}`
+	}
+	task := `{"resourceType":"Task","id":"t1","status":"requested"}`
+	plain := `{"resourceType":"Bundle","type":"searchset"}`
+	for _, sig := range []string{
+		shape("type", "when", "who"),
+		shape("Type", "WHEN", "Who"),
+		shape("TYPE", "_When", "WHO"),
+		shape("tYPE", "_when", "wHo"),
+	} {
+		t.Run("Task "+sig[:12], func(t *testing.T) {
+			_, err := shnsdk.BuildCDexQueryResult([]byte(inTask(sig)), []byte(plain))
+			if !errors.Is(err, shnsdk.ErrCDexSignedContent) || !strings.Contains(err.Error(), "a Signature element in the request Task") {
+				t.Fatalf("want ErrCDexSignedContent naming the Task's Signature, got %v", err)
+			}
+		})
+		t.Run("records "+sig[:12], func(t *testing.T) {
+			_, err := shnsdk.BuildCDexQueryResult([]byte(task), []byte(inRecords(sig)))
+			if !errors.Is(err, shnsdk.ErrCDexSignedContent) || !strings.Contains(err.Error(), "a Signature element in the records Bundle") {
+				t.Fatalf("want ErrCDexSignedContent naming the records' Signature, got %v", err)
+			}
+		})
+	}
+	// Controls: a shape missing who, and names that only resemble the members.
+	for _, sig := range []string{
+		`{"Type":` + typ + `,"When":` + when + `}`,
+		shape("types", "when", "who"),
+		shape("type", "when", "whom"),
+	} {
+		t.Run("control Task "+sig[:12], func(t *testing.T) {
+			if _, err := shnsdk.BuildCDexQueryResult([]byte(inTask(sig)), []byte(plain)); err != nil {
+				t.Fatalf("want a fulfillment, got %v", err)
+			}
+		})
+		t.Run("control records "+sig[:12], func(t *testing.T) {
+			if _, err := shnsdk.BuildCDexQueryResult([]byte(task), []byte(inRecords(sig))); err != nil {
+				t.Fatalf("want a fulfillment, got %v", err)
+			}
+		})
+	}
+}

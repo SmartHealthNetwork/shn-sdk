@@ -91,9 +91,20 @@ operation's (`/fhir/ExplanationOfBenefit/$submit`) is not served. A
 is one an advertised service carries — `order-sign-crd` with `"hook":"order-sign"` — is
 served by that service (`shn-order-sign`). `/fhir/$submit-attachment` is served as the plain
 `POST /$submit-attachment`, and `GET /fhir/metadata` (or `/fhir/R4/metadata`) as `GET /metadata`,
-though not under a resource type (`/Patient/metadata` reads a Patient); a return path under a
-base (`/fhir/cdex/payer/{payer}`), or a path under one that the table does not list, is not
-aliased, and is answered `404`. An aliased answer is the payer's answer
+though not under a resource type (`/Patient/metadata` reads a Patient). A path that names
+where it goes is never aliased, since served as the plain operation it would lose that: a
+return path under a base (`/fhir/cdex/payer/{payer}`) or a path under one that the table
+does not list, an adaptive questionnaire's address that the table does not list (under
+`/dtr/payer/` or `/dtr/fetch-server/`), and `/pas/payers` or a path under `/pas/payer/{payer}/`,
+under a base or not, which this endpoint does not offer. These are read in any letter case,
+both as written and with any `.` or `..` segment resolved, and an empty segment (as an
+encoded `//` leaves) is skipped, so neither `/CDEX/payer/{payer}/$submit-attachment` nor
+`/pas/payer/{payer}/%2E%2E/%2E%2E/Claim/$submit` is aliased. Each is answered `404`.
+Nor is a `.` or `..` an id: in a listed path where a payer, line, tag or CDS service id goes,
+or in a further segment of a payer's adaptive address (sent encoded, `%2E` in any case, since
+a literal one is redirected), it names nothing, so the path is answered `404` unmapped and
+nothing is forwarded, whatever the body. `...` or `.x` is an id like any other.
+An aliased answer is the payer's answer
 unchanged, plus two headers naming the canonical form:
 `Link: </Claim/$submit>; rel="canonical"` (or `</cds-services/shn-order-sign>`) and a
 `Warning: 299` that says the same in words. The canonical forms are the table above and

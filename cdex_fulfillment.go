@@ -62,16 +62,37 @@ func cdexRootValue(d *splice.Doc, src []byte) []byte {
 }
 
 // cdexIsSignature reports whether obj has the shape of a FHIR Signature
-// datatype: type, when (or its extension form _when) and who.
+// datatype: type, when (or its extension form _when) and who, each name read
+// in any case (strings.EqualFold).
 func cdexIsSignature(d *splice.Doc, obj splice.NodeID) bool {
 	if d.Kind(obj) != splice.KindObject {
 		return false
 	}
-	_, hasType := d.Member(obj, "type")
-	_, hasWho := d.Member(obj, "who")
-	_, hasWhen := d.Member(obj, "when")
-	_, hasWhenExt := d.Member(obj, "_when")
-	return hasType && hasWho && (hasWhen || hasWhenExt)
+	var hasType, hasWhen, hasWho bool
+	for _, m := range d.Members(obj) {
+		switch {
+		case strings.EqualFold(m.Name, "type"):
+			hasType = true
+		case strings.EqualFold(m.Name, "when"), strings.EqualFold(m.Name, "_when"):
+			hasWhen = true
+		case strings.EqualFold(m.Name, "who"):
+			hasWho = true
+		}
+	}
+	return hasType && hasWhen && hasWho
+}
+
+// cdexOwnSignature reports whether obj, a Bundle or a Provenance, carries its
+// own signature member, `signature`, its name read in any case (`Signature`,
+// `SIGNATURE`; strings.EqualFold). A parse never holds two member names that
+// fold alike, so at most one member answers.
+func cdexOwnSignature(d *splice.Doc, obj splice.NodeID) bool {
+	for _, m := range d.Members(obj) {
+		if strings.EqualFold(m.Name, "signature") {
+			return true
+		}
+	}
+	return false
 }
 
 // cdexIsResource reports whether obj is a FHIR resource (an object with a
@@ -109,8 +130,8 @@ func cdexWalk(d *splice.Doc, visit func(n, resource splice.NodeID)) {
 }
 
 // cdexSignedProvenanceTargets calls match for every target reference of
-// every Provenance in d that carries a signature, and reports whether any
-// call matched.
+// every Provenance in d that carries its own signature (cdexOwnSignature), and
+// reports whether any call matched.
 func cdexSignedProvenanceTargets(d *splice.Doc, match func(ref string) bool) bool {
 	hit := false
 	for i := 0; i < d.Len() && !hit; i++ {
@@ -118,7 +139,7 @@ func cdexSignedProvenanceTargets(d *splice.Doc, match func(ref string) bool) boo
 		if rt, _ := cdexStringMember(d, n, "resourceType"); rt != "Provenance" {
 			continue
 		}
-		if _, signed := d.Member(n, "signature"); !signed {
+		if !cdexOwnSignature(d, n) {
 			continue
 		}
 		targets, _ := d.Member(n, "target")
@@ -176,7 +197,7 @@ func cdexTaskSignature(task, records *splice.Doc, taskID string) string {
 // as a whole, or returns "".
 func cdexRecordsSignature(records *splice.Doc) string {
 	root := records.Root()
-	if _, ok := records.Member(root, "signature"); ok {
+	if cdexOwnSignature(records, root) {
 		return "Bundle.signature on the records"
 	}
 	carrier := ""
