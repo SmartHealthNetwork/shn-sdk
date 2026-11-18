@@ -1789,11 +1789,16 @@ in one direction for one correlation.
 
 - From the network's deploy, an Authorization Framework instance that has not read the
   registrar's feed once since it started → 503 `{"error":"registry not yet loaded"}` with
-  `Retry-After: 3`, before anything else is read. It is a refusal on authentication: the
+  `Retry-After: 3`, `X-SHN-Delivered: no` and `Connection: close`, before anything else is read. It is a refusal on authentication: the
   instance cannot yet tell a registered holder from a stranger, so it answers neither way.
   An instance is unready only until that first read, normally its first few seconds after
   it starts, unless the registrar cannot answer: retry after the wait. `GET /pubkey` is
-  served throughout.
+  served throughout. `X-SHN-Delivered: no` is the instance's statement that it read,
+  decided and recorded nothing, which is what makes sending the same call again safe: from
+  shn-gateway v1.16.0 a gateway sends a call refused this way again, at most twice, each time
+  on a new connection (a ready instance may be serving beside the unready one) and with a fresh
+  holder assertion, and only a `503` whose `error` is exactly `registry not yet loaded` and that
+  carries `X-SHN-Delivered: no`; refused every time, the leg is not sent, as §6.1b says.
 - `X-Holder-Assertion` missing or malformed → 401 `{"error":"unauthorized"}`
 - `X-Holder-Assertion` names a holder the Authorization Framework has not read
   from the registrar's feed yet → 401 `{"error":"unknown sender"}`. It reads the
@@ -1844,6 +1849,26 @@ is minted. `rule` names the network primitive the Framework refused on, `audit`,
 in the vocabulary a gateway records refusals in (`refusal.rule`). It is the only
 answer that carries `rule`. From shn-gateway v1.1.0, a requester's gateway reads
 that field, not the error text, and records the leg as refused on the `audit` rule.
+
+A record the Framework could not confirm may still have been written: an append
+to the Audit Plane is known not written only when the Plane refuses it (a `4xx`
+other than `408` and `429`). From the network's deploy, when a decision's record
+may have been written, the Framework closes it with a decision record whose
+outcome is `audit-error`, in the background, never holding that `502` for it:
+the same holder, operation, frame, patient, involvement and `correlationId`, no
+scope, and its own `recordId`. The close is best effort, within a bound: each such
+decision gets a first attempt, and a close whose outcome that attempt leaves unknown is
+tried again for up to 60 seconds, with at most 16 decisions' closes retried at once. A
+close the Audit Plane refuses, one past that time or that cap, or one still pending when
+the Framework stops is left unwritten;
+the Framework logs and counts it. So a decision record that may have been written is not
+always followed by its `audit-error` record. An `audit-error` record says that a decision was
+refused on the audit rule and no token issued for it. It does not name the
+decision record it closes, which may never have been written, and another
+attempt of the same step can share its `correlationId`, so read it on its own,
+never as closing any one decision record. A decision record's outcome is one of
+`allowed`, `denied`, `policy-error`, `consent-error` and `audit-error`; read any
+other as not allowed.
 
 **What a requester's gateway tells its caller (from shn-gateway v1.9.0).** When no
 authority can be obtained for a request leg, the leg is not sent, and the caller is told
@@ -2467,7 +2492,7 @@ rather than route it unguarded.
 
 From the network's deploy, a Hub instance that has not read the registrar's feed once
 since it started refuses every leg before step 1 with `503 {"error":"registry not yet
-loaded"}`, `X-SHN-Delivered: no` and `Retry-After: 3`. It is a refusal on routing: the
+loaded"}`, `X-SHN-Delivered: no`, `Retry-After: 3` and `Connection: close`. It is a refusal on routing: the
 instance cannot yet tell a registered holder from a stranger, as sender or as recipient,
 so it neither refuses you as unknown nor routes. Nothing is audited or forwarded. An
 instance is unready only until that first read, normally its first few seconds after it
@@ -2815,7 +2840,7 @@ caller gets back from the route that started the exchange. A leg is
 | `routed` | The leg was attempted: recipient resolved, contract line selected, seal → authorize (§4.1) → `POST {hub}/route` under way. Always followed by exactly one terminal outcome. | — |
 | `answered` | The counterpart answered and the response envelope verified end-to-end (§6.1 steps 6–8, `VerifyBound` §4.4). A frame-carried **non-2xx answer** is `answered`, not a failure: an application answer (§6.3 — an adjudication denial, a `422` validation reject, a partner payer's real `400`), and since shn-gateway v0.54.0 the counterpart gateway's own failure (§8, "Mechanical vs. application status" — its system unreachable, a record it could not read). The counterpart reports it, so it is not counted in your `LegError`; the counterpart's operators see it, and to the Hub, which cannot see inside the frame, the leg was answered. | The application response; a non-2xx answer is relayed **verbatim** with the recipient's own status, `Content-Type` and body. |
 | `denied` | The **Authorization Framework refused the request leg** — `403` from `POST {authz}/authorize` (§4.1: wrong role for the frame, or no consent on `federated-query-submit`). A policy decision, not an error; excluded from the operators' `LegError` alarm. | A `403` whose `error` carries `authorization denied` (a `502` before shn-gateway v0.54.0), from a route with no legitimate denied branch; a flow that has one treats it as a business outcome instead (the UC-05 federated query leaves the prior authorization pended with `consentDenied: true` rather than failing). |
-| `unreachable` | The **Hub leg did not complete**: the recipient was not reached, or, for a leg that timed out after your gateway sent it, may have been (the `504` says so): your gateway could not reach `POST {hub}/route`, or (from shn-gateway v1.10.0) was answered there with a redirect (any `3xx`), which it never follows; or the Hub refused the leg — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), the `422` for a leg its recipient does not take or one for another role than the recipient's, or the `502` it returns when the recipient is unknown, cannot be reached, or refuses the forward at its edge, or on a payload-hash mismatch, or the `500` it returns when it cannot encode the envelope it would forward (`encode envelope failed`) or mint its transport assertion (`transport assertion encoding failed`), or the `503` it returns when it cannot reach its replay record (`replay guard unavailable`) or cannot hold a large envelope (`large envelope budget exhausted`, §5), or, from the network's deploy, when it has not read the registrar's feed once since it started (`registry not yet loaded`), or when it cannot write its own audit record while nothing has reached the recipient (`audit append failed`: before the forward, or after a forward that did not reach the recipient; from the network's deploy, and a `502` before), or the `503` it relays when the recipient's gateway states that it refused the leg before acting, because it does not know your gateway yet or has no room for the envelope (`X-SHN-Not-Acted`, §6.1) (each marked `X-SHN-Delivered: no`); or a `4xx` with no `X-SHN-Delivered` marker, which did not come from the Hub (a load balancer in front of it). A recipient that does not frame its answers is refused at its edge in the Hub's eyes, so its `4xx` application answer reads this way too. Also the leg that produced **no answer within your gateway's wait** (the HTTP client timeout it posts to `POST {hub}/route` with — 30 seconds in the published Smart Gateway; the whole Hub → counterpart gateway → counterpart system path shares that budget). From shn-gateway v0.60.0, also a request leg whose **Authorization Framework did not answer**: `POST {authz}/authorize` was refused, reset or closed, or failed some other way, before any response, got no answer within your gateway's HTTP client timeout, or was answered `503` or `504` (the Framework answers neither itself, apart from, from the network's deploy, its `503 registry not yet loaded` before it has read the registrar's feed once (§4.1); otherwise they come from a proxy or load balancer in front of it), or, from shn-gateway v1.10.0, with a redirect (any `3xx`), which your gateway never follows (its access line's `authorizeError` reads `redirect-refused`); from shn-gateway v1.9.0, also a `429`, the Framework limiting your gateway, which is never retried and is answered as §4.1 says. Your gateway tries that call once more, with a fresh holder assertion, only when the first attempt failed with a refused, reset or closed connection before the request was written; after the write the Framework may have decided and recorded its decision, so it is not repeated. The leg is not sent to the Hub. | The Hub not reached: a `502` whose `error` is `hub routing failed`; from shn-gateway v1.10.0, so is a redirect (any `3xx`, with or without a `Location`) answered to `POST {hub}/route`, which your gateway never follows, and whose log line names `redirect-refused`. The Hub's refusal, with `error` reading `hub refused the exchange: <the Hub's reason>`: a `409 … replay detected` keeps the Hub's status (and from shn-gateway v1.1.0, so does a `413 … request body too large`, §5); every other Hub `4xx` concerns your gateway's standing with the Hub (its registration, its token, its clock), not the caller's request, and is a `502` — e.g. `502 … stale or future timestamp`, `502 … unknown sender`; the Hub's `422` for a leg the recipient does not take (§6.1) concerns the recipient: from shn-gateway v1.1.0 your caller gets that `422` with the Hub's reason as it stands, `{"error":"the recipient does not take <leg>: …"}`, and so it does for the Hub's `422` for a recipient of another role than the leg's, `{"error":"the recipient cannot take <leg>: it is registered as <role>, and <leg> is answered by <roles>"}` (an OperationOutcome with code `not-supported` and the reason as its `diagnostics` on a FHIR operation route), and before that it is `502 … hub refused the exchange: the recipient does not take <leg>: …`; a Hub `5xx` keeps its status, e.g. `502 … unknown recipient` or `503 … replay guard unavailable`. A recipient gateway that refused the forward at its edge: `502 the recipient's gateway refused the exchange (403)`. Before shn-gateway v0.54.0, every one of these was `502 hub routing failed`. The timed-out leg: a `504` whose `error` reads `no answer on the hub leg within 30s (hub leg timeout)` (the number is the client's own timeout, which your gateway applies as its own deadline on the leg; `hub leg timed out` with no number when your own request deadline ended the wait first; either adds `the recipient may have received this request: check its outcome before resending` when the request had already been sent to the Hub, and from shn-gateway v1.12.0 that `504` also carries `X-SHN-Delivered: unknown` and states it in its body, §6.1; a connection or TLS handshake that gives up before the Hub is reached is not called a timeout and stays the `502`). Retry with a freshly sealed envelope (§6.1a). The Authorization Framework not answering (from shn-gateway v0.60.0): your gateway's own `503`, uncacheable, whose `error` reads `the authorization service could not be reached, so this leg was not sent to the recipient` (before shn-gateway v1.5.0, `… not sent to the payer`) (an OperationOutcome with code `transient` on a FHIR operation route). A Da Vinci ingress call is one leg, so nothing reached the payer and resending it is safe; on a route that sends several legs, the earlier ones may have been sent. Before v0.60.0 it was a `502 authorization failed`, counted `failed`. The recipient's gateway not knowing yours yet (from shn-gateway v0.62.0): your gateway's own `503`, uncacheable, with the relayed `Retry-After`, whose `error` reads `the recipient's gateway has not read this gateway's registration yet and took no action on this leg; resend after <n>s` (an OperationOutcome with code `transient` on a FHIR operation route). A Da Vinci ingress call is one leg, so nothing reached the recipient and resending it after that wait is safe; on a route that sends several legs, the earlier ones may have been answered. Before v0.62.0 the recipient's gateway acted on the leg and then answered `500`, which read as `the recipient may have received this request`. |
+| `unreachable` | The **Hub leg did not complete**: the recipient was not reached, or, for a leg that timed out after your gateway sent it, may have been (the `504` says so): your gateway could not reach `POST {hub}/route`, or (from shn-gateway v1.10.0) was answered there with a redirect (any `3xx`), which it never follows; or the Hub refused the leg — its own verification refusal (§6.1, any `400`/`401`/`403`/`409`, including `401 "unknown sender"` inside the registrar-poll window after you register), the `422` for a leg its recipient does not take or one for another role than the recipient's, or the `502` it returns when the recipient is unknown, cannot be reached, or refuses the forward at its edge, or on a payload-hash mismatch, or the `500` it returns when it cannot encode the envelope it would forward (`encode envelope failed`) or mint its transport assertion (`transport assertion encoding failed`), or the `503` it returns when it cannot reach its replay record (`replay guard unavailable`) or cannot hold a large envelope (`large envelope budget exhausted`, §5), or, from the network's deploy, when it has not read the registrar's feed once since it started (`registry not yet loaded`), or when it cannot write its own audit record while nothing has reached the recipient (`audit append failed`: before the forward, or after a forward that did not reach the recipient; from the network's deploy, and a `502` before), or the `503` it relays when the recipient's gateway states that it refused the leg before acting, because it does not know your gateway yet or has no room for the envelope (`X-SHN-Not-Acted`, §6.1) (each marked `X-SHN-Delivered: no`); or a `4xx` with no `X-SHN-Delivered` marker, which did not come from the Hub (a load balancer in front of it). A recipient that does not frame its answers is refused at its edge in the Hub's eyes, so its `4xx` application answer reads this way too. Also the leg that produced **no answer within your gateway's wait** (the HTTP client timeout it posts to `POST {hub}/route` with — 30 seconds in the published Smart Gateway; the whole Hub → counterpart gateway → counterpart system path shares that budget). From shn-gateway v0.60.0, also a request leg whose **Authorization Framework did not answer**: `POST {authz}/authorize` was refused, reset or closed, or failed some other way, before any response, got no answer within your gateway's HTTP client timeout, or was answered `503` or `504` (the Framework answers neither itself, apart from, from the network's deploy, its `503 registry not yet loaded` before it has read the registrar's feed once (§4.1); otherwise they come from a proxy or load balancer in front of it), or, from shn-gateway v1.10.0, with a redirect (any `3xx`), which your gateway never follows (its access line's `authorizeError` reads `redirect-refused`); from shn-gateway v1.9.0, also a `429`, the Framework limiting your gateway, which is never retried and is answered as §4.1 says. Your gateway tries that call once more, with a fresh holder assertion, only when the first attempt failed with a refused, reset or closed connection before the request was written; after the write the Framework may have decided and recorded its decision, so it is not repeated. From shn-gateway v1.16.0 it also sends the call again when the Framework's own `503 registry not yet loaded` carries `X-SHN-Delivered: no`, the instance's statement that it decided nothing, at most twice, each time on a new connection and with a fresh holder assertion (§4.1); and it sends a leg the Hub refused `503 registry not yet loaded` with `X-SHN-Delivered: no` again the same way, the same sealed envelope with a fresh assertion, since that refusal comes before the Hub reads the envelope, so nothing of the leg was recorded or forwarded. Refused every time, each is answered as before. The leg is not sent to the Hub. | The Hub not reached: a `502` whose `error` is `hub routing failed`; from shn-gateway v1.10.0, so is a redirect (any `3xx`, with or without a `Location`) answered to `POST {hub}/route`, which your gateway never follows, and whose log line names `redirect-refused`. The Hub's refusal, with `error` reading `hub refused the exchange: <the Hub's reason>`: a `409 … replay detected` keeps the Hub's status (and from shn-gateway v1.1.0, so does a `413 … request body too large`, §5); every other Hub `4xx` concerns your gateway's standing with the Hub (its registration, its token, its clock), not the caller's request, and is a `502` — e.g. `502 … stale or future timestamp`, `502 … unknown sender`; the Hub's `422` for a leg the recipient does not take (§6.1) concerns the recipient: from shn-gateway v1.1.0 your caller gets that `422` with the Hub's reason as it stands, `{"error":"the recipient does not take <leg>: …"}`, and so it does for the Hub's `422` for a recipient of another role than the leg's, `{"error":"the recipient cannot take <leg>: it is registered as <role>, and <leg> is answered by <roles>"}` (an OperationOutcome with code `not-supported` and the reason as its `diagnostics` on a FHIR operation route), and before that it is `502 … hub refused the exchange: the recipient does not take <leg>: …`; a Hub `5xx` keeps its status, e.g. `502 … unknown recipient` or `503 … replay guard unavailable`. A recipient gateway that refused the forward at its edge: `502 the recipient's gateway refused the exchange (403)`. Before shn-gateway v0.54.0, every one of these was `502 hub routing failed`. The timed-out leg: a `504` whose `error` reads `no answer on the hub leg within 30s (hub leg timeout)` (the number is the client's own timeout, which your gateway applies as its own deadline on the leg; `hub leg timed out` with no number when your own request deadline ended the wait first; either adds `the recipient may have received this request: check its outcome before resending` when the request had already been sent to the Hub, and from shn-gateway v1.12.0 that `504` also carries `X-SHN-Delivered: unknown` and states it in its body, §6.1; a connection or TLS handshake that gives up before the Hub is reached is not called a timeout and stays the `502`). Retry with a freshly sealed envelope (§6.1a). The Authorization Framework not answering (from shn-gateway v0.60.0): your gateway's own `503`, uncacheable, whose `error` reads `the authorization service could not be reached, so this leg was not sent to the recipient` (before shn-gateway v1.5.0, `… not sent to the payer`) (an OperationOutcome with code `transient` on a FHIR operation route). A Da Vinci ingress call is one leg, so nothing reached the payer and resending it is safe; on a route that sends several legs, the earlier ones may have been sent. Before v0.60.0 it was a `502 authorization failed`, counted `failed`. The recipient's gateway not knowing yours yet (from shn-gateway v0.62.0): your gateway's own `503`, uncacheable, with the relayed `Retry-After`, whose `error` reads `the recipient's gateway has not read this gateway's registration yet and took no action on this leg; resend after <n>s` (an OperationOutcome with code `transient` on a FHIR operation route). A Da Vinci ingress call is one leg, so nothing reached the recipient and resending it after that wait is safe; on a route that sends several legs, the earlier ones may have been answered. Before v0.62.0 the recipient's gateway acted on the leg and then answered `500`, which read as `the recipient may have received this request`. |
 | `failed` | Anything else, on **your gateway's** side of the leg: the Authorization Framework erroring (an answer other than `403`, `429`, `503` or `504`, and from shn-gateway v1.10.0 other than a `3xx`, which is `unreachable`, or an answer your gateway cannot read; before shn-gateway v0.60.0 also no answer at all, and before v1.9.0 also a `429`), a seal/encode failure. Also a leg **the recipient's gateway was reached for** whose answer was lost: the Hub marks its `502` with `X-SHN-Delivered` (`yes`: the recipient answered and the Hub could not read, decode, verify or audit the answer; `unknown`: the recipient answered `5xx`, the connection failed after the request was sent, or it did not answer before the forward gave up), a `5xx` with no marker (not from the Hub), a connection to the Hub that failed after your gateway sent the request, or the Hub returned `200` and the answer could not be read or fails your gateway's own verification (not an envelope, `VerifyBound`, correlation match, decrypt, frame decode). Counted in `LegError` with `unreachable`. | A `502` whose `error` names the reason — from shn-gateway v1.9.0, for a request leg's own Framework failure, the class §4.1 lists (`the authorization service failed (answered 500), so this leg was not sent`; before, `authorization failed`), …. A leg the recipient was reached for reads `the recipient received this request and answered, but its answer was lost on the way back (…)` or `… its answer could not be accepted (…)`, or `the recipient may have received this request (…)`: the recipient may have acted on it, so check the request's outcome (for PAS, `$inquire`) before resending. From shn-gateway v1.12.0 each also carries `X-SHN-Delivered` (`yes` when the recipient answered, `unknown` when it may have received the request) and states it in its body: problem details members after `error` on CDS Hooks (`application/json`) and `/scenario` (`application/problem+json`), a `details` coding on a FHIR operation route's OperationOutcome (§6.1); and a Hub `200` that could not be read, was not an envelope or whose answer token failed verification reads `the recipient may have received this request (<reason>)` (`unknown`), not `… its answer could not be accepted (…)`, and so does one naming another sender or correlation; `… could not be accepted (…)` (`yes`) is kept for an answer verified as the recipient's own and then refused (decryption, frame decode, a `204` with a body, another contract line). A `2xx` answer whose frame declares a contract line other than the one the leg routed to (§6.3) is also refused after the recipient answered (from shn-gateway v0.62.0 only when your gateway sets `REQUIRE_SHARED_LINE=true`: by default it is relayed and the difference recorded, §8.6), and from shn-gateway v0.62.0 reads `the recipient received this request and answered, but its answer could not be accepted (response contract version mismatch: frame declares <token>, leg routed <token>); it may have acted on the request: check its outcome before resending`; before v0.62.0 it read only `response contract version mismatch: …`, without that advice, and the same check applied to it. |
 
 Two things are **not** leg outcomes:
@@ -2918,7 +2943,7 @@ for an absent token, then `Validate`, which checks the structure above and nothi
 | `409` | the answer has a record already | replay |
 | `413` | the body is over 64 KiB, so it cannot be read whole | message integrity |
 | `503` | the Hub cannot reach its replay store, so it fails closed | replay |
-| `503` | from the network's deploy: the Hub instance has not read the registrar's feed once since it started (`registry not yet loaded`, with `Retry-After`) | routing |
+| `503` | from the network's deploy: the Hub instance has not read the registrar's feed once since it started (`registry not yet loaded`, with `Retry-After` and `Connection: close`) | routing |
 | `503` | from the network's deploy: the Hub claimed the answer but its audit store could not write the record; the record is not sent again for that answer, since its claim stays spent (the leg is unaffected) | audit |
 
 **What the Hub records**, from the network's deploy: on a `bound` record,
@@ -4661,15 +4686,29 @@ edit E-03 is retired and never reused.
   place (outside any resource, in a resource whose type is not an R4 resource type, in a
   member R4 does not define there, or a value of another kind than its place's type), an
   object with a `Signature`'s required members (`type`, `when`, `who`, in any case) is read as
-  one. Before shn-gateway v1.15.0 any object with those members was read as one, wherever it
-  was. From shn-gateway v1.15.0, in finding what a signature in a message covers, a Bundle's or
-  a Provenance's own signature in that message is read under its member's name in any case, as
-  `Bundle.signature` or `Provenance.signature`; before, one named in another case was read as
-  a `Signature` in that resource, and a Provenance's then covered only the Provenance, not its
-  targets. From shn-gateway v1.1.0 a provider's gateway re-keys the `payer-url` of each Task in
-  a PAS answer to its own documentation return path even where a signature covers it (§7b.1a), so
-  that the documentation the provider sends stays on the network; that signature then no
-  longer verifies in the provider's copy, and the answer names the edit and the signature in
+  one. Before shn-gateway v1.15.0 any object with those members, each named exactly, was read
+  as one, wherever it was. From shn-gateway v1.15.0, in finding what a signature in a message
+  covers, a Bundle's or a Provenance's own signature in that message is read under its member's
+  name in any case, as `Bundle.signature` or `Provenance.signature`; before, one named in
+  another case was read as a `Signature` in that resource only when its `type`, `when` and
+  `who` were each named exactly, and otherwise as no signature; a Provenance's then covered
+  only the Provenance, not its targets. From shn-gateway v1.15.0 a signed Provenance that a
+  resource contains and that targets `#`, R4's reference to the resource containing it, covers
+  that resource; before, `#` named nothing, so an edit there was made without naming that
+  Provenance's signature. From a Provenance that is not contained, `#` still names nothing.
+  From shn-gateway v1.15.0 the members that say what a Provenance's signature covers are read by
+  their names in any case too: the Provenance's `target` and each target's `reference`, and, in
+  resolving a reference, a resource's `id`, a Bundle entry's `fullUrl` and `resource`, and a
+  `contained` array; before, a reference was resolved only through members named exactly, so an
+  edit to a resource it named only through one named in another case was made without naming
+  that signature. An object whose `resourceType` is named in another case is read both ways: a
+  signature in it is read by its required members and covers the resource enclosing it, and the
+  object is also the resource it names, which a target may name and which, as a Bundle or a
+  Provenance with its own signature, covers what that signature covers.
+  From shn-gateway v1.1.0 a provider's gateway re-keys the `payer-url` of each Task in a PAS
+  answer to its own documentation return path even where a signature covers it (§7b.1a), so
+  that the documentation the provider sends stays on the network; that signature then no longer
+  verifies in the provider's copy, and the answer names the edit and the signature in
   `X-SHN-Edited`. From shn-gateway v1.5.0 it does the same to the one `payer-url` of a payer's
   attachment-request Task (`cdex-attachment-request`) as it carries the Task to its own
   system, and the forward names the edit and the signature in `X-SHN-Edited`
@@ -5121,7 +5160,9 @@ at PAS 2.0.1" below); earlier releases carry one at every line.
   contains that targets it, or the facility's signed `Provenance` that attributes
   it) is refused when E-14 would change it, `422 signed content cannot be edited
   (E-14, <carrier>)`, and no amendment is sent; a report about anyone else is
-  refused `422`, with no edit made. From v1.8.0 the gateway's Carried update builder
+  refused `422`, with no edit made. From shn-gateway v1.15.0 a facility `Provenance`
+  signed under its own signature member named in any case (such as `Signature`), not
+  only `signature`, refuses E-14. From v1.8.0 the gateway's Carried update builder
   then carries the report and the facility's Provenance as written: under the
   facility's own ids, each at an entry whose `fullUrl` is built from its own id, with
   their `meta`, and the Provenance's `target` exactly as the facility wrote it, never
@@ -6146,6 +6187,81 @@ property. Until then, build to the rule: preserve what you do not recognise.
 ## 9. Status and roadmap
 
 ### Changelog
+
+- **2026-11-18 — From shn-sdk v1.14.0, a CDex fulfillment past the limits of the SDK's JSON reader is refused with `ErrCDexLimit`.**
+  `shnsdk.BuildCDexQueryResult` and `shnsdk.BuildCDexFulfillment` refuse with `ErrCDexLimit`
+  (new) a fulfillment stopped by the limits of the SDK's JSON reader: where the request
+  `Task`, the records `Bundle` (once its id is written, where the fulfillment writes one) or
+  the fulfilled `Task` is longer than 16 MiB, nested more than 64 deep, or holds more than
+  1,000,000 JSON tokens (each value and each member name is one). The fulfilled `Task` holds
+  the request `Task` and the records `Bundle`, so it can pass a limit when neither does alone.
+  Releases since CDex fulfillment came to keep the request `Task` and the records exactly
+  (2026-09-16) refused each of these with an error no exported value matched, so a caller could
+  not tell it from a fault in the build.
+- **2026-11-17 — From shn-sdk v1.14.0, CDex fulfillment reads a `Signature` by its place, and a signed `Provenance`'s targets under their members' names in any case.**
+  `shnsdk.BuildCDexQueryResult` and `shnsdk.BuildCDexFulfillment` read an object at a place
+  FHIR R4 types `Signature` as a `Signature` whatever its members: an extension's or a modifier
+  extension's `valueSignature` at any depth, and a `Task` input's or output's `valueSignature`,
+  each member's name read in any case. They read the members that say what a `Provenance`'s own
+  signature covers by their names in any case too: its `resourceType` and `target`, each
+  target's `reference`, and the `id` of the request `Task` or the records `Bundle` it names.
+  These are refused with `ErrCDexSignedContent`, where earlier releases could extend the
+  `Task`: a `Signature` lacking a member it requires (`type`, `when` or `who`) at such a place
+  in the request `Task`, or, when the records `Bundle` would need its id written, in that
+  `Bundle` outside any resource it holds; and a signed `Provenance` that names the request
+  `Task` or the records `Bundle` only through a member named in another case. An object with a
+  `Signature`'s members is still read as one wherever it is, but for the records `Bundle`
+  itself: it is not read as a `Signature` covering itself, as earlier releases read it where
+  the fulfillment writes its id, refusing it; a gateway's relay does not read it as one either.
+  Four more readings refuse where
+  earlier releases extended the `Task`: a `Signature` that names a `resourceType` of its own is
+  read with the resource holding it, so one directly in the records `Bundle` covers it; a
+  signed `Provenance`'s `#` target in the records is read as naming the records `Bundle`, and,
+  where it names the records `Bundle` as the relay reads `#` (up from the Provenance's
+  container to the nearest resource, and on while that resource is contained), as naming the
+  request `Task` too, which the fulfillment makes the `Bundle`'s container; and a reference
+  names the resource of its last two segments once a version is cut from its end, so
+  `/_history/` earlier in it no longer hides its type and id.
+
+- **2026-11-17 — From shn-gateway v1.16.0, a gateway sends a call that a Hub or Authorization Framework instance refused `503 registry not yet loaded` again, at most twice, each time on a new connection (§4.1, §6.1b).**
+  From shn-gateway v1.16.0, a leg's `POST {hub}/route` or its `POST {authz}/authorize` that an
+  instance refused with status `503`, `X-SHN-Delivered: no` and an `error` of exactly
+  `registry not yet loaded` is sent again at most twice, 250 ms and then 500 ms after the
+  refusal, each time on a new connection and with a fresh holder assertion: the Hub's leg within
+  its own deadline and with the same sealed envelope, the authorize call within the call the
+  gateway is answering. `X-SHN-Delivered: no` is what
+  makes that safe: the refusing instance read, decided, recorded and forwarded nothing. A new
+  connection matters because an instance that is starting can be reached inside the network
+  beside a ready one, and a kept-alive connection that reached it would reach it again. No
+  other answer is sent again for this: not a `503` without that header or with another
+  `error`, nor a `502`, `504`, `429` or a failed connection. Refused every time, the leg is
+  answered and recorded as before: the Hub's `503` as `routing`, with its `Retry-After`, and
+  the Framework's as the authorization service not reached.
+
+- **2026-11-17 — From the network's deploy, a Hub or Authorization Framework instance's `503 registry not yet loaded` closes its connection (§4.1, §6.1, §6.1c).**
+  The refusal, and an unready instance's `GET /ready` `503`, now carry `Connection: close`, so
+  the connection is closed after the answer. An instance that still cannot read the
+  registrar's feed when its health check gives up (about 90 seconds after it starts) can be
+  reached inside the network until it is replaced, about 2 minutes, and a kept-alive
+  connection that reaches it would keep reaching it; closing the connection lets the next
+  request open a new one, which may reach a ready instance. Nothing else about the refusal changes: its status, body,
+  `Retry-After` and `X-SHN-Delivered: no` are as before, and nothing was delivered. A ready
+  instance's answers keep their connections.
+
+- **2026-11-17 — From the network's deploy, the Authorization Framework closes a decision whose record may have been written with an `audit-error` record (§4.1).**
+  A decision is refused `502 decision audit failed`, rule `audit`, with no token, when its
+  record cannot be written, as before. When that record may have been written all the same
+  (its append was answered with neither a `2xx` nor a `4xx` other than `408` and `429`, or not
+  at all), the Framework then writes, in the background and within a bound, a decision record
+  with the outcome `audit-error`: the same holder, operation, frame, patient, involvement and
+  `correlationId`, no scope, and its own `recordId`. The bound: a first attempt, then, for a
+  close whose outcome it leaves unknown, retries for up to 60 seconds, with at most 16
+  decisions' closes retried at once; a close the Audit Plane refuses, one past that time or
+  that cap, or one still pending when the Framework stops is left unwritten, logged and
+  counted. The `audit-error` record says that a decision was refused and no token issued for it; it does not name
+  the decision record it closes, so read it on its own. The decision outcomes are a closed set:
+  `allowed`, `denied`, `policy-error`, `consent-error` and `audit-error`. This is a rule on the
+  audit primitive, the same at every conformance level.
 
 - **2026-11-17 — From shn-sdk v1.13.0, §2.3's `legs` row and §6.1 list `cdex-task-signal` among the marked legs.**
   Documented, with no change in behaviour: their lists of the legs the network marks with the

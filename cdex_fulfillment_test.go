@@ -634,8 +634,10 @@ func TestBuildCDexQueryResult_OwnSignatureInAnyCase(t *testing.T) {
 // TestBuildCDexQueryResult_SignatureShapeInAnyCase: an object shaped as a
 // Signature (type, when or _when, and who) is read with each member's name in
 // any case: in the request Task, or in the records Bundle when its id must be
-// written, it refuses as the exact-case shape does. A shape that lacks a
-// member, or whose names only resemble them, is no Signature.
+// written, it refuses as the exact-case shape does. At a place no FHIR R4 type
+// describes, a shape that lacks a member, or whose names only resemble them,
+// is no Signature; at a place R4 types Signature it is one all the same
+// (TestBuildCDexQueryResult_SignatureByItsPlace).
 func TestBuildCDexQueryResult_SignatureShapeInAnyCase(t *testing.T) {
 	const typ, when, who = `[{"system":"urn:iso-astm:E1762-95:2013","code":"1.2.840.10065.1.12.1.1"}]`, `"2026-06-04T00:00:00Z"`, `{"display":"payer"}`
 	shape := func(tn, wn, on string) string {
@@ -668,19 +670,239 @@ func TestBuildCDexQueryResult_SignatureShapeInAnyCase(t *testing.T) {
 			}
 		})
 	}
-	// Controls: a shape missing who, and names that only resemble the members.
+	// Controls: a shape missing who, and names that only resemble the
+	// members, at a place no R4 type describes (a member R4 does not define).
+	untypedInTask := func(v string) string {
+		return `{"resourceType":"Task","id":"t1","status":"requested","x-note":` + v + `}`
+	}
+	untypedInRecords := func(v string) string {
+		return `{"resourceType":"Bundle","type":"searchset","x-note":` + v + `}`
+	}
 	for _, sig := range []string{
 		`{"Type":` + typ + `,"When":` + when + `}`,
 		shape("types", "when", "who"),
 		shape("type", "when", "whom"),
 	} {
 		t.Run("control Task "+sig[:12], func(t *testing.T) {
-			if _, err := shnsdk.BuildCDexQueryResult([]byte(inTask(sig)), []byte(plain)); err != nil {
+			if _, err := shnsdk.BuildCDexQueryResult([]byte(untypedInTask(sig)), []byte(plain)); err != nil {
 				t.Fatalf("want a fulfillment, got %v", err)
 			}
 		})
 		t.Run("control records "+sig[:12], func(t *testing.T) {
-			if _, err := shnsdk.BuildCDexQueryResult([]byte(task), []byte(inRecords(sig))); err != nil {
+			if _, err := shnsdk.BuildCDexQueryResult([]byte(task), []byte(untypedInRecords(sig))); err != nil {
+				t.Fatalf("want a fulfillment, got %v", err)
+			}
+		})
+	}
+}
+
+// TestBuildCDexQueryResult_SignatureByItsPlace: an object at a place FHIR R4
+// types Signature is a Signature whatever its members, as the gateway relay
+// reads one (an extension's valueSignature at any depth, a Task input's or
+// output's), its members' names read in any case: one in the request Task, or
+// in the records Bundle when its id must be written, refuses. The value here
+// has none of a Signature's members, so only its place can refuse it. The
+// same value at a place no R4 type describes, or one R4 types otherwise, is
+// no Signature, nor is a contained Bundle's own signature, which is that
+// Bundle's.
+func TestBuildCDexQueryResult_SignatureByItsPlace(t *testing.T) {
+	const bare = `{"data":"c2ln"}`
+	taskWith := func(members string) string {
+		return `{"resourceType":"Task","id":"t1","status":"requested","intent":"order",` + members + `}`
+	}
+	recordsWith := func(members string) string {
+		return `{"resourceType":"Bundle","type":"searchset",` + members + `}`
+	}
+	task := taskWith(`"priority":"routine"`)
+	plain := recordsWith(`"total":0`)
+	for _, row := range []struct{ name, members string }{
+		{"an extension's valueSignature", `"extension":[{"url":"x","valueSignature":` + bare + `}]`},
+		{"a modifier extension's valueSignature", `"modifierExtension":[{"url":"x","valueSignature":` + bare + `}]`},
+		{"a nested extension's valueSignature", `"extension":[{"url":"x","extension":[{"url":"y","valueSignature":` + bare + `}]}]`},
+		{"an input's valueSignature", `"input":[{"type":{"text":"x"},"valueSignature":` + bare + `}]`},
+		{"an output's valueSignature", `"output":[{"type":{"text":"x"},"valueSignature":` + bare + `}]`},
+		{"an extension's valueSignature on an input", `"input":[{"type":{"text":"x"},"valueString":"v","extension":[{"url":"x","valueSignature":` + bare + `}]}]`},
+		{"an extension's valueSignature on a primitive", `"_status":{"extension":[{"url":"x","valueSignature":` + bare + `}]}`},
+		{"names in another case", `"Extension":[{"url":"x","VALUESIGNATURE":` + bare + `}]`},
+		{"an extension's valueSignature under a member R4 does not define", `"x-note":{"extension":[{"url":"x","valueSignature":` + bare + `}]}`},
+		{"an extension's valueSignature in a contained resource", `"contained":[{"resourceType":"Patient","id":"p","extension":[{"url":"x","valueSignature":` + bare + `}]}]`},
+	} {
+		t.Run("Task/"+row.name, func(t *testing.T) {
+			out, err := shnsdk.BuildCDexQueryResult([]byte(taskWith(row.members)), []byte(plain))
+			if !errors.Is(err, shnsdk.ErrCDexSignedContent) || !strings.Contains(err.Error(), "a Signature element in the request Task") || out != nil {
+				t.Fatalf("want ErrCDexSignedContent naming the Task's Signature, got err=%v out=%s", err, out)
+			}
+		})
+	}
+	for _, row := range []struct{ name, members string }{
+		{"meta's extension's valueSignature", `"meta":{"extension":[{"url":"x","valueSignature":` + bare + `}]}`},
+		{"an entry's extension's valueSignature", `"entry":[{"extension":[{"url":"x","valueSignature":` + bare + `}]}]`},
+		{"a link's modifier extension's valueSignature", `"link":[{"relation":"self","url":"u","modifierExtension":[{"url":"x","valueSignature":` + bare + `}]}]`},
+	} {
+		t.Run("records/"+row.name, func(t *testing.T) {
+			out, err := shnsdk.BuildCDexQueryResult([]byte(task), []byte(recordsWith(row.members)))
+			if !errors.Is(err, shnsdk.ErrCDexSignedContent) || !strings.Contains(err.Error(), "a Signature element in the records Bundle") || out != nil {
+				t.Fatalf("want ErrCDexSignedContent naming the records' Signature, got err=%v out=%s", err, out)
+			}
+		})
+	}
+	// Controls.
+	for _, row := range []struct{ name, task, records string }{
+		{"Task: a member R4 does not define", taskWith(`"x-note":` + bare), plain},
+		{"Task: a place R4 types Annotation", taskWith(`"note":[` + bare + `]`), plain},
+		{"Task: an input's value of another type", taskWith(`"input":[{"type":{"text":"x"},"valueAttachment":` + bare + `}]`), plain},
+		{"Task: a contained Bundle's own signature", taskWith(`"contained":[{"resourceType":"Bundle","id":"b","type":"collection","signature":` + bare + `}]`), plain},
+		{"records: a member R4 does not define", task, recordsWith(`"x-note":` + bare)},
+		{"records: an entry resource's own extension", task, recordsWith(`"entry":[{"resource":{"resourceType":"Patient","id":"p","extension":[{"url":"x","valueSignature":` + bare + `}]}}]`)},
+	} {
+		t.Run("control "+row.name, func(t *testing.T) {
+			if _, err := shnsdk.BuildCDexQueryResult([]byte(row.task), []byte(row.records)); err != nil {
+				t.Fatalf("want a fulfillment, got %v", err)
+			}
+		})
+	}
+}
+
+// TestBuildCDexQueryResult_ProvenanceTargetMembersInAnyCase: the members that
+// say what a Provenance's own signature covers are read by their names in
+// any case, as the gateway relay reads them: the Provenance's resourceType
+// and target, each target's reference, and the id of the request Task or the
+// records Bundle it names. A target named through any of them refuses as the
+// exact names do; a member whose name only resembles one names nothing.
+func TestBuildCDexQueryResult_ProvenanceTargetMembersInAnyCase(t *testing.T) {
+	const signed = `"signature":[{"data":"c2ln"}]`
+	prov := func(rt, target, ref, to string) string {
+		return `{"` + rt + `":"Provenance","id":"sp","` + target + `":[{"` + ref + `":"` + to + `"}],` + signed + `}`
+	}
+	task := func(id string) string {
+		return `{"resourceType":"Task","` + id + `":"t1","status":"requested"}`
+	}
+	containing := func(p string) string {
+		return `{"resourceType":"Task","id":"t1","status":"requested","contained":[` + p + `]}`
+	}
+	records := func(id string, entries ...string) string {
+		b := `{"resourceType":"Bundle",`
+		if id != "" {
+			b += `"` + id + `":"r1",`
+		}
+		b += `"type":"searchset","entry":[`
+		for i, e := range entries {
+			if i > 0 {
+				b += ","
+			}
+			b += `{"resource":` + e + `}`
+		}
+		return b + `]}`
+	}
+	// The records Bundle's id r1 is taken in the Task, so it must be written.
+	collides := `{"resourceType":"Task","id":"t1","status":"requested","contained":[{"resourceType":"Patient","id":"r1"}]}`
+	const (
+		recordsOnTask = "a signed Provenance in the records targets the request Task"
+		taskOnTask    = "a signed Provenance in the request Task targets it"
+		onRecords     = "a signed Provenance in the records targets the records Bundle"
+	)
+	for _, row := range []struct {
+		name, task, records, carrier string
+	}{
+		{"records: Target", task("id"), records("", prov("resourceType", "Target", "reference", "Task/t1")), recordsOnTask},
+		{"records: REFERENCE", task("id"), records("", prov("resourceType", "target", "REFERENCE", "Task/t1")), recordsOnTask},
+		{"records: ResourceType", task("id"), records("", prov("ResourceType", "target", "reference", "Task/t1")), recordsOnTask},
+		{"records: the Task's ID", task("ID"), records("", prov("resourceType", "target", "reference", "Task/t1")), recordsOnTask},
+		{"Task: TARGET by #", containing(prov("resourceType", "TARGET", "reference", "#")), records(""), taskOnTask},
+		{"Task: Reference by type and id", containing(prov("resourceType", "target", "Reference", "Task/t1")), records(""), taskOnTask},
+		{"Task: RESOURCETYPE", containing(prov("RESOURCETYPE", "target", "reference", "#")), records(""), taskOnTask},
+		{"Task: the Task's Id", `{"resourceType":"Task","Id":"t1","status":"requested","contained":[` + prov("resourceType", "target", "reference", "Task/t1") + `]}`, records(""), taskOnTask},
+		{"records Bundle: Target, its id written", collides, records("id", prov("resourceType", "Target", "reference", "Bundle/r1")), onRecords},
+		{"records Bundle: its ID, its id written", task("id"), records("ID", prov("resourceType", "target", "reference", "Bundle/r1")), onRecords},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			out, err := shnsdk.BuildCDexQueryResult([]byte(row.task), []byte(row.records))
+			if !errors.Is(err, shnsdk.ErrCDexSignedContent) || !strings.Contains(err.Error(), row.carrier) || out != nil {
+				t.Fatalf("want ErrCDexSignedContent naming %q, got err=%v out=%s", row.carrier, err, out)
+			}
+		})
+	}
+	// Controls: names that only resemble the members, and a target that
+	// names another resource.
+	for _, row := range []struct{ name, task, records string }{
+		{"targets", task("id"), records("", prov("resourceType", "targets", "reference", "Task/t1"))},
+		{"ref", task("id"), records("", prov("resourceType", "target", "ref", "Task/t1"))},
+		{"resourceTypes", task("id"), records("", prov("resourceTypes", "target", "reference", "Task/t1"))},
+		{"the Task's ids", task("ids"), records("", prov("resourceType", "target", "reference", "Task/t1"))},
+		{"another Task", task("ID"), records("", prov("resourceType", "Target", "REFERENCE", "Task/t2"))},
+		{"records Bundle: another id", collides, records("id", prov("resourceType", "Target", "reference", "Bundle/r2"))},
+	} {
+		t.Run("control "+row.name, func(t *testing.T) {
+			if _, err := shnsdk.BuildCDexQueryResult([]byte(row.task), []byte(row.records)); err != nil {
+				t.Fatalf("want a fulfillment, got %v", err)
+			}
+		})
+	}
+}
+
+// TestBuildCDexQueryResult_SignedAsTheRelayReadsIt: where the relay reads the
+// request Task or the records Bundle as signed, so does the fulfillment, and
+// refuses. A Signature is read with the resource that holds it, even when it
+// names a resourceType of its own; a signed Provenance's "#" target names its
+// container, which may be the records Bundle; and a reference names the
+// resource of its last two segments once a version is cut from its end,
+// whatever "/_history/" stands earlier in it, or, refusing more than the
+// relay, once it is cut at its first "/_history/".
+func TestBuildCDexQueryResult_SignedAsTheRelayReadsIt(t *testing.T) {
+	const shaped = `"type":[{"code":"c"}],"when":"2020-01-01T00:00:00Z","who":{"reference":"Practitioner/p"}`
+	signedProv := func(ref string) string {
+		return `{"resourceType":"Provenance","target":[{"reference":"` + ref + `"}],"recorded":"2020-01-01T00:00:00Z","agent":[],"signature":[{"data":"c2ln"}]}`
+	}
+	task := `{"resourceType":"Task","id":"t1","status":"requested","intent":"order"}`
+	plain := `{"resourceType":"Bundle","id":"b1","type":"collection"}`
+	// The records Bundle's id results is taken in the Task, so it must be
+	// rewritten.
+	collides := `{"resourceType":"Task","id":"t1","status":"requested","intent":"order","contained":[{"resourceType":"Basic","id":"results"}]}`
+	const (
+		inRecords     = "a Signature element in the records Bundle"
+		onRecords     = "a signed Provenance in the records targets the records Bundle"
+		taskOnTask    = "a signed Provenance in the request Task targets it"
+		recordsOnTask = "a signed Provenance in the records targets the request Task"
+		containedTask = "a signed Provenance contained in the records targets the request Task"
+	)
+	for _, row := range []struct{ name, task, records, carrier string }{
+		{"records: a Signature with a resourceType of its own at meta", task, `{"resourceType":"Bundle","type":"collection","meta":{"resourceType":"Basic",` + shaped + `}}`, inRecords},
+		{"records: a Signature with a resourceType of its own at a member R4 does not define", task, `{"resourceType":"Bundle","type":"collection","foo":{"resourceType":"X",` + shaped + `}}`, inRecords},
+		{"records: a Signature with a resourceType of its own at a valueSignature", task, `{"resourceType":"Bundle","type":"collection","extension":[{"url":"u","valueSignature":{"resourceType":"X",` + shaped + `}}]}`, inRecords},
+		{"records: a contained Provenance's #, read first as naming the Task", task, `{"resourceType":"Bundle","type":"collection","contained":[` + signedProv("#") + `]}`, containedTask},
+		{"records: an entry's contained Provenance's #, read first as naming the Task", task, `{"resourceType":"Bundle","type":"collection","entry":[{"contained":[` + signedProv("#") + `]}]}`, containedTask},
+		{"records: an entry resource's contained Provenance's #", task, `{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Basic","contained":[` + signedProv("#") + `]}}]}`, onRecords},
+		{"records: a version path before the type and id", collides, `{"resourceType":"Bundle","id":"results","type":"collection","entry":[{"resource":` + signedProv("http://a/_history/v/Bundle/results") + `}]}`, onRecords},
+		{"Task: a version path before the type and id", `{"resourceType":"Task","id":"t1","status":"requested","intent":"order","contained":[` + signedProv("http://a/_history/v/Task/t1") + `]}`, plain, taskOnTask},
+		{"Task: a version at the end", task, `{"resourceType":"Bundle","id":"b1","type":"collection","entry":[{"resource":` + signedProv("http://a/Task/t1/_history/2") + `}]}`, recordsOnTask},
+		{"Task: the records' contained Provenance's #, the records kept", task, `{"resourceType":"Bundle","id":"b1","type":"collection","contained":[` + signedProv("#") + `]}`, containedTask},
+		{"Task: a contained Provenance named by RESOURCETYPE, its target #, the records kept", task, `{"resourceType":"Bundle","id":"b1","type":"collection","contained":[{"RESOURCETYPE":"Provenance","target":[{"reference":"#"}],"recorded":"2020-01-01T00:00:00Z","agent":[],"signature":[{"data":"c2ln"}]}]}`, containedTask},
+		{"Task: an entry's contained Provenance's #, the records kept", task, `{"resourceType":"Bundle","id":"b1","type":"collection","entry":[{"contained":[` + signedProv("#") + `]}]}`, containedTask},
+		{"Task: the records' meta's contained Provenance's #, the records kept", task, `{"resourceType":"Bundle","id":"b1","type":"collection","meta":{"contained":[` + signedProv("#") + `]}}`, containedTask},
+		{"Task: a Provenance's # contained in an entry resource named by RESOURCETYPE, the records kept", task, `{"resourceType":"Bundle","id":"b1","type":"collection","entry":[{"resource":{"RESOURCETYPE":"Basic","contained":[` + signedProv("#") + `]}}]}`, containedTask},
+		{"Task: a Provenance's # contained under a member of a contained resource, the records kept", task, `{"resourceType":"Bundle","id":"b1","type":"collection","contained":[{"resourceType":"Basic","x-note":{"contained":[` + signedProv("#") + `]}}]}`, containedTask},
+		{"Task: a Provenance's # contained in the records' CONTAINED resource, the records kept", task, `{"resourceType":"Bundle","id":"b1","type":"collection","CONTAINED":[{"resourceType":"Basic","contained":[` + signedProv("#") + `]}]}`, containedTask},
+		{"Task: a version cut at its first /_history/", task, `{"resourceType":"Bundle","id":"b1","type":"collection","entry":[{"resource":` + signedProv("Task/t1/_history/2/") + `}]}`, recordsOnTask},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			out, err := shnsdk.BuildCDexQueryResult([]byte(row.task), []byte(row.records))
+			if !errors.Is(err, shnsdk.ErrCDexSignedContent) || !strings.Contains(err.Error(), row.carrier) || out != nil {
+				t.Fatalf("want ErrCDexSignedContent naming %q, got err=%v out=%s", row.carrier, err, out)
+			}
+		})
+	}
+	// Controls: a reference to another Task, and a records Bundle whose id
+	// is kept, so nothing in it is edited, with a "#" that names an entry's
+	// resource, which is not contained.
+	for _, row := range []struct{ name, task, records string }{
+		{"another Task's id after a version path", `{"resourceType":"Task","id":"t1","status":"requested","intent":"order","contained":[` + signedProv("http://a/_history/v/Task/t2") + `]}`, plain},
+		{"records kept as they are", task, `{"resourceType":"Bundle","id":"b1","type":"collection","entry":[{"resource":{"resourceType":"Basic","contained":[` + signedProv("#") + `]}}]}`},
+		{"a # under a member of an entry resource, kept", task, `{"resourceType":"Bundle","id":"b1","type":"collection","entry":[{"resource":{"resourceType":"Basic","x-note":{"contained":[` + signedProv("#") + `]}}}]}`},
+		{"a contained signed Provenance with another target, the records kept", task, `{"resourceType":"Bundle","id":"b1","type":"collection","contained":[` + signedProv("Basic/b9") + `]}`},
+		{"an unsigned contained Provenance's #, the records kept", task, `{"resourceType":"Bundle","id":"b1","type":"collection","contained":[{"resourceType":"Provenance","target":[{"reference":"#"}],"recorded":"2020-01-01T00:00:00Z","agent":[]}]}`},
+	} {
+		t.Run("control "+row.name, func(t *testing.T) {
+			if _, err := shnsdk.BuildCDexQueryResult([]byte(row.task), []byte(row.records)); err != nil {
 				t.Fatalf("want a fulfillment, got %v", err)
 			}
 		})

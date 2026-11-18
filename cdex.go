@@ -299,14 +299,31 @@ func parseNarrowQuery(raw, forRef string) (CDexQuery, error) {
 // Provenance among the supplied documents targets the Task, or a signed
 // records Bundle would need its id written. A Provenance's or the records
 // Bundle's own signature member is read under its name in any case
-// (`signature`, `Signature`, `SIGNATURE`), and a Signature element by its
-// shape (type, when or _when, and who) with each name in any case.
+// (`signature`, `Signature`, `SIGNATURE`). A Signature element is read by its
+// place, an object at a place FHIR R4 types Signature (an extension's
+// valueSignature, a Task input's or output's) whatever its members, and by
+// its shape (type, when or _when, and who) anywhere, each name in any case.
+// The members that say what a Provenance's signature covers, its
+// resourceType and target, each target's reference, and the id of the Task
+// or the records Bundle it names, are read by their names in any case. A "#"
+// target of a signed Provenance in the records that names the records Bundle,
+// as the relay reads "#" (up from the Provenance's container to the nearest
+// resource, and on while that resource is contained), names the Task too,
+// which contains the records once fulfilled.
 var ErrCDexSignedContent = errors.New("cdex: signed content cannot be extended")
 
 // ErrCDexTaskStatus reports a request Task whose status does not allow
 // fulfillment. Only requested, received, accepted and in-progress Tasks can
 // be fulfilled.
 var ErrCDexTaskStatus = errors.New("cdex: the request Task's status does not allow fulfillment")
+
+// ErrCDexLimit reports a fulfillment refused because the request Task, the
+// records Bundle (its id written included) or the fulfilled Task built from
+// them is past the limits of the SDK's JSON reader: longer than 16 MiB, nested
+// more than 64 deep, or holding more than 1,000,000 JSON tokens (each value and
+// each member name is one). The fulfilled Task holds the request Task and the
+// records Bundle, so it can pass the limits when neither does alone.
+var ErrCDexLimit = errors.New("cdex: past the reader's limits")
 
 // CDexFulfillment is a completed CDex data request built by
 // BuildCDexFulfillment.
@@ -370,11 +387,15 @@ func BuildCDexQueryResult(requestTaskJSON, searchsetBundle []byte) ([]byte, erro
 //     any depth, compared after unescaping and ignoring case, is refused);
 //   - the Task's status is not requested, received, accepted or in-progress
 //     (ErrCDexTaskStatus);
-//   - the Task carries a Signature element anywhere, or a signed Provenance
-//     in the Task or in the records targets the Task (ErrCDexSignedContent);
+//   - the Task carries a Signature element anywhere, by its place or its
+//     shape, or a signed Provenance in the Task or in the records targets the
+//     Task (ErrCDexSignedContent);
 //   - the records Bundle carries an empty or non-string id;
 //   - the records Bundle would need its id written although a signature
-//     covers it (ErrCDexSignedContent).
+//     covers it (ErrCDexSignedContent);
+//   - the request Task, the records Bundle (once its id is written, where it
+//     is written) or the fulfilled Task is past the reader's limits
+//     (ErrCDexLimit).
 func BuildCDexFulfillment(requestTaskJSON, recordsBundle []byte) (CDexFulfillment, error) {
 	return buildCDexFulfillment(requestTaskJSON, recordsBundle)
 }
