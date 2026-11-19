@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 
@@ -79,9 +80,35 @@ const pciVersion = "v1-demo-sha256"
 // participants MUST NOT depend on re-deriving the PCI from demographics; treat it
 // as an opaque, Trust-assigned identifier. pciVersion marks this scheme so a future
 // Trust-issued scheme is a clean, detectable swap.
+//
+// A blank member id (empty, only whitespace, or "Patient/" with nothing but
+// whitespace after it) names no one, so no identifier is
+// derived from it: ResolvePCI returns "", which is no PCI, where earlier releases
+// derived one from it as from any other member id. "" names no patient: a
+// system-of-record connector refuses such a member as a failed read, never as a
+// member it does not hold and never as a held member with identifier "". A caller
+// that must not proceed without an identifier uses ResolvePCIStrict, which refuses
+// a blank member id with an error.
 func ResolvePCI(memberID, birthDate, familyName string) string {
+	pci, _ := ResolvePCIStrict(memberID, birthDate, familyName)
+	return pci
+}
+
+// ErrBlankMember is the refusal of a blank member (empty, only whitespace, or a bare
+// "Patient/"): ResolvePCIStrict returns it, and every reader's refusal of a request
+// whose member reads as blank wraps it (errors.Is). A blank member names no one, so
+// no patient identifier is derived from it.
+var ErrBlankMember = errors.New("shnsdk: a blank member id names no patient")
+
+// ResolvePCIStrict is ResolvePCI, refusing a blank member id (empty, only
+// whitespace, or "Patient/" with nothing but whitespace after it) with ErrBlankMember and returning "". Any other member id derives
+// exactly the identifier ResolvePCI derives.
+func ResolvePCIStrict(memberID, birthDate, familyName string) (string, error) {
+	if memberNamesNoOne(memberID) {
+		return "", ErrBlankMember
+	}
 	_ = pciVersion // documents the scheme version; see the doc comment + caveat above
 	key := strings.ToLower(memberID + "|" + birthDate + "|" + familyName)
 	sum := sha256.Sum256([]byte(key))
-	return "pci:" + hex.EncodeToString(sum[:16])
+	return "pci:" + hex.EncodeToString(sum[:16]), nil
 }

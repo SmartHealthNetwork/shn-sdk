@@ -90,7 +90,9 @@ func TestBuildPayerCDexIngressCapabilityStatement_Interactions(t *testing.T) {
 			t.Fatalf("%+v: documentation %q does not say %q", row.base, cs.Rest[0].Documentation, row.doc)
 		}
 		sec := cs.Rest[0].Security.Description
-		if reads := strings.Contains(sec, "system/Task.read"); reads != row.base.Reads || !strings.Contains(sec, "system/Task.write") {
+		// Each names the Task scope and SMART's wildcard that permit it.
+		if reads := strings.Contains(sec, "system/Task.read"); reads != row.base.Reads || !strings.Contains(sec, "system/Task.write") ||
+			!strings.Contains(sec, "system/*.write") || strings.Contains(sec, "system/*.rs") != row.base.Reads {
 			t.Fatalf("%+v: security %q", row.base, sec)
 		}
 	}

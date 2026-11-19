@@ -209,7 +209,12 @@ func isJSONObjectWithMembers(raw json.RawMessage) bool {
 // ParseEligibilityRequestMember extracts the member ID from a
 // CoverageEligibilityRequest's patient.reference literally, stripping a leading
 // "Patient/" prefix and keeping the rest. It errors if the resource is not a
-// CoverageEligibilityRequest or the patient reference is missing.
+// CoverageEligibilityRequest, the patient reference is missing, or the member it
+// reads names no one: it is empty, only whitespace, or a bare "Patient/" (so a
+// reference "Patient/Patient/" names no one either). A blank member is never returned: searched as a member identifier,
+// a blank code would match any member of the system. That refusal is an
+// *EligibilityRequestRefusal with the text a payer's Smart Gateway answers the
+// request with, and wraps ErrBlankMember.
 //
 // It is not a payer's Smart Gateway's reading of the request, which is
 // ParseEligibilityRequestMemberExact: a Responder answers with that one, and a
@@ -226,24 +231,38 @@ func isJSONObjectWithMembers(raw json.RawMessage) bool {
 // For a request naming its patient by an unversioned relative reference and
 // read one way only, the two bind the same member.
 func ParseEligibilityRequestMember(data []byte) (memberID string, err error) {
+	member, err := eligibilityRequestLiteral(data)
+	if err != nil {
+		return "", err
+	}
+	if memberNamesNoOne(member) {
+		return "", errNoMember
+	}
+	return member, nil
+}
+
+// eligibilityRequestLiteral is ParseEligibilityRequestMember's reading of the
+// member, before a blank one is refused: ParseEligibilityRequestMemberExact reads
+// it so, and refuses a blank member only after it has refused a request it cannot
+// read one way only.
+func eligibilityRequestLiteral(data []byte) (string, error) {
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 	}
-	if err = json.Unmarshal(data, &probe); err != nil {
+	if err := json.Unmarshal(data, &probe); err != nil {
 		return "", err
 	}
 	if probe.ResourceType != "CoverageEligibilityRequest" {
 		return "", fmt.Errorf("shnsdk: expected CoverageEligibilityRequest, got %q", probe.ResourceType)
 	}
 	var req fhir.CoverageEligibilityRequest
-	if err = json.Unmarshal(data, &req); err != nil {
+	if err := json.Unmarshal(data, &req); err != nil {
 		return "", err
 	}
 	if req.Patient.Reference == nil {
 		return "", fmt.Errorf("shnsdk: CoverageEligibilityRequest missing patient.reference")
 	}
-	ref := *req.Patient.Reference
-	return strings.TrimPrefix(ref, "Patient/"), nil
+	return strings.TrimPrefix(*req.Patient.Reference, "Patient/"), nil
 }
 
 func strPtr(s string) *string { return &s }

@@ -221,6 +221,14 @@ func requirePriorAuthRecords(req PriorAuthRequest) error {
 }
 
 func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoints, payer Payer, req PriorAuthRequest) (PriorAuthResult, error) {
+	// Resolve the patient PCI (AI-5) — the same patient binds every leg's token. A
+	// blank member id names no patient: nothing is sent for it, and that is said
+	// before any missing record is.
+	pci, err := ResolvePCIStrict(req.Member, req.DOB, req.Family)
+	if err != nil {
+		return PriorAuthResult{}, fmt.Errorf("prior authorization: %w", err)
+	}
+
 	// The records this flow cannot invent, checked BEFORE the first leg is sent.
 	//
 	// They were required all along — a claim is made under a policy, names the
@@ -232,9 +240,6 @@ func (id Identity) runPriorAuth(ctx context.Context, c *http.Client, ep Endpoint
 	}
 	patientRef := "Patient/" + req.Member
 	coverageRef := "Coverage/" + req.Member
-
-	// Resolve the patient PCI (AI-5) — the same patient binds every leg's token.
-	pci := ResolvePCI(req.Member, req.DOB, req.Family)
 
 	// The CRD-leg inputs: the draft order (ServiceRequest) + the Coverage prefetch.
 	// Built from the dev-visible order in req, not hardcoded.

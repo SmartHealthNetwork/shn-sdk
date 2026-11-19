@@ -48,13 +48,13 @@ func BuildPayerCDexIngressCapabilityStatement(created time.Time, base PayerCDexB
 		return nil, ErrPayerCDexBase
 	}
 	doc := "Da Vinci CDex ingress of a payer's Smart Gateway. Create a CDex Task Attachment Request here (POST [base]/Task): it is carried to the provider its Task.owner names. A Task is read at the base of the provider it was created for, listed at /cdex/providers, where that provider serves reads."
-	sec := "SMART Backend Services (client_credentials, private_key_jwt); configuration at [base]/.well-known/smart-configuration. A create needs a system/Task scope that permits it, such as system/Task.write, system/Task.*, or a SMART v2 scope with c."
+	sec := "SMART Backend Services (client_credentials, private_key_jwt); configuration at [base]/.well-known/smart-configuration. A create needs a scope that permits it, such as system/Task.write, system/Task.*, a SMART v2 Task scope with c, or a SMART wildcard that does, such as system/*.write."
 	interactions := []fhir.CapabilityStatementRestResourceInteraction{{Code: fhir.TypeRestfulInteractionCreate}}
 	if base.Provider {
 		doc = "Da Vinci CDex ingress of a payer's Smart Gateway, at the base of one provider. Create a CDex Task Attachment Request here (POST [base]/Task): it is carried to this provider."
 		if base.Reads {
 			doc += " Read (GET [base]/Task/[id]) and vread (GET [base]/Task/[id]/_history/[vid]) a Task created for this provider: the provider's answer is delivered only for a Task the network carried for this payer, and any other is answered 404."
-			sec += " A read or vread needs one that permits reading, such as system/Task.read, system/Task.*, or a SMART v2 scope with r."
+			sec += " A read or vread needs one that permits reading, such as system/Task.read, system/Task.*, a SMART v2 Task scope with r, or a SMART wildcard that does, such as system/*.rs."
 			interactions = append(interactions,
 				fhir.CapabilityStatementRestResourceInteraction{Code: fhir.TypeRestfulInteractionRead},
 				fhir.CapabilityStatementRestResourceInteraction{Code: fhir.TypeRestfulInteractionVread},

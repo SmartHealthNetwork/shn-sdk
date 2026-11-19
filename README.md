@@ -318,7 +318,8 @@ directly if you are building a native integration or test harness.
 | Symbol | Purpose |
 |---|---|
 | `GenerateIdentity(holderID)` | Fresh Ed25519 (signing) + X25519 (encryption) keypairs. |
-| `ResolvePCI(memberID, birthDate, familyName)` | The network's patient identifier for a member, for a custom system-of-record connector. Opaque: carry it as returned and as tokens name it; do not parse it, reimplement how it is produced, or depend on its format beyond the `pci:` prefix. |
+| `ResolvePCI(memberID, birthDate, familyName)` | The network's patient identifier for a member, for a custom system-of-record connector. Opaque: carry it as returned and as tokens name it; do not parse it, reimplement how it is produced, or depend on its format beyond the `pci:` prefix. From shn-sdk v1.15.0 a blank member id (empty, only whitespace, or a bare `Patient/`) names no patient and gets `""`, which is no identifier: refuse it as a failed read, never as a member you do not hold. |
+| `ResolvePCIStrict(memberID, birthDate, familyName)` | From shn-sdk v1.15.0: `ResolvePCI`, refusing a blank member id with `ErrBlankMember` (errors.Is) instead of returning `""`. |
 | `Identity.Assertion(audience, now, ttl)` | Signed holder assertion (the `X-Holder-Assertion` header value). |
 | `Identity.Authorize(ctx, client, authzURL, req)` | Obtain a per-operation, scope-bound `Token`. From shn-sdk v1.1.0 a 2xx answer with no token, a `null` one or one with no signature is an error, never the zero token; verify the token with `VerifyBound` before sealing it in. |
 | `Identity.Registration(role, baseURL)` | Build a proof-of-possession `RegistrationRequest`. |

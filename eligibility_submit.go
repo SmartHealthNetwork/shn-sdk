@@ -68,6 +68,11 @@ func (e *EligibilityBatchTooLarge) Error() string {
 // *EligibilityBatchTooLarge before any request's patient is read. Any other
 // error is an input that is none of the forms, or a request whose patient
 // names no member one way only; the gateway answers it "parse member failed".
+// A request whose member reads as blank (a request sent alone whose patient
+// reference names no member, or a contained Patient's identifier or a Bundle
+// entry's id that is only whitespace) is refused with an
+// *EligibilityRequestRefusal carrying the gateway's text, which wraps
+// ErrBlankMember.
 func ParseEligibilitySubmission(data []byte) ([]EligibilitySubmission, error) {
 	if scan := scanMemberNames(data); scan.repeated {
 		dup := scan.named
@@ -88,6 +93,11 @@ func ParseEligibilitySubmission(data []byte) ([]EligibilitySubmission, error) {
 		member, err := eligibilitySubmissionMember(sub)
 		if err != nil {
 			return nil, namedInAnotherCase(err)
+		}
+		// A Bundle entry's id, or a contained Patient's identifier, may be
+		// only whitespace: a blank member names no one, in either form.
+		if memberNamesNoOne(member) {
+			return nil, errNoMember
 		}
 		out[i] = EligibilitySubmission{Request: sub.request, Member: member}
 	}

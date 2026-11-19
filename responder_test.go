@@ -602,16 +602,25 @@ func TestResponder_RejectionRows(t *testing.T) {
 		return b
 	}
 
+	var sealedPayloadEnv func(t *testing.T, payload []byte) []byte
 	// notCEREnv: payload that Opens successfully (sealed to the responder's real
 	// key) but is NOT a CoverageEligibilityRequest (e.g. {"resourceType":"Patient"}).
 	notCEREnv := func(t *testing.T) []byte {
+		// Seal a Patient resource (wrong type) to the responder's real enc key.
+		return sealedPayloadEnv(t, []byte(`{"resourceType":"Patient"}`))
+	}
+	// blankMemberEnv: a CoverageEligibilityRequest whose patient reference names
+	// no member ("Patient/"): refused before the adjudicator is asked about "".
+	blankMemberEnv := func(t *testing.T) []byte {
+		return sealedPayloadEnv(t, []byte(`{"resourceType":"CoverageEligibilityRequest","status":"active","purpose":["validation"],`+
+			`"patient":{"reference":"Patient/"},"created":"2026-01-01","insurer":{"reference":"Organization/payer"}}`))
+	}
+	sealedPayloadEnv = func(t *testing.T, notCER []byte) []byte {
 		t.Helper()
 		var env Envelope
 		if err := json.Unmarshal(validEnvBytes, &env); err != nil {
 			t.Fatalf("unmarshal env: %v", err)
 		}
-		// Seal a Patient resource (wrong type) to the responder's real enc key.
-		notCER := []byte(`{"resourceType":"Patient"}`)
 		resealedEnv, err := Seal(env.Metadata, notCER, responderIdent.EncPub)
 		if err != nil {
 			t.Fatalf("Seal notCER: %v", err)
@@ -789,6 +798,14 @@ func TestResponder_RejectionRows(t *testing.T) {
 			hubHeader: hubHdr,
 			wantCode:  http.StatusBadRequest,
 			wantError: "parse member failed",
+			fhir:      true,
+		},
+		{
+			name:      "patient reference names no member",
+			body:      blankMemberEnv,
+			hubHeader: hubHdr,
+			wantCode:  http.StatusBadRequest,
+			wantError: "eligibility request names its patient by a reference that names no one, so the request names no patient to bind",
 			fhir:      true,
 		},
 		{

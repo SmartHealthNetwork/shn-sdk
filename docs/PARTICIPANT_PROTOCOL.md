@@ -405,7 +405,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `messageFrames` | **Optional** JSON array of message-frame versions this holder can decode (today: `["v1"]` — see §6.3). **Self-declared** — the codec-capable SDK/gateway build stamps it automatically; you do not hand-set it. At most 8 tokens, each matching `^[a-z0-9]{1,16}$`. Omitted ⇒ legacy (no framing). It is **outside** the PoP signing payload (below), so advertising it never changes your `pop`. |
 | `contractVersions` | **Optional** JSON array of self-declared exchange-contract version tokens, one per contract line this build can exchange, shape `<contract>@<line>` (e.g. `"pa.pas@2.0"`). Grammar: `^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`; at most 16 tokens; each 3–48 bytes. The registrar admission-validates shape only — the grammar is deliberately **open**, so declaring a line the network does not yet speak registers fine; tokens are **self-asserted capability, not admission-verified identity** (contrast the operator-vouched `payerIds`). A current SDK or Smart Gateway build declares `pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0` by default (shn-sdk v0.62.0 and gateways before v0.62.0 also declared `pa.pdex@2.1`; from shn-gateway v0.62.0 a gateway whose declared set names it refuses to boot, and from shn-sdk v0.63.0 the SDK refuses a set naming it); the lines the network's gateways can build or bridge are the discovery descriptor's `bridgedContractVersions` (§1a). It is **outside** the PoP signing payload, so advertising it never changes your `pop`, and this field is purely **additive** — it did not require a `wireProtocolVersion` bump. An originating Smart Gateway reads the recipient's declaration to choose each leg's contract line (version-matched routing, §8.6). |
 | `requestFrames` | **Optional** JSON array of the sealed request-frame versions this holder accepts (today `"v1"`, `"v1op"`, from shn-sdk v1.8.0 `"v1opsub"`, and from shn-sdk v1.11.0 `"cdexloc"` and `"v1cds"` — see §6.3). **Self-declared**, with the same limits as `messageFrames` (at most 8 tokens, each `^[a-z0-9]{1,16}$`). A current SDK/gateway build stamps `"v1"` and `"v1op"` by default, like `messageFrames`. This SDK never stamps `"v1opsub"`: only a holder whose own system honors `operationSubpath` declares it (§6.3). From shn-gateway v1.8.0 a payer's Smart Gateway declares `"v1opsub"`, with the request frames it serves, in the capability declaration it makes at each start (§2.4); a provider's declares none of its own, until, from shn-gateway v1.12.0, a provider's Smart Gateway that takes the payer's attachment request (its participant sets `PROVIDER_CDEX_TASK_URL`) declares `"cdexloc"` there, with the request frames it serves, which replaces the set its registration carried. This SDK does not stamp `"cdexloc"` or `"v1cds"` either: only a provider's holder that frames `taskLocation` declares `"cdexloc"`, and only a holder whose own system calls the CDS service `cdsService` names declares `"v1cds"` (§6.3). Omitted ⇒ requests to you are sent bare. Outside the PoP signing payload. |
-| `legs` | **Optional** JSON array of the request legs this holder takes as recipient, each named by its flat transaction type (`"cdex-attachment-submit"`, never a `pa.`-prefixed name). **Self-declared** by the system answering at `baseURL`: from shn-gateway v1.1.0, a Smart Gateway declares its own as it starts (`PUT /register/{id}/capabilities`, §2.4), and a registration the SDK builds leaves it absent. **Absent and empty differ.** Absent (or `null`) declares no list, the registration of a build older than this field; `[]` declares that the holder takes none. The Hub refuses a leg the network marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0, `cdex-attachment-request`, since 1.5.0, `cdex-task-status`, since 1.12.0, and `cdex-task-subscribe` and `cdex-task-signal`, each since 1.13.0) to a recipient whose list lacks it, and to one that declares no list (§6.1). Every other leg is routed whatever the holder declares. On a rotation, absent `legs` keeps the legs held (§2.4). Each element must be a leg of the network, named once, whose row (§4.3) names the holder's `role` for its recipient: a payer declares no leg a provider answers, and the reverse. Outside the PoP signing payload. |
+| `legs` | **Optional** JSON array of the request legs this holder takes as recipient, each named by its flat transaction type (`"cdex-attachment-submit"`, never a `pa.`-prefixed name). **Self-declared** by the system answering at `baseURL`: from shn-gateway v1.1.0, a Smart Gateway declares its own as it starts (`PUT /register/{id}/capabilities`, §2.4), and a registration the SDK builds leaves it absent. **Absent and empty differ.** Absent (or `null`) declares no list, the registration of a build older than this field; `[]` declares that the holder takes none. The Hub refuses a leg the network marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0, `cdex-attachment-request`, since 1.5.0, `cdex-task-status`, since 1.12.0, `cdex-task-subscribe` and `cdex-task-signal`, each since 1.13.0, and `pas-subscription-subscribe`, `pas-subscription-signal` and `pas-subscription-notify`, each since 1.16.0) to a recipient whose list lacks it, and to one that declares no list (§6.1). Every other leg is routed whatever the holder declares. On a rotation, absent `legs` keeps the legs held (§2.4). Each element must be a leg of the network, named once, whose row (§4.3) names the holder's `role` for its recipient: a payer declares no leg a provider answers, and the reverse. Outside the PoP signing payload. |
 | `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted**: on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). At admission the registrar checks only the role and this uniqueness; the entry-shape rules (count, both parts present, no whitespace or `\|`, no repeats) are applied by `PUT /register/{id}/payer-ids` and by the self-serve access request (§2.3a). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). Identities acquired **after** admission are attested through `PUT /register/{id}/payer-ids` (§2.4) — same authority — so a payer never re-onboards to become routable on a new one. |
 | `providerIds` | **Not accepted at registration.** A provider's organization NPIs are operator-attested through `PUT /register/{id}/provider-ids` (§2.4), each on the operator's recorded check; a registration carrying the field is refused (400 below). Served on `GET /holders` for `role=provider` only, and preserved across key rotation (§2.4). |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
@@ -1816,7 +1816,8 @@ in one direction for one correlation.
   response's names the patient the answer discloses, or is absent for an answer that
   discloses no patient's data. From the network's deploy, a leg that names no patient on
   either side (its taxonomy row's `subject` is `none`; today `cdex-task-subscribe` and
-  `cdex-task-signal`, from shn-gateway v1.13.0) is the other: its request's and its
+  `cdex-task-signal`, from shn-gateway v1.13.0, and `pas-subscription-subscribe` and
+  `pas-subscription-signal`, from shn-gateway v1.16.0) is the other: its request's and its
   response's `subjectPCI` are absent, one that names a patient gets the same 400, and so
   does a request with an `involvement`, since the leg involves no patient. On every other
   leg, a request with an `involvement` always names its patient.
@@ -2019,7 +2020,7 @@ lists. From shn-sdk v1.0.0, the SDK's originators (`RunEligibility`, `RunPriorAu
 answers under the name the request used. The token's `operation` is the same whichever
 name the envelope uses.
 
-Under the Smart Gateway's stability promise (shn-gateway `STABILITY.md`), the `coverage-eligibility`, `patient-dtr` and `federated-query` legs are evolving at shn-gateway v1.0, the `cdex-attachment-submit` leg is evolving from shn-gateway v1.1.0, the release that adds it, the `cdex-attachment-request` leg is evolving from shn-gateway v1.5.0, the release that adds it, and the `cdex-task-status` leg is evolving from shn-gateway v1.12.0, the release that adds it, and the `cdex-task-subscribe` and `cdex-task-signal` legs are evolving from shn-gateway v1.13.0, the release that adds them, while this protocol's own versioning still governs their names.
+Under the Smart Gateway's stability promise (shn-gateway `STABILITY.md`), the `coverage-eligibility`, `patient-dtr` and `federated-query` legs are evolving at shn-gateway v1.0, the `cdex-attachment-submit` leg is evolving from shn-gateway v1.1.0, the release that adds it, the `cdex-attachment-request` leg is evolving from shn-gateway v1.5.0, the release that adds it, and the `cdex-task-status` leg is evolving from shn-gateway v1.12.0, the release that adds it, the `cdex-task-subscribe` and `cdex-task-signal` legs are evolving from shn-gateway v1.13.0, the release that adds them, and the `pas-subscription-subscribe`, `pas-subscription-signal` and `pas-subscription-notify` legs are evolving from shn-gateway v1.16.0, the release that adds them, while this protocol's own versioning still governs their names.
 
 | `transactionType` (envelope) | Request `operation` | Response `operation` |
 |---|---|---|
@@ -2037,6 +2038,9 @@ Under the Smart Gateway's stability promise (shn-gateway `STABILITY.md`), the `c
 | `cdex-task-status` (from shn-gateway v1.12.0) | `cdex-task-read` | `cdex-task-read-response` |
 | `cdex-task-subscribe` (from shn-gateway v1.13.0) | `cdex-task-subscribe` | `cdex-task-subscribe-response` |
 | `cdex-task-signal` (from shn-gateway v1.13.0) | `cdex-task-signal` | `cdex-task-signal-response` |
+| `pas-subscription-subscribe` (from shn-gateway v1.16.0) | `pas-subscribe` | `pas-subscribe-response` |
+| `pas-subscription-signal` (from shn-gateway v1.16.0) | `pas-signal` | `pas-signal-response` |
+| `pas-subscription-notify` (from shn-gateway v1.16.0) | `pas-notify` | `pas-notify-response` |
 
 From shn-gateway v1.10.0, and from shn-sdk v1.11.0 for the SDK's `Responder`, the body a Smart
 Gateway writes when it refuses a leg itself, with no answer from its participant's system to carry
@@ -2044,8 +2048,8 @@ Gateway writes when it refuses a leg itself, with no answer from its participant
 leg's answer envelope, which the network's leg taxonomy names for each transaction type. It is an
 `OperationOutcome` (`application/fhir+json`) on `coverage-eligibility`, `dtr-questionnaire-fetch`,
 `pas-claim`, `pas-claim-update`, `pas-claim-inquire`, `federated-query`, `cdex-attachment-submit`,
-`cdex-attachment-request`, `cdex-task-status`, `cdex-task-subscribe` and `cdex-task-signal`, whose clients reach
-them through a FHIR operation or interaction; and
+`cdex-attachment-request`, `cdex-task-status`, `cdex-task-subscribe`, `cdex-task-signal`,
+`pas-subscription-subscribe`, `pas-subscription-signal` and `pas-subscription-notify`, whose clients reach them through a FHIR operation or interaction; and
 `{"error": …}` (`application/json`) on `crd-order-select`, `crd-order-dispatch` and `patient-dtr`.
 Earlier releases write `{"error": …}` on every leg, so while a counterpart runs one, a client of a
 FHIR operation can receive either body: read an `OperationOutcome` first. A participant's own
@@ -2060,6 +2064,7 @@ Standard authority frames:
 | Provider → PHG (patient-authored DTR, `patient-dtr`) | `provider-tpo` | `patient-authorship` |
 | Payer → provider (from shn-gateway v1.5.0, a CDex attachment-request Task; from shn-gateway v1.12.0, the payer's read of that Task; from shn-gateway v1.13.0, the payer's Subscription to its Tasks' changes) | `payer-payment` | `provider-disclosure` |
 | Provider → payer (from shn-gateway v1.13.0, a notification of a change to the payer's CDex Tasks) | `provider-disclosure` | `payer-payment` |
+| Payer → provider (from shn-gateway v1.16.0, the notifications of the provider's Subscription to the PAS topic) | `payer-coverage` | `provider-tpo` |
 
 The policy also checks the caller's registered role: a `provider-tpo` request comes
 from a `provider`, a `payer-coverage` response from a `payer`, a
@@ -2067,7 +2072,8 @@ from a `provider`, a `payer-coverage` response from a `payer`, a
 response from the `phg`; from shn-gateway v1.5.0, a `payer-payment` request comes from a
 `payer`, and a `provider-disclosure` response from a `provider`; from shn-gateway v1.13.0, a
 `provider-disclosure` request comes from a `provider`, and a `payer-payment` response from a
-`payer`. Every operation rides an envelope.
+`payer`; from shn-gateway v1.16.0, a `payer-coverage` request comes from a `payer`, and a
+`provider-tpo` response from a `provider`. Every operation rides an envelope.
 
 ### 4.4 Per-leg token verification — `VerifyBound`
 
@@ -2203,9 +2209,22 @@ request's own patient; from shn-gateway v1.6.0, none it cannot identify
 under an identifier derived from an id alone, on every leg but coverage eligibility
 only one it holds, on CRD, DTR and the PAS inquiry only one nothing the request
 carries ties to the request's own patient, and a Coverage's `subscriber` or
-`policyHolder` names no one), so the exchange is recorded under each of them. This is for the audit record only: it
+`policyHolder` names no one; from shn-gateway v1.16.0, the
+member names and resource types those readers read within a FHIR resource are read
+in any case, as a lenient FHIR reader reads them, so a Patient under `"Contained"`,
+a `"resourceType":"patient"` or a `{"Reference":…}` is named, and a `"Subscriber"`
+slot is the Coverage's party slot; a decimal past a double's range is read), so the
+exchange is recorded under each of them. This is for the audit record only: it
 never refuses a request or records a finding, and the conformance checks decide
-as they do without it. It names at most 16 patients within 2 seconds per leg,
+as they do without it. A request whose patients it cannot read at all (on
+coverage eligibility and the PAS decision notification, an empty one too), and on
+coverage eligibility each request in it whose own patient it cannot read, is sent
+with no list for those patients; from shn-gateway v1.16.0 the gateway counts each
+omission once, as `involvedOmitted` reason `request-unreadable`, and still names
+every patient the other requests name, where earlier releases counted nothing.
+Each leg's own readers refuse such a request first, so only a request they never
+see, such as an embedder's own call, reaches this. The gateway names at most 16
+patients within 2 seconds per leg,
 and leaves out, with an observer event, any it cannot identify or obtain a token
 for in that time.
 
@@ -2296,7 +2315,8 @@ The Hub enforces:
   `payload hash mismatch` and its `denied` record.
 - From the network's deploy, a leg that names no patient on either side (its
   taxonomy row's `subject` is `none`; today `cdex-task-subscribe` and
-  `cdex-task-signal`, from shn-gateway v1.13.0) is held to the same rule on both
+  `cdex-task-signal`, from shn-gateway v1.13.0, and `pas-subscription-subscribe` and
+  `pas-subscription-signal`, from shn-gateway v1.16.0) is held to the same rule on both
   sides, at every
   conformance level. A request token that names a patient is refused 403 as above.
   An answer whose token names a patient is refused as the Hub refuses an answer:
@@ -2514,8 +2534,9 @@ request record and answers `422` with `X-SHN-Delivered: no`:
 **A leg its recipient does not take.** Between steps 3 and 4, for a leg the network
 marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0,
 `cdex-attachment-request`, since 1.5.0, and, from shn-gateway v1.12.0,
-`cdex-task-status`, and from shn-gateway v1.13.0, `cdex-task-subscribe` and
-`cdex-task-signal`),
+`cdex-task-status`, from shn-gateway v1.13.0, `cdex-task-subscribe` and
+`cdex-task-signal`, and from shn-gateway v1.16.0, `pas-subscription-subscribe`,
+`pas-subscription-signal` and `pas-subscription-notify`),
 the Hub checks the recipient's `legs` (§2.3). A recipient whose list lacks the leg,
 `[]` included, or that declares no list — it registered with a build older than the
 declaration, and so older than the leg — is never contacted. The Hub appends a
@@ -2892,7 +2913,7 @@ binding here, after it has delivered the answer, so the Hub records the read und
 beside the responder's.
 
 From the network's deploy, a leg that names no patient on either side (its row's `subject`
-is `none`; today `cdex-task-subscribe` and `cdex-task-signal`, from shn-gateway v1.13.0) has no such record: its answer discloses no patient to bind, so the
+is `none`; today `cdex-task-subscribe` and `cdex-task-signal`, from shn-gateway v1.13.0, and `pas-subscription-subscribe` and `pas-subscription-signal`, from shn-gateway v1.16.0) has no such record: its answer discloses no patient to bind, so the
 Hub refuses a record for it 403, as for any leg whose patient is not bound from its
 answer.
 
@@ -3623,7 +3644,7 @@ or signal leg, from the release that serves that leg: taking the leg implies the
 no `requestFrames` token declares them.
 
 - **`subscriptionRequest`**, a request-frame header. From shn-sdk v1.12.0, and only from the
-  release that serves the leg (the leg table marks `cdex-task-subscribe` from shn-gateway v1.13.0),
+  release that serves the leg (the leg table marks `cdex-task-subscribe` from shn-gateway v1.13.0, and `pas-subscription-subscribe` from shn-gateway v1.16.0),
   on every request of a subscribe leg: the interaction the
   subscriber's system made at its per-counterpart base, as the method, one space, and the path
   below that base with its query, one of `POST Subscription` (create),
@@ -3664,16 +3685,18 @@ no `requestFrames` token declares them.
   leg's create or update, the subscriber's `channel.endpoint` sealed by its gateway,
   `<kid>.<sealed>`: `<kid>` is 11 base64url characters naming the key, `<sealed>` base64url. On
   a subscribe leg's search by `url` during a sealing key's overlap, two such values separated by
-  one space. On every signal leg, the value read from the notification address the
-  notifier's system posted to.
+  one space. On every signal leg, and from shn-gateway v1.16.0 on `pas-subscription-notify`,
+  the value read from the notification address the notifier's system posted to.
 - **`subscriptionChannel`**, a request-frame header. From shn-sdk v1.12.0 and shn-gateway
   v1.13.0, on a subscribe
-  leg's create or update and on every signal leg, the subscriber's `channel.header`
+  leg's create or update and on every signal leg (and from shn-gateway v1.16.0 on
+  `pas-subscription-notify`), the subscriber's `channel.header`
   values, sealed by its gateway beside the sealed endpoint, `<kid>.<sealed>`. An empty set is
   sealed too.
 - **`statedBase`**, an answer-frame header and a request-frame header. From shn-sdk v1.12.0,
   and only from the release that serves the leg (the leg table marks `cdex-task-subscribe`
-  and `cdex-task-signal` from shn-gateway v1.13.0): the notifier's FHIR base that a message's absolute addresses
+  and `cdex-task-signal` from shn-gateway v1.13.0, and `pas-subscription-subscribe`,
+  `pas-subscription-signal` and `pas-subscription-notify` from shn-gateway v1.16.0): the notifier's FHIR base that a message's absolute addresses
   lie under, an absolute URL with no query, no fragment and no ending slash, carried exactly.
   It is framed on a subscribe leg's 2xx answer, for the answer's absolute addresses (an entry's
   `fullUrl`, a paging `link`), and on a signal leg's request, for the notification's. The
@@ -3682,7 +3705,7 @@ no `requestFrames` token declares them.
   shape into the value; checking it is the gateway's. Like `operationBase`, it is an address
   into a participant's system.
 - **`subscriptionLocation`**, an answer-frame header. From shn-sdk v1.12.0, and only from the
-  release that serves the leg (the leg table marks `cdex-task-subscribe` from shn-gateway v1.13.0),
+  release that serves the leg (the leg table marks `cdex-task-subscribe` from shn-gateway v1.13.0, and `pas-subscription-subscribe` from shn-gateway v1.16.0),
   on a subscribe leg's `2xx` answer to a create or an update: the tail of the `Location` the
   notifier's system answered, `Subscription/<id>` or `Subscription/<id>/_history/<vid>`, where
   `<id>` and `<vid>` are FHIR ids other than `.` and `..`. It is framed only when that `Location`
@@ -3871,6 +3894,56 @@ Three behaviours of the leg are intended, from shn-gateway v1.13.0:
   would show that payer's endpoint in the clear. Page ids are not guessable by default (HAPI
   FHIR's are random); a provider for which the count matters keeps them so.
 
+**A provider's Subscription at the payer's gateway (`pas-subscription-subscribe`).** From
+shn-gateway v1.16.0 a payer's gateway whose participant sets `PAYER_DAVINCI_SUBSCRIPTION_SCOPE`
+serves the notifier's half of a provider's topic Subscription to the PAS topic
+(`http://hl7.org/fhir/us/davinci-pas/SubscriptionTopic/PASSubscriptionTopic`) at the payer's own
+Subscription endpoint, at its PAS base (shn-gateway `docs/CONFIGURATION.md`). The gateway
+declares the leg from that setting alone. The leg names no patient on either side. Every rule of
+the HRex Task topic's subscribe leg above holds here, with the roles the other way round: the
+closed interaction set, E-19 on a create or an update and E-21 on a search, the ownership test,
+the answer checks, `statedBase` and `subscriptionLocation`, each a network rule at every
+conformance level. From shn-gateway v1.16.0 two things differ:
+
+- **The filter.** From shn-gateway v1.16.0, a Subscription to the PAS topic names exactly one
+  `org-identifier`, with no modifier and no other parameter, and each value must be an
+  identifier the network attests for the provider that sends it (an NPI today): a
+  `system|value` must equal an attested identifier, and a value with no system, as the PAS
+  specification writes its example, must equal the value of one. Any other is refused `403` on
+  authority, before anything reaches the payer's system. A value is never rewritten.
+- **No header of the network's.** From shn-gateway v1.16.0, the forward to the payer's system
+  names the provider in no header: the filter, held to the provider's attested identifiers, says
+  whose Subscription it is.
+
+A payer's system that does not serve `Subscription` answers for itself, from shn-gateway
+v1.16.0: the interaction is carried to it, and its own answer goes back to the provider's
+system as sent, held only to the rule every answer on the leg is (it names no patient). The
+network adds no refusal for it. A payer's gateway that does not take the leg answers it `422`
+on routing, and the Hub routes none to it.
+
+**A provider's Subscription at its own gateway (`pas-subscription-subscribe`, the subscriber's
+half).** From shn-gateway v1.16.0 a provider's gateway whose participant sets
+`PROVIDER_PAS_SUBSCRIPTION`, with its Da Vinci ingress, serves its own system's topic
+Subscription to the PAS topic at a payer's PAS base on the gateway,
+`[ingress]/pas/payer/{payer}`, the base it sends that payer's claims to (`/pas/payers` lists
+them): the provider's system configures that base as the payer's FHIR base for `Subscription`
+and changes nothing else. Every rule of the HRex Task topic's subscriber's half above holds here,
+with the roles the other way round: the same interactions at the same paths below the base, the
+same three edits (E-18 on a create or an update, E-20 and E-23 on the answer), the search's
+sealed `url`, and every refusal in its table, each a network rule at every conformance level,
+with a base naming no registered payer refused on routing, `422` for a create and `404`
+otherwise, naming `/pas/payers`. The bearer is the provider's ingress's: the provider gateway's
+SMART configuration advertises each Subscription scope with no query a client of the
+provider's own is registered for, and a provider gateway refuses to start with a client
+registered for a Subscription scope SMART does not spell. A gateway without
+`PROVIDER_PAS_SUBSCRIPTION` serves none of these routes, so a provider that cannot be delivered
+a notification makes no Subscription through the network. The forward names the provider in no
+header (the payer's gateway holds the filter to the provider's attested identifiers). One rule
+differs: a payer's PAS base serves no CapabilityStatement yet (`GET [base]/metadata` is answered
+as any path the gateway does not serve), so it declares no `Subscription`; the provider's system
+uses the base without reading one. At the plain base, which names no payer, a Subscription is
+refused as above.
+
 **A payer's Subscription at its own gateway (`cdex-task-subscribe`, the subscriber's half).**
 From shn-gateway v1.13.0 a payer's gateway with its ingress enabled serves its own system's
 topic Subscription to a provider's Tasks' changes at that provider's base on the gateway,
@@ -3956,7 +4029,7 @@ to a participant's own system. It makes one registered edit:
 
 | Edit (from shn-gateway v1.13.0) | When | What changes |
 |---|---|---|
-| E-17 `cdex-task-notification-address-rekey` (from shn-gateway v1.13.0) | every notification it delivers | each absolute address into the provider's server, under the `statedBase` the provider's gateway framed (matched at a path segment's boundary, never as a string prefix), is written at the payer's base for that provider: that base, then the address's path below the stated base in its escaped form (percent-encoding kept, any other byte outside the URL's allowed set percent-encoded), then its query as sent. An address whose path below the stated base holds a `.` or `..` segment, raw or percent-encoded in any case, or a segment that decodes to one holding `/` or `\`, is not under it. The places are the Bundle's `link` `url`s, the SubscriptionStatus's `subscription` reference and each `notification-event` `focus` reference, each entry's `request.url` and `response.location` (an entry carries no `link`: the closed shape refuses one), and each entry's `fullUrl` that is not a `urn:uuid`: every locator the notification's closed shape admits, chosen by element. The shape's identity members (a canonical such as `meta.profile`, and a uri that names rather than locates: `implicitRules`, `meta.source`, a coding's `system`, a reference's `type`) are carried as sent, never re-keyed, never refused and recorded nowhere, since re-keying one would change what it asserts. An `http` or `https` address, or a network-path reference (`//`), at one of these places that is not an absolute URL naming its server plainly, the same server to every URL reader (no host; userinfo; a host other than dot-separated labels of ASCII letters, digits, hyphens and underscores, or a canonical IP address; a trailing dot; a port with a leading zero, an empty port or one above 65535, an IPv4-mapped IPv6 address, a last host label that opens with a digit and is not a canonical IPv4 address; a backslash, a tab or line break, or a space or control character at either end; or a value that does not parse as a URL), is not read one way only, and both gateways refuse the notification `422` on routing, nothing sent or delivered. A notification the payer's gateway could not read one way only at these places (JSON the network cannot read unambiguously, such as a lone surrogate in a string) is refused on the fidelity of SHN's own edit, `400` by the provider's gateway and `502` by the payer's, nothing sent or delivered. An address into the provider's own server (the stated base's scheme, host and port, read from the parsed address) that is not under the stated base (a fragment, a dot segment, or a path outside the base, escaped or not) cannot be written either, and both gateways refuse it `422` on routing. A relative reference, which already resolves against the payer's base for the provider, is carried. An address on another server, every address when no base is stated, and every address when the payer's gateway has no base for the provider, are carried as sent, and why is recorded. Both gateways first hold the notification to the closed shape an instance `$status` answer is held to, as a `history` Bundle: the SubscriptionStatus as its first entry, each later entry carrying no resource, every member at every depth one the Backport SubscriptionStatus defines, no extension and no signature anywhere, each `focus` a Task, no `additional-context`, no reference but the subscription's and each focus's, and no address naming another resource type in a path segment below the stated base (each segment split at every character a FHIR id never holds, so a Task id such as `Patient-1` names nothing); a notification outside it is refused on authority, `403` by the provider's gateway and `502` by the payer's, nothing sent or delivered. A provider that signs its notifications cannot use this leg yet. Named in `X-SHN-Edited`. |
+| E-17 `cdex-task-notification-address-rekey` (from shn-gateway v1.13.0) | every notification it delivers | each absolute address into the provider's server, under the `statedBase` the provider's gateway framed (matched at a path segment's boundary, never as a string prefix), is written at the payer's base for that provider: that base, then the address's path below the stated base in its escaped form (percent-encoding kept, any other byte outside the URL's allowed set percent-encoded), then its query as sent. An address whose path below the stated base holds a `.` or `..` segment, raw or percent-encoded in any case, or a segment that decodes to one holding `/` or `\`, is not under it. The places are the Bundle's `link` `url`s, the SubscriptionStatus's `subscription` reference and each `notification-event` `focus` reference, each entry's `request.url` and `response.location` (an entry carries no `link`: the closed shape refuses one), and each entry's `fullUrl` that is not a `urn:uuid`: every locator the notification's closed shape admits, chosen by element. The shape's identity members (a canonical such as `meta.profile`, and a uri that names rather than locates: `implicitRules`, `meta.source`, a coding's `system`, a reference's `type`) are carried as sent, never re-keyed, never refused and recorded nowhere, since re-keying one would change what it asserts. An `http` or `https` address, or a network-path reference (`//`), at one of these places that is not an absolute URL naming its server plainly, the same server to every URL reader (no host; userinfo; a host other than dot-separated labels of ASCII letters, digits, hyphens and underscores, or a canonical IP address; a trailing dot; a port with a leading zero, an empty port or one above 65535, an IPv4-mapped IPv6 address, a last host label that opens with a digit and is not a canonical IPv4 address; a backslash, a tab or line break, or a space or control character at either end; or a value that does not parse as a URL), is not read one way only, and both gateways refuse the notification `422` on routing, nothing sent or delivered. A notification the payer's gateway could not read one way only at these places (JSON the network cannot read unambiguously, such as a lone surrogate in a string) is refused `400` on the fidelity of SHN's own edit by both gateways, nothing sent or delivered (the payer's gateway before shn-gateway v1.16.0: `502`). An address into the provider's own server (the stated base's scheme, host and port, read from the parsed address) that is not under the stated base (a fragment, a dot segment, or a path outside the base, escaped or not) cannot be written either, and both gateways refuse it `422` on routing. A relative reference, which already resolves against the payer's base for the provider, is carried. An address on another server, every address when no base is stated, and every address when the payer's gateway has no base for the provider, are carried as sent, and why is recorded. Both gateways first hold the notification to the closed shape an instance `$status` answer is held to, as a `history` Bundle: the SubscriptionStatus as its first entry, each later entry carrying no resource, every member at every depth one the Backport SubscriptionStatus defines, no extension and no signature anywhere, each `focus` a Task, no `additional-context`, no reference but the subscription's and each focus's, and no address naming another resource type in a path segment below the stated base (each segment split at every character a FHIR id never holds, so a Task id such as `Patient-1` names nothing); a notification outside it is refused `403` on authority by both gateways, nothing sent or delivered (the payer's gateway before shn-gateway v1.16.0: `502`). A provider that signs its notifications cannot use this leg yet. Named in `X-SHN-Edited`. |
 
 From shn-gateway v1.13.0 the payer's system then reads the Task the notification names at its
 base for the provider. A redirect the endpoint answers with is followed only within its origin and
@@ -3980,6 +4053,144 @@ nothing delivered:
 A payer's gateway on a release before shn-gateway v1.13.0 does not list the leg, and the Hub refuses the
 notification on routing (`422 the recipient does not take cdex-task-signal: …`), as it refuses
 every marked leg to a recipient that does not take it.
+
+**A PAS notification (`pas-subscription-signal`).** From shn-gateway v1.16.0 a payer's gateway
+that takes `pas-subscription-subscribe` mounts the notification route its system posts each
+notification of a provider's Subscription to the PAS topic to, at the address E-19 wrote into that
+Subscription, `POST [ingress]/notify/pas/<provider>/<kid>/<sealed>`, with the two
+`channel.header` values E-19 wrote (`Authorization: Bearer <kid>.<tag>` and `X-SHN-Channel`), as
+a Subscriptions Backport IG rest-hook posts. The gateway sends each no-content notification (a
+handshake, a heartbeat or an `id-only` event notification), its bytes as the system posted them,
+on `pas-subscription-signal` to the provider the address names. The request frame carries
+`subscriptionEndpoint`, `subscriptionChannel` and `statedBase` (the payer's PAS base) as on
+`cdex-task-signal`. The leg names no patient on either side. The answer is the provider's
+endpoint's own, carried back to the payer's system as it answered, or a refusal. A retry is a new
+notification in a new frame, never refused as a replay. On the route, the payer's gateway refuses
+as the provider's gateway refuses a CDex notification above, at every conformance level, with
+nothing sent, the credential checked before the body is read. A notification that carries
+content (a `full-resource` event notification) is not sent on this leg: it rides
+`pas-subscription-notify` (below). No address in a PAS notification is re-keyed by either gateway, so none is refused for
+where it points. Each `focus` is a `Bundle` or a `ClaimResponse`, as the PAS
+topic's pinned definitions declare.
+
+From shn-gateway v1.16.0 a provider's gateway takes `pas-subscription-signal` when its
+participant sets `PROVIDER_PAS_SUBSCRIPTION`, from that setting alone. It opens the sealed
+endpoint and headers under its own key, with this provider, the payer the Hub authenticated and
+the topic as their associated data, holds the endpoint to the delivery rule, and delivers the
+notification by `POST` to that endpoint with the provider's own header values and no credential
+of the network's, by the rules of every forward to a participant's own system, its bytes as the
+payer's system sent them: it makes no edit. It refuses as the payer's gateway refuses a CDex
+notification above, at every conformance level, with nothing delivered, but for the refusals of
+E-17, which this leg does not make. The endpoint's answer, at every status, is held to the same
+rule: FHIR passes only as an OperationOutcome holding no resource. A provider's gateway that
+does not take the leg is not listed for it, and the Hub refuses the notification on routing
+(`422 the recipient does not take pas-subscription-signal: …`); one that reaches such a gateway
+anyway, as when the Hub still holds its earlier declaration, is refused `422` on routing there,
+nothing delivered.
+
+**A PAS decision notification (`pas-subscription-notify`).** From shn-gateway v1.16.0 the same
+route carries a notification with content: a `full-resource` event notification, whose entry after
+the SubscriptionStatus carries the payer's decision (a PAS Response Bundle, or a ClaimResponse).
+The payer's gateway decides the leg by the no-content test alone: a notification that passes it
+rides `pas-subscription-signal` (above), and one that does not rides `pas-subscription-notify`.
+That leg names its patient, as `pas-claim`'s answer does. The request frame carries
+`subscriptionEndpoint`, `subscriptionChannel` and `statedBase` as on the signal leg. Before it
+sends one, the payer's gateway holds it, beyond the route's own rules above, to:
+
+- **What it reads.** From shn-gateway v1.16.0 the payer's gateway reads every resource the
+  notification carries, wherever a FHIR reader could take one: the decision in an entry's
+  `resource`, an entry of a PAS Response Bundle at any depth, a SubscriptionStatus parameter's
+  `resource`, an entry's `response.outcome`, a contained resource, a `resource` array's elements,
+  and any other member, every member name and `resourceType` read in any case. Each is held to the
+  rules below as the decision is, and so are the notification's own members outside them (a
+  SubscriptionStatus parameter's or part's `valueReference`, an entry's or the Bundle's
+  `extension`). The entry members beside a resource (`fullUrl`, `request`, `response`, `search`)
+  are read as they are, and the notification is carried as sent.
+- **The receiver.** From shn-gateway v1.16.0 every ClaimResponse the notification carries,
+  wherever it sits, must name, as its `applicationReceiverCode` (the
+  `http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-TransmissionIdentifiers`
+  extension's, as a `valueString` and no other `value[x]`), an identifier the network attests
+  for the provider the address names, by the rule the Subscription's `org-identifier` is held
+  to: a value with no system equals the value of an attested identifier, and a `system|value`
+  equals an attested pair. That code is the provider's own sending-system code turned round, the value its
+  Subscription's filter named.
+- **The patient.** From shn-gateway v1.16.0 each ClaimResponse's `patient`, wherever it sits, is
+  read by the identity rules a PAS answer is read by: a relative reference resolves against the
+  `fullUrl` of its own entry, a `urn:uuid` or `urn:oid` reference to the entry whose `fullUrl` it
+  is (FHIR R4's Bundle rule) and names that Patient's id, and one that no entry resolves binds by
+  the `Patient/<id>` it names, whatever IG line the pair speaks. The first decision's first
+  ClaimResponse's patient is the leg's, bound by the member that id names, in the order every PA
+  leg binds one: the payer's own member when its system of record holds it (and, where the
+  payer requires known members, refused `400` as unknown when it does not); otherwise the
+  identifier derived from the member and the demographics of the Patient entry that
+  ClaimResponse's reference resolves to (that entry itself, never another object stating its
+  `fullUrl`, nor a resource contained in it), or, where that reference resolves at the payer's
+  stated base to `Patient/<id>`, of the one Patient of its decision written under a urn with that
+  id, its `resourceType` and `id` read in any case (a urn-written Patient is at the stated base; two such Patients are neither the leg's, and
+  both are listed), when that Patient carries a birth date and a family name (`birthDate`, `name` and `family` read as FHIR spells them, as every leg's binding reads them); otherwise (it resolves
+  to a Patient without them, or to no Patient entry) the identifier derived from the member id
+  alone. Only in that last case is the notification as a whole read, and only for whether the
+  member's number is a Coverage party's, which is refused `422` (the patient cannot be
+  identified). Every name that Patient is read under (its `fullUrl`, its id and its member
+  identifiers) is the leg's patient. Every other patient the notification names, every member
+  name and `resourceType` read in any case, is carried on the involved list: every Patient it
+  carries, anywhere, a Coverage's party (its `subscriber`, `policyHolder` or `payor`) aside, is
+  one person, listed once and bound once from itself (one with no id named by its `fullUrl`, or
+  its place in the notification when it has none). A Patient reference, a Coverage's party
+  slots aside, names the Patient at its exact identity, or, failing that, the one Patient read
+  under the name it states at the base its identity is at (a Patient whose `fullUrl` is a urn
+  at the payer's stated base, the server the notification came from), as the leg's own
+  Patient's names do
+  (a name two Patients answer to names neither); a `urn:uuid` or `urn:oid` reference resolves
+  among the entries of the Bundle that holds it, then outward through each Bundle enclosing it,
+  never in a sibling Bundle. One that names no Patient, or only a Coverage's party, is an
+  identity of its own, bound from the resource it sits in (from the whole notification for its
+  own members). Inside a decision (a bare ClaimResponse at the `fullUrl` of the entry carrying
+  it when that ends in `/ClaimResponse/<its own id>`, else at the payer's stated base), every
+  reference resolves by that decision's own
+  graph, as a PAS answer's does and as the leg's patient is bound: a relative reference against
+  its entry's RESTful `fullUrl`, under a URN entry to the one entry whose RESTful identity ends
+  in it, and, where the graph resolves nothing, by the `Patient/<id>` it names against the
+  payer's stated base, the server the notification came from. Outside any decision (a
+  SubscriptionStatus parameter, the Bundle's own members, an entry outside any decision), a
+  relative reference resolves by FHIR R4's Bundle rule: against the base of the entry it sits in
+  when that entry's `fullUrl` is RESTful, and otherwise (a URN `fullUrl`, an entry that states
+  none, or outside any entry) against the stated base. A reference is the leg's patient
+  exactly when it resolves to the leg's patient's identity (under any name that Patient is read
+  under, at that base), and references that resolve to different identities name different
+  patients. Two Patients the notification carries under one member id, anywhere
+  (another entry, a nested Bundle, a contained resource), are two patients, each bound from its
+  own resource and named on the involved list as its own identity.
+- **The decision's shape.** From shn-gateway v1.16.0 each decision that is a PAS Response Bundle
+  is held to the graph rules a PAS answer is read by (one ClaimResponse, a `collection`, entries
+  with usable identities, and every reference resolving as the line requires) at the PAS lines
+  the payer declares its own system speaks (its gateway's `PAYER_DAVINCI_CONTRACT_VERSIONS`), or,
+  when it declares none, at any line the decision could be on (2.0.1, 2.2 and 2.1, the
+  notification stating none). It passes when any of those lines accepts
+  it, and is refused only when it meets none; the refusal names each line tried and its failure.
+
+| Refusal (from shn-gateway v1.16.0) | Status | Recorded |
+|---|---|---|
+| From shn-gateway v1.16.0, a ClaimResponse anywhere in the notification whose `applicationReceiverCode` names an identifier not attested for the provider, names one by a value that is not a string or with a `value[x]` beside its `valueString`, or that names no `applicationReceiverCode`; a notification with no ClaimResponse; or one holding an object whose `resourceType` is not a string with a value, so which resource it is cannot be read | `403` | `authority` |
+| From shn-gateway v1.16.0, a decision whose patient the network cannot identify: a ClaimResponse, anywhere in the notification, naming no patient or one that resolves to no Patient, an entry after the SubscriptionStatus whose resource is neither a Bundle nor a ClaimResponse, or a defect that touches the binding (a ClaimResponse entry the network cannot read, a patient resolving to an identity an entry it cannot read claims, or two entries claim, a Patient it cannot read carrying the patient's id, or any entry it cannot read that the binding would draw on, given the decision as sent: a Patient carrying the member's demographics, by its id or its member identifier, or a Coverage, contained or not, that would make the member's number a party's) | `422` | `authority` |
+| From shn-gateway v1.16.0, a decision larger than the gateway reads within its own limit, so its patient cannot be bound within that limit | `422` | `authority` |
+| From shn-gateway v1.16.0, a notification the provider's gateway cannot make E-22 on, since it cannot be read one way only (JSON with a lone surrogate in a string, say), refused `400` on fidelity at both gateways | `400` | `fidelity` |
+| From shn-gateway v1.16.0, a notification that names more than one patient, at the levels that refuse `patient.mixed` (`strict`): ClaimResponses naming more than one patient, any patient on its involved list that binds otherwise than the leg's patient, or a decision naming a subject that is not its ClaimResponse's patient by the subject rule a PAS answer is held to at the line the decision is read at; at `none`, `observe` and `structural` it is carried, each other patient on the involved list; a patient on the involved list that the payer's own system of record cannot answer for is no second patient: the check cannot finish, recorded as an unavailable `patient.mixed` finding (at `observe` and `structural`, the notification carried), and at `strict` the notification is refused with that system's failure as its status and message (`503` when it is unavailable, `502` otherwise), not `patient.mixed`'s `422` | `422` | `conformance` (`patient.mixed`) |
+| From shn-gateway v1.16.0, a decision that is a PAS Response Bundle and meets the graph rules a PAS answer is read by at none of the PAS lines the payer declares its system speaks, or of any line it could be on (2.0.1, 2.2, 2.1) when it declares none (a Bundle that is not a `collection`, two ClaimResponses, an entry without a usable identity, a nested Bundle, a reference that does not resolve), the refusal naming each line and its failure, at the levels that refuse `answer.shape` (`structural` and `strict`); at `none` and `observe` it is carried | `422` | `conformance` (`answer.shape`) |
+
+From shn-gateway v1.16.0 a provider's gateway takes `pas-subscription-notify` under the same
+setting as the signal leg, `PROVIDER_PAS_SUBSCRIPTION`, and delivers it as it delivers a signal,
+the sealed values opened and the endpoint held to the delivery rule, with one registered edit,
+and carries its endpoint's answer back as the endpoint answered:
+
+| Edit (from shn-gateway v1.16.0) | When | What changes |
+|---|---|---|
+| E-22 `pas-notified-return-rekey` (from shn-gateway v1.16.0) | every PAS decision notification it delivers, when the payer that sent it takes the documentation submission | E-10's change, on the notified decision: each PAS Task's `payer-url` input written as a `valueUrl`, found by its type coding, becomes the gateway's own documentation return path for that payer, so the documentation the provider sends there stays on the network. Made even where a signature covers the `payer-url` (Signatures, §7a.4); that signature then no longer verifies in the provider's copy. A `payer-url` in any other form, or a payer that does not take the submission, is carried as sent and recorded. A notification it cannot read one way only is refused, never carried. Named in `X-SHN-Edited`, with `; signed="<carriers>"` where a signature covered it. |
+
+From shn-gateway v1.16.0 it refuses a message on the leg that is not a notification of the PAS
+topic with content `403` on authority, one reaching a gateway whose `PROVIDER_PAS_SUBSCRIPTION`
+is unset `422` on routing, and one it cannot read one way only, so cannot make E-22 on, `400` on
+the fidelity of SHN's own edit, as the payer's gateway refuses it, each with nothing delivered.
 
 The Smart Gateway additionally *honors* a well-formed claim it can both
 natively build and validate for (native ∩ laned);
@@ -4059,7 +4270,10 @@ Obtain the patient's network identifier (the `subjectPCI` of Step 4) from
 record holds them; the Smart Gateway does this through its system-of-record connector. Treat
 the result as an opaque string: carry it as the SDK returns it and as tokens name it, and do
 not parse it, reimplement how it is produced, or depend on its format beyond the `pci:`
-prefix. How it is produced is internal to the network and may change. For a member its
+prefix. How it is produced is internal to the network and may change. From shn-sdk v1.15.0 a
+blank member identifier (empty, only whitespace, or a bare `Patient/`) names no patient: `ResolvePCI` returns
+`""` for it, which is no identifier, and `ResolvePCIStrict` refuses it with `ErrBlankMember`;
+refuse such a member as a failed read, never as a member your system of record does not hold. For a member its
 system of record does not hold, the Smart Gateway gives the patient an identifier of its
 own; that is internal to the gateway, and a participant building its own gateway has no
 SDK call for it. From shn-gateway v0.55.0 that identifier never equals the identifier of a
@@ -4721,7 +4935,11 @@ edit E-03 is retired and never reused.
   on the answers its system reads (E-20, §6.3), even where a signature covers them, the answer
   naming the restore and the signature (`subscription-endpoint-restore; signed="<signatures>"`).
   A provider's CDex Task notification that carries a signature is refused (§6.3), so E-17, which
-  stays in the exempt set, is never made on signed content on that leg.
+  stays in the exempt set, is never made on signed content on that leg. From shn-gateway v1.16.0
+  a provider's gateway makes E-22, E-10's `payer-url` re-key, on a payer's PAS decision
+  notification it delivers (§6.3) even where a signature covers the `payer-url`; that signature
+  then no longer verifies in the provider's copy, and the delivery names the edit and the
+  signature (`pas-notified-return-rekey; signed="<signatures>"`).
   Every other edit that would change
   signed content is refused with `422 signed content cannot be edited (<edit>, <signature>)`,
   naming the edit and the signature that covers the content (`Bundle.signature`, `Provenance.signature`,
@@ -5059,12 +5277,19 @@ at PAS 2.0.1" below); earlier releases carry one at every line.
   | Status | Error | When |
   |---|---|---|
   | `500` | `no supplemental report` | the provider's system of record holds no supplemental report for the member |
-  | `422` | `supplemental report names no subject.reference` | the report has no `subject.reference` |
-  | `422` | `supplemental report's subject is not the member's patient in the system of record` | the report names any other subject |
-  | `422` | `signed content cannot be edited (E-06, <carrier>)` | the re-point would change the report and a signature covers it (a `Signature` in the report itself, outside any resource it contains, or a signed `Provenance` it contains that targets it); a report the system already names by the member id is carried exactly as held, signed or not |
+  | `502` | `supplemental report names no subject.reference` | the report has no `subject.reference` (from shn-gateway v1.16.0; `422` before shn-gateway v1.16.0) |
+  | `502` | `supplemental report's subject is not the member's patient in the system of record` | the report names any other subject (from shn-gateway v1.16.0; `422` before shn-gateway v1.16.0) |
+  | `502` | `signed content cannot be edited (E-06, <carrier>)` | the re-point would change the report and a signature covers it (a `Signature` in the report itself, outside any resource it contains, or a signed `Provenance` it contains that targets it); a report the system already names by the member id is carried exactly as held, signed or not (from shn-gateway v1.16.0; `422` before shn-gateway v1.16.0) |
   | `502` | `supplemental report is not a resource` | the report cannot be read as a resource |
   | as for any system-of-record failure | as for any system-of-record failure | the read from the system of record fails |
   | `500` | `prepare supplemental report failed` | the gateway cannot prepare the report it read |
+
+  From shn-gateway v1.16.0, a report with no `subject.reference`, one naming any other
+  subject, and one a signature covers where E-06 would re-point it are refused `502`: each
+  is a report the build cannot carry as read, read from the provider's own system. Each is
+  recorded as the fidelity of the gateway's own build (refusal rule `fidelity`, stage
+  `build`) at every conformance level, with no `Retry-After`. Before v1.16.0 each was
+  refused `422`, under no named rule.
 
   From shn-gateway v1.7.0, registered edit E-06 also covers the clinical records a
   provider's gateway on the provider-data origination profile
@@ -5088,26 +5313,39 @@ at PAS 2.0.1" below); earlier releases carry one at every line.
   record whose `subject.reference` is not exactly the request's patient (another patient;
   `Patient/<member id>` itself where the system holds the member under its own id; a
   versioned or absolute reference; a `Group` or other non-Patient reference; a contained,
-  `urn:`, malformed or empty reference) is refused with `422 a record read from the system
+  `urn:`, malformed or empty reference) is refused with `502 a record read from the system
   of record cannot be carried as read: <type>/<id>'s subject is not exactly the request's
   patient`; where the system holds the member under the member id, a record naming the
   request's own Patient `fullUrl` is that patient and is carried. A record naming no
-  `subject.reference` (no `subject`, or one with no string `reference`) is refused with `422
+  `subject.reference` (no `subject`, or one with no string `reference`) is refused with `502
   a record read from the system of record cannot be carried as read: <type>/<id> names no
   subject.reference`, as a record that does not say whose it is cannot be filled as this
-  patient's; one whose bytes cannot be carried as read with `422 a record read from the
+  patient's; one whose bytes cannot be carried as read with `502 a record read from the
   system of record cannot be carried as read: <type>/<id> is not UTF-8` or `<type>/<id>
-  holds a lone surrogate escape`; one the system definitely does not hold (its read answers
+  holds a lone surrogate escape`; one a signature covers with `502 signed content cannot be
+  edited (E-06, <carrier>)`; and one the system definitely does not hold (its read answers
   `404` or `410`) with `422 a record the request references cannot be filled: <type>/<id> is
-  not held by the system of record`, as the build fills evidence only from the system; and
-  one a signature covers with `422 signed content cannot be edited (E-06, <carrier>)`. Each
-  `422` is recorded as the fidelity of the gateway's own build (refusal rule `fidelity`,
-  stage `build`), whatever legs went before. A record of the referenced type with another
+  not held by the system of record`, as the build fills evidence only from the system and
+  the request named a record it does not hold. Each is recorded as the fidelity of the
+  gateway's own build (refusal rule `fidelity`, stage `build`), at every conformance level,
+  whatever legs went before, with no `Retry-After`. The `502`s are what the gateway read
+  from its own participant's system and cannot carry; before shn-gateway v1.16.0 each was
+  refused `422`, with the same reason, rule and stage. A record of the referenced type with another
   `id` is refused with `502 PAS evidence linkage failed: <type>/<id> as the system answered
-  it is not that resource`, recorded with outcome `upstream-error`. A record nested deeper,
-  or holding more JSON tokens, than the gateway carries in a request, or records that
-  together take the request past its size bound, are refused with `502 PAS evidence linkage
-  failed`, the gateway's own limit, recorded as its own refusal under no named rule. Before v1.7.0, a record about the
+  it is not that resource`, recorded with outcome `upstream-error`. From shn-gateway
+  v1.16.0, a record past the gateway's own carrying limits (nested deeper than the request
+  graph's 64 levels, or than 64 levels as the request carries it; holding more than
+  1,000,000 JSON tokens, or larger than 16 MiB, as the request carries it; or taking the
+  request, with the records read before it, past its 8 MiB bound, its 4096 references, its
+  256 resources, or the relay's limits on the request as a whole) is refused with `502 PAS
+  evidence <type>/<id> read from the provider's system is past the gateway's own carrying
+  limits: it <limit>; the request cannot be sent until that record changes`, with no
+  `Retry-After`, recorded as the fidelity of the gateway's own build (refusal rule
+  `fidelity`, stage `build`) at every conformance level: what cannot be carried is what the
+  gateway read from its own participant's system, so the answer is `502`, where content the
+  caller sent or a peer's message past the same limits is a `4xx`. Before, it was refused
+  with `502 PAS evidence linkage failed`, recorded as the gateway's own refusal under no
+  named rule. Before v1.7.0, a record about the
   Patient the system holds the member under was refused with `502 PAS evidence linkage
   failed`, after the CRD and questionnaire legs had gone out, and one naming
   `Patient/<member id>` while the system holds the member under another id was carried.
@@ -5116,7 +5354,9 @@ at PAS 2.0.1" below); earlier releases carry one at every line.
 
   From shn-gateway v1.8.0, every PAS submission and amendment a provider's gateway builds
   is checked once, right after the build, for two edits of its own build that cannot be
-  made, each refused `422`, the fidelity of the gateway's own build, with nothing sent.
+  made, each refused `502`, the fidelity of the gateway's own build (refusal rule
+  `fidelity`, stage `build`), at every conformance level, with no `Retry-After` and nothing
+  sent.
   First, a record the build addresses by its own `resourceType` and `id` (the Coverage,
   the payer's Organization, the Claim's provider) that states either only in another
   spelling (`"ID"`, say), or any record whose `resourceType` is spelled so: such a record
@@ -5127,9 +5367,13 @@ at PAS 2.0.1" below); earlier releases carry one at every line.
   the build's id would sit beside that spelling, in a body the network's message integrity
   does not seal, since it can be read two ways (`the build's own id for it cannot be set
   beside the id it spells another way`). Once the build carries these records as written,
-  a lone member spelled so is carried. Each message follows `422 a record read from the
-  system of record cannot be carried as read: `. Earlier releases, depending on the
-  request, built and sent such a request or answered it as the gateway's own `500`. A
+  a lone member spelled so is carried. Each message follows `502 a record read from the
+  system of record cannot be carried as read: `. Every record these checks can refuse is
+  one the gateway read from the provider's system: on UC-05 the facility's report is taken
+  only by its exact `resourceType` and `id`, and a facility Provenance with no exact `id`
+  is refused first by the SDK's build (`422`, the fidelity of the gateway's own build).
+  Before shn-gateway v1.16.0 each was refused `422`; before v1.8.0, depending on the
+  request, such a request was built and sent or answered as the gateway's own `500`. A
   person the Coverage names spelled so is, as before, refused `422` by the build's own
   party read.
 
@@ -5140,10 +5384,24 @@ at PAS 2.0.1" below); earlier releases carry one at every line.
   reaches the splice and cannot be carried as read (one that is not exactly one JSON
   object, is not UTF-8 or holds a lone surrogate escape, or names a member twice whatever
   its case; an order's requester or a dispatched supplier with no `resourceType` or `id`
-  spelled exactly) is refused with `422 a record read from the system of record cannot be
+  spelled exactly) is refused with `502 a record read from the system of record cannot be
   carried as read: <why>`, the fidelity of the gateway's own edit, before the claim is
-  sent. Most such records are answered earlier, as in earlier releases, by the read that
-  takes them from the system or by E-06.
+  sent (`422` before shn-gateway v1.16.0). Most such records are answered earlier, as in
+  earlier releases, by the read that takes them from the system or by E-06: the records the
+  order's requester leads to are read strictly, and one that cannot be read so is refused
+  with `502 system of record returned an invalid response`, recorded with outcome
+  `upstream-error`. From shn-gateway v1.16.0, a dispatched supplier that cannot be carried
+  as read is refused before the request is built, whether or not the Claim names it as its
+  provider: `502 a record read from the system of record cannot be carried as read: the
+  dispatched supplier <the order's performer reference> <why>`, the fidelity of the
+  gateway's own build, at every conformance level, with no `Retry-After`. From shn-gateway
+  v1.16.0, as before, the gateway's own FHIR connector (`fhirsor`) refuses a supplier that
+  names a member twice, or is not exactly one JSON object, at its read (`502 system of record
+  returned an invalid response`), so through it this refusal is reached by one that is not
+  UTF-8 or holds a lone surrogate escape; a connector that returns the bytes as held reaches
+  it with each. Before shn-gateway v1.16.0, a supplier the Claim named as its provider that
+  reached the build was refused `502 PAS evidence linkage failed` under no named rule, or, if
+  it named a member twice, `500` as the gateway's own failure.
 
   From shn-gateway v1.8.0, when a provider's gateway builds the UC-05 amendment
   itself, the `DiagnosticReport` is the facility's report the gateway read on the
@@ -5793,7 +6051,7 @@ applicable IG profiles. The network enforces a **two-gate** posture:
 | `dtr-questionnaire-fetch` | Da Vinci DTR `$questionnaire-package` input `Parameters` (or the SDC `$next-question` input) / the `$questionnaire-package` collection `Bundle`: the `Questionnaire` plus its dependent Libraries and ValueSets (§7a.1) |
 | `pas-claim` / `pas-claim-update` | Da Vinci PAS `Claim` bundle / `ClaimResponse` bundle |
 | `pas-claim-inquire` | Da Vinci PAS inquiry request `Bundle` / a `Bundle` of `ClaimResponse`s at 2.0.1 and 2.1.0, a `Parameters` at 2.2.1 (§7b.2a) |
-| `federated-query` | Da Vinci CDex `cdex-task-data-request` `Task` (request) / completed CDex `Task` whose `output` contains a US-Core searchset `Bundle` (`DiagnosticReport`/`DocumentReference` records, the facility's identity-binding `Patient`, one `Provenance` per record) (response) — CDex + HRex + US Core |
+| `federated-query` | Da Vinci CDex `cdex-task-data-request` `Task` (request) / completed CDex `Task` whose `output` contains a US-Core searchset `Bundle` (`DiagnosticReport`/`DocumentReference` records, the facility's identity-binding `Patient`, one `Provenance` per record) (response); from shn-gateway v1.16.0 on the facility's gateway, a request `Task` whose status does not allow it to be fulfilled is answered `422` with an `OperationOutcome` whose issue is a `business-rule`, the facility's own answer — CDex + HRex + US Core |
 | `patient-dtr` | Da Vinci DTR `QuestionnaireResponse` |
 
 ### 8.3 Terminology
@@ -6188,6 +6446,139 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-11-19 — From shn-sdk v1.15.0, a patient reference that names no member is refused, and no patient identifier is derived from a blank member (§7).**
+  A member is blank when it is empty, only whitespace, or a bare `Patient/`, and a blank member
+  is never read as an identifier: a system-of-record connector refuses it as a failed read, never
+  as a member it does not hold. Changed:
+  - `shnsdk.ParseEligibilityRequestMember`, `ParseEligibilityRequestMemberExact` and
+    `ParseEligibilitySubmission` refuse a request whose member reads as blank, including one
+    read through a contained Patient's member identifier or a Bundle entry's id, with an
+    `*EligibilityRequestRefusal` whose text is the one a payer's Smart Gateway answers: "eligibility
+    request names its patient by a reference that names no one, so the request names no patient
+    to bind". Earlier releases read the member as `""`, or as the whitespace, with no error.
+  - `shnsdk.Responder` answers such a request `400` with that text before its `Adjudicator` is
+    asked, where earlier releases asked it about the blank member.
+  - `shnsdk.ParseCDexTaskDataRequest` refuses a `Task.for` that names no patient.
+  - `shnsdk.ResolvePCI` returns `""`, which is no identifier, for a blank member; earlier
+    releases derived an identifier from it as from any other member id. `RunEligibility` and
+    `RunPriorAuth` send nothing for a blank member and return `ErrBlankMember`.
+
+  Added: `shnsdk.ResolvePCIStrict`, which refuses a blank member with `ErrBlankMember`, and
+  `ErrBlankMember`, which each of these refusals wraps (`errors.Is`). A request submitted in a
+  Bundle whose patient reference is itself empty or a bare `Patient/` keeps its answer, `400`
+  "parse member failed". Every member that is not blank reads and derives as before.
+
+- **2026-11-18 — From shn-gateway v1.16.0, a provider's gateway serves its own system's Subscription to the PAS topic at each payer's PAS base (`pas-subscription-subscribe`, the subscriber's half) (§6.1).**
+  Added: where its participant sets `PROVIDER_PAS_SUBSCRIPTION`, a provider's gateway serves
+  `POST`, `GET`, `PUT` and `DELETE` `[ingress]/pas/payer/{payer}/Subscription[/…]` with the
+  HRex Task topic's subscriber's rules, roles reversed (E-18, E-20, E-23; a `PATCH` refused
+  `405`), and carries each interaction to that payer on the leg. Its SMART configuration
+  advertises each Subscription scope a client of the provider's own is registered for, and the
+  gateway refuses to start with one SMART does not spell.
+
+- **2026-11-18 — From shn-gateway v1.16.0, a provider's gateway refuses a record read from its own system of record that it cannot carry as read `502` (§7b.2).**
+  Changed: on a PAS submission, update or resumed claim update the provider's gateway builds,
+  a clinical record its system of record answers is refused `502` where earlier releases
+  refused it `422`, with the same reason, refusal rule `fidelity` and stage `build`, at every
+  conformance level and with no `Retry-After`. That holds for a record on the provider-data
+  origination profile whose subject is not exactly the request's patient, that names no
+  `subject.reference`, whose bytes are not UTF-8 or hold a lone surrogate escape, or that a
+  signature covers where E-06 would re-point it (`502 signed content cannot be edited (E-06,
+  <carrier>)`). It holds too for a record the order's requester leads to, or a dispatched
+  supplier, that the splice cannot carry as read. What cannot be carried is what the gateway
+  read from its own participant's system, so the answer is `502`. So are the checks of the
+  built request's entries, on every PAS submission and amendment the gateway builds (`502 a
+  record read from the system of record cannot be carried as read: it states its
+  resourceType or id only in another spelling`, `... the build's own id for it cannot be set
+  beside the id it spells another way`): every record they can refuse is one the gateway read
+  from the provider's system. So is UC-04's supplemental report, on the amendment the gateway
+  builds, that names no `subject.reference` or another subject, or that a signature covers
+  where E-06 would re-point it, now recorded as the fidelity of the gateway's own build.
+  So is a dispatched supplier the system answers that reaches the build and cannot be
+  carried as read, whether or not the Claim names it as its provider: refused before the
+  request is built, naming it (`... the dispatched supplier <the order's performer
+  reference> <why>`), where earlier releases refused one the Claim named as its provider
+  `502 PAS evidence linkage failed` under no named rule, or `500`. The gateway's own FHIR
+  connector still refuses one that names a member twice, or is not exactly one JSON
+  object, at its read, as before (§7b.2).
+  Unchanged: a record the request references that the system
+  does not hold stays `422 a record the request references cannot be filled: <type>/<id> is
+  not held by the system of record`, since the request named it.
+
+- **2026-11-18 — From shn-gateway v1.16.0, the involved list reads a request's patients under member names and resource types spelled in any case (§5.1).**
+  Changed: the readers with which a Smart Gateway lists the other patients a request carries
+  read the member names and resource types within a FHIR resource in any case, as a lenient
+  FHIR reader reads them. A Patient under `"Contained"`, with `"resourceType":"patient"`, or
+  named by `{"Reference":"Patient/p2"}` is listed, where earlier releases carried it and never
+  listed it, and a `"Subscriber"` or `"PolicyHolder"` slot is the Coverage's party slot. The
+  binding reads the same names the same way, so a Coverage's beneficiary reference spelled in
+  another case ties the member's own Patient: beside a party slot the member is now bound,
+  where earlier releases refused it as a patient the gateway cannot identify. A decimal past a
+  double's range, such as `1e400`, no longer drops a patient from the list or the binding. A
+  request whose patients the gateway cannot read at all (on coverage eligibility and the PAS
+  decision notification, an empty one too), and on coverage eligibility each request in it whose
+  own patient the gateway cannot read, is sent with no list for those patients, as before, and
+  each omission is now counted once, as `involvedOmitted` reason `request-unreadable`, beside
+  every patient the other requests name; earlier releases counted nothing. Counting it refuses
+  nothing.
+  The list is for the audit record only, as before, and the bytes the gateway carries are
+  unchanged.
+
+- **2026-11-18 — From shn-gateway v1.16.0, the subscriber's gateway refuses a notification it cannot carry `4xx`, as the notifier's gateway does (§6.3).**
+  Changed: a provider's CDex Task notification (`cdex-task-signal`) that the payer's gateway
+  cannot read one way only at the places E-17 re-keys is refused `400`, on the fidelity of SHN's
+  own edit as before, where earlier releases refused it `502`. A notification outside its
+  topic's closed notification shape is refused `403` on authority by the subscriber's gateway:
+  the payer's on `cdex-task-signal`, where earlier releases refused it `502`, and the provider's
+  on `pas-subscription-signal`, new in the same release. Each is now the status the notifier's
+  gateway answers for the same notification. What these two refuse is a message the gateway
+  received, a peer's through the Hub, so the answer is a `4xx`. A `502` is for what the gateway
+  read from its own participant's system, such as an endpoint answer that names a patient, and
+  for a fault in the gateway's own edit, such as E-17 failing its own verification; both are
+  unchanged. Nothing is delivered, as before.
+
+- **2026-11-18 — From shn-sdk v1.15.0, CDex fulfillment reads signed content by a gateway's relay's own rule.**
+  `shnsdk.BuildCDexQueryResult` and `shnsdk.BuildCDexFulfillment` refuse with
+  `ErrCDexSignedContent` exactly when a gateway's relay reads the fulfillment as signed. That
+  holds when a signature covers the fulfilled `Task`, which holds the records `Bundle` in its
+  `contained`, or, where the fulfillment writes or rewrites the records `Bundle`'s id, when a
+  signature covers the records as supplied. The refusal names the signature as the relay names
+  it: `Bundle.signature`, `Provenance.signature`, `Signature in <resource type>` or
+  `Signature`. The new package `signedcontent` holds that reading: its `Coverage` and
+  `RootCarrier` give what a document's signatures cover, and `OwnSignatureMember` says which
+  member of a `Bundle` or a `Provenance` is its own signature. Earlier releases also refused content
+  the relay carries, and each such fulfillment is now built:
+  - a `Signature` in a resource the `Task` contains, which covers that resource only;
+  - an object with a `Signature`'s members where the relay reads none by them;
+  - a `#` target or a version path that names nothing the fulfillment changes.
+
+- **2026-11-18 — From shn-gateway v1.16.0, provider-data evidence past the gateway's own carrying limits is refused under a named rule (§7b.2).**
+  A record the provider's system of record answers, which a PAS submission, update or
+  resumed claim update carries as evidence, is refused `502 PAS evidence <type>/<id> read
+  from the provider's system is past the gateway's own carrying limits: it <limit>; the
+  request cannot be sent until that record changes` when it is past those limits, with no
+  `Retry-After`. It is recorded as the fidelity of the gateway's own build (refusal rule
+  `fidelity`, stage `build`), at every conformance level. Earlier releases refused it `502 PAS
+  evidence linkage failed`, under no named rule. What cannot be carried is what the gateway
+  read from its own participant's system, so the answer is `502`; content the caller sent, or
+  a peer's message, past the same limits stays a `4xx`.
+
+- **2026-11-18 — From shn-gateway v1.16.0, a facility's gateway declines a federated query's closed `Task` as the facility.**
+  On the `federated-query` leg the facility's gateway builds the CDex fulfillment as the
+  facility, so a request `Task` whose status does not allow it to be fulfilled (such as
+  `cancelled` or `completed`, which FHIR R4's Task state machine closes) is the facility's own
+  decision, not a refusal of the network's. The facility's gateway answers it as a FHIR server
+  answers a change its business rules do not allow: `422`, an `OperationOutcome` whose one issue
+  has `severity` `error` and `code` `business-rule`, and whose `diagnostics` name the `Task`'s
+  status (such as `the Task's status (cancelled) does not allow it to be fulfilled`), with no
+  `Retry-After`. It is the same at every conformance level, and the requester's gateway relays
+  it exactly. It comes after the network's refusals of the request itself (consent, the
+  patient's binding, a request that reads two ways, the request's shape); signed content bears
+  only on an edit, and a decline makes none, so a signed `Task` that is closed is declined too.
+  A requester's gateway that negotiated no message frame receives the gateway's existing refusal
+  for such a requester instead, as for every participant's error answer. Earlier releases refused it `422 federated query refused: the request Task's
+  status does not allow fulfillment`, written as the gateway's own refusal (issue `code`
+  `not-supported`).
 - **2026-11-18 — From shn-sdk v1.14.0, a CDex fulfillment past the limits of the SDK's JSON reader is refused with `ErrCDexLimit`.**
   `shnsdk.BuildCDexQueryResult` and `shnsdk.BuildCDexFulfillment` refuse with `ErrCDexLimit`
   (new) a fulfillment stopped by the limits of the SDK's JSON reader: where the request
@@ -6198,6 +6589,39 @@ property. Until then, build to the rule: preserve what you do not recognise.
   Releases since CDex fulfillment came to keep the request `Task` and the records exactly
   (2026-09-16) refused each of these with an error no exported value matched, so a caller could
   not tell it from a fault in the build.
+- **2026-11-17 — From shn-gateway v1.16.0, a payer's notification of a decision on a provider's Subscription to the PAS topic, carrying the decision, reaches the provider's own endpoint through both gateways (`pas-subscription-notify`), with E-22 (§2.3, §4.3, §6.1, §6.3, §7a.4).**
+  Added: the leg taxonomy gains `pas-subscription-notify` (`pa.pas-subscription-notify`): the
+  request `pas-notify` under `payer-coverage` from a `payer`, the response `pas-notify-response`
+  under `provider-tpo` from a `provider`, the scope `pas-notification-bundle`, naming its patient,
+  marked from shn-gateway v1.16.0. The payer's notification route sends a `full-resource`
+  notification on it instead of refusing it: every ClaimResponse it carries, wherever it sits,
+  must name an `applicationReceiverCode` attested for the provider, or it is refused `403` on
+  authority, an absent code as a mismatched one; its patient is bound from the decision, and one
+  the network cannot identify is refused `422` on authority. A provider's gateway takes it under
+  `PROVIDER_PAS_SUBSCRIPTION` and makes E-22, E-10's `payer-url` re-key on the notified decision,
+  even where a signature covers the `payer-url`, which then no longer verifies in the provider's
+  copy; a notification it cannot read one way only is refused `400` on fidelity at both gateways.
+- **2026-11-17 — From shn-gateway v1.16.0, a payer's no-content notification of a provider's Subscription to the PAS topic reaches the provider's own endpoint through both gateways (`pas-subscription-signal`), a leg that names no patient on either side (§2.3, §4.3, §6.1, §6.3).**
+  Added: the leg taxonomy gains `pas-subscription-signal` (`pa.pas-subscription-signal`): the
+  request `pas-signal` under `payer-coverage` from a `payer`, the response `pas-signal-response`
+  under `provider-tpo` from a `provider`, the scope `pas-notification`, `subject` `none`, marked
+  from shn-gateway v1.16.0. A payer's gateway that takes `pas-subscription-subscribe` serves the
+  notification route `POST [ingress]/notify/pas/…` and sends each handshake, heartbeat and
+  `id-only` event on the leg, refusing a notification with content `403`; a provider's gateway
+  takes the leg when its participant sets `PROVIDER_PAS_SUBSCRIPTION`, and delivers each
+  notification to the endpoint the provider's system wrote, as the payer's system sent it. The
+  standard authority frames gain payer → provider, `payer-coverage` → `provider-tpo`.
+- **2026-11-17 — From shn-gateway v1.16.0, a payer's gateway carries a provider's topic Subscription to the PAS topic (`pas-subscription-subscribe`), a leg that names no patient on either side (§2.3, §4.3, §6.1, §6.3).**
+  Added: the leg taxonomy gains `pas-subscription-subscribe` (`pa.pas-subscription-subscribe`):
+  the request `pas-subscribe` under `provider-tpo` from a `provider`, the response
+  `pas-subscribe-response` under `payer-coverage` from a `payer`, the scope `pas-subscription`,
+  `subject` `none`, marked from shn-gateway v1.16.0. A payer's gateway takes it when its
+  participant sets `PAYER_DAVINCI_SUBSCRIPTION_SCOPE`, from that setting alone, and carries it
+  to the payer's own Subscription endpoint with the subscribe leg's rules, E-19 and E-21 among
+  them. A Subscription's `org-identifier` must name only identifiers the network attests for the
+  provider, with or without their system, or it is refused `403` on authority; a value is never
+  rewritten. The forward names the provider in no header of the network's. A payer's system
+  that does not serve `Subscription` answers for itself, its own answer carried as sent.
 - **2026-11-17 — From shn-sdk v1.14.0, CDex fulfillment reads a `Signature` by its place, and a signed `Provenance`'s targets under their members' names in any case.**
   `shnsdk.BuildCDexQueryResult` and `shnsdk.BuildCDexFulfillment` read an object at a place
   FHIR R4 types `Signature` as a `Signature` whatever its members: an extension's or a modifier

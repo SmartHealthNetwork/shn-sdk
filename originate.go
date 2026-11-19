@@ -83,7 +83,11 @@ func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoi
 	now := id.now()
 
 	// Step 1 — resolve the patient PCI (AI-5). Never appears in Hub-readable Metadata.
-	pci := ResolvePCI(memberID, birthDate, familyName)
+	// A blank member id names no patient: nothing is sent for it.
+	pci, err := ResolvePCIStrict(memberID, birthDate, familyName)
+	if err != nil {
+		return false, "", err
+	}
 
 	// Step 2 — build the FHIR CoverageEligibilityRequest payload.
 	cer, err := BuildEligibilityRequestExact(memberID, npi, payer.Identity, now)

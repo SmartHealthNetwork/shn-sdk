@@ -193,6 +193,11 @@ func ParseCDexTaskDataRequest(data []byte) (ParsedCDexRequest, error) {
 	if !strings.HasPrefix(forRef, "Patient/") {
 		return ParsedCDexRequest{}, fmt.Errorf("cdex: Task.for missing/invalid")
 	}
+	// A Patient reference with no id (or only whitespace where it goes) names
+	// no patient: read as a member, a blank one would match any member.
+	if memberNamesNoOne(strings.TrimPrefix(forRef, "Patient/")) {
+		return ParsedCDexRequest{}, errTaskForNamesNoPatient
+	}
 	out := ParsedCDexRequest{PatientRef: forRef}
 	for _, in := range task.Input {
 		isDataQuery := false
@@ -295,21 +300,17 @@ func parseNarrowQuery(raw, forRef string) (CDexQuery, error) {
 }
 
 // ErrCDexSignedContent reports a fulfillment refused because it would extend
-// signed content: the request Task carries a Signature element, a signed
-// Provenance among the supplied documents targets the Task, or a signed
-// records Bundle would need its id written. A Provenance's or the records
-// Bundle's own signature member is read under its name in any case
-// (`signature`, `Signature`, `SIGNATURE`). A Signature element is read by its
-// place, an object at a place FHIR R4 types Signature (an extension's
-// valueSignature, a Task input's or output's) whatever its members, and by
-// its shape (type, when or _when, and who) anywhere, each name in any case.
-// The members that say what a Provenance's signature covers, its
-// resourceType and target, each target's reference, and the id of the Task
-// or the records Bundle it names, are read by their names in any case. A "#"
-// target of a signed Provenance in the records that names the records Bundle,
-// as the relay reads "#" (up from the Provenance's container to the nearest
-// resource, and on while that resource is contained), names the Task too,
-// which contains the records once fulfilled.
+// signed content, as a gateway's relay reads it (package signedcontent, the
+// one rule both hold content to): a signature covers the fulfilled Task, which
+// holds the records in its contained, or, where the fulfillment writes or
+// rewrites the records Bundle's id, a signature covers the records Bundle as
+// supplied. A fulfillment that cannot be built once its inputs are read (the
+// records' id cannot be written, or the fulfilled Task is past the reader's
+// limits) is refused so first when a signature covers the request Task, when
+// a signed Provenance among the records names the request Task by type and
+// id, or when a signature covers the records whose id it would write, each as
+// supplied. The error names the
+// signature's carrier, as signedcontent names it.
 var ErrCDexSignedContent = errors.New("cdex: signed content cannot be extended")
 
 // ErrCDexTaskStatus reports a request Task whose status does not allow
@@ -387,12 +388,14 @@ func BuildCDexQueryResult(requestTaskJSON, searchsetBundle []byte) ([]byte, erro
 //     any depth, compared after unescaping and ignoring case, is refused);
 //   - the Task's status is not requested, received, accepted or in-progress
 //     (ErrCDexTaskStatus);
-//   - the Task carries a Signature element anywhere, by its place or its
-//     shape, or a signed Provenance in the Task or in the records targets the
-//     Task (ErrCDexSignedContent);
 //   - the records Bundle carries an empty or non-string id;
-//   - the records Bundle would need its id written although a signature
-//     covers it (ErrCDexSignedContent);
+//   - a signature covers the fulfilled Task, or, where the records Bundle's id
+//     is written, the records Bundle, as a gateway's relay reads it
+//     (ErrCDexSignedContent). A fulfillment refused for another reason once
+//     its inputs are read is refused so first when a signature covers the
+//     request Task, a signed Provenance among the records names the request
+//     Task by type and id, or a signature covers the records whose id it
+//     would write;
 //   - the request Task, the records Bundle (once its id is written, where it
 //     is written) or the fulfilled Task is past the reader's limits
 //     (ErrCDexLimit).

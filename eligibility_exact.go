@@ -16,7 +16,8 @@ import (
 
 // EligibilityRequestRefusal is a coverage eligibility request that
 // ParseEligibilityRequestMemberExact refuses because it cannot be read one way
-// only. Its Error is the text a payer answers the request with: the text a
+// only, or because its patient names no member (that refusal also wraps
+// ErrBlankMember). Its Error is the text a payer answers the request with: the text a
 // payer's Smart Gateway answers the same request with. It names a member, never
 // a value.
 type EligibilityRequestRefusal struct{ text string }
@@ -81,7 +82,7 @@ func ParseEligibilityRequestMemberExact(data []byte) (memberID string, err error
 	if member, ok := namedOnlyInAnotherCase(top, "resourceType"); ok {
 		return "", inAnotherCase(member, "resourceType")
 	}
-	literal, err := ParseEligibilityRequestMember(data)
+	literal, err := eligibilityRequestLiteral(data)
 	if err != nil {
 		return "", err
 	}
@@ -117,6 +118,11 @@ func ParseEligibilityRequestMemberExact(data []byte) (memberID string, err error
 	}
 	if !strict && strings.ContainsRune(member, utf8.RuneError) && memberValueReplaced(top, patient, ref) {
 		return "", &EligibilityRequestRefusal{"eligibility request names its patient by a value carrying a replaced character (not well-formed UTF-8 or a lone surrogate escape): readers read it two ways, so the request names no patient to bind"}
+	}
+	// A member read through a contained Patient is its identifier's value,
+	// which may be only whitespace: that names no member either.
+	if memberNamesNoOne(member) {
+		return "", errNoMember
 	}
 	return member, nil
 }

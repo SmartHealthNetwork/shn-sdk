@@ -1,6 +1,6 @@
 // Code generated from hl7.fhir.r4.core 4.0.1 StructureDefinitions; DO NOT EDIT.
 
-package shnsdk
+package signedcontent
 
 // r4ResourceTypes are FHIR R4's resource types (its concrete ones: not
 // Resource or DomainResource).
