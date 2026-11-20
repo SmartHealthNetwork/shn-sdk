@@ -205,7 +205,7 @@ func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoi
 		return false, "", fmt.Errorf("shnsdk: unmarshal response authz token: %w", err)
 	}
 	respHash := sha256.Sum256(respEnv.Ciphertext)
-	if err := VerifyBound(
+	if err := VerifyBoundWant(
 		respTok,
 		payer.AuthzPub,
 		now,
@@ -213,7 +213,7 @@ func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoi
 		"eligibility-response",          // wantOp
 		correlationID,                   // wantCorrelationID
 		payer.ID,                        // wantHolder
-		pci,                             // wantSubject
+		SubjectIs(pci),                  // the request's patient
 		hex.EncodeToString(respHash[:]), // wantPayloadHash (AI-2)
 	); err != nil {
 		return false, "", fmt.Errorf("shnsdk: verify response token: %w", err)

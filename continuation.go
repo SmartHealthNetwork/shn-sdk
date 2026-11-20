@@ -73,7 +73,9 @@ type PASInquiryRecords struct {
 // code, service date, trace number), and the answer's ClaimResponse
 // identifiers, authorization reference and per-item authorization and
 // administration reference numbers. Every request item must carry a trace
-// number. The answer may be empty (no payer facts yet).
+// number. The answer may be empty (no payer facts yet). A member id that names
+// no member (empty, only whitespace, or "Patient/" with no id) is refused with
+// an error wrapping ErrBlankMember.
 //
 // The provider identifier is read off the SUBMITTED BUNDLE — the Claim's own
 // provider reference, resolved to the entry that rode with it — like every
@@ -83,8 +85,11 @@ func NewPriorAuthContinuation(line, payerHolder, memberID string, request, respo
 	if _, ok := PASLineDef(line); !ok {
 		return PriorAuthContinuation{}, fmt.Errorf("shnsdk: continuation: unknown PAS line %q", line)
 	}
-	if payerHolder == "" || memberID == "" {
-		return PriorAuthContinuation{}, errors.New("shnsdk: continuation: the payer holder and the member id are required")
+	if payerHolder == "" {
+		return PriorAuthContinuation{}, errors.New("shnsdk: continuation: the payer holder is required")
+	}
+	if memberNamesNoOne(memberID) {
+		return PriorAuthContinuation{}, errContinuationNamesNoOne
 	}
 	c := PriorAuthContinuation{Line: line, PayerHolder: payerHolder, MemberID: memberID}
 	claim, err := firstBundleResource(request, "Claim")

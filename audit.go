@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"slices"
 )
 
 // AuditRecord is the SDK-facing representation of an audit record's CONTENT
@@ -46,8 +47,9 @@ type AuditRecord struct {
 	// version 1 record carries none of them, so its canonical bytes are
 	// unchanged. Do NOT move these fields.
 
-	// Version is the record's schema version: 0 (absent) for version 1, or
-	// AuditRecordVersion2. An explicit 1 is not a valid encoding.
+	// Version is the record's schema version: 0 (absent) for version 1,
+	// AuditRecordVersion2 or AuditRecordVersion3. An explicit 1 is not a
+	// valid encoding.
 	Version int `json:"version,omitempty"`
 	// CorrelationID is the leg's correlation id, in BoundedCorrelationID's
 	// form: the exchange identifier.
@@ -64,6 +66,14 @@ type AuditRecord struct {
 	// Gateway is the content of a gateway-start record, and nil on every
 	// other record.
 	Gateway *Gateway `json:"gateway,omitempty"`
+
+	// The version 3 member, APPENDED after Gateway. A version 1 or version 2
+	// record carries none, so its canonical bytes are unchanged. Do NOT move
+	// this field.
+
+	// Involved is whether the involved list of a list leg was complete, on
+	// a version 3 record, and nil on every other record.
+	Involved *Involved `json:"involved,omitempty"`
 }
 
 // signableAuditContent is the canonical type whose json tags and field order
@@ -107,8 +117,9 @@ type signableAuditContent struct {
 	// version 1 record carries none of them, so its canonical bytes are
 	// unchanged. Do NOT move these fields.
 
-	// Version is the record's schema version: 0 (absent) for version 1, or
-	// AuditRecordVersion2. An explicit 1 is not a valid encoding.
+	// Version is the record's schema version: 0 (absent) for version 1,
+	// AuditRecordVersion2 or AuditRecordVersion3. An explicit 1 is not a
+	// valid encoding.
 	Version int `json:"version,omitempty"`
 	// CorrelationID is the leg's correlation id, in BoundedCorrelationID's
 	// form: the exchange identifier.
@@ -125,6 +136,14 @@ type signableAuditContent struct {
 	// Gateway is the content of a gateway-start record, and nil on every
 	// other record.
 	Gateway *Gateway `json:"gateway,omitempty"`
+
+	// The version 3 member, APPENDED after Gateway. A version 1 or version 2
+	// record carries none, so its canonical bytes are unchanged. Do NOT move
+	// this field.
+
+	// Involved is whether the involved list of a list leg was complete, on
+	// a version 3 record, and nil on every other record.
+	Involved *Involved `json:"involved,omitempty"`
 }
 
 // AuditAppendRequest is the POST /append body a gateway sends to the Audit Plane:
@@ -165,6 +184,7 @@ func SignableContent(r AuditRecord) []byte {
 		Finding:           r.Finding,
 		Module:            r.Module.canonical(),
 		Gateway:           r.Gateway.canonical(),
+		Involved:          r.Involved.canonical(),
 	})
 	return b
 }
@@ -172,6 +192,26 @@ func SignableContent(r AuditRecord) []byte {
 // AuditRecordVersion2 is AuditRecord.Version on a version 2 record. A version 1
 // record leaves Version unset.
 const AuditRecordVersion2 = 2
+
+// AuditRecordVersion3 is AuditRecord.Version on a version 3 record: version 2
+// plus Involved. A record is version 3 exactly when it carries Involved, and
+// only the Hub writes one, on its record of a list leg.
+const AuditRecordVersion3 = 3
+
+// AuditRecordVersionSupported reports whether v is an AuditRecord.Version
+// this SDK reads: 0 (version 1), AuditRecordVersion2 or AuditRecordVersion3.
+//
+// A verifier checks the version first, before the signature. SignableContent
+// rebuilds only the members this SDK knows, so a record of a later version
+// would fail its signature with no other hint; checked first, it is reported
+// as an unsupported version instead.
+func AuditRecordVersionSupported(v int) bool {
+	switch v {
+	case 0, AuditRecordVersion2, AuditRecordVersion3:
+		return true
+	}
+	return false
+}
 
 // Version 2 record types that a registered holder's key (or a probe key)
 // signs, rather than the Hub's, the Framework's, the Registrar's or Accounts'.
@@ -278,6 +318,122 @@ func (g *Gateway) canonical() *Gateway {
 	}
 	if c.Modules == nil {
 		c.Modules = []string{}
+	}
+	return &c
+}
+
+// Involved is the content of a version 3 record's involved member: whether
+// the list of the other patients a list leg involves was complete. Every
+// member is always encoded, in this order; a nil list encodes as [].
+type Involved struct {
+	// Completeness: InvolvedComplete, InvolvedIncomplete or InvolvedUnknown.
+	Completeness string `json:"completeness"`
+	// Omitted: why the list was incomplete, a count per reason (of patients,
+	// or, for AuditInvolvedUnverified, of entries), each reason from
+	// AuditInvolvedOmitReasons, sorted by reason with each reason once. It is
+	// empty unless Completeness is InvolvedIncomplete, and holds at least one
+	// reason when it is.
+	Omitted []InvolvedOmission `json:"omitted"`
+}
+
+// InvolvedOmission is one reason an involved list was incomplete, and its
+// count (at least 1): for a requester's reason, how many patients it left
+// out; for AuditInvolvedUnverified, how many entries of the list the Hub
+// rejected (see AuditInvolvedUnverified), which is not a count of patients.
+type InvolvedOmission struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
+}
+
+// The completeness values of Involved.
+const (
+	// InvolvedComplete: the list names every other patient the leg involves.
+	InvolvedComplete = "complete"
+	// InvolvedIncomplete: the list was not complete, for the reasons
+	// Omitted gives.
+	InvolvedIncomplete = "incomplete"
+	// InvolvedUnknown: whether the list was complete is not known.
+	InvolvedUnknown = "unknown"
+)
+
+// The Hub's own Involved omission reasons. A gateway never reports either:
+// the Hub writes them on its record of the leg.
+const (
+	// AuditInvolvedUnverified: entries of the list the Hub rejected, so it
+	// recorded no patient from them. The count is of entries, not patients:
+	// each entry that fails the Hub's checks (an involvement the leg does not
+	// allow, a token that does not verify, or no patient identifier), and
+	// every entry of a list over the Hub's limit, which it rejects unread, so
+	// some may repeat a patient or name the leg's own. An entry that verifies
+	// but names a patient already covered is not counted, and a list the Hub
+	// cannot read at all (one that does not decode as a list, or is over the
+	// envelope metadata's size bound) makes the list unknown, not incomplete.
+	AuditInvolvedUnverified = "unverified"
+	// AuditInvolvedUnrecognized: patients a gateway reported omitting under a
+	// reason the Hub does not know (one outside the list it was built with).
+	// The record keeps the count, not which reason it was, and the list reads
+	// incomplete; the Hub's own counter is how the network sees that drift.
+	AuditInvolvedUnrecognized = "unrecognized"
+)
+
+// AuditInvolvedOmitReasons returns the closed set of reasons an Involved
+// omission may give, sorted: the reasons a gateway leaves a patient out of
+// its involved list for, and the Hub's own two, AuditInvolvedUnrecognized
+// and AuditInvolvedUnverified. The list is a copy.
+func AuditInvolvedOmitReasons() []string {
+	return []string{
+		"authorization-failed",
+		"authorization-refused",
+		"budget",
+		"involvement-not-carried",
+		"overflow",
+		"request-unreadable",
+		"system-of-record-unavailable",
+		"unknown-member",
+		AuditInvolvedUnrecognized,
+		AuditInvolvedUnverified,
+	}
+}
+
+// ValidInvolved reports whether i is a version 3 record's involved member
+// within its closed sets: its completeness one of the three values, its
+// omitted list empty unless incomplete and not empty when it is, each reason
+// from AuditInvolvedOmitReasons, each count at least 1, and the reasons
+// sorted, each once. A nil i is not valid.
+func ValidInvolved(i *Involved) bool {
+	if i == nil {
+		return false
+	}
+	switch i.Completeness {
+	case InvolvedComplete, InvolvedUnknown:
+		return len(i.Omitted) == 0
+	case InvolvedIncomplete:
+		if len(i.Omitted) == 0 {
+			return false
+		}
+	default:
+		return false
+	}
+	reasons := AuditInvolvedOmitReasons()
+	for n, o := range i.Omitted {
+		if o.Count < 1 || !slices.Contains(reasons, o.Reason) {
+			return false
+		}
+		if n > 0 && i.Omitted[n-1].Reason >= o.Reason {
+			return false
+		}
+	}
+	return true
+}
+
+// canonical returns i with a nil omitted list empty, as Module.canonical does.
+func (i *Involved) canonical() *Involved {
+	if i == nil {
+		return nil
+	}
+	c := *i
+	if c.Omitted == nil {
+		c.Omitted = []InvolvedOmission{}
 	}
 	return &c
 }

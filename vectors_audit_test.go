@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -27,7 +28,14 @@ var auditVectors = []string{
 	"v2-module-details-bridged.json",
 	"v2-gateway-start.json",
 	"v2-refused-builder-on-other-edit.json",
+	"v3-exchange-involved-complete.json",
+	"v3-exchange-involved-incomplete.json",
+	"v3-exchange-involved-unknown.json",
+	"v3-refused-omitted-on-complete.json",
 }
+
+// refusedVectorName matches a refused vector's name, at any record version.
+var refusedVectorName = regexp.MustCompile(`^v[0-9]+-refused-`)
 
 type auditVector struct {
 	Record    json.RawMessage `json:"record"`
@@ -58,12 +66,22 @@ func TestVectorAuditRecordSignableContent(t *testing.T) {
 			if err := json.Unmarshal(readVector(t, dir, name), &v); err != nil {
 				t.Fatalf("decode vector: %v", err)
 			}
-			if refused := strings.HasPrefix(name, "v2-refused-"); refused != (v.Refused != "") {
+			if refused := refusedVectorName.MatchString(name); refused != (v.Refused != "") {
 				t.Fatalf("refused member %q on a vector whose name says refused=%v", v.Refused, refused)
 			}
 			var rec AuditRecord
 			if err := json.Unmarshal(v.Record, &rec); err != nil {
 				t.Fatalf("decode record: %v", err)
+			}
+			// A version 3 vector's involved member is refused exactly when
+			// the vector says so: its one member rule is ValidInvolved's.
+			if strings.HasPrefix(name, "v3-") {
+				if rec.Version != AuditRecordVersion3 || rec.Involved == nil {
+					t.Fatalf("a version 3 vector with version %d, involved %v", rec.Version, rec.Involved)
+				}
+				if ValidInvolved(rec.Involved) != (v.Refused == "") {
+					t.Fatalf("ValidInvolved = %v on a vector whose refused member is %q", ValidInvolved(rec.Involved), v.Refused)
+				}
 			}
 			want, err := hex.DecodeString(v.Signable)
 			if err != nil {

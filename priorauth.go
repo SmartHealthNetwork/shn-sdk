@@ -784,7 +784,7 @@ func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoint
 		return nil, fmt.Errorf("unmarshal response authz token: %w", err)
 	}
 	respHash := sha256.Sum256(respEnv.Ciphertext)
-	if err := VerifyBound(
+	if err := VerifyBoundWant(
 		respTok,
 		payer.AuthzPub,
 		now,
@@ -792,7 +792,7 @@ func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoint
 		respOp,
 		correlationID,
 		payer.ID,
-		pci,
+		SubjectIs(pci),
 		hex.EncodeToString(respHash[:]),
 	); err != nil {
 		return nil, fmt.Errorf("verify response token: %w", err)

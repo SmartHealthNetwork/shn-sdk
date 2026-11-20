@@ -1,9 +1,5 @@
 package signedcontent
 
-// The reading below is the gateway relay's own, copied so that one rule
-// serves both: the platform's SDK parity suite holds the two copies' code
-// equal until the relay calls this package instead.
-
 import (
 	"cmp"
 	"slices"

@@ -67,7 +67,11 @@ type PASInquiry struct {
 	Patient string
 	// ClaimIdentifiers are the inquiry Claim's identifiers.
 	ClaimIdentifiers []PASIdentifier
-	// MemberIdentifiers are the identifiers of the inquiry's Patient entry.
+	// MemberIdentifiers are the identifiers of the inquiry's Patient entry
+	// that name a member. One whose value is blank (empty, only whitespace,
+	// or "Patient/" with no id) names no member and is left out, so a lookup
+	// by these never searches for a blank value; Bundle still carries it as
+	// sent.
 	MemberIdentifiers []PASIdentifier
 	// Items are the inquiry Claim's items.
 	Items []PASInquiryItem
@@ -414,8 +418,10 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		respondErr(w, http.StatusForbidden, "invalid authz token")
 		return
 	}
-	if err := VerifyBound(tok, r.cfg.AuthzPub, now,
-		"provider-tpo", op, corr, env.Metadata.Sender, "", sha256Hex(env.Ciphertext)); err != nil {
+	// Every leg the Responder answers names its patient, and it answers for
+	// the patient the token names: the token names some patient.
+	if err := VerifyBoundWant(tok, r.cfg.AuthzPub, now,
+		"provider-tpo", op, corr, env.Metadata.Sender, SubjectNamed(), sha256Hex(env.Ciphertext)); err != nil {
 		respondErr(w, http.StatusForbidden, "authz verification failed")
 		return
 	}

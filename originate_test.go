@@ -49,6 +49,18 @@ type fakeSubstrate struct {
 	// statedName is the transaction type the request stated, before the
 	// stand-in Hub resolves it to its leg.
 	statedName string
+	// answerSubject, if answerSubjectSet, is the subject the answer token
+	// names in place of the request token's.
+	answerSubject    string
+	answerSubjectSet bool
+}
+
+// answerSubjectFor is the subject the stand-in payer's answer token names.
+func (f *fakeSubstrate) answerSubjectFor(requestSubject string) string {
+	if f.answerSubjectSet {
+		return f.answerSubject
+	}
+	return requestSubject
 }
 
 // mint signs a Token the way the substrate authz framework does (Signature over
@@ -154,7 +166,7 @@ func (f *fakeSubstrate) routeHandler() http.HandlerFunc {
 		respTok := f.mint(Token{
 			Operation:     "eligibility-response",
 			Scope:         "coverage",
-			Subject:       inTok.Subject,
+			Subject:       f.answerSubjectFor(inTok.Subject),
 			Frame:         "payer-coverage",
 			CorrelationID: corr,
 			Holder:        f.payerID,

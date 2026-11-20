@@ -559,6 +559,23 @@ func parsePASInquiry(body []byte) (PASInquiry, int, string) {
 		return bad("inquiry Claim is not a preauthorization")
 	}
 	inq.Patient, inq.ClaimIdentifiers = cl.Patient.Reference, cl.Identifier
+	// Claim.patient is read as a payer's Smart Gateway reads it, and refused
+	// with its answers, before the Adjudicator is asked: no reference; a
+	// reference naming no Patient id (no "Patient/", or nothing after the
+	// last one); a Patient id that is only whitespace, which names no member.
+	if cl.Patient.Reference == "" {
+		return bad("PAS inquiry Claim missing patient")
+	}
+	member := ""
+	if strings.Contains(cl.Patient.Reference, "Patient/") {
+		member = pasMemberFromRef(cl.Patient.Reference)
+	}
+	if member == "" {
+		return bad("PAS inquiry Bundle missing Claim.patient")
+	}
+	if memberNamesNoOne(member) {
+		return bad(msgInquiryNamesNoOne)
+	}
 	patientKeyRef := patientKey(cl.Patient.Reference)
 	if patientKeyRef == "" {
 		return PASInquiry{}, http.StatusForbidden, "inquiry Claim patient is not a Patient reference"
@@ -578,7 +595,14 @@ func parsePASInquiry(body []byte) (PASInquiry, int, string) {
 		Identifier []PASIdentifier `json:"identifier"`
 	}
 	_ = json.Unmarshal(patient, &p)
-	inq.MemberIdentifiers = p.Identifier
+	// A blank identifier names no member, so it is no member the inquiry
+	// names: it is left out, never handed on as one (the Bundle carries it as
+	// sent).
+	for _, id := range p.Identifier {
+		if !memberNamesNoOne(id.Value) {
+			inq.MemberIdentifiers = append(inq.MemberIdentifiers, id)
+		}
+	}
 	for _, res := range byURL {
 		var cov struct {
 			ResourceType string `json:"resourceType"`

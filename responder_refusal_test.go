@@ -415,6 +415,24 @@ func TestSDKResponder_PreAuthRefusalsBare(t *testing.T) {
 			b, hdr := forward(t, "pre-10", h.responderEnc, func(_ *Envelope, tok *Token) { tok.PayloadHash = strings.Repeat("00", 32) })
 			return do(t, srv, b, hdr)
 		}, http.StatusForbidden, "authz verification failed", 0},
+		// Every leg the Responder answers names its patient: a token naming
+		// none, or no patient identifier, is not this leg's.
+		{"token naming no patient", func(t *testing.T, srv *httptest.Server) (int, []byte) {
+			b, hdr := forward(t, "pre-12", h.responderEnc, func(_ *Envelope, tok *Token) { tok.Subject = "" })
+			return do(t, srv, b, hdr)
+		}, http.StatusForbidden, "authz verification failed", 0},
+		{"token naming no patient identifier", func(t *testing.T, srv *httptest.Server) (int, []byte) {
+			b, hdr := forward(t, "pre-13", h.responderEnc, func(_ *Envelope, tok *Token) { tok.Subject = "member-1" })
+			return do(t, srv, b, hdr)
+		}, http.StatusForbidden, "authz verification failed", 0},
+		// Every binding is required: an envelope stating no sender is refused,
+		// never a skipped holder binding (ErrBindingUnstated). One stating no
+		// correlation is refused before the token is read (missing
+		// correlation id).
+		{"envelope stating no sender", func(t *testing.T, srv *httptest.Server) (int, []byte) {
+			b, hdr := forward(t, "pre-15", h.responderEnc, func(env *Envelope, _ *Token) { env.Metadata.Sender = "" })
+			return do(t, srv, b, hdr)
+		}, http.StatusForbidden, "authz verification failed", 0},
 		{"sealed to another holder's key", func(t *testing.T, srv *httptest.Server) (int, []byte) {
 			b, hdr := forward(t, "pre-11", other.EncPub, nil)
 			return do(t, srv, b, hdr)

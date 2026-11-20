@@ -96,8 +96,8 @@ func checkNamesNoOne(t *testing.T, what string, err error) {
 }
 
 // TestEligibilitySubmissionBundleRefusesABlankMember: a request submitted in a
-// Bundle whose patient reference names no member is refused too, as before: a
-// reference that names no Patient the Bundle carries.
+// Bundle whose patient reference names no member is refused as a request sent
+// alone is: with the gateway's text, wrapping ErrBlankMember.
 func TestEligibilitySubmissionBundleRefusesABlankMember(t *testing.T) {
 	for _, ref := range blankMemberRefs {
 		body := `{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"urn:uuid:1","resource":` +
@@ -107,10 +107,27 @@ func TestEligibilitySubmissionBundleRefusesABlankMember(t *testing.T) {
 			t.Errorf("bundled patient reference %q: %+v with no error; want a refusal", ref, subs)
 			continue
 		}
-		// Its answer is unchanged: an error that is no refusal ("parse member failed").
+		checkNamesNoOne(t, "bundled patient reference "+strconv.Quote(ref), err)
+		batch := `{"resourceType":"Bundle","type":"batch","entry":[{"resource":` + string(blankMemberCER(ref)) + `}]}`
+		if _, err := shnsdk.ParseEligibilitySubmission([]byte(batch)); err == nil {
+			t.Errorf("batched patient reference %q: no error; want a refusal", ref)
+		} else {
+			checkNamesNoOne(t, "batched patient reference "+strconv.Quote(ref), err)
+		}
+	}
+	// A Bundle's request that names its patient by no reference at all is
+	// no reference naming no one (unknown is not empty): it keeps its answer,
+	// an error that is no refusal, as the same request sent alone does.
+	for name, patient := range map[string]string{
+		"no patient":                    ``,
+		"a patient named by identifier": `,"patient":{"identifier":{"system":"urn:shn:member","value":"MBR-1"}}`,
+	} {
+		body := `{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"urn:uuid:1","resource":` +
+			`{"resourceType":"CoverageEligibilityRequest","insurer":{"identifier":{"value":"P"}}` + patient + `}}]}`
+		_, err := shnsdk.ParseEligibilitySubmission([]byte(body))
 		var refusal *shnsdk.EligibilityRequestRefusal
-		if errors.Is(err, shnsdk.ErrBlankMember) || errors.As(err, &refusal) {
-			t.Errorf("bundled patient reference %q: refused as %v; want its earlier answer, an error that is no refusal", ref, err)
+		if err == nil || errors.Is(err, shnsdk.ErrBlankMember) || errors.As(err, &refusal) {
+			t.Errorf("bundled request with %s: error %v; want an error that is no refusal", name, err)
 		}
 	}
 }

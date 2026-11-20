@@ -69,16 +69,26 @@ another language checks its canonical form against `signable`
 | `audit/v2-module-details-bridged.json` | version 2: a `module-details` record for another `pa.pas-claim` request, which its builder authored and a line bridge then translated from 2.1 to 2.2 (edit `E-09`), with its loss; it keeps the builder |
 | `audit/v2-gateway-start.json` | version 2: a gateway's `gateway-start` record naming its build, wire versions and modules |
 | `audit/v2-refused-builder-on-other-edit.json` | **refused**: a provider gateway's `module-details` record for a `pa.dtr-questionnaire-fetch` answer it edited under `E-08`, naming a builder, although `E-08` edits the payer's answer, which no builder authored. Its signature verifies, and the Audit Plane refuses it `400` under the rule in its `refused` member |
+| `audit/v3-exchange-involved-complete.json` | version 3: the Hub's exchange record on `v2-exchange`'s leg, under the leg token's own patient, with `involved` `complete` and no omissions |
+| `audit/v3-exchange-involved-incomplete.json` | version 3: the same leg's record with `involved` `incomplete`, naming omissions under three reasons in their sorted order: a gateway's `budget`, and the Hub's own `unrecognized` (omissions the gateway reported under a reason the Hub does not know) and `unverified` |
+| `audit/v3-exchange-involved-unknown.json` | version 3: the same leg's record with `involved` `unknown` and `omitted` left null, which `signable` shows signed as `[]` |
+| `audit/v3-refused-omitted-on-complete.json` | **refused**: the same leg's record with `involved` `complete` but naming an `overflow` omission. Its signature verifies, and the Audit Plane refuses it `400` `invalid involved` under the rule in its `refused` member |
 
-A vector with a `refused` member is signed correctly and must still be refused: a
-builder is allowed on an `edited` body only when every edit is an IG-line bridge's
-translation of the whole body (`shnsdk.BuilderKeepingEdits()`, today `E-09`).
+A vector with a `refused` member is signed correctly and must still be refused. In
+`v2-refused-builder-on-other-edit`, a builder is allowed on an `edited` body only when
+every edit is an IG-line bridge's translation of the whole body
+(`shnsdk.BuilderKeepingEdits()`, today `E-09`). In `v3-refused-omitted-on-complete`,
+`involved` must be within its closed sets (`shnsdk.ValidInvolved`), and a `complete`
+or `unknown` list omits no one, so its `omitted` is `[]`.
 
 The version 1 vectors are minted through the Audit Plane's own canonicalisation.
 Version 1 vectors never change. A version 2
 record sets `"version": 2`, and its members follow `involvement` in the order
 `version`, `correlationId`, `resends`, `finding`, `module`, `gateway`. Every member of
 `finding`, `module` and `gateway` is always present, and an empty list is `[]`.
+A version 3 record sets `"version": 3` and carries one more member, `involved`, after
+`gateway`; both of its members, `completeness` and `omitted`, are always present in the
+signed bytes, and a null or absent `omitted` signs as `[]`.
 
 The canonical form is Go's `encoding/json` encoding of the record's members in
 the order above, with no insignificant whitespace: the ten members from

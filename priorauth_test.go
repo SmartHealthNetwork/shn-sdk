@@ -98,6 +98,10 @@ type paFakeSubstrate struct {
 	// statedNames is each request's transaction type as the requester stated
 	// it, in order, before the stand-in Hub resolves it to its leg.
 	statedNames []string
+	// answerSubject, if answerSubjectSet, is the subject every answer token
+	// names in place of the request token's.
+	answerSubject    string
+	answerSubjectSet bool
 }
 
 // responseOpFor mirrors hubsvc.responseOp: the op the response-leg token is pinned
@@ -330,7 +334,7 @@ func (f *paFakeSubstrate) routeHandler() http.HandlerFunc {
 		respTok := f.mint(Token{
 			Operation:     respOp,
 			Scope:         "coverage",
-			Subject:       inTok.Subject,
+			Subject:       f.answerSubjectFor(inTok.Subject),
 			Frame:         "payer-coverage",
 			CorrelationID: corr,
 			Holder:        f.payerID,
@@ -725,4 +729,12 @@ func TestDemoLumbarContexts(t *testing.T) {
 	if short.PriorSurgery {
 		t.Error("DemoLumbarContextShortTherapy: must vary ONLY the therapy weeks")
 	}
+}
+
+// answerSubjectFor is the subject the stand-in payer's answer token names.
+func (f *paFakeSubstrate) answerSubjectFor(requestSubject string) string {
+	if f.answerSubjectSet {
+		return f.answerSubject
+	}
+	return requestSubject
 }

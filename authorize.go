@@ -154,9 +154,10 @@ func verifyToken(t Token, pub ed25519.PublicKey, now time.Time) error {
 }
 
 // sdkVerifyBindings asserts the token's frame/operation/correlation/holder/subject
-// match the exchange it arrived in (empty want = skip that check). Shared by
-// VerifyBound and VerifyBoundNoPayload so the binding set cannot drift between the
-// envelope and non-envelope verifiers. Mirrors the framework's own binding checks.
+// match the exchange it arrived in (empty want = skip that check, which only the
+// deprecated forms and VerifyInvolved rely on: the Want forms refuse an empty
+// want before calling it). Shared by every verifier so the binding set cannot
+// drift between them. Mirrors the framework's own binding checks.
 func sdkVerifyBindings(t Token, wantFrame, wantOp, wantCorr, wantHolder, wantSubject string) error {
 	if wantFrame != "" && t.Frame != wantFrame {
 		return errors.New("shnsdk: token frame mismatch")
@@ -187,6 +188,14 @@ func sdkVerifyBindings(t Token, wantFrame, wantOp, wantCorr, wantHolder, wantSub
 // verifier, it refuses a token that carries an Involvement: such a token is
 // minted for another patient a leg involves and rides only to the network's
 // Hub in Metadata.Involved, so it is never a leg's own token.
+//
+// Deprecated: an empty want skips that binding, for every binding but the
+// payload hash: the frame, operation, correlation, holder and subject. An
+// empty value reads the same whether the verifier does not check the binding,
+// does not hold its value, or the value came out empty by accident. Use
+// VerifyBoundWant, which requires every binding (ErrBindingUnstated) and
+// states the expected subject (SubjectIs, SubjectNamed, SubjectNone,
+// SubjectFromAnswer, SubjectChecked).
 func VerifyBound(t Token, authzPub ed25519.PublicKey, now time.Time, wantFrame, wantOp, wantCorr, wantHolder, wantSubject, wantPayloadHash string) error {
 	if err := verifyToken(t, authzPub, now); err != nil {
 		return err
@@ -215,6 +224,11 @@ func VerifyBound(t Token, authzPub ed25519.PublicKey, now time.Time, wantFrame, 
 // always carries a hash) can never be replayed onto the bearer read path (AI-2).
 // Use VerifyBound (strict payload) for every sealed-envelope leg; use this ONLY for
 // a direct read. Ported from the framework's no-payload bound verifier.
+//
+// Deprecated: an empty want skips that binding, for every binding: the
+// frame, operation, correlation, holder and subject. Use
+// VerifyBoundNoPayloadWant, which requires every binding and states the
+// expected subject.
 func VerifyBoundNoPayload(t Token, pub ed25519.PublicKey, now time.Time, wantFrame, wantOp, wantCorr, wantHolder, wantSubject string) error {
 	if t.PayloadHash != "" {
 		return errors.New("shnsdk: payload hash present on non-envelope token")

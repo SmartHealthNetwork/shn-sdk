@@ -70,7 +70,12 @@ const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|M
 	// Review-round shorthand without the hyphen, in file names ("review_round1_test.go")
 	// and content ("round3 finding"). No word boundary in front, since an underscore is
 	// a word character; a digit must follow, so RoundTrip and "round trip" do not match.
-	`|(?i:round[0-9])`
+	`|(?i:round[0-9])` +
+	// A decision ledger's ids past one digit ("D127", "D47(2)", "D132 N2"): a partner
+	// cannot read the ledger, so the fix is to state what the decision says. A dot and a
+	// digit after the digits make it no id, since "D57.1" is an ICD-10-CM diagnosis code a
+	// fixture names; a letter, a digit or an underscore after them make it none too, as \b would.
+	`|\bD[0-9]{2,4}(?:[^.0-9A-Za-z_]|\.[^0-9]|\.?$)`
 
 // sweepSkipFiles are the module-root test files excluded from the sweep.
 //

@@ -33,6 +33,14 @@ type blankMemberError struct{ text string }
 func (e blankMemberError) Error() string { return e.text }
 func (e blankMemberError) Unwrap() error { return ErrBlankMember }
 
+// msgInquiryNamesNoOne is a PAS inquiry whose Claim.patient names no member: the
+// text a payer's Smart Gateway answers the same inquiry with.
+const msgInquiryNamesNoOne = "cannot identify the patient: the request names its patient by a reference that names no one"
+
+// errContinuationNamesNoOne is a continuation whose member id names no member. It
+// wraps ErrBlankMember.
+var errContinuationNamesNoOne error = blankMemberError{"shnsdk: continuation: the member id names no member"}
+
 // memberNamesNoOne reports whether a member names no patient: blank once one
 // "Patient/" prefix is removed, as a Smart Gateway reads a member.
 func memberNamesNoOne(member string) bool {

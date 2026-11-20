@@ -68,11 +68,10 @@ func (e *EligibilityBatchTooLarge) Error() string {
 // *EligibilityBatchTooLarge before any request's patient is read. Any other
 // error is an input that is none of the forms, or a request whose patient
 // names no member one way only; the gateway answers it "parse member failed".
-// A request whose member reads as blank (a request sent alone whose patient
-// reference names no member, or a contained Patient's identifier or a Bundle
-// entry's id that is only whitespace) is refused with an
-// *EligibilityRequestRefusal carrying the gateway's text, which wraps
-// ErrBlankMember.
+// A request whose patient names no member (its reference empty, blank or a bare
+// "Patient/", in any form, or a contained Patient's identifier or a Bundle
+// entry's id that is blank) is refused with an *EligibilityRequestRefusal
+// carrying the gateway's text, which wraps ErrBlankMember.
 func ParseEligibilitySubmission(data []byte) ([]EligibilitySubmission, error) {
 	if scan := scanMemberNames(data); scan.repeated {
 		dup := scan.named
@@ -346,21 +345,31 @@ func oneRequest(bundle []byte) (eligibilitySubmission, bool) {
 //     another type answers;
 //   - a well-formed Patient reference no entry answers: the id it writes.
 //
-// Any other reference, an empty one among them, names no patient, and is
-// refused.
+// A reference that names no one (empty, blank, or "Patient/" with no id) is
+// refused as a request sent alone is (errNoMember); any other reference names
+// no patient, and is refused.
 func eligibilitySubmissionMember(sub eligibilitySubmission) (string, error) {
 	if !sub.bundled {
 		return ParseEligibilityRequestMemberExact(sub.request)
 	}
 	var req struct {
-		Patient struct {
-			Reference string `json:"reference"`
+		Patient *struct {
+			Reference *string `json:"reference"`
 		} `json:"patient"`
 	}
 	if err := exactdecode.Decode(sub.request, &req); err != nil {
 		return "", fmt.Errorf("the request's patient cannot be read one way only: %w", err)
 	}
-	ref := req.Patient.Reference
+	// No reference at all is no reference, never an empty one.
+	if req.Patient == nil || req.Patient.Reference == nil {
+		return "", errors.New("shnsdk: the request names its patient by no reference")
+	}
+	ref := *req.Patient.Reference
+	// A reference that names no one (empty, blank, or "Patient/" with no id)
+	// is refused as a request sent alone refuses it.
+	if memberNamesNoOne(strings.TrimPrefix(ref, "Patient/")) {
+		return "", errNoMember
+	}
 	if strings.HasPrefix(ref, "#") {
 		var c struct {
 			Contained []any `json:"contained"`

@@ -129,7 +129,6 @@ func TestParseEligibilitySubmission(t *testing.T) {
 		"a Bundle holding no request":                                 bundle("collection", entry("urn:uuid:p", `{"resourceType":"Patient","id":"MBR-001"}`)),
 		"a batch entry that is a Bundle of two":                       bundle("batch", entry("urn:uuid:b", bundle("collection", entry("urn:uuid:r1", req), entry("urn:uuid:r2", req)))),
 		"a batch entry that is a Bundle of a Bundle":                  bundle("batch", entry("urn:uuid:b", bundle("collection", entry("urn:uuid:r1", req), entry("urn:uuid:b2", bundle("collection"))))),
-		"a Bundle's request naming no patient":                        bundle("collection", entry("urn:uuid:r", request(""))),
 		"a Bundle's request naming an Organization":                   bundle("collection", entry("urn:uuid:r", request("urn:uuid:o")), entry("urn:uuid:o", `{"resourceType":"Organization","id":"o"}`)),
 		"a Bundle's request naming two entries":                       bundle("collection", entry("urn:uuid:r", req), entry("urn:uuid:p1", `{"resourceType":"Patient","id":"MBR-001"}`), entry("urn:uuid:p2", `{"resourceType":"Patient","id":"MBR-001"}`)),
 		"a Bundle's Patient whose id is not the reference's":          bundle("collection", entry("urn:uuid:r", request("https://h/fhir/Patient/MBR-001")), entry("https://h/fhir/Patient/MBR-001", `{"resourceType":"Patient","id":"MBR-002"}`)),
