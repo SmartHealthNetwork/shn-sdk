@@ -134,7 +134,6 @@ func TestParseEligibilitySubmission(t *testing.T) {
 		"a Bundle's Patient whose id is not the reference's":          bundle("collection", entry("urn:uuid:r", request("https://h/fhir/Patient/MBR-001")), entry("https://h/fhir/Patient/MBR-001", `{"resourceType":"Patient","id":"MBR-002"}`)),
 		"a Bundle's Patient with no id or member":                     bundle("collection", entry("urn:uuid:r", request("urn:uuid:p")), entry("urn:uuid:p", `{"resourceType":"Patient"}`)),
 		"a Bundle's request naming no contained Patient":              bundle("collection", entry("urn:uuid:r", request("#p"))),
-		"a Bundle's request naming a reference no reader resolves":    bundle("collection", entry("urn:uuid:r", request("Patient/MBR-001/$everything"))),
 		"a Bundle past the strict reader's bounds":                    strings.TrimSuffix(bundle("collection", entry("urn:uuid:r", req)), "}") + `,"note":"\ud800"}`,
 	} {
 		t.Run(name, func(t *testing.T) {

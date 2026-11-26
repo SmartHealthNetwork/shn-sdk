@@ -56,9 +56,10 @@ const noPatientToBind = ": member names are case-sensitive, so the request names
 // one contained Patient with that id, whose urn:shn:member identifier is the
 // member (a contained id is local, never a member id). A "#id" reference naming
 // no contained Patient, or more than one, is an error that is no refusal, as is a
-// "#id" reference that is not well-formed. Any other reference is read as
-// ParseEligibilityRequestMember reads it, and so is a relative one; any other
-// error is that function's. ParseEligibilitySubmission reads a request sent
+// "#id" reference that is not well-formed. Any other reference names no Patient
+// by FHIR's reference grammar and names no one: it is refused as a reference that
+// names no one (an *EligibilityRequestRefusal wrapping ErrBlankMember), never read
+// as a member from its text. Any other error is ParseEligibilityRequestMember's. ParseEligibilitySubmission reads a request sent
 // alone with this reader, and a Responder answers with that.
 func ParseEligibilityRequestMemberExact(data []byte) (memberID string, err error) {
 	scan := scanMemberNames(data)
@@ -82,8 +83,7 @@ func ParseEligibilityRequestMemberExact(data []byte) (memberID string, err error
 	if member, ok := namedOnlyInAnotherCase(top, "resourceType"); ok {
 		return "", inAnotherCase(member, "resourceType")
 	}
-	literal, err := eligibilityRequestLiteral(data)
-	if err != nil {
+	if _, err := eligibilityRequestLiteral(data); err != nil {
 		return "", err
 	}
 	if member, ok := namedOnlyInAnotherCase(top, "patient"); ok {
@@ -112,9 +112,10 @@ func ParseEligibilityRequestMemberExact(data []byte) (memberID string, err error
 	case local:
 		return "", errors.New("shnsdk: the patient reference names no contained Patient, or more than one")
 	default:
-		// A reference that is not a well-formed one keeps the literal reading:
-		// a member id is an identifier value, not limited to a FHIR id's shape.
-		member = literal
+		// Any other reference names no Patient by FHIR's reference grammar
+		// ("urn:Patient/<id>", "Group/1", "Patient/1/x", a bare id): it names no
+		// one, never a member read from its text.
+		return "", errNoMember
 	}
 	if !strict && strings.ContainsRune(member, utf8.RuneError) && memberValueReplaced(top, patient, ref) {
 		return "", &EligibilityRequestRefusal{"eligibility request names its patient by a value carrying a replaced character (not well-formed UTF-8 or a lone surrogate escape): readers read it two ways, so the request names no patient to bind"}

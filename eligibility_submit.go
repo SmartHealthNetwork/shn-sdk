@@ -397,7 +397,9 @@ func eligibilitySubmissionMember(sub eligibilitySubmission) (string, error) {
 		if member, ok := patientRefMember(ref, nil); ok {
 			return member, nil
 		}
-		return "", fmt.Errorf("patient reference %s names no Patient the Bundle carries", quotedBounded(ref))
+		// It names no Patient by FHIR's reference grammar, and no entry
+		// answers it: it names no one.
+		return "", errNoMember
 	}
 	var p struct {
 		ID         string `json:"id"`
@@ -406,7 +408,7 @@ func eligibilitySubmissionMember(sub eligibilitySubmission) (string, error) {
 	if exactdecode.Decode(matches[0].resource, &p) != nil {
 		return "", fmt.Errorf("patient reference %s names a Patient that cannot be read one way only", quotedBounded(ref))
 	}
-	if written := patientRefShape.FindStringSubmatch(ref); written != nil && p.ID != written[1] {
+	if written, _, ok := readPatientReference(ref); ok && p.ID != written {
 		return "", fmt.Errorf("patient reference %s names a Bundle entry whose id is not the reference's", quotedBounded(ref))
 	}
 	if p.ID != "" {

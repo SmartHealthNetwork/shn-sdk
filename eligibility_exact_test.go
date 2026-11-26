@@ -21,6 +21,8 @@ func TestParseEligibilityRequestMemberExact(t *testing.T) {
 		noBind  = ": member names are case-sensitive, so the request names no patient to bind"
 		generic = "eligibility request names its type or patient only in another case" + noBind
 		replace = "eligibility request names its patient by a value carrying a replaced character (not well-formed UTF-8 or a lone surrogate escape): readers read it two ways, so the request names no patient to bind"
+		// namesNoOne is a request whose patient reference names no one.
+		namesNoOne = "eligibility request names its patient by a reference that names no one, so the request names no patient to bind"
 	)
 	member := func(id, value string) string {
 		return `{"resourceType":"Patient","id":"` + id + `","identifier":[{"system":"urn:shn:member","value":"` + value + `"}]}`
@@ -59,9 +61,14 @@ func TestParseEligibilityRequestMemberExact(t *testing.T) {
 		{name: "U+FFFD sent in the member identifier beside a replaced character in another contained Patient", body: `{` + cer + `,"contained":[` + member("q", `MBR\ud800`) + `,` + member("p", `MBR\ufffd`) + `],"patient":{"reference":"#p"}}`, member: "MBR\ufffd", resolved: true},
 		{name: "U+FFFD sent in the member identifier beside a replaced character in another system's", body: `{` + cer + `,"contained":[{"resourceType":"Patient","id":"p","identifier":[{"system":"urn:mrn","value":"M\ud800"},{"system":"urn:shn:member","value":"MBR\ufffd"}]}],"patient":{"reference":"#p"}}`, member: "MBR\ufffd", resolved: true},
 		{name: "a replaced character in another contained Patient", body: `{` + cer + `,"contained":[` + member("q", `MBR\ud800`) + `,` + member("p", "MBR-X") + `],"patient":{"reference":"#p"}}`, member: "MBR-X", resolved: true},
-		{name: "a reference with a trailing slash", body: `{` + cer + `,"patient":{"reference":"Patient/MBR-001/"}}`, member: "MBR-001/"},
-		{name: "a reference to an operation", body: `{` + cer + `,"patient":{"reference":"Patient/MBR-001/$everything"}}`, member: "MBR-001/$everything"},
-		{name: "a bare id", body: `{` + cer + `,"patient":{"reference":"MBR-001"}}`, member: "MBR-001"},
+		// A reference that names no Patient by FHIR's reference grammar names
+		// no one, never a member read from its text.
+		{name: "a reference with a trailing slash", body: `{` + cer + `,"patient":{"reference":"Patient/MBR-001/"}}`, refusal: namesNoOne},
+		{name: "a reference to an operation", body: `{` + cer + `,"patient":{"reference":"Patient/MBR-001/$everything"}}`, refusal: namesNoOne},
+		{name: "a bare id", body: `{` + cer + `,"patient":{"reference":"MBR-001"}}`, refusal: namesNoOne},
+		{name: "a URN", body: `{` + cer + `,"patient":{"reference":"urn:Patient/MBR-001"}}`, refusal: namesNoOne},
+		{name: "Patient/ inside another reference", body: `{` + cer + `,"patient":{"reference":"Group/1/Patient/MBR-001"}}`, refusal: namesNoOne},
+		{name: "an absolute reference whose id is not a FHIR id", body: `{` + cer + `,"patient":{"reference":"https://h/fhir/Patient/MBR_001"}}`, member: "MBR_001", resolved: true},
 		{name: "an id past 64 characters", body: `{` + cer + `,"patient":{"reference":"Patient/` + strings.Repeat("a", 65) + `"}}`, member: strings.Repeat("a", 65)},
 
 		{name: "patient repeated", body: `{` + cer + `,` + patient + `,"patient":{"reference":"Patient/B"}}`, refusal: repeats + `the JSON member "patient" in the top-level object` + twoWays},

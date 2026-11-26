@@ -134,6 +134,11 @@ type DiscoveryLegSide struct {
 // the Hub records a leg under every patient it names.
 const HubAcceptsInvolved = "involved"
 
+// HubAcceptsInvolvedSummary is the Discovery.HubAccepts entry for
+// Metadata.InvolvedSummary: the Hub reads a gateway's signed summary of its
+// involved list and records whether the gateway stated the list complete.
+const HubAcceptsInvolvedSummary = "involved-summary"
+
 // HubAcceptsField reports whether the Hub lists field in HubAccepts.
 func (d Discovery) HubAcceptsField(field string) bool {
 	for _, f := range d.HubAccepts {

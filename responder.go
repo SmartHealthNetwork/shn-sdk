@@ -79,6 +79,43 @@ type PASInquiry struct {
 	// claim-level numbers (PAS 2.2); item-level numbers are on Items.
 	AuthorizationNumber           string
 	AdministrationReferenceNumber string
+	// UnreadablePatientReferences are the inquiry's references that carry a
+	// "Patient" segment but name no Patient by FHIR's reference grammar
+	// ("urn:Patient/<id>", "#Patient/<id>", one behind white space, "Patient/"
+	// inside another reference), as written, each once, in byte order. The
+	// patient each names is unknown: the Responder does not refuse the inquiry
+	// for them, as a payer's Smart Gateway below strict carries it, and leaves
+	// what they mean to the Adjudicator. Empty when there are none.
+	UnreadablePatientReferences []string
+}
+
+// PASSubmissionAdjudicator is an optional Adjudicator extension. A Responder
+// whose Adjudicator implements it adjudicates each PAS submission and
+// ClaimUpdate with PriorAuthSubmission, in place of PriorAuth, and answers
+// with its decision exactly as it answers PriorAuth's.
+//
+// Implement it to see a request's UnreadablePatientReferences: references to
+// a patient the Responder cannot know, which it does not refuse. An
+// Adjudicator without it is called with PriorAuth as before and carries such
+// a request as a payer's Smart Gateway does at none, without seeing that its
+// patient references could not all be read.
+type PASSubmissionAdjudicator interface {
+	PriorAuthSubmission(submission PASSubmission) (PASDecision, error)
+}
+
+// PASSubmission is a PAS submission or ClaimUpdate the Responder received.
+type PASSubmission struct {
+	// QuestionnaireResponse and HasDiagnosticReport are what PriorAuth
+	// receives: the request's QuestionnaireResponse, and whether it carried
+	// supplemental evidence.
+	QuestionnaireResponse []byte
+	HasDiagnosticReport   bool
+	// Patient is the operative Claim's patient reference, as written.
+	Patient string
+	// UnreadablePatientReferences are the request's references that carry a
+	// "Patient" segment but name no Patient by FHIR's reference grammar, as
+	// PASInquiry's are. Empty when there are none.
+	UnreadablePatientReferences []string
 }
 
 // CoverageAssertion is one coverage assertion the Responder sent: its id (the
@@ -265,6 +302,19 @@ type handlerResult struct {
 	participantBody bool
 	commit          func()
 	rollback        func()
+	// systemAnswered marks a result given after the Adjudicator answered
+	// (answeredBySystem).
+	systemAnswered bool
+}
+
+// answeredBySystem marks res as given after the Adjudicator answered: the
+// Responder's system, which may have acted on the request. Its handlers defer it
+// at the call, so every result they return from there on is marked, and none
+// returned before (the Responder's own refusals of the request). A refusal to
+// send that answer is then attested delivered (respondAnswerRefused), as a
+// Smart Gateway attests one once its system has answered.
+func answeredBySystem(res *handlerResult) {
+	res.systemAnswered = true
 }
 
 // adjudicatorError answers an Adjudicator error: an *AppAnswerError with a
@@ -314,10 +364,40 @@ func refusalBody(leg string, status int, msg string) ([]byte, string) {
 
 // respondErr writes a JSON {"error": msg} body with the given HTTP status code.
 func respondErr(w http.ResponseWriter, status int, msg string) {
+	respondJSON(w, status, map[string]string{"error": msg})
+}
+
+// respondJSON writes v as a JSON answer with status.
+func respondJSON(w http.ResponseWriter, status int, v map[string]string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	// Ignore the write error — nothing useful to do on a broken connection.
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// deliveredHeader is the header on which a recipient states, refusing to send
+// its system's answer, that its system answered (it may have acted): the Hub
+// relays it to the requester as a refusal of a delivered request.
+const deliveredHeader = "X-SHN-Delivered"
+
+// msgRecipientKeyNotUsable is the refusal of an answer to a requester whose
+// registered encryption key cannot be sealed to: one of small order, or none
+// (ErrLowOrderKey). It names no cause; the Smart Gateway answers the same.
+const msgRecipientKeyNotUsable = "the recipient's registered encryption key is not usable"
+
+// refusalRuleAuthentication is the network primitive a refusal of an
+// unusable encryption key is made on.
+const refusalRuleAuthentication = "authentication"
+
+// respondAnswerRefused refuses to send an answer: 502 {"error": msg, "rule":
+// rule}, the body a Smart Gateway answers the Hub with, byte for byte. When
+// systemAnswered, the refusal is attested delivered (deliveredHeader yes);
+// otherwise it carries no attestation.
+func respondAnswerRefused(w http.ResponseWriter, rule, msg string, systemAnswered bool) {
+	if systemAnswered {
+		w.Header().Set(deliveredHeader, "yes")
+	}
+	respondJSON(w, http.StatusBadGateway, map[string]string{"error": msg, "rule": rule})
 }
 
 // sha256Hex returns hex(sha256(b)). Used to compute the per-leg payload hash
@@ -604,6 +684,17 @@ func (r *Responder) handleInbound(w http.ResponseWriter, req *http.Request) {
 		CorrelationID:   corr,
 	}
 	respEnv, err := Seal(respMeta, sealPayload, senderEncPub)
+	if errors.Is(err, ErrLowOrderKey) {
+		// The requester's registered key cannot be sealed to: the answer is
+		// refused on authentication before its token is asked for, as a Smart
+		// Gateway refuses it, attested delivered once the Adjudicator has
+		// answered (it may have acted) and otherwise not.
+		if res.rollback != nil {
+			res.rollback()
+		}
+		respondAnswerRefused(w, refusalRuleAuthentication, msgRecipientKeyNotUsable, res.systemAnswered)
+		return
+	}
 	if err != nil {
 		if res.rollback != nil {
 			res.rollback()
@@ -710,7 +801,7 @@ const eligibilityBatchNotAnswered = "this payer answers coverage eligibility fro
 // parity-pinned byte-for-byte against the platform's builder (the platform's
 // SDK parity suite), so a conformant resource is what this code produces — it is
 // just not re-validated per request here.
-func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Time) handlerResult {
+func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Time) (out handlerResult) {
 	// The input is read one way only, in any of the operation's forms, as a
 	// payer's Smart Gateway reads it: an input that can be read two ways, or a
 	// batch too large to record, is refused with that gateway's text.
@@ -741,6 +832,9 @@ func (r *Responder) handleEligibility(plaintext []byte, corr string, now time.Ti
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "the request names no insurer"}
 	}
 	covered, reason := r.cfg.Adjudicator.Eligibility(member)
+	// The Adjudicator has answered: every return from here on is its answer, or
+	// this Responder refusing it (answeredBySystem).
+	defer answeredBySystem(&out)
 	crrJSON, err := BuildEligibilityAnswer(corr, "Patient/"+member, covered, reason, insurer, now)
 	if err != nil {
 		return handlerResult{appStatus: http.StatusInternalServerError, errMsg: "build response failed"}
@@ -782,8 +876,11 @@ func (r *Responder) handleDTR(plaintext []byte, claimedContract, operation strin
 }
 
 // questionnairePackage answers a package request for one canonical.
-func (r *Responder) questionnairePackage(canonical string) handlerResult {
+func (r *Responder) questionnairePackage(canonical string) (out handlerResult) {
 	questionnaireJSON, ok := r.cfg.Adjudicator.Questionnaire(canonical)
+	// The Adjudicator has answered: every return from here on is its answer, or
+	// this Responder refusing it (answeredBySystem).
+	defer answeredBySystem(&out)
 	if !ok {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "unknown questionnaire canonical"}
 	}

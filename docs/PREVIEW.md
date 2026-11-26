@@ -529,6 +529,11 @@ by the four-method `Adjudicator` interface above, and `pas-claim-inquire`, which
 Responder answers only when your adjudicator also implements `shnsdk.InquiryAdjudicator`
 (`Inquire(PASInquiry) (PASDecision, error)`); without it an inquiry is refused with
 `501`. The Responder does not serve the CRD order-dispatch leg (`crd-order-dispatch`).
+From shn-sdk v1.17.0, the Responder decides `pas-claim` and `pas-claim-update` with
+`PriorAuthSubmission(PASSubmission)` when your adjudicator also implements
+`shnsdk.PASSubmissionAdjudicator`, in place of `PriorAuth`. `PASSubmission` carries the request's
+`UnreadablePatientReferences`, as `PASInquiry` does: references to a patient the Responder
+cannot read, which it does not refuse for their text.
 
 The Responder keeps its pended-claim ledger to itself: in memory, per process, keyed by
 the patient subject and the correlation id of the original submit, with no hook for a

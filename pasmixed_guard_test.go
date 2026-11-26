@@ -62,6 +62,28 @@ func TestPASCarriesAnotherPatientGuard(t *testing.T) {
 			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","extension":[{"url":"http://example.org/amount","valueDecimal":1e400}],"patient":{"reference":"Patient/MBR-COVERED"}}}`), false},
 		{"a decimal outside float64's range beside another member",
 			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","extension":[{"url":"http://example.org/amount","valueDecimal":1e400}],"patient":{"reference":"Patient/MBR-NOTCOVERED"}}}`), true},
+		// A reference that carries a "Patient" segment but names no Patient by
+		// FHIR's reference grammar is compared as written: another patient.
+		{"a malformed Patient reference elsewhere, with a trailing slash",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"Patient/MBR-COVERED/"}}}`), true},
+		{"a Patient reference inside another type's",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"Basic/1/Patient/MBR-COVERED"}}}`), true},
+		{"a URN that reads as a Patient reference",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"urn:Patient/MBR-COVERED"}}}`), true},
+		{"a contained reference that reads as a Patient reference",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"#Patient/MBR-COVERED"}}}`), true},
+		{"a Patient reference behind white space",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":" Patient/MBR-COVERED"}}}`), true},
+		{"a Patient reference whose separator is escaped",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"https://ehr.example/fhir/Patient%2FMBR-COVERED"}}}`), true},
+		{"a contained Patient whose id is Patient, the member",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","contained":[{"resourceType":"Patient","id":"Patient","identifier":[{"system":"urn:shn:member","value":"MBR-COVERED"}]}],"patient":{"reference":"#Patient"}}}`), false},
+		{"another type's reference whose id is Patient",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"Practitioner/Patient"}}}`), false},
+		{"another type's reference under a base with a Patient segment",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"https://h.example/Patient/fhir/Group/1"}}}`), false},
+		{"another type's reference with no Patient segment, about the member only",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"Group/1"}}}`), false},
 		{"a bundle it cannot read", `{"resourceType":"Bundle","entry":[`, true},
 		// A dependent's parent carried as a Patient entry of its own is the
 		// Coverage's party (CoverageEntryParties) when only the subscriber or

@@ -306,6 +306,17 @@ const (
 // as a validator.
 const FrameHeaderIfMatch = "If-Match"
 
+// FrameHeaderPrefer is a request-frame header, framed only on a
+// subscription's subscribe leg: the return preference the subscriber's system
+// sent in its Prefer field (RFC 7240), "return=minimal",
+// "return=representation" or "return=OperationOutcome" as FHIR defines them,
+// or any other return value, carried exactly as sent. Only the first return
+// preference is framed, as RFC 7240 reads a preference given more than once;
+// no other preference crosses the network. The network adds none. Like
+// If-Match, it is spelled as the HTTP field it carries, and a frame carries
+// the value, it does not judge it.
+const FrameHeaderPrefer = "Prefer"
+
 // ErrFramedDTRUnsupported: the payer has not declared RequestFrameV1Op, so a
 // framed DTR operation is not sent to it.
 var ErrFramedDTRUnsupported = errors.New("payer gateway does not support framed DTR operations (upgrade required)")
@@ -358,7 +369,8 @@ const (
 // cdsService with a CDS Hooks request naming the recipient's own service, and
 // a topic Subscription's headers (subscriptionEndpoint, subscriptionChannel,
 // statedBase, subscriptionRequest, subscriptionLocation) and If-Match with
-// notifications across the network.
+// notifications across the network, and Prefer with a subscribe leg's return
+// preference.
 var allowedFrameHeaders = map[string]bool{
 	"Content-Type": true, FrameHeaderContractVersion: true, FrameHeaderOperation: true,
 	FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true,
@@ -366,6 +378,7 @@ var allowedFrameHeaders = map[string]bool{
 	FrameHeaderReadPath: true, FrameHeaderTaskLocation: true, FrameHeaderCDSService: true,
 	FrameHeaderSubscriptionEndpoint: true, FrameHeaderSubscriptionChannel: true, FrameHeaderStatedBase: true,
 	FrameHeaderSubscriptionRequest: true, FrameHeaderSubscriptionLocation: true, FrameHeaderIfMatch: true,
+	FrameHeaderPrefer: true,
 }
 
 // frameHeaderNames maps each allowlisted header's name, folded to ASCII lower
@@ -404,13 +417,14 @@ func asciiLower(s string) string {
 // path a gateway sends on as it reads it, cdsService, a service id the
 // recipient's system declared, a topic Subscription's headers, sealed
 // values, a base, an interaction and a location read byte for byte, and
-// If-Match, carried as sent. Content-Type keeps the encoder's older rule.
+// If-Match and Prefer, carried as sent. Content-Type keeps the encoder's older rule.
 var exactFrameHeaders = map[string]bool{
 	FrameHeaderETag: true, FrameHeaderLastModified: true, FrameHeaderRetryAfter: true,
 	FrameHeaderOperationSubpath: true, FrameHeaderOperationBase: true, FrameHeaderOperationAddressTags: true,
 	FrameHeaderReadPath: true, FrameHeaderTaskLocation: true, FrameHeaderCDSService: true,
 	FrameHeaderSubscriptionEndpoint: true, FrameHeaderSubscriptionChannel: true, FrameHeaderStatedBase: true,
 	FrameHeaderSubscriptionRequest: true, FrameHeaderSubscriptionLocation: true, FrameHeaderIfMatch: true,
+	FrameHeaderPrefer: true,
 }
 
 // ErrFrameHeaderTooLarge is a header segment over the limit DecodeHTTPFrame

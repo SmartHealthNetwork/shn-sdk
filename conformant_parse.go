@@ -2,6 +2,7 @@ package shnsdk
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 )
 
@@ -170,43 +171,90 @@ func parseConformantClaimSubmit(body []byte) (conformantClaimSubmit, bool) {
 // NOTE): the gateway additionally resolves Claim.patient against its patient registry and rejects
 // when the derived PCI != token subject. The SDK Responder has no registry; that defense-in-depth
 // layer is structurally unavailable here. ALL bundle-internal consistency checks ARE enforced.
-func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg string) {
+//
+// A reference that carries a "Patient" segment but names no Patient by FHIR's reference grammar
+// (pasUnreadablePatientRef: "urn:Patient/<id>", "#Patient/<id>", one behind white space) names a
+// patient this cannot know. It is not refused, as a payer's Smart Gateway below strict carries it:
+// unreadable lists each such reference, as written, each once, in byte order, for the
+// Adjudicator (PASSubmission.UnreadablePatientReferences). One that names another patient by
+// structure (a well-formed "Patient/<other>", a subject of another type) is still refused 403,
+// which the gateway refuses only at strict: a known divergence of this Responder from the gateway.
+func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg string, unreadable []string) {
 	if !cs.haveOrder {
-		return 400, "PAS bundle missing order (ServiceRequest or DeviceRequest)"
+		return 400, "PAS bundle missing order (ServiceRequest or DeviceRequest)", nil
 	}
 	// No Coverage at all, and a Coverage without a beneficiary, are told
 	// apart, so a sender is not sent looking for a beneficiary on a Coverage it
 	// never sent.
 	if !cs.haveCoverage {
-		return 400, "PAS bundle carries no Coverage"
+		return 400, "PAS bundle carries no Coverage", nil
 	}
 	if cs.covBeneficiary == "" {
-		return 400, "PAS bundle missing Coverage.beneficiary"
+		return 400, "PAS bundle missing Coverage.beneficiary", nil
+	}
+	// A Claim.patient that names no Patient by FHIR's reference grammar, or
+	// names it by an id that names no one, names no patient: refused before
+	// any consistency check, with the text and in the order a payer's Smart
+	// Gateway refuses it at strict.
+	if member, _ := pasClaimSubject(cs.bundle, cs.claimPatient); memberNamesNoOne(member) {
+		return 400, msgRequestNamesNoOne, nil
 	}
 	member := pasMemberFromRef(cs.claimPatient)
-	if pasMemberFromRef(cs.srSubject) != member {
-		return 403, "inconsistent patient in PAS bundle"
+	seen := map[string]bool{}
+	// same reports whether a subject is the member's, or one this cannot read,
+	// which it records.
+	same := func(ref string) bool {
+		if pasUnreadablePatientRef(ref) {
+			seen[ref] = true
+			return true
+		}
+		return pasMemberFromRef(ref) == member
 	}
-	if pasMemberFromRef(cs.covBeneficiary) != member {
-		return 403, "inconsistent patient in PAS bundle"
+	if !same(cs.srSubject) {
+		return 403, "inconsistent patient in PAS bundle", nil
+	}
+	if !same(cs.covBeneficiary) {
+		return 403, "inconsistent patient in PAS bundle", nil
 	}
 	if cs.qrJSON != nil {
 		if cs.qrSubject == "" {
-			return 403, "PAS bundle QuestionnaireResponse missing subject"
+			return 403, "PAS bundle QuestionnaireResponse missing subject", nil
 		}
-		if pasMemberFromRef(cs.qrSubject) != member {
-			return 403, "inconsistent patient in PAS bundle"
+		if !same(cs.qrSubject) {
+			return 403, "inconsistent patient in PAS bundle", nil
 		}
 	}
-	if cs.hasDR && pasMemberFromRef(cs.drSubject) != member {
-		return 403, "inconsistent patient in PAS bundle"
+	if cs.hasDR && !same(cs.drSubject) {
+		return 403, "inconsistent patient in PAS bundle", nil
 	}
 	// Nothing else it carries, contained or nested, is or names another
-	// patient, read as the gateway reads it (pasCarriesAnotherPatient).
-	if pasCarriesAnotherPatient(cs.bundle, member) {
-		return 403, "inconsistent patient in PAS bundle"
+	// patient, read as the gateway reads it (pasOtherPatients).
+	another, others := pasOtherPatients(cs.bundle, member)
+	if another {
+		return 403, "inconsistent patient in PAS bundle", nil
 	}
-	return 0, ""
+	return 0, "", mergeUnreadable(seen, others)
+}
+
+// pasUnreadablePatientRef reports a reference that carries a "Patient" segment but names no
+// Patient by FHIR's reference grammar (patientLike, readPatientReference): a reference to a
+// patient this cannot know, never read as the member nor as another patient by its text.
+func pasUnreadablePatientRef(ref string) bool {
+	_, _, ok := readPatientReference(ref)
+	return !ok && patientLike(ref)
+}
+
+// mergeUnreadable is the unreadable references of seen and others, each once, in byte order.
+func mergeUnreadable(seen map[string]bool, others []string) []string {
+	for _, ref := range others {
+		seen[ref] = true
+	}
+	var out []string
+	for ref := range seen {
+		out = append(out, ref)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // pasMemberFromRef reads the bare member id out of a patient reference in EITHER spelling a
@@ -230,17 +278,34 @@ func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg strin
 // Identical to the Smart Gateway's own pasMemberFromRef (its native PAS bind), which
 // already resolved this for the native lane. The two fences are twins on purpose and must decide
 // the same bundle the same way.
-// A versioned reference names the same patient: Patient/<id>/_history/<version>
-// reads as <id>. Only a trailing version is dropped: a base whose path contains
-// /_history/ is part of the reference.
+// A Patient reference is read by FHIR's reference grammar (readPatientReference), versioned or
+// not; any other reference, "Patient/" found inside another one included
+// ("Basic/1/_history/Patient/2", "#Patient/2"), is returned verbatim.
 func pasMemberFromRef(ref string) string {
-	if i := strings.LastIndex(ref, "/_history/"); i >= 0 && !strings.Contains(ref[i+len("/_history/"):], "/") {
-		ref = ref[:i]
-	}
-	if i := strings.LastIndex(ref, "Patient/"); i >= 0 {
-		return ref[i+len("Patient/"):]
+	if id, _, ok := readPatientReference(ref); ok {
+		return id
 	}
 	return ref
+}
+
+// pasClaimSubject is the member a PAS submit or update names by its Claim.patient
+// ref, as a payer's Smart Gateway reads it, and whether the id it is read from is
+// a FHIR id. A Patient reference (readPatientReference) names its id. A "#<id>"
+// naming the one Patient the Claim contains, or a URN naming the one Patient
+// entry with that fullUrl (claimPatientTarget), names the reference itself. Any
+// other reference names no Patient: the member is "", which names no one.
+func pasClaimSubject(bundle []byte, ref string) (member string, conforms bool) {
+	if id, conforms, ok := readPatientReference(ref); ok {
+		return id, conforms
+	}
+	var doc map[string]any
+	if json.Unmarshal(bundle, &doc) != nil {
+		return "", false
+	}
+	if p, _ := claimPatientTarget(doc, firstClaim(doc), ref); p != nil {
+		return ref, true
+	}
+	return "", false
 }
 
 // conformantBundleMember returns the bare member id bound by a conformantClaimSubmit, in either

@@ -23,7 +23,7 @@ func TestConformantClaimSubjectTellsNoCoverageFromNoBeneficiary(t *testing.T) {
 		{"no Coverage", noCoverage, 400, "PAS bundle carries no Coverage"},
 		{"a Coverage without a beneficiary", noBeneficiary, 400, "PAS bundle missing Coverage.beneficiary"},
 	} {
-		if status, msg := bindConformantClaimSubject(c.cs); status != c.status || msg != c.msg {
+		if status, msg, _ := bindConformantClaimSubject(c.cs); status != c.status || msg != c.msg {
 			t.Errorf("%s: %d %q, want %d %q", c.name, status, msg, c.status, c.msg)
 		}
 	}

@@ -33,14 +33,16 @@ import (
 // claimedContract is the inbound request-frame claim (handleInbound step 7, "" when the
 // request arrived bare or unclaimed) — currently unread; see handleInbound's RECEIVER
 // OBLIGATION comment for why.
-func (r *Responder) handleCRD(plaintext []byte, now time.Time, claimedContract string) handlerResult {
+func (r *Responder) handleCRD(plaintext []byte, now time.Time, claimedContract string) (out handlerResult) {
 	srJSON, ok := parseConformantOrderSelectSR(plaintext)
 	if !ok {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse order-select failed"}
 	}
 
 	// Three-way member consistency — SR subject, Coverage beneficiary, context.patientId all
-	// reference the same patient (bare member, "Patient/" stripped). Mirrors conformantCRDBind.
+	// reference the same patient. Mirrors conformantCRDBind: a Patient reference is read by
+	// FHIR's reference grammar (any base, versioned or not), and context.patientId as a
+	// Patient's id (crdContextPatientID).
 	srSubjectRef, err := ParseServiceRequestSubject(srJSON)
 	if err != nil {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse order-select failed"}
@@ -53,10 +55,72 @@ func (r *Responder) handleCRD(plaintext []byte, now time.Time, claimedContract s
 	if err != nil {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse order-select failed"}
 	}
-	srMember := strings.TrimPrefix(srSubjectRef, "Patient/")
-	covMember := strings.TrimPrefix(covBeneRef, "Patient/")
-	if srMember != covMember || srMember != strings.TrimPrefix(ctxMember, "Patient/") {
+	member, noPatient := crdContextPatientID(ctxMember)
+	if noPatient {
+		return handlerResult{appStatus: http.StatusBadRequest, errMsg: msgRequestNamesNoOne}
+	}
+	var hook struct {
+		FHIRServer string `json:"fhirServer"`
+	}
+	_ = json.Unmarshal(plaintext, &hook)
+	base := strings.TrimRight(hook.FHIRServer, "/")
+	// same reports whether a reference names the request's patient, as a payer's Smart Gateway
+	// reads it. An absolute reference names the EHR's patient only on the EHR's own server
+	// (fhirServer); on any other it names a resource there. A relative Patient reference is read
+	// by FHIR's reference grammar, versioned or not. One that only looks like a reference to a
+	// patient ("urn:Patient/<id>") names a patient this cannot know: it is not refused, as the
+	// gateway below strict carries it. OrderSelect decides by the procedure code alone, never by
+	// the patient, so there is nothing to hand it.
+	same := func(resource []byte, ref string) bool {
+		// A blank one ("Patient/", "Patient/ ", relative or on the EHR's own server) is the
+		// blank member, which names no one.
+		blank := ref
+		if rest, ok := strings.CutPrefix(ref, base+"/"); ok && strings.Contains(base, "://") {
+			blank = rest
+		}
+		if rest, ok := strings.CutPrefix(blank, "Patient/"); ok && memberNamesNoOne(rest) {
+			return rest == member
+		}
+		// A request whose context.patientId names no one names its patient by nothing this
+		// can read: an unreadable subject is not the request's patient then.
+		if pasUnreadablePatientRef(ref) {
+			return !memberNamesNoOne(member)
+		}
+		// A "#<id>" naming the one contained Patient of the resource names its member identifier.
+		if strings.HasPrefix(ref, "#") {
+			var r struct {
+				Contained []any `json:"contained"`
+			}
+			if json.Unmarshal(resource, &r) == nil {
+				if m, ok := patientRefMember(ref, containedObjects(r.Contained)); ok {
+					return m == member
+				}
+			}
+			return false
+		}
+		relative := ref
+		if strings.Contains(ref, "://") {
+			rest, ok := strings.CutPrefix(ref, base+"/")
+			if base == "" || !strings.Contains(base, "://") || !ok {
+				return false
+			}
+			relative = rest
+		}
+		if id, _, ok := readPatientReference(relative); ok && strings.HasPrefix(relative, "Patient/") {
+			return id == member
+		}
+		return relative == member
+	}
+	if !same(srJSON, srSubjectRef) || !same(covJSON, covBeneRef) {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "inconsistent patient in order-select"}
+	}
+	// A request that names its patient nowhere (context.patientId blank, and its subjects blank
+	// too) is refused as a payer's Smart Gateway refuses it at every level.
+	if memberNamesNoOne(member) {
+		if ctxMember == "" {
+			return handlerResult{appStatus: http.StatusBadRequest, errMsg: "missing context.patientId"}
+		}
+		return handlerResult{appStatus: http.StatusBadRequest, errMsg: msgRequestNamesNoOne}
 	}
 
 	// Procedure coding is system-agnostic here (CPT or HCPCS): ParseServiceRequestProductCoding
@@ -79,6 +143,9 @@ func (r *Responder) handleCRD(plaintext []byte, now time.Time, claimedContract s
 	}
 
 	paRequired, canonical := r.cfg.Adjudicator.OrderSelect(code)
+	// The Adjudicator has answered: every return from here on is its answer, or
+	// this Responder refusing it (answeredBySystem).
+	defer answeredBySystem(&out)
 	assertion := CoverageAssertion{
 		ID:            r.newAssertionID(),
 		Order:         "ServiceRequest/" + orderID,
@@ -148,6 +215,58 @@ func coverageReferences(covJSON []byte) ([]string, bool) {
 	return refs, len(refs) > 0
 }
 
+// crdContextPatientID reads a CDS Hooks context.patientId, which is a Patient's id, not a
+// reference, as a payer's Smart Gateway reads it: the one relative "Patient/<id>", with no
+// version, is read as its id; a value that holds no "/" is the id as written; any other value
+// names no Patient by its structure ("Patient/1/x", "Patient/1/_history/2", "Group/1"), so the
+// request names no one. A blank one is the blank member.
+func crdContextPatientID(patientID string) (member string, noPatient bool) {
+	rest, relative := strings.CutPrefix(patientID, "Patient/")
+	if memberNamesNoOne(rest) {
+		return rest, false
+	}
+	if id, _, ok := readPatientReference(patientID); ok && relative && strings.Count(patientID, "/") == 1 {
+		return id, false
+	}
+	if relative || strings.Contains(patientID, "/") {
+		return "", true
+	}
+	return patientID, false
+}
+
+// answerGraphRefusal is the refusal of a PAS request whose graph this Responder's answer
+// cannot restate. Every answer carries the request's resources as sent, and is assembled only
+// when every reference among them resolves in the request and every subject is the Claim's
+// patient (buildPASOperationResponse): a request carrying a reference that resolves to nothing,
+// such as one that only looks like a reference to a patient ("urn:Patient/<id>"), cannot be
+// answered. It is checked before the Adjudicator is asked, so the Adjudicator never decides a
+// request this Responder cannot answer, and the request is refused 400 on its structure.
+func answerGraphRefusal(request []byte, now time.Time) (handlerResult, bool) {
+	// What the answer restates first, with its own refusal (answerRequest).
+	if _, refused, ok := answerRequest(request); !ok {
+		return refused, true
+	}
+	if _, err := buildPASOperationResponse(request, []byte(`{"resourceType":"ClaimResponse","id":"graph-check"}`), now); err != nil {
+		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "incomplete PAS request graph"}, true
+	}
+	return handlerResult{}, false
+}
+
+// priorAuth adjudicates a PAS submission or ClaimUpdate: with PriorAuthSubmission
+// when the Adjudicator implements PASSubmissionAdjudicator, so it sees the request's
+// unreadable patient references, else with PriorAuth.
+func (r *Responder) priorAuth(cs conformantClaimSubmit, unreadable []string) (PASDecision, error) {
+	if s, ok := r.cfg.Adjudicator.(PASSubmissionAdjudicator); ok {
+		return s.PriorAuthSubmission(PASSubmission{
+			QuestionnaireResponse:       cs.qrJSON,
+			HasDiagnosticReport:         cs.hasDR,
+			Patient:                     cs.claimPatient,
+			UnreadablePatientReferences: unreadable,
+		})
+	}
+	return r.cfg.Adjudicator.PriorAuth(cs.qrJSON, cs.hasDR)
+}
+
 // handlePASSubmit implements the conformant pas-claim handler (FR-21). It parses the conformant
 // Claim Bundle, adjudicates from the QR + DR-presence, and builds the approve/pend/deny response.
 // On pend the ledger record is deferred to commit (runs only after seal+authorize succeed),
@@ -156,16 +275,23 @@ func coverageReferences(covJSON []byte) ([]string, bool) {
 // claimedContract is the inbound request-frame claim (handleInbound step 7, "" when the
 // request arrived bare or unclaimed) — currently unread; see handleInbound's RECEIVER
 // OBLIGATION comment for why.
-func (r *Responder) handlePASSubmit(plaintext []byte, tok Token, corr string, now time.Time, claimedContract string) handlerResult {
+func (r *Responder) handlePASSubmit(plaintext []byte, tok Token, corr string, now time.Time, claimedContract string) (out handlerResult) {
 	cs, ok := parseConformantClaimSubmit(plaintext)
 	if !ok {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse bundle failed"}
 	}
-	if status, msg := bindConformantClaimSubject(cs); status != 0 {
+	status, msg, unreadable := bindConformantClaimSubject(cs)
+	if status != 0 {
 		return handlerResult{appStatus: status, errMsg: msg}
 	}
 
-	dec, err := r.cfg.Adjudicator.PriorAuth(cs.qrJSON, cs.hasDR)
+	if refusal, refused := answerGraphRefusal(plaintext, now); refused {
+		return refusal
+	}
+	dec, err := r.priorAuth(cs, unreadable)
+	// The Adjudicator has answered: every return from here on is its answer, or
+	// this Responder refusing it (answeredBySystem).
+	defer answeredBySystem(&out)
 	if err != nil {
 		return adjudicatorError(err)
 	}
@@ -334,14 +460,15 @@ func firstClaimFullURL(bundle []byte) (string, bool) {
 // claimedContract is the inbound request-frame claim (handleInbound step 7, "" when the
 // request arrived bare or unclaimed) — currently unread; see handleInbound's RECEIVER
 // OBLIGATION comment for why.
-func (r *Responder) handlePASUpdate(plaintext []byte, tok Token, corr string, now time.Time, claimedContract string) handlerResult {
+func (r *Responder) handlePASUpdate(plaintext []byte, tok Token, corr string, now time.Time, claimedContract string) (out handlerResult) {
 	cs, ok := parseConformantClaimSubmit(plaintext)
 	if !ok {
 		return handlerResult{appStatus: http.StatusBadRequest, errMsg: "parse bundle failed"}
 	}
 	// Bind subject across the WHOLE bundle BEFORE the pend lock (mirrors the gateway: a
 	// wrong-subject bundle is rejected 403 before the atomic ledger is touched).
-	if status, msg := bindConformantClaimSubject(cs); status != 0 {
+	status, msg, unreadable := bindConformantClaimSubject(cs)
+	if status != 0 {
 		return handlerResult{appStatus: status, errMsg: msg}
 	}
 	facts, ok := parseConformantUpdateFacts(plaintext)
@@ -413,7 +540,13 @@ func (r *Responder) handlePASUpdate(plaintext []byte, tok Token, corr string, no
 		return fail(http.StatusForbidden, "ClaimUpdate Provenance does not target the supplemental data")
 	}
 
-	dec, err := r.cfg.Adjudicator.PriorAuth(cs.qrJSON, cs.hasDR)
+	if refusal, refused := answerGraphRefusal(plaintext, now); refused {
+		return fail(refusal.appStatus, refusal.errMsg)
+	}
+	dec, err := r.priorAuth(cs, unreadable)
+	// The Adjudicator has answered: every return from here on is its answer, or
+	// this Responder refusing it (answeredBySystem).
+	defer answeredBySystem(&out)
 	if err != nil {
 		r.ledger.release(tok.Subject, facts.relatedClaim)
 		return adjudicatorError(err)
@@ -471,7 +604,7 @@ func decisionNotesMisplaced(dec PASDecision) string {
 // collection Bundle whose first Claim (use preauthorization) names a Patient
 // entry of the same Bundle; a Coverage entry, when present, must be for that
 // Patient. The Adjudicator's Inquire decision is answered like a submit's.
-func (r *Responder) handlePASInquire(plaintext []byte, corr string, now time.Time) handlerResult {
+func (r *Responder) handlePASInquire(plaintext []byte, corr string, now time.Time) (out handlerResult) {
 	inq, status, msg := parsePASInquiry(plaintext)
 	if status != 0 {
 		return handlerResult{appStatus: status, errMsg: msg}
@@ -480,7 +613,13 @@ func (r *Responder) handlePASInquire(plaintext []byte, corr string, now time.Tim
 	if !ok {
 		return handlerResult{appStatus: http.StatusNotImplemented, errMsg: "prior-authorization inquiries are not served by this payer"}
 	}
+	if refusal, refused := answerGraphRefusal(plaintext, now); refused {
+		return refusal
+	}
 	dec, err := inquirer.Inquire(inq)
+	// The Adjudicator has answered: every return from here on is its answer, or
+	// this Responder refusing it (answeredBySystem).
+	defer answeredBySystem(&out)
 	if err != nil {
 		return adjudicatorError(err)
 	}
@@ -559,32 +698,28 @@ func parsePASInquiry(body []byte) (PASInquiry, int, string) {
 		return bad("inquiry Claim is not a preauthorization")
 	}
 	inq.Patient, inq.ClaimIdentifiers = cl.Patient.Reference, cl.Identifier
-	// Claim.patient is read as a payer's Smart Gateway reads it, and refused
-	// with its answers, before the Adjudicator is asked: no reference; a
-	// reference naming no Patient id (no "Patient/", or nothing after the
-	// last one); a Patient id that is only whitespace, which names no member.
+	// Claim.patient is read as a payer's Smart Gateway reads it, by FHIR's
+	// reference grammar (inquiryClaimPatient), and refused with its answers,
+	// before the Adjudicator is asked: no reference; a reference that names no
+	// Patient, or names one by an id that is only whitespace, names no member.
 	if cl.Patient.Reference == "" {
 		return bad("PAS inquiry Claim missing patient")
 	}
-	member := ""
-	if strings.Contains(cl.Patient.Reference, "Patient/") {
-		member = pasMemberFromRef(cl.Patient.Reference)
-	}
-	if member == "" {
-		return bad("PAS inquiry Bundle missing Claim.patient")
-	}
+	var doc map[string]any
+	_ = json.Unmarshal(body, &doc)
+	member, containedPatient := inquiryClaimPatient(doc, cl.Patient.Reference)
 	if memberNamesNoOne(member) {
-		return bad(msgInquiryNamesNoOne)
+		return bad(msgRequestNamesNoOne)
 	}
-	patientKeyRef := patientKey(cl.Patient.Reference)
-	if patientKeyRef == "" {
-		return PASInquiry{}, http.StatusForbidden, "inquiry Claim patient is not a Patient reference"
-	}
+	patientKeyRef := "Patient/" + member
 	var patient json.RawMessage
+	if containedPatient != nil {
+		patient, _ = json.Marshal(containedPatient)
+	}
 	for url, res := range byURL {
 		var h head
 		_ = json.Unmarshal(res, &h)
-		if h.ResourceType == "Patient" && (url == cl.Patient.Reference || patientKey(url) == patientKeyRef) {
+		if h.ResourceType == "Patient" && (url == cl.Patient.Reference || inquiryReferenceKey(doc, url) == patientKeyRef) {
 			patient = res
 		}
 	}
@@ -603,6 +738,7 @@ func parsePASInquiry(body []byte) (PASInquiry, int, string) {
 			inq.MemberIdentifiers = append(inq.MemberIdentifiers, id)
 		}
 	}
+	seen := map[string]bool{}
 	for _, res := range byURL {
 		var cov struct {
 			ResourceType string `json:"resourceType"`
@@ -610,15 +746,25 @@ func parsePASInquiry(body []byte) (PASInquiry, int, string) {
 				Reference string `json:"reference"`
 			} `json:"beneficiary"`
 		}
-		if json.Unmarshal(res, &cov) == nil && cov.ResourceType == "Coverage" && patientKey(cov.Beneficiary.Reference) != patientKeyRef {
-			return PASInquiry{}, http.StatusForbidden, "inquiry Coverage is for another patient"
+		if json.Unmarshal(res, &cov) != nil || cov.ResourceType != "Coverage" || inquiryReferenceKey(doc, cov.Beneficiary.Reference) == patientKeyRef {
+			continue
 		}
+		// A beneficiary this cannot read names a patient it cannot know:
+		// recorded for the Adjudicator, not refused. One that names another
+		// patient by structure is, as bindConformantClaimSubject refuses one.
+		if pasUnreadablePatientRef(cov.Beneficiary.Reference) {
+			seen[cov.Beneficiary.Reference] = true
+			continue
+		}
+		return PASInquiry{}, http.StatusForbidden, "inquiry Coverage is for another patient"
 	}
 	// And no resource it carries, contained or nested, is or names another
-	// patient (pasCarriesAnotherPatient), as the gateway reads the inquiry.
-	if pasCarriesAnotherPatient(body, pasMemberFromRef(cl.Patient.Reference)) {
+	// patient (pasOtherPatients), as the gateway reads the inquiry.
+	another, others := pasOtherPatients(body, member)
+	if another {
 		return PASInquiry{}, http.StatusForbidden, "inconsistent patient in PAS inquiry"
 	}
+	inq.UnreadablePatientReferences = mergeUnreadable(seen, others)
 	stringExt := func(exts []map[string]json.RawMessage, want string) string {
 		for _, e := range exts {
 			var url, v string

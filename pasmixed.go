@@ -3,6 +3,7 @@ package shnsdk
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 	"strings"
 )
 
@@ -143,6 +144,11 @@ func pasMemberIdentifiers(p map[string]any, member string) (mine, another bool) 
 //   - a reference whose reference names "Patient/<id>" names that member
 //     (pasMemberFromRef: in either spelling, under any base, versioned or
 //     not);
+//   - a reference that carries a "Patient" segment but names no Patient by
+//     FHIR's reference grammar (patientLike: "urn:Patient/<id>",
+//     "#Patient/<id>", one behind white space, "Patient/" inside another
+//     reference) names a patient this cannot know: it is unreadable, never
+//     the member and never read as another patient by its text;
 //   - any other reference with no reference that names a patient, by an
 //     element whose target is the patient (pasSubjectElements) or by its type,
 //     names the member only by one of the member's identifiers: the member
@@ -152,7 +158,37 @@ func pasMemberIdentifiers(p map[string]any, member string) (mine, another bool) 
 // points at, which is read in its own right. The Bundle's own elements are
 // read as well. A bundle this cannot read is reported as naming another
 // patient: never read as naming no one.
+//
+// It is pasOtherPatients' two answers read as one: a request that names an
+// unreadable patient may name another. A participant's own policy decides
+// what each means (a payer's Smart Gateway at strict refuses either; the
+// SDK's Responder refuses another and hands the unreadable to its
+// Adjudicator).
 func pasCarriesAnotherPatient(bundleJSON []byte, member string) bool {
+	another, unreadable := pasOtherPatients(bundleJSON, member)
+	return another || len(unreadable) > 0
+}
+
+// pasOtherPatients reads a PAS request Bundle as pasCarriesAnotherPatient
+// does, with its two answers apart: another reports a patient other than
+// member, and unreadable lists each reference that carries a "Patient"
+// segment but names no Patient by FHIR's reference grammar (patientLike), as
+// written, each once, in byte order. The read stops at the first other patient,
+// so the list is complete only when another is false. Unknown is not empty: such
+// a reference is never dropped, and never read as the member.
+func pasOtherPatients(bundleJSON []byte, member string) (another bool, unreadable []string) {
+	seen := map[string]bool{}
+	another = pasReadOtherPatients(bundleJSON, member, seen)
+	for ref := range seen {
+		unreadable = append(unreadable, ref)
+	}
+	sort.Strings(unreadable)
+	return another, unreadable
+}
+
+// pasReadOtherPatients is pasOtherPatients' read: it reports another patient,
+// and adds each unreadable reference it meets to unreadable.
+func pasReadOtherPatients(bundleJSON []byte, member string, unreadable map[string]bool) bool {
 	// Numbers are read as written (UseNumber), as the gateway reads them: a
 	// decimal outside float64's range is valid FHIR and must not stop the read.
 	var doc map[string]any
@@ -207,7 +243,13 @@ func pasCarriesAnotherPatient(bundleJSON []byte, member string) bool {
 			if _, party := ref[pasPartySlotMark]; party {
 				return false
 			}
-			return strings.Contains(literal, "Patient/") && pasMemberFromRef(literal) != member
+			if _, _, ok := readPatientReference(literal); !ok && patientLike(literal) {
+				// Its patient is unknown: recorded, never compared by its text.
+				unreadable[literal] = true
+				return false
+			}
+			m, names := patientRefCompared(literal)
+			return names && m != member
 		}
 		id, ok := ref["identifier"].(map[string]any)
 		if !ok || id["system"] == MemberSystem {

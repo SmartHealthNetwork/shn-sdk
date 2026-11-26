@@ -31,6 +31,12 @@ type Metadata struct {
 	// patient as subject. The Hub records the exchange under each of them as
 	// well. A recipient ignores it.
 	Involved string `json:"involved,omitempty"`
+	// InvolvedSummary is the sending gateway's signed statement about this
+	// side's Involved list (EncodeInvolvedSummary of an InvolvedSummary): how
+	// many entries it has and how many patients it left out, why. A gateway
+	// sets it only for a Hub that lists HubAcceptsInvolvedSummary. The Hub
+	// never forwards it, so a recipient never sees it.
+	InvolvedSummary string `json:"involvedSummary,omitempty"`
 }
 
 // InvolvedToken is one other patient a leg involves: a JSON-encoded Token

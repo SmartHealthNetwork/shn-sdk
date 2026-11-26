@@ -36,18 +36,25 @@ func TestResponderInquire_RefusesAClaimPatientNamingNoOne(t *testing.T) {
 		t.Run(strconv.Quote(blank), func(t *testing.T) {
 			envBytes, hubHdr := h.buildForwardEnv(t, "pas-claim-inquire", "pas-inquire", "inq-blank-"+strconv.Itoa(i), body)
 			resp := postInbound(t, srv, envBytes, hubHdr)
-			assertError(t, resp, readBody(t, resp), http.StatusBadRequest, msgInquiryNamesNoOne)
+			assertError(t, resp, readBody(t, resp), http.StatusBadRequest, msgRequestNamesNoOne)
 		})
 	}
-	// A Claim.patient naming no Patient id is refused with the answers a
-	// payer's Smart Gateway gives it: no reference, or one naming no Patient id
-	// (nothing after its last "Patient/", or no "Patient/" at all).
+	// A Claim.patient naming no Patient is refused with the answers a payer's
+	// Smart Gateway gives it: no reference has its own text, and a reference
+	// that names no Patient by FHIR's reference grammar names no one, however
+	// much of it reads "Patient/".
 	const ref = "https://shn.example/fhir/Patient/pat-1"
 	for i, row := range []struct{ ref, msg string }{
 		{"", "PAS inquiry Claim missing patient"},
-		{"Patient/", "PAS inquiry Bundle missing Claim.patient"},
-		{"Patient/Patient/", "PAS inquiry Bundle missing Claim.patient"},
-		{"Group/pat-1", "PAS inquiry Bundle missing Claim.patient"},
+		{"Patient/", msgRequestNamesNoOne},
+		{"Patient/Patient/", msgRequestNamesNoOne},
+		{"Group/pat-1", msgRequestNamesNoOne},
+		{"XPatient/pat-1", msgRequestNamesNoOne},
+		{"urn:Patient/pat-1", msgRequestNamesNoOne},
+		{"Basic/1/_history/Patient/pat-1", msgRequestNamesNoOne},
+		{"Group/1/Patient/pat-1", msgRequestNamesNoOne},
+		{"#Patient/pat-1", msgRequestNamesNoOne},
+		{"https://shn.example/Patient/fhir/Practitioner/9", msgRequestNamesNoOne},
 	} {
 		body := bytes.Replace(good.Body, []byte(`"patient":{"reference":"`+ref+`"}`), []byte(`"patient":{"reference":"`+row.ref+`"}`), 1)
 		if bytes.Equal(body, good.Body) {

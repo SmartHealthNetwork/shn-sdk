@@ -347,7 +347,11 @@ type InvolvedOmission struct {
 
 // The completeness values of Involved.
 const (
-	// InvolvedComplete: the list names every other patient the leg involves.
+	// InvolvedComplete: the gateway that sent the list stated, in its signed
+	// InvolvedSummary, that it left no patient out, and the list held every
+	// entry the summary counted. It is that gateway's own statement; the
+	// network does not judge whether the list named every patient the
+	// message involves.
 	InvolvedComplete = "complete"
 	// InvolvedIncomplete: the list was not complete, for the reasons
 	// Omitted gives.
@@ -368,6 +372,9 @@ const (
 	// but names a patient already covered is not counted, and a list the Hub
 	// cannot read at all (one that does not decode as a list, or is over the
 	// envelope metadata's size bound) makes the list unknown, not incomplete.
+	// It also counts the entries the sending gateway's InvolvedSummary, one
+	// that verifies, lists beyond those the list held: entries that did not
+	// arrive.
 	AuditInvolvedUnverified = "unverified"
 	// AuditInvolvedUnrecognized: patients a gateway reported omitting under a
 	// reason the Hub does not know (one outside the list it was built with).

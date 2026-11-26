@@ -61,7 +61,7 @@ func TestAnswerHeaders_NothingElseCrosses(t *testing.T) {
 		FrameHeaderOperationSubpath, FrameHeaderOperationBase, FrameHeaderOperationAddressTags,
 		FrameHeaderReadPath, FrameHeaderTaskLocation, FrameHeaderCDSService,
 		FrameHeaderSubscriptionEndpoint, FrameHeaderSubscriptionChannel, FrameHeaderStatedBase, FrameHeaderSubscriptionRequest,
-		FrameHeaderSubscriptionLocation, FrameHeaderIfMatch}
+		FrameHeaderSubscriptionLocation, FrameHeaderIfMatch, FrameHeaderPrefer}
 	if got := slices.Sorted(maps.Keys(allowedFrameHeaders)); !slices.Equal(got, slices.Sorted(slices.Values(want))) {
 		t.Fatalf("allowlist %q, want %q", got, want)
 	}

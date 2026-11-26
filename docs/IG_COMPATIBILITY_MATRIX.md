@@ -8,14 +8,17 @@ runs the real transform chain.
 
 Four honest qualifications about how strong that backing is:
 
-- **The Carried rows are live-validated, on injected fixtures.** No pinned payload in the
-  validation corpus carries these elements, because this gateway's own builders never produce
-  them — that is a property of the corpus, not a gap in the checking. Each carry is exercised
-  on every validation run against the real IG lanes: the carried output is validated at the
-  target line, and the restored output at the source line, from fixtures derived by injecting
-  a declared element into a pinned reference payload. One element is exercised on the restore lane only
-  (`Claim.extension:transmissionIdentifiers`), because the downcast bundle it rides in carries
-  unrelated content the 2.1 line rejects.
+- **The Carried rows are checked on injected fixtures.** No pinned payload in the validation
+  corpus carries these elements, because this gateway's own builders never produce them — that
+  is a property of the corpus, not a gap in the checking. On every validation run against the
+  real IG lanes, each is exercised from a fixture derived by injecting a declared element into a
+  pinned reference payload. The sender's message, with the element, is validated against the
+  source line's IG profile; the translated output the gateway builds, with the element inside
+  its `shn-carried-content` wrapper, against the target line's IG profile; and the message
+  restored on the way back against the source line's IG profile, with the element value- and
+  literal-identical to what was sent. One element is exercised on the source lane only
+  (`Claim.extension:transmissionIdentifiers`), because the translated bundle it rides in
+  carries unrelated content the 2.1 line rejects.
 - **A manifest class can outrun its rows.** The per-contract `Manifest class` tables state
   what the engine declares a step is for. Where a declared `carry` step has no `Carried` row
   left, nothing travels in the wrapper for a conformant payload and no loss is reported; the
@@ -24,8 +27,17 @@ Four honest qualifications about how strong that backing is:
 - **The `pa.crd` rows are identity by construction.** The engine registers no transform for
   those steps, so their obligation confirms the payload is untouched rather than exercising
   translation logic, and CRD payloads are not part of the live validation corpus.
-- **"Validated on a lane" varies in strength.** Payloads carrying a `meta.profile` are
-  checked against that profile; payloads without one get structural FHIR R4 validation only.
+- **Translated output is held to the target line's IG profile.** Every pinned translation
+  artifact is validated against the target line's IG profile for its resource type (DTR
+  QuestionnaireResponse, PAS ClaimResponse, PAS response Bundle, DTR questionnaire package
+  Bundle), at the package version that line ships, whether or not it declares a
+  `meta.profile`; so is every injected fixture's translated output a lane exercises (the
+  first qualification names the one it does not). A pinned artifact that carries content as
+  the sender wrote it that the target profile does not accept is held to exactly those
+  findings, and never excuses a finding in the gateway's own edit. Shapes whose translation
+  the target line does not yet accept are not in the corpus; each is a ⚠ Known gap row. A CPT
+  code is read as unchecked, not as a defect: no IG package ships CPT, so no lane can check
+  one.
 
 **Topology.** Translation is an *egress* adaptation with tolerant ingress: a gateway adapts
 what it sends to the line its peer speaks. An inbound request on a non-native line is not
@@ -237,12 +249,12 @@ line. The suite also pins that a composed chain equals sequential application of
 
 Read that coverage precisely, in three respects.
 
-**What the lanes check.** The PAS artifacts carry a `meta.profile` and are validated against
-it. The 2.0 lane loads the DTR 2.0.1, CRD 2.0.1 and SDC 3.0.0 packages
+**What the lanes check.** Each artifact is validated against its target line's IG profile
+for its resource type, at the package version that line ships, whether or not it declares a
+`meta.profile`. The 2.0 lane loads the DTR 2.0.1, CRD 2.0.1 and SDC 3.0.0 packages
 beside PAS 2.0.1 (since 2026-09), so a DTR artifact targeting 2.0 is profile-validated
-there by the profile-conformance gate. The authored downcast control additionally receives
-explicit standard Questionnaire and package profile checks on all three lines.
-Other unprofiled DTR artifacts receive structural validation in the general sweep.
+there too. The authored downcast control additionally receives explicit standard
+Questionnaire and package profile checks on all three lines.
 
 **How many distinct payloads.** The down-direction span's artifacts are byte-duplicates of
 the corresponding adjacent 2.2 → 2.1 outputs, because the second leg (2.1 → 2.0) is a
@@ -256,12 +268,15 @@ to the Questionnaire's own definition is unchecked. Structural and profile confo
 
 Two package shapes **refuse** rather than producing an artifact. The `pa.dtr` 2.0 → 2.2
 source package has no `QuestionnaireResponse` entry, so the second leg's QR-required
-gate fires. The captured standard Questionnaire at 2.2 has no resource narrative,
-so its downcasts to 2.1 and 2.0 refuse the older standard profile's requirement.
-The native source remains unchanged. An independently authored, explicitly profiled
-package supplies the successful down-span control. Both refusal paths are asserted
-with no partial output or reports escaping composition. Narrative presence alone
-does not certify the captured resource against the other target constraints.
+gate fires. And a standard Questionnaire at 2.2 with no resource narrative refuses its
+downcasts to 2.1 and 2.0, whose standard profile requires narrative; that refusal is
+asserted on a 2.2 questionnaire package built around the reference payer's captured
+Questionnaire, with its narrative removed. Both refusal paths are asserted with no
+partial output or reports escaping composition. That package itself carries the captured
+Questionnaire's narrative, and an executed test runs it down to 2.1 and 2.0 with that
+narrative unchanged. An independently authored, explicitly profiled package is the
+down-span control the lanes validate. Narrative presence alone does not certify a
+Questionnaire against the other target constraints.
 
 ## Known gaps
 
