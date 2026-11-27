@@ -81,27 +81,23 @@ func scenarioAssertion(method, target string, body []byte, label, gateway string
 	return base64.StdEncoding.EncodeToString(raw), nil
 }
 
-// signScenarioRequest stamps req with its assertion. It reads req's body and
-// puts it back, so req can still be sent.
-func signScenarioRequest(req *http.Request, label, gateway string, priv ed25519.PrivateKey, now time.Time) error {
+// scenarioRequestAssertion is the assertion that signs req, for its
+// scenarioHeader. It reads req's body and puts it back, so req can still be
+// sent; send it with signedsend.Do.
+func scenarioRequestAssertion(req *http.Request, label, gateway string, priv ed25519.PrivateKey, now time.Time) (string, error) {
 	var body []byte
 	if req.Body != nil && req.Body != http.NoBody {
 		b, err := io.ReadAll(req.Body)
 		_ = req.Body.Close()
 		if err != nil {
-			return err
+			return "", err
 		}
 		body = b
 		req.Body = io.NopCloser(bytes.NewReader(body))
 		req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 		req.ContentLength = int64(len(body))
 	}
-	h, err := scenarioAssertion(req.Method, req.URL.RequestURI(), body, label, gateway, priv, now)
-	if err != nil {
-		return err
-	}
-	req.Header.Set(scenarioHeader, h)
-	return nil
+	return scenarioAssertion(req.Method, req.URL.RequestURI(), body, label, gateway, priv, now)
 }
 
 // parseScenarioKey reads a caller key: a base64 ed25519 private key, the

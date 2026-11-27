@@ -336,6 +336,7 @@ GET    /register/{id}             — holder-initiated read of its own registrat
 PUT    /register/{id}             — holder-initiated key-rotation (§2.4)
 PUT    /register/{id}/payer-ids   — Trust-admin-gated payer-identity update (§2.4)
 PUT    /register/{id}/capabilities — holder-initiated declaration of its capabilities (§2.4)
+PUT    /register/{id}/lease       — holder-initiated renewal of its registration (§2.4)
 ```
 
 **A refusal's body.** From the network's deploy, every refusal a registrar route
@@ -408,6 +409,7 @@ Body (JSON, all keys base64-standard-encoded):
 | `legs` | **Optional** JSON array of the request legs this holder takes as recipient, each named by its flat transaction type (`"cdex-attachment-submit"`, never a `pa.`-prefixed name). **Self-declared** by the system answering at `baseURL`: from shn-gateway v1.1.0, a Smart Gateway declares its own as it starts (`PUT /register/{id}/capabilities`, §2.4), and a registration the SDK builds leaves it absent. **Absent and empty differ.** Absent (or `null`) declares no list, the registration of a build older than this field; `[]` declares that the holder takes none. The Hub refuses a leg the network marks with the release that brings it (today `cdex-attachment-submit`, since 1.1.0, `cdex-attachment-request`, since 1.5.0, `cdex-task-status`, since 1.12.0, `cdex-task-subscribe` and `cdex-task-signal`, each since 1.13.0, and `pas-subscription-subscribe`, `pas-subscription-signal` and `pas-subscription-notify`, each since 1.16.0) to a recipient whose list lacks it, and to one that declares no list (§6.1). Every other leg is routed whatever the holder declares. On a rotation, absent `legs` keeps the legs held (§2.4). Each element must be a leg of the network, named once, whose row (§4.3) names the holder's `role` for its recipient: a payer declares no leg a provider answers, and the reverse. Outside the PoP signing payload. |
 | `payerIds` | **Optional, `role=payer` only.** JSON array of `{ "system", "value" }` payer identifiers this holder is routed to for (§1a personas carry the matching `payerId`). **Operator-attested, never self-asserted**: on this admin-gated path the Trust operator attests them in the body; on the self-serve path (§2.3a) they must have been vouched at access-request approval before `/pop` forwards them here. Outside the PoP signing payload. Globally unique — a `(system, value)` already bound to another holder is refused (409 below). At admission the registrar checks only the role and this uniqueness; the entry-shape rules (count, both parts present, no whitespace or `\|`, no repeats) are applied by `PUT /register/{id}/payer-ids` and by the self-serve access request (§2.3a). Preserved across key rotation (§2.4); republished verbatim on `/holders` and projected into the participant directory (§1a). Identities acquired **after** admission are attested through `PUT /register/{id}/payer-ids` (§2.4) — same authority — so a payer never re-onboards to become routable on a new one. |
 | `providerIds` | **Not accepted at registration.** A provider's organization NPIs are operator-attested through `PUT /register/{id}/provider-ids` (§2.4), each on the operator's recorded check; a registration carrying the field is refused (400 below). Served on `GET /holders` for `role=provider` only, and preserved across key rotation (§2.4). |
+| `admission` | **Optional; the Accounts service's only** (from the network's deploy). How the holder was admitted, from a closed set: `"self-onboarded"`, a developer's own registration through the Accounts service, or `"provisioned"`, a hosted tenant's, by SHN Cloud. Under the Trust operator's own key the registrar records `operator` whatever the body says. Absent or `null` under the Accounts service's key records none, and a holder with none recorded is unknown, never read as either. Recorded with the registration and shown on the operator's admin read; never served on `GET /holders`. Outside the PoP signing payload. |
 | `pop` | Base64 Ed25519 **proof-of-possession** signature over the canonical registration payload, made with the private key for the `signPub` being registered (see below) |
 
 **Proof-of-possession (`pop`).** In addition to the Trust admin gate, the
@@ -453,6 +455,8 @@ Rejection cases:
 | `pop` does not verify against the submitted `signPub` | 401 (`"registration proof-of-possession failed"`) |
 | `id` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
 | `payerIds` present on a non-`payer` role | 400 (`"payerIds are only valid for role=payer"`) |
+| `admission` is `"operator"` under the Accounts service's key: only the Trust operator's own key records an operator registration (from the network's deploy) | 403 (`"only the Trust operator's own key records an operator admission; the Accounts service names self-onboarded or provisioned"`) |
+| `admission` under the Accounts service's key is outside the set: any other string, `""` included, in any other letter case or padded (from the network's deploy) | 400 (`"admission must be self-onboarded or provisioned"`) |
 | `providerIds` present at all, even `[]`: a provider's identifiers are attested only through `PUT /register/{id}/provider-ids` (§2.4) | 400 (`"providerIds are attested through PUT /register/{id}/provider-ids, never at registration"`) |
 | `id` already dynamically registered, or a `payerIds` entry already bound to another holder | 409 (`"id or payer-id already registered"`) |
 | `id` was registered before: its signing keys are kept, and a new holder under it would be authenticated as the old one | 409 (`"holder id has key history"`) |
@@ -570,6 +574,15 @@ The `--accounts` path is the **Cognito-gated self-serve** path for preview-envir
 onboarding. The admin-gated direct `POST /register` (§2.3) remains the canonical
 operator/Trust path and the authoritative wire spec for all participants — the
 Accounts service is an additive convenience layer over it.
+
+**How the registration says you were admitted.** The Accounts service records, on your
+client, which app client minted the sign-in that created it, and the registration it
+sends names that as its `admission` (§2.3): `self-onboarded` for a developer's own
+sign-in through the CLI app client (the `shn` CLI's), `provisioned` for SHN Cloud's machine user registering a
+hosted tenant. It comes from the client as created, never from anything the
+proof-of-possession step sends. A client created before the network recorded this, or
+whose sign-in matched both app clients, registers with no admission: the holder's
+admission stays unknown (from the network's deploy).
 
 > **Note:** The full self-serve round-trip (login → register → list →
 > revoke) is interactive (browser Cognito login) and is verified operator-side
@@ -1392,7 +1405,59 @@ only once the record is appended.
 
 The clear is audited as `request-frames-cleared`, naming the credential's label (§2.5).
 
-**Operational note — propagation window.** A 200 only updates the registrar feed.
+**`PUT /register/{id}/lease`** — a holder's own renewal of its registration (from the
+network's deploy): proof, by the holder's current key, that it is alive.
+
+Header: `X-Holder-Assertion: base64(json(assertion))` — a holder assertion (§3) for
+`{id}`, signed with the holder's **own current** `signPub`, `audience` = `"registrar"`,
+unexpired and used once, as for `PUT /register/{id}`. No body. Neither admin key
+renews a holder: they admit and revoke one, and only the holder can attest that it is
+alive. A holder whose signing key is lost cannot renew.
+
+A 200 answers when the holder's lease lapses:
+
+```json
+{ "leaseExpiresAt": null }
+```
+
+`leaseExpiresAt` is always present. `null` says no lease runs: nothing lapses, and the
+holder has nothing more to do. Today no lease runs for any holder, so every renewal
+answers `null`. A time (RFC 3339, UTC) is when the registration stops being listed on
+`GET /holders` unless the holder renews before it.
+
+| Condition | Status |
+|---|---|
+| `{id}` is a founding holder from the manifest | 409 (`"founding holder, manifest-authoritative"`) |
+| No such (dynamic) holder, a revoked or deregistered one included | 404 (`"no such holder"`) |
+| The assertion is absent, malformed, expired, for another audience or another holder, signed with a key other than the holder's current one (its retired or compromised keys included, or either admin key), or a replayed `jti` | 403 (`"a holder may only renew itself"`) |
+| Registrar store unavailable | 503 (`"store error"`) |
+| Lifecycle audit append failed | 502 (`"lifecycle audit failed"`) |
+| Success | 200 (OK) |
+
+As for `DELETE`, the `404` before authentication reveals only what `GET /holders`
+already serves. A renewal is audited as `renewed`, holder-self (§2.5); a refused one
+records nothing.
+
+**Renewing from the SDK.** From shn-sdk v1.18.0, `Identity.RenewLease`
+sends the renewal, and `shn renew <id> --registrar <url> -out <keys>` sends it from the
+CLI. Each signs at the identity's clock, follows no redirect, and reads the registrar's
+answer as one of three outcomes:
+- renewed: a `200` it can read, with the lease's expiry or none;
+- refused: the registrar's own refusal, a `403` whose problem `type` ends `not-self` or a
+  `409` whose `type` ends `founding-holder` (above). Renewing again with the same keys and
+  clock is refused the same way;
+- unknown: no answer, a redirect, a `404` or `405`, a `5xx`, a `403` or `409` without
+  that `type` (from something in front of the registrar), any other status, or a `200` it
+  cannot read. A registrar from before the renewal answers `404` or `405`, so neither is
+  read as the holder being gone.
+
+An unknown renewal may or may not have been recorded, and renewing again is safe.
+`Identity.RenewLease` returns an error for every outcome but renewed. `shn renew` reads
+the keys in `-out` and writes nothing. It exits `0` when renewed, `3` when unknown, and
+`1` when refused or when the keys cannot be read, in which case it sends nothing; it
+says which.
+
+**Operational note — propagation window.** A rotation's 200 (`PUT /register/{id}`) only updates the registrar feed.
 The new keys propagate to the Hub and the Authorization Framework on their next
 converge poll (~one ~3-second interval, §2.3). Rotate during a quiet moment, and on
 the holder side:
@@ -1421,7 +1486,8 @@ Every lifecycle transition — `registered`, `revoked`, `deregistered`, `rotated
 `provider-ids-fenced` (a fence: a `PUT /register/{id}/provider-ids` that changes nothing, or a `POST /register/{id}/provider-ids/fence`, §2.4),
 `provider-ids-withheld` (a rolled-back removal restored a provider without its identifiers, §2.4),
 `test-participant-marked` and `test-participant-unmarked` (a `PUT /register/{id}/test-participant`, §2.4),
-`request-frames-cleared` (a Trust operator's `DELETE /admin/holders/{id}/declared-request-frames`, §2.4) — is signed
+`request-frames-cleared` (a Trust operator's `DELETE /admin/holders/{id}/declared-request-frames`, §2.4),
+`renewed` (a holder's own `PUT /register/{id}/lease`, §2.4) — is signed
 by the registrar with its own signing key (public key = the manifest `registrarPub`,
 which the Audit Plane trusts as a signer; distinct from `auditSignPub`, the key the
 Hub signs routing records with) and appended to the canonical audit chain. A transition
@@ -1671,7 +1737,7 @@ X-Holder-Assertion: base64(json(assertion))
 | Authorization Framework (`POST /authorize`) | `"authz"` |
 | Hub (`POST /route`) | `"hub"` |
 | Registrar (`POST /register`, `POST /revoke`, `PUT /register/{id}/payer-ids`) | `"registrar"` (Trust admin key) |
-| Registrar (`DELETE /register/{id}`, `GET /register/{id}`, `PUT /register/{id}`) | `"registrar"` (the holder's **own** current `signPub`) |
+| Registrar (`DELETE /register/{id}`, `GET /register/{id}`, `PUT /register/{id}`, `PUT /register/{id}/lease`) | `"registrar"` (the holder's **own** current `signPub`) |
 | A provider gateway's `/scenario` routes, from shn-gateway v0.63.0 | `"scenario:<the gateway's holder id>"` (a `/scenario` caller's own key, §3.4a) |
 
 The verifier rejects an assertion whose `audience` does not match what it expects.
@@ -1687,7 +1753,8 @@ are:
 - the **Authorization Framework** `POST /authorize` (an assertion mints one token,
   not many),
 - the **Registrar** `POST /register`, `POST /revoke`, `PUT /register/{id}/payer-ids`,
-  `DELETE /register/{id}`, `GET /register/{id}`, `PUT /register/{id}` (each gated
+  `DELETE /register/{id}`, `GET /register/{id}`, `PUT /register/{id}`,
+  `PUT /register/{id}/lease` (each gated
   action, the holder's own read included, consumes its assertion once), and
 - the **Hub** `POST /route` (a request whose assertion verifies, and whose envelope the
   Hub then reads, names that holder as its sender and carries its authority frame and
@@ -1700,6 +1767,22 @@ are:
   consume its assertion.
 
 Generate a fresh `jti` per assertion regardless of target.
+
+**Never send an assertion through a redirect.** One-time use does not protect an
+assertion that a redirect carries away. A client that follows a redirect re-sends the
+header to the host the redirect names, and that host can spend it once, before it
+expires, on any route that accepts it. Send every request that carries an assertion
+without following redirects, and read a `3xx` as a failure. From shn-sdk v1.18.0,
+every SDK call that carries one does so whatever `*http.Client` it is
+given:
+- `Identity.Authorize`, `Identity.DeclareCapabilities` and `Identity.RenewLease`;
+- the originators' Hub sends;
+- `PostRaw` and `PostJSON`, which answer a `3xx` as a `*StatusError` with its status
+  (a client whose transport itself refuses a redirect answers that transport's error);
+- the `shn` CLI's `register`, `rotate`, `renew` and `send-test`.
+
+From shn-gateway v1.10.0, a Smart Gateway's clients for the network's services refuse
+every redirect.
 
 ### 3.4a `/scenario` caller assertions
 
@@ -2262,7 +2345,7 @@ type Metadata struct {
 | `timestamp` | RFC 3339 UTC — must be within ±5 minutes of the Hub clock |
 | `correlationId` | Must be non-empty; must match the token's `correlationId` |
 | `involved` | Optional. The other patients this leg involves, as a JSON-marshalled list (a **string**, like `authzToken`) of `{"token": <JSON-marshalled token>, "involvement": <value>}`, one per patient, each token minted for this leg with that patient as subject and carrying, signed, the `involvement` it was requested with (§4.1); the entry's `involvement` must match it. The Hub records the exchange under each of these patients as well as the leg token's. Omit it when the leg involves no other patient. Recipients ignore it |
-| `involvedSummary` | Optional. From shn-sdk v1.17.0 (`InvolvedSummary`, `SignInvolvedSummary`), and only to a network whose discovery descriptor lists `involved-summary` in `hubAccepts` (§1a): your own signed statement about this side's `involved` list, as a JSON-marshalled **string** of `{"side": "request" or "answer", "leg": <lowercase hex SHA-256 of this side's own token's signature>, "listed": <the list's entry count>, "omitted": [{"reason": <reason>, "count": <n>}, …], "sig": <Ed25519 signature>}`, signed with your holder signing key. `sig` is an Ed25519 signature (64 bytes, std-base64 in the JSON) over the bytes `shn-involved-summary/v1` and a newline (`\n`), followed by the summary as **compact JSON**: members in exactly the order `side`, `leg`, `listed`, `omitted`, `sig`; `omitted` present, `[]` when empty, each entry `{"reason","count"}` in that order; `sig` present with the value `null`; strings escaped as in §3.1. `omitted` gives a count per reason you left patients out of the list for, from the SDK's `InvolvedSummaryOmitReasons`, sorted, each reason once; send it empty when you left no one out. Never send `unverified` or `unrecognized`: only the Hub writes those. The Hub records from it whether you stated your list complete. That is your own statement, recorded as yours; the network does not judge whether your list named every patient the message involves. Recipients never see it: the Hub does not forward it. From the network's deploy the Hub reads it as the "Involved summary" rules below say, and never refuses an envelope for it |
+| `involvedSummary` | Optional. From shn-sdk v1.17.0 (`InvolvedSummary`, `SignInvolvedSummary`), and only to a network whose discovery descriptor lists `involved-summary` in `hubAccepts` (§1a): your own signed statement about this side's `involved` list, as a JSON-marshalled **string** of `{"side": "request" or "answer", "leg": <lowercase hex SHA-256 of this side's own token's signature>, "listed": <the list's entry count>, "omitted": [{"reason": <reason>, "count": <n>}, …], "sig": <Ed25519 signature>}`, signed with your holder signing key. `sig` is an Ed25519 signature (64 bytes, std-base64 in the JSON) over the bytes `shn-involved-summary/v1` and a newline (`\n`), followed by the summary as **compact JSON**: members in exactly the order `side`, `leg`, `listed`, `omitted`, `sig`; `omitted` present, `[]` when empty, each entry `{"reason","count"}` in that order; `sig` present with the value `null`; strings escaped as in §3.1. `omitted` gives a count per reason you left patients out of the list for, from the SDK's `InvolvedSummaryOmitReasons`, sorted, each reason once; send it empty when you left no one out. Never send `unverified` or `unrecognized`: only the Hub writes those. The Hub records from it whether you stated your list complete. That is your own statement, recorded as yours; the network does not judge whether your list named every patient the message involves. Recipients never see it: the Hub does not forward it. From the network's deploy the Hub reads it as the "Involved summary" rules below say, and never refuses an envelope for it. From shn-gateway v1.17.0 a Smart Gateway sends it, only to a network that lists both `involved` and `involved-summary`, on each side of a leg that takes the `involved` list: on a request it sends and on an answer it builds, beside that side's list, signed with its holder signing key and bound to that side's own `authzToken`. Its `listed` is the number of entries in the list it sends, and its `omitted` counts the patients that side's gateway left out, by reason, that side's alone. A side with no list states `listed` 0, with `omitted` empty when the gateway left no one out, and the reasons when it did (a request whose patients it could not read at all is `request-unreadable`). An answer's list names the answering gateway's own binding of the member, so it sends the answer's summary only once that binding has run. When a binding failed, the summary states it under its reason (`system-of-record-unavailable` for a system-of-record read that did not answer, `request-unreadable` for a request whose patients could not be read, `unknown-member` for a member the gateway could not identify, one its system of record holds with no identifier included), and that reason's count is exactly the number of members the request named whose binding could not be read: observed from the request, one for each binding attempted, naming no one, and never an estimate of what the system of record holds. Such a count is in the summary only, not in the gateway's exchange record (its `InvolvedOmitted` count). It sends no summary when the leg was refused before its binding ran, when the member the request names names no one, when the binding ran but the leg was refused before its result entered the list, or when a request naming several members (a coverage-eligibility batch) was refused at the binding of a member other than its last, so that the members after it were never bound: the answer's list may be missing their patients, whatever that member's own binding said. A batch refused at its last member's binding states that member's failed binding under its reason beside the earlier members' bindings, or, for a member not held where the participant requires known members, the list as complete. An empty `omitted` is that gateway's own statement that its list is complete. A summary the gateway cannot make, or one that would take the envelope over its size limit, is not sent, and the leg is carried as before. To any other network it sends none, and its envelope is unchanged |
 
 **No member identifier appears in Metadata** — no member ID, name or birth date;
 those travel only inside the sealed ciphertext. The patient appears in cleartext
@@ -3539,7 +3622,21 @@ for it (`504`, with the same advice when the request was sent, or `504 the payer
 system could not be reached in time`) or a deadline that gateway's own work used
 up before it could ask its system (`504 the payer's gateway ran out of time before
 it could send this request to the payer's system; the payer's system did not
-receive it`). (A record it cannot write after its payer answered withholds
+receive it`). From shn-gateway v0.62.0 that gateway's own failure (before,
+`500 responder failed`) is a `500` that says whether it had forwarded the request
+to its system. It reads `the <role>'s gateway failed after forwarding this request
+to the <role>'s system, which may have acted on it: check its outcome before
+resending` once the gateway's built-in forward has sent the request, and `the
+<role>'s gateway failed before forwarding this request to the <role>'s system`
+when its record shows that forward started on a leg that reaches the system only
+through it, and had not sent the request. Otherwise it reads `the <role>'s gateway
+failed, and whether the <role>'s system received this request is not known: check
+its outcome before resending`: as when a responder the participant plugs in
+answers the leg (it may call its system itself) and nothing went out through the
+built-in forward, and when the payer gateway's coverage-eligibility forward fails
+before it sends. `<role>` names the recipient (`payer` for a payer, `provider` for
+a provider; before shn-gateway v1.5.0, `payer` on every leg).
+(A record it cannot write after its payer answered withholds
 nothing: the answer is relayed, §7b.2.) The requester reads that gateway's status and message.
 From shn-gateway v1.10.0 the body of each such refusal takes the leg's answer envelope (§4.3): on a
 leg whose client reaches it through a FHIR operation, an `OperationOutcome`
@@ -3870,7 +3967,8 @@ no `requestFrames` token declares them.
   rest of the frame as before; a frame that carries none of them is unchanged, byte for byte.
 - **Only on a subscribe or signal leg.** From shn-gateway v1.13.0 a gateway of any role refuses,
   at every conformance level and before its leg's handler runs, a request whose frame names
-  `subscriptionRequest` or `If-Match` on a leg other than a subscribe leg, `subscriptionEndpoint`
+  `subscriptionRequest` or `If-Match` (or, from shn-gateway v1.17.0, `Prefer`) on a leg other
+  than a subscribe leg, `subscriptionEndpoint`
   or `subscriptionChannel` on a leg other than a subscribe or signal leg, or `statedBase` on a
   leg other than a signal leg: `400 a topic Subscription's frame headers are not defined for this
   transaction type`, recorded on message `integrity`.
@@ -3883,8 +3981,9 @@ value, carried exactly as sent. Only the first return preference is framed, as R
 preference given more than once, and no other preference crosses the network. Like `If-Match`,
 it is spelled as the HTTP field it carries, sits inside the sealed payload, so the Hub never
 sees it, and is carried exactly: a value the frame's JSON would change is refused where it is
-made (`ErrFrameHeaderValue`). No Smart Gateway frames it before the release that carries the
-preference on a subscribe leg.
+made (`ErrFrameHeaderValue`). From shn-gateway v1.17.0 a subscriber's gateway frames it on a
+subscribe leg, and the notifier's gateway carries it to its system as the HTTP `Prefer` of the
+interaction's own forward (below); no Smart Gateway frames it before.
 
 - **An older decoder** (before shn-sdk v1.17.0) drops it without error and reads the rest of
   the frame as before, so its gateway sends its system no preference, as every gateway did
@@ -3906,21 +4005,33 @@ request it forwards to its own system:
 A read's or a vread's `_elements` and `_summary`, and a page's trailing `_elements`, are carried
 to the provider's system as sent; a page's `_elements`, and a search's, must keep `channel`. An
 update's or a delete's `If-Match` is carried as the HTTP `If-Match` of that forward, never of the
-gateway's own read before it, and is refused on any other interaction. An update of a
+gateway's own read before it, and is refused on any other interaction. From shn-gateway v1.17.0
+the payer's return preference, `Prefer`, is carried as the HTTP `Prefer` of every interaction's
+own forward, exactly as framed, never of the gateway's own read; a framed `Prefer` that is not
+exactly one return preference is refused. An update of a
 Subscription the provider's system holds, a delete and an instance `$status` are forwarded only
 after the gateway reads the Subscription with the same token and finds it the payer's: its
 `channel.endpoint` is the gateway's notification address for that payer and topic, and the
-credential beside it verifies. A read's or vread's `2xx` is delivered only when it is such a
-Subscription, and a create's or an update's `2xx` that carries a Subscription only when it is
-the payer's, the network's `404` otherwise. The ownership test reads only `channel.endpoint` and the credential beside it, so only
+credential beside it verifies. A read's or vread's `2xx` is delivered only when it carries
+exactly one Subscription and that is such a Subscription (from shn-gateway v1.17.0 one carrying
+none, an OperationOutcome or no body among them, is the network's `404`, not refused `502`),
+and a create's or an update's `2xx` that carries a Subscription only when it is the payer's,
+as, from shn-gateway v1.17.0, a delete's or a `$status`'s only when each it carries is, the
+network's `404` otherwise. The ownership test reads only `channel.endpoint` and the credential beside it, so only
 a subset that hides the channel (an `_elements` without `channel`, or `_summary=true`, which leaves
 out `channel.header`) is the network's `404`; one that hides the criteria or the filter is still the
 owner's own Subscription, and is delivered. A search's or a page's `2xx` is delivered only when
-every Subscription in it is the payer's. Every `2xx` is first held to the shape of the
-interaction it answers: a read or a vread, a Subscription; a create or an update, a Subscription,
-no body, or an OperationOutcome; a delete, an OperationOutcome or no body; a search or a page, a
-searchset Bundle whose entries are only Subscriptions and OperationOutcomes; an instance
-`$status`, a `searchset` (the Backport IG STU 1.1's) or `history` Bundle holding exactly one
+every Subscription in it is the payer's. Every `2xx` is first held to the answer check. From
+shn-gateway v1.17.0 it passes an answer that holds nothing but shapes that name no patient,
+whatever the interaction it answers: a Subscription, an OperationOutcome, no body, or a searchset
+Bundle whose entries are only Subscriptions and OperationOutcomes; and, on an interaction that
+names the Subscription by id (a read, a vread, an update, a delete or an instance `$status`), a
+`$status` Bundle naming it (a Bundle read as one when it is a `history` Bundle or an entry
+carries a Parameters), which on a read or a vread, carrying no Subscription, is then the network's
+`404`; on a create, a search or a page it is refused. Before shn-gateway v1.17.0 each interaction passed only its own shape: a read or a
+vread, a Subscription; a create or an update, a Subscription, no body, or an OperationOutcome; a
+delete, an OperationOutcome or no body; a search or a page, the searchset; an instance
+`$status`, the `$status` Bundle. A `$status` Bundle is a `searchset` (the Backport IG STU 1.1's) or `history` Bundle holding exactly one
 SubscriptionStatus Parameters whose `subscription` references the Subscription asked for, and
 whose `notification-event` parts reference only what the topic's notification shape declares: a
 `focus` is a Task (by its reference, relative or absolute; a `type`, when stated, must agree), and
@@ -3931,9 +4042,9 @@ this leg is held to the Backport SubscriptionStatus shape, and anything outside 
 carries no extension; no reference but the subscription's (a Subscription, by its reference and
 any type) and the focus's; its topic the topic's own canonical; and no address in its Bundle (an
 entry's `fullUrl`, `request.url` or `response.location`, a link's `url`), read with its
-percent-escapes decoded, names a resource type but Subscription or Parameters. A
-shape valid only for another interaction is refused, and nothing in any of them holds a
-resource but each Bundle entry's own. A delivered answer is carried as the provider's system
+percent-escapes decoded, names a resource type but Subscription or Parameters. Before
+shn-gateway v1.17.0 a shape valid only for another interaction is refused. Nothing in any of
+them holds a resource but each Bundle entry's own. A delivered answer is carried as the provider's system
 sent it, framed with `statedBase`, the provider's base. From shn-gateway v1.13.0 a create's or
 an update's `2xx` is also framed with `subscriptionLocation`, the tail of the provider's
 `Location` (`Subscription/<id>` or `Subscription/<id>/_history/<vid>`), only when exactly one
@@ -3999,21 +4110,23 @@ authority, and a FHIR XML Subscription or any other body the gateway cannot read
 unreadable Subscription. The leg names no
 patient on either side, so a create or an update whose Subscription holds a resource (a
 `contained` member, or any object with a `resourceType` below the Subscription, whatever its
-type) is refused. The
-network carries no `Prefer` header on any leg: a subscriber's `Prefer` does not reach the
-provider's system, which answers a create or an update by its own default. The gateway refuses:
+type) is refused. From
+shn-gateway v1.17.0 the subscriber's first return preference (`Prefer`) reaches the provider's
+system as sent, on the interaction's own forward (below); no other preference does, and no
+`Prefer` on any other leg, so the provider's system answers those by its own default. The
+gateway refuses:
 
 | Refusal, from shn-gateway v1.13.0 | Status | Recorded |
 |---|---|---|
 | from shn-gateway v1.13.0, an instance's `_history` or the type-level `$status`, which are outside the leg's authority | `403` | `authority` |
 | from shn-gateway v1.13.0, a `PATCH`: the network re-keys a Subscription's channel only in a whole Subscription | `405` | `fidelity` |
 | from shn-gateway v1.13.0, any other interaction outside `subscriptionRequest`'s closed set, an id or version that is not a FHIR id, a read's or vread's query outside its set, or no `subscriptionRequest` | `400` | `routing` |
-| from shn-gateway v1.13.0, a read, delete, `$status`, search or page that carries a body; an `If-Match` on an interaction other than an update or a delete | `400` | `integrity` |
+| from shn-gateway v1.13.0, a read, delete, `$status`, search or page that carries a body; an `If-Match` on an interaction other than an update or a delete; from shn-gateway v1.17.0, a `Prefer` that is not exactly one return preference | `400` | `integrity` |
 | from shn-gateway v1.13.0, a create or update outside the closed shape (a topic Subscription on the HRex Task topic, `rest-hook`, `application/fhir+json`, `id-only`, the Backport IG's allowlisted extensions only, no `modifierExtension`), a filter without exactly one `requester:identifier` naming only identifiers the network attests for the payer, each as `system|value` (a bare value, which names no system and so matches that value in every system, is refused), or with a parameter other than `owner:identifier`, `code` or `status` | `403` | `authority` |
 | from shn-gateway v1.13.0, a create or update whose Subscription holds a resource; a create or update whose body is FHIR JSON or FHIR XML of another type, or a JSON object or array holding a resource | `403` | `authority` |
 | from shn-gateway v1.13.0, a search or page query outside its set (a `url` framed among them), a create, update or search without the sealed values E-19 or E-21 needs, or with values that are not sealed values; a search or page answer holding another's Subscription | `403` | `authority` |
-| from shn-gateway v1.13.0, a read, vread, update, delete or `$status` of a Subscription that is not the payer's, or a create's or an update's `2xx` carrying another's: the network's `404`, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"not-found","diagnostics":"Subscription not found"}]}`, the same bytes in every case | `404` | `authority` |
-| from shn-gateway v1.13.0, a `2xx` answer that is not the shape of the interaction it answers, FHIR XML included; an answer that is not a `2xx` and is FHIR other than an OperationOutcome holding no resource (FHIR XML: one with a `contained` element at any depth), or a body never judged | `502` | `authority` |
+| from shn-gateway v1.13.0, a read, vread, update, delete or `$status` of a Subscription that is not the payer's, or a create's or an update's `2xx` carrying another's; from shn-gateway v1.17.0, a read's or vread's `2xx` that does not carry exactly one Subscription, the payer's, and a delete's or `$status`'s `2xx` carrying another's: the network's `404`, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"not-found","diagnostics":"Subscription not found"}]}`, the same bytes in every case | `404` | `authority` |
+| from shn-gateway v1.13.0, a `2xx` answer that is not the shape of the interaction it answers (from shn-gateway v1.17.0, one holding anything but shapes that name no patient, whatever the interaction, or a `$status` Bundle answering a create, a search or a page), FHIR XML included; an answer that is not a `2xx` and is FHIR other than an OperationOutcome holding no resource (FHIR XML: one with a `contained` element at any depth), or a body never judged | `502` | `authority` |
 | from shn-gateway v1.13.0, a create or update the gateway cannot read to re-key, by its body's structure: a FHIR XML Subscription, FHIR XML it cannot read, or another body that is not JSON (`415`); no body, a JSON value holding no resource, FHIR JSON not one unambiguous Subscription, or a body in UTF-16 or UTF-32 (`400`) | `415` or `400` | the fidelity of its own edit |
 | from shn-gateway v1.13.0, a provider whose participant sets no subscription scope (the Hub routes none to it, refusing `422 the recipient does not take …`) | `422` | `routing` |
 
@@ -4139,7 +4252,8 @@ predecessor's too, both in `subscriptionEndpoint`), and frames the rest of the q
 `url`, so the payer's endpoint never leaves its gateway and the search finds exactly the
 Subscriptions it made, as it would directly. A page is framed in its page form,
 `GET ?_getpages=…`, its query as sent. An update's or a delete's `If-Match` is framed as sent;
-the network carries no `Prefer` header on any leg. Every rule here is a network rule, the same
+from shn-gateway v1.17.0 the first return preference in the payer's `Prefer` is framed as sent,
+on any interaction, and no other preference. Every rule here is a network rule, the same
 at every conformance level, and the gateway refuses, with nothing sent:
 
 | Refusal, from shn-gateway v1.13.0 | Status | Recorded |
@@ -4148,7 +4262,7 @@ at every conformance level, and the gateway refuses, with nothing sent:
 | from shn-gateway v1.13.0, a `PATCH` | `405` | the fidelity of its own edit |
 | from shn-gateway v1.13.0, an instance `_history`; a type-level `$status`; a search with no `url`, a search or page parameter outside its set or with a modifier | `403` | `authority` |
 | from shn-gateway v1.13.0, an interaction outside the closed set, an id or version that is not a FHIR id, a read's or vread's query outside its set; a search whose `url` names more than one endpoint (only one sealed endpoint can be carried); a base naming no registered provider (`404`, `422` for a create) | `400` | `routing` |
-| from shn-gateway v1.13.0, a read, vread, delete, `$status`, search or page that carries a body; an `If-Match` a frame cannot carry | `400` | `integrity` |
+| from shn-gateway v1.13.0, a read, vread, delete, `$status`, search or page that carries a body; an `If-Match` a frame cannot carry; from shn-gateway v1.17.0, a return preference a frame cannot carry | `400` | `integrity` |
 | from shn-gateway v1.13.0, a create or update whose `channel.endpoint` is not an absolute `https` URL with no userinfo, fragment, space or backslash, or states none | `422` | `integrity` |
 | from shn-gateway v1.13.0, a create or update whose `channel.endpoint` is itself a notification address (its path holds `notify`, a topic, a registered participant and a key id, in that order), or a search whose `url` is one | `422` | `routing` |
 | from shn-gateway v1.13.0, a create or update whose body, judged by its structure and never its `Content-Type`, is FHIR JSON or FHIR XML of another resource type, or a Subscription that holds a resource (a `contained` member, or any object with a `resourceType` below it) | `403` | `authority` |
@@ -5537,6 +5651,71 @@ at PAS 2.0.1" below); earlier releases carry one at every line.
   In that system's own numbering `Patient/<member id>` is another record, so it is now
   refused.
 
+  From shn-gateway v1.17.0, the provider-data build also carries each record the provider's
+  QuestionnaireResponse names in a DTR `qr-context` beside the exchange's own order and
+  Coverage: under PAS spec-13 a record the Claim's supporting information references is an
+  entry of the request. A literal `qr-context` reference to a ServiceRequest,
+  DeviceRequest, MedicationRequest, NutritionOrder or Encounter is read once from the
+  provider's system of record, at that occurrence in the QuestionnaireResponse only, and
+  carried as read, never minted:
+  - from shn-gateway v1.17.0, the record names its patient in `subject` (a NutritionOrder
+    in `patient`), which must be exactly the request's patient. When the system holds the
+    member's Patient under its own id, registered edit E-06 re-points that reference, when
+    it is exactly that Patient, to `Patient/<member id>`, as it does a clinical record's
+    `subject.reference`, and the request names E-06. A record a signature covers there is
+    refused `502 signed content cannot be edited (E-06, <carrier>)`;
+  - from shn-gateway v1.17.0, the records its `requester` leads to (a NutritionOrder's
+    `orderer`) are carried by the rule the exchange's own order's requester is. An
+    Encounter's participants, service provider and location are not carried, so an
+    Encounter naming one is refused as below;
+  - from shn-gateway v1.17.0, a Coverage it references must be the exchange's;
+  - from shn-gateway v1.17.0, a clinical record it references is read as above.
+
+  From shn-gateway v1.17.0, the QuestionnaireResponse's own Reference is carried as written.
+  A logical context, named by `identifier` alone, names no record and is carried as before.
+  So is a context naming a resource the QuestionnaireResponse contains, or a record the
+  request already carries.
+
+  From shn-gateway v1.17.0, each of these is refused before the payer, `502`, the fidelity
+  of the gateway's own build (refusal rule `fidelity`, stage `build`), at every conformance
+  level, with no `Retry-After` and nothing sent on the PAS leg:
+  - from shn-gateway v1.17.0, a record the system definitely does not hold: `502 a record
+    the request references cannot be filled: <type>/<id> is not held by the system of
+    record`. A record the request itself names that the system does not hold stays `422`,
+    with the same words: the status follows where the reference came from, the provider's
+    own QuestionnaireResponse or the caller's request;
+  - from shn-gateway v1.17.0, a record about another patient, one naming no patient, one
+    whose bytes cannot be carried as read, and one past the gateway's carrying limits: as
+    for the clinical records above, a NutritionOrder naming no patient saying
+    `<type>/<id> names no patient.reference`;
+  - from shn-gateway v1.17.0, one whose requester's records cannot be carried: `502 a record
+    read from the system of record cannot be carried as read: <type>/<id>: <the requester
+    rule's reason>`;
+  - from shn-gateway v1.17.0, one referencing a record no context carries, such as another
+    Coverage, a performer or a medication: `502 a record read from the system of record
+    cannot be carried as read: <type>/<id> references <reference>, which a
+    prior-authorization request this gateway builds cannot carry`. A `qr-context` of a type
+    outside those above, or in another shape (an absolute address, a `urn`) naming a record
+    the request does not carry, is refused the same way, naming the QuestionnaireResponse;
+  - from shn-gateway v1.17.0, an Appointment, which names its patient as one of its
+    participants: `502 a record read from the system of record cannot be carried as read:
+    Appointment/<id> is an Appointment, which a prior-authorization request this gateway
+    builds cannot carry yet: an Appointment names its patient as one of its participants`.
+
+  From shn-gateway v1.17.0, a read the system fails to answer is the system's failure, as for
+  the clinical records.
+
+  From shn-gateway v1.17.0, on the `demo` origination profile, which reads no orders from a
+  system of record, a literal context is refused `502 a record read from the system of
+  record cannot be carried as read: <type>/<id> cannot be filled: this gateway's demo
+  profile reads no orders from a system of record`, recorded the same way.
+
+  Before shn-gateway v1.17.0 the gateway carried such a context unread. On the provider-data
+  profile a ServiceRequest or DeviceRequest was sent naming a record the request did not
+  carry, which a payer holding the request to spec-13 refuses, and any other type was refused
+  `502 PAS evidence linkage failed`, under no named rule. On the demo profile every literal
+  context was sent unread.
+
   From shn-gateway v1.8.0, every PAS submission and amendment a provider's gateway builds
   is checked once, right after the build, for two edits of its own build that cannot be
   made, each refused `502`, the fidelity of the gateway's own build (refusal rule
@@ -6645,6 +6824,93 @@ property. Until then, build to the rule: preserve what you do not recognise.
 
 ### Changelog
 
+- **2026-11-27 — From shn-gateway v1.18.0, a payer's gateway refuses a DTR questionnaire-package request it cannot read whole on its network primitive, and carries one whose only unread part is the request's own shape (§7a.1).**
+  Changed: a body that is not one JSON document or not a `Parameters` is recorded as
+  `authority`, and one that repeats a member name as `integrity`; the answer to both is
+  unchanged. A body past the relay's carrying limits is refused `400` saying which limit it
+  passed (nesting depth or JSON tokens), recorded as `limit`. A `parameter` or `part` list that
+  is not a list, an element of one that is not an object, a resource or coverage resource that
+  is not an object, or a `Bundle` whose `entry` is not a list of objects, stops the gateway's
+  read of the request. Met before a coverage binds the patient, the request is refused at every
+  level, recorded as `authority`, with the first problem in document order: a coverage past it
+  could name another patient. Met after a coverage binds the patient, it is the request's own
+  shape: carried as sent at `none`, recorded at `observe`, and refused `400` at `structural`
+  and `strict` (`conformance`); before, each but the `Bundle` was refused at every level. Fixed: a `Bundle` whose
+  `entry` could not be read was carried unexamined, even at `strict`; and a `coverage`
+  parameter inside a nested `Parameters` was taken as the request's coverage, so it could choose
+  the patient the request was bound to: only a top-level one is the request's now, and a nested
+  one is not judged as a coverage (one that is not a Coverage, or has no beneficiary, is carried
+  at every level), though a patient it names is another patient the request names. A `Parameters` with no
+  `parameter` is read as empty: nested, it is carried; at the root, the request is refused
+  `400 questionnaire-package request has no coverage` (`authority`), where it was `400 parse
+  questionnaire-package parameters failed`.
+
+- **2026-11-27 — From shn-sdk v1.18.0, `Identity.RenewLease` and `shn renew` renew a holder's registration (§2.4).**
+  Added: `Identity.RenewLease` sends a holder's own renewal, `PUT /register/{id}/lease`, signed
+  with its current key, and returns a `LeaseRenewal`. Its `Outcome` is `RenewalRenewed`,
+  `RenewalRefused` (the registrar's own `403 not-self` or `409 founding-holder`) or
+  `RenewalUnknown` (no answer, a redirect, `404`, `405`, a `5xx`, any other `403` or `409`, any
+  other status, or an answer it cannot read), and only a renewed outcome comes without an error.
+  It follows no redirect. `shn renew` sends it from the CLI and exits `0`, `1` or `3`. Against
+  a registrar from before the renewal, the outcome is unknown.
+
+- **2026-11-27 — From shn-sdk v1.18.0, the SDK follows no redirect on a request that carries an assertion, and `DeclareCapabilities` signs at the identity's clock (§3.4).**
+  Changed: `Identity.Authorize`, `Identity.DeclareCapabilities`, the originators' Hub sends,
+  `PostRaw`, `PostJSON`, and the `shn` CLI's `register`, `rotate` and `send-test` send through
+  a copy of the given client that follows no redirect, and read a `3xx` as a failure: `PostRaw`
+  and `PostJSON` answer it as a `*StatusError` with its status, and the CLI commands exit `1`.
+  Earlier releases followed a redirect and re-sent the assertion to the host it named. The
+  given client is not changed. `Identity.DeclareCapabilities` signs its assertion at the
+  identity's `Clock`, as `Identity.Authorize` does; earlier releases signed at the wall clock,
+  so a registrar on a fixed clock, as in a test, refused it.
+
+- **2026-11-26 — From shn-gateway v1.17.0, a subscribe leg delivers any answer shape that names no patient, whatever the interaction, and carries the subscriber's return preference (§6.3).**
+  Changed: the notifier's gateway passes a `2xx` answer that holds nothing but a Subscription,
+  an OperationOutcome, no body, or a searchset of Subscriptions and OperationOutcomes, whatever
+  the interaction it answers, and a `$status` Bundle naming the Subscription on an interaction
+  that names one by id; a
+  delete answered with the deleted Subscription, for one, was refused `502` and is delivered.
+  The ownership test still decides each Subscription an answer carries: a read's or vread's
+  answer that carries no Subscription is now the network's `404`, not `502`, and a delete's or
+  `$status`'s answer carrying another's Subscription is the network's `404`. Every containment
+  refusal stands. Added: the subscriber's gateway frames the first return preference in its
+  system's `Prefer` as sent (`FrameHeaderPrefer`), and the notifier's gateway sends it to its
+  system on the interaction's own forward, never on its own read before it. No other preference
+  is carried. A return preference a frame cannot carry is refused `400` (`integrity`) at the
+  subscriber's gateway, and a framed `Prefer` that is not exactly one return preference at the
+  notifier's. Against a notifier's gateway before shn-gateway v1.17.0, the preference is dropped
+  and its system answers by its own default, as before.
+
+- **2026-11-26 — From shn-gateway v1.17.0, a PAS request's `Claim.patient` that names a Patient it carries by `#<id>` or `urn:` is identified as that Patient's member (§7b.1, §7b.2).**
+  Fixed: a Smart Gateway binds a PAS submission or update whose `Claim.patient` is a `#<id>`
+  naming the one Patient the Claim contains, or a `urn:` naming the one Patient entry with that
+  `fullUrl`, to that Patient's member, as it binds `Patient/<id>`. It does so on the requester's
+  gateway and the payer's, at every conformance level, whether or not the system of record holds
+  the member. A contained Patient's member is its member identifier; an entry's member is its id,
+  else its member identifier. The request's other subjects that name the same Patient so name the
+  same member, so a gateway at `strict` carries such a request, and its involved list names that
+  member as the request's patient. Earlier releases bound such a request to an identifier made
+  from the reference's text, the same for every request that named its patient so, and at
+  `strict` refused it `403 inconsistent patient in PAS bundle`.
+  Changed: a PAS submission, update or inquiry whose `Claim.patient` names, by `#<id>` or `urn:`,
+  a Patient that holds no member key (a contained Patient with no member identifier or two
+  different ones, or an entry with neither an id nor a member identifier) is refused `400 cannot
+  identify the patient: the request names its patient by a reference to a Patient it carries that
+  holds no member identifier; name the patient by Patient/<id>, or give that Patient one member
+  identifier`, recorded as `authority`, at every conformance level, before anything is read from
+  the system of record. Earlier releases bound such a submission or update to an identifier made
+  from the reference's text below `strict` and refused it `403 inconsistent patient in PAS bundle`
+  at `strict`, and refused such an inquiry `400 PAS inquiry Bundle missing Claim.patient`.
+  A `Responder` reads `Claim.patient` the same way from shn-sdk v1.18.0. It
+  answers a submission or update that names its patient's entry by `urn:`. It refuses one that
+  names a contained Patient `400 incomplete PAS request graph` before its Adjudicator is asked,
+  because its answer cannot yet restate a contained Claim patient, and one naming a Patient that
+  holds no member key with the text above. Earlier releases refused each `403 inconsistent
+  patient in PAS bundle`. It refuses an inquiry naming a Patient that holds no member key with
+  the text above too, where shn-sdk v1.17.0 refuses it `400 cannot identify the patient: the
+  request names its patient by a reference that names no one`, and earlier releases `400 PAS
+  inquiry Bundle missing Claim.patient`.
+
 - **2026-11-25 — From shn-sdk v1.17.0, the message frame's allowlist adds `Prefer`, a subscribe leg's return preference (§6.3).**
   Added: `Prefer` (`FrameHeaderPrefer`), a request-frame header for a subscription's subscribe
   leg: the first return preference the subscriber's system sent in its `Prefer` field, carried
@@ -6780,6 +7046,27 @@ property. Until then, build to the rule: preserve what you do not recognise.
   before the upgrade is not matched by a later leg sent after it, as when a later leg carries a
   different Patient.
 
+- **2026-11-23 — From shn-gateway v1.17.0, a PAS request module 1 builds carries the records the provider's QuestionnaireResponse contexts name, or is refused (§7b.2).**
+  On the provider-data origination profile, each record a DTR `qr-context` names beside the
+  exchange's own order and Coverage (a ServiceRequest, DeviceRequest, MedicationRequest,
+  NutritionOrder or Encounter) is read once from the provider's system of record and carried
+  as read, with the records its requester leads to, as PAS spec-13 requires. A context the
+  build cannot carry is refused `502` before the payer, on the fidelity of SHN's own build:
+  one the system does not hold, one about another patient or naming none, one referencing a
+  record no context carries, an Appointment, and, on the demo profile, any literal context
+  the request does not carry. Earlier releases carried such a context unread. A logical
+  context, named by identifier, is unchanged.
+
+- **2026-11-23 — From shn-gateway v1.17.0, registered edit E-06 also re-keys the records a provider's QuestionnaireResponse contexts name (§7b.2).**
+  E-06 (`evidence-subject-rekey`) is registered per type, at the element each type names its
+  patient by: `subject` on a Condition, Observation, ClinicalImpression, Goal,
+  DiagnosticReport, ServiceRequest, DeviceRequest, MedicationRequest or Encounter, and
+  `patient` on a NutritionOrder. A type outside the registry is never re-keyed. The five
+  request and encounter types are new: when the provider's system holds the member's Patient
+  under its own id, a record a `qr-context` names is re-pointed to `Patient/<member id>` at
+  that element before it is carried, the request names E-06, and one a signature covers is
+  refused `502 signed content cannot be edited (E-06, <carrier>)`.
+
 - **2026-11-22 — From shn-sdk v1.17.0 and shn-gateway v1.17.0, every leg's patient reference is read by FHIR's reference forms (§4.3, §7, §7a, §7b).**
   Changed: a Smart Gateway reads the patient of coverage eligibility, the federated query, the
   CRD order legs, the DTR questionnaire package and next question, and the patient-authored DTR
@@ -6901,6 +7188,26 @@ property. Until then, build to the rule: preserve what you do not recognise.
   `Adjudicator` has answered, and otherwise with no attestation. Before, it answered
   `500 seal failed`.
 
+- **2026-11-20 — From shn-gateway v1.17.0, a Smart Gateway signs a summary of each involved list it sends, for a network whose Hub reads one (§5.1).**
+  Added: to a network whose discovery descriptor lists both `involved` and `involved-summary`
+  in `hubAccepts`, a Smart Gateway sends `involvedSummary` beside the `involved` list on each
+  side of a leg that takes it, on a request it sends and on an answer it builds: the number of
+  entries it listed and, by reason, the patients it left out, signed with its holder signing key
+  and bound to that side's own token. On an answer it sends one only once its own binding of the
+  member has run: a failed binding is stated under its reason, counted as exactly the number of
+  members the request named whose binding could not be read (observed from the request, one for
+  each binding attempted, naming no one, never an estimate of what the system of record holds; in the summary only, not in the
+  exchange record's `InvolvedOmitted`), and a member held with no identifier counts as
+  `unknown-member`; a leg refused before its
+  binding ran, one whose member names no one, one refused before the binding's result entered
+  the list, or a coverage-eligibility batch refused at one member's binding with members after
+  it never bound, sends none (a batch refused at its last member's binding states that
+  member's course beside the earlier members' bindings). An empty
+  `omitted` is the gateway's own statement that its list is complete. Unchanged: nothing is refused for a summary; one the gateway cannot make, or
+  one that would take the envelope over its size limit, is not sent. To a network that does not
+  list `involved-summary`, a gateway sends no summary, and its envelope is unchanged, byte for
+  byte.
+
 - **2026-11-20 — From the network's deploy, the Hub reads a sending gateway's signed summary of its involved list, and records the list as complete only when the gateway stated it complete in a summary that verifies (§1a, §2.5.2, §5.1, §5.3, §6.1).**
   Added: the discovery descriptor's `hubAccepts` lists `involved-summary` beside `involved`,
   under the same network control. Changed: the Hub reads an envelope's `involvedSummary` on a
@@ -6969,7 +7276,9 @@ property. Until then, build to the rule: preserve what you do not recognise.
   submission or update, shn-sdk v1.17.0's `Responder` reads a `Claim.patient` that is a `#<id>`
   or a `urn:` naming a Patient entry as its text, so a subject or beneficiary that names the
   member, or the Patient it names itself, reads as another patient, and the request is refused
-  `403 inconsistent patient in PAS bundle` first.
+  `403 inconsistent patient in PAS bundle` first. From shn-sdk v1.18.0 it reads
+  them by their structure, as a payer's Smart Gateway does from shn-gateway v1.17.0 (the
+  2026-11-26 entry).
   Changed: a payer's Smart Gateway at `structural` or `strict` refuses a `Claim.patient` that
   names one Patient by an id that is not a FHIR id as the request's own shape (`request.shape`):
   `400 PAS bundle Claim.patient names its Patient by an id that is not a FHIR id`, or on the

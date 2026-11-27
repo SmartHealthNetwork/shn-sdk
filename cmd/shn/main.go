@@ -28,6 +28,8 @@ import (
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"golang.org/x/crypto/curve25519"
+
+	"github.com/SmartHealthNetwork/shn-sdk/internal/signedsend"
 )
 
 func main() {
@@ -63,6 +65,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdRevoke(rest, stdout, stderr)
 	case "rotate":
 		return cmdRotate(rest, stdout, stderr)
+	case "renew":
+		return cmdRenew(rest, stdout, stderr)
 	case "doctor":
 		return cmdDoctor(rest, stdout, stderr)
 	case "gateway":
@@ -118,6 +122,7 @@ commands:
   revoke        revoke a client by id (Accounts service)
   rotate        rotate a holder's keys against the registrar (holder-self); re-declares request frames (--request-frames, as for register)
                 and contract versions: --contract-versions, else the set the registrar holds now (it refuses if that cannot be read)
+  renew         renew a holder's registration against the registrar (holder-self, current key; exit 0 renewed, 1 refused, 3 unknown: renew again later)
   doctor        self-validate against the network: discovery + eligibility (wire-correctness)
   gateway stats read GET /internal/stats from one or more Smart Gateway replicas (--url, repeatable) and merge them into one table by exchange
   send-test     drive a provider gateway's 8 /scenario UCs and tabulate pass/fail (--scenario-key signs them; exit 0 pass, 1 fail, 2 misuse, 3 still pended)
@@ -300,10 +305,13 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	req.Header.Set("Content-Type", "application/json")
+	var headers map[string]string
 	if *adminAssertion != "" {
-		req.Header.Set("X-Holder-Assertion", *adminAssertion)
+		headers = map[string]string{signedsend.HolderAssertion: *adminAssertion}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// Sent without following a redirect: the admin assertion goes only to the
+	// registrar, and a 3xx is a failed registration.
+	resp, err := signedsend.Do(nil, req, headers)
 	if err != nil {
 		fmt.Fprintf(stderr, "shn register: POST /register: %v\n", err)
 		return 1
@@ -313,6 +321,10 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "registrar responded %d\n%s\n", resp.StatusCode, respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			fmt.Fprintf(stderr, "shn register: the registrar URL answered a redirect (%d), which shn does not follow: pass the registrar's own URL.\n", resp.StatusCode)
+			return 1
+		}
 		if *adminAssertion == "" {
 			fmt.Fprintln(stderr, "shn register: registrar rejected the request. POST /register is Trust-admin-gated; pass --admin-assertion (operator path) or use --accounts for self-serve registration.")
 		}

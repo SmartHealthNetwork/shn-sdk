@@ -39,6 +39,12 @@ func (e blankMemberError) Unwrap() error { return ErrBlankMember }
 // request with.
 const msgRequestNamesNoOne = "cannot identify the patient: the request names its patient by a reference that names no one"
 
+// msgPatientCarriesNoMember is a PAS inquiry, submission or update whose
+// Claim.patient resolves, by structure, to one Patient the request carries that
+// holds no member key (pasPatientRefMember): the text a payer's Smart Gateway
+// answers the same request with.
+const msgPatientCarriesNoMember = "cannot identify the patient: the request names its patient by a reference to a Patient it carries that holds no member identifier; name the patient by Patient/<id>, or give that Patient one member identifier"
+
 // errContinuationNamesNoOne is a continuation whose member id names no member. It
 // wraps ErrBlankMember.
 var errContinuationNamesNoOne error = blankMemberError{"shnsdk: continuation: the member id names no member"}

@@ -62,7 +62,7 @@ type fakeNetwork struct {
 	// resolvePersonaPayer's "no test counterparty" refusal (R3/R4 boundary).
 	emptyResponders bool
 	// withoutRetired serves the descriptor without the fields wire protocol
-	// 2.0.0's descriptor leaves out (signable design §7): endpoints.patientAccess,
+	// 2.0.0's descriptor leaves out: endpoints.patientAccess,
 	// contractVersions and demoResponders, the keys absent, not empty, and
 	// states 2.0.0 unless discWireVersion says otherwise. A descriptor stating
 	// 2.0.0 is always served this way, as a 2.0.0 network's will be. Without
@@ -964,7 +964,7 @@ func TestCLI_WireVersionMembership(t *testing.T) {
 }
 
 // TestCLI_ReadsEachDescriptorShape: doctor and priorauth against each
-// descriptor of the wire protocol 2.0.0 window (signable design §7): 1.1.0's;
+// descriptor of the wire protocol 2.0.0 window: 1.1.0's;
 // S2's, which accepts 2.0.0 beside 1.1.0; and 2.0.0's, which states 2.0.0 and
 // leaves out endpoints.patientAccess, contractVersions and demoResponders.
 // Each shares a version with this CLI exactly when one of

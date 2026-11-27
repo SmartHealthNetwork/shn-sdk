@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/SmartHealthNetwork/shn-sdk/internal/signedsend"
 )
 
 // capabilitiesDeclarationTTL bounds a capability declaration's assertion: it
@@ -134,6 +136,8 @@ const maxDeclaredRequestFrames = 8
 // may be named when none was sent, or DeclareCapabilities fails: the
 // registrar's answer then does not match what was declared. An answer that
 // names no digest is returned with CDSServicesDigest empty. A nil c uses http.DefaultClient.
+// The assertion is issued at the identity's Clock, and the declaration follows
+// no redirect, whatever c does: a 3xx is not the registrar's answer.
 func (id Identity) DeclareCapabilities(ctx context.Context, c *http.Client, registrarURL string, d CapabilityDeclaration) (CapabilityDeclaration, error) {
 	if c == nil {
 		c = http.DefaultClient
@@ -170,7 +174,7 @@ func (id Identity) DeclareCapabilities(ctx context.Context, c *http.Client, regi
 		return CapabilityDeclaration{}, err
 	}
 	body := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
-	hdr, err := id.AssertionForBody("registrar", time.Now(), capabilitiesDeclarationTTL, body)
+	hdr, err := id.AssertionForBody("registrar", id.now(), capabilitiesDeclarationTTL, body)
 	if err != nil {
 		return CapabilityDeclaration{}, err
 	}
@@ -180,8 +184,8 @@ func (id Identity) DeclareCapabilities(ctx context.Context, c *http.Client, regi
 		return CapabilityDeclaration{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Holder-Assertion", hdr)
-	resp, err := c.Do(req)
+	// Sent without following a redirect: a 3xx is not the registrar's answer.
+	resp, err := signedsend.Do(c, req, map[string]string{signedsend.HolderAssertion: hdr})
 	if err != nil {
 		return CapabilityDeclaration{}, err
 	}

@@ -361,7 +361,7 @@ const (
 // allowedFrameHeaders is the produce+consume header allowlist: relaying
 // arbitrary headers through the seal would be a smuggling vector (cookies,
 // hop-by-hop, internal headers). Widening it is a spec change — contractVersion
-// was added with the multi-version contracts design, operation with framed
+// was added for multi-version contracts, operation with framed
 // DTR operations, the answer's own headers above to carry a 2xx as sent, the
 // operation's address headers (operationSubpath, operationBase,
 // operationAddressTags) with framed DTR operations' addresses, the CDex
@@ -686,7 +686,7 @@ func (e *AppAnswerError) Error() string {
 // rolling deploys). The payer's advertised frames are therefore advisory only and
 // not an input here.
 //
-// expectedToken is the contractVersion stamp-verify check (multi-version contracts design, published-SDK
+// expectedToken is the contractVersion stamp-verify check (published-SDK
 // parity — v0.38.0): when non-empty (the caller knows the contract-version token
 // this leg was routed/built at) AND the 2xx frame carries a non-empty
 // FrameHeaderContractVersion stamp that DIFFERS from it, the answer is rejected —

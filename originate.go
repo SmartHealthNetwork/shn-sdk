@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/SmartHealthNetwork/shn-sdk/internal/signedsend"
 )
 
 // Endpoints are the substrate base URLs an originating participant talks to.
@@ -160,9 +162,9 @@ func (id Identity) RunEligibility(ctx context.Context, c *http.Client, ep Endpoi
 		return false, "", fmt.Errorf("shnsdk: build /route request: %w", err)
 	}
 	hubReq.Header.Set("Content-Type", "application/json")
-	hubReq.Header.Set("X-Holder-Assertion", hubAssertion)
 
-	hubResp, err := c.Do(hubReq)
+	// Sent without following a redirect: a 3xx is not the Hub's answer.
+	hubResp, err := signedsend.Do(c, hubReq, map[string]string{signedsend.HolderAssertion: hubAssertion})
 	if err != nil {
 		return false, "", fmt.Errorf("shnsdk: POST /route: %w", err)
 	}

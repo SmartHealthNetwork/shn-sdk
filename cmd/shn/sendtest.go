@@ -15,6 +15,8 @@ import (
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+
+	"github.com/SmartHealthNetwork/shn-sdk/internal/signedsend"
 )
 
 // sendTestCase is one scenario probe: POST {gateway}/scenario/{path} with body, then assert pred
@@ -205,12 +207,17 @@ func postScenario(client *http.Client, url string, body []byte, signer *sendTest
 		return 0, nil, "request: " + err.Error()
 	}
 	req.Header.Set("Content-Type", "application/json")
+	var headers map[string]string
 	if signer != nil {
-		if err := signScenarioRequest(req, signer.label, signer.gateway, signer.priv, now()); err != nil {
+		h, err := scenarioRequestAssertion(req, signer.label, signer.gateway, signer.priv, now())
+		if err != nil {
 			return 0, nil, "sign the request: " + err.Error()
 		}
+		headers = map[string]string{scenarioHeader: h}
 	}
-	resp, err := client.Do(req)
+	// Sent without following a redirect, signed or not: the assertion goes
+	// only to the gateway.
+	resp, err := signedsend.Do(client, req, headers)
 	if err != nil {
 		return 0, nil, "request failed: " + err.Error()
 	}

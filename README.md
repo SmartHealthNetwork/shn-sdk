@@ -79,11 +79,12 @@ go install github.com/SmartHealthNetwork/shn-sdk/cmd/shn@latest
 ```
 
 From shn-sdk v1.0.0 the stability promise covers the onboarding commands (`keygen`,
-`register`, `login`, `clients`, `revoke`, `rotate`, `doctor`): their flags, exit codes
-and the key files they write. `eligibility`, `priorauth`, `send-test`, `scenario-key`
-and `scenario-sign` are test tooling, outside the promise; the examples below show what
-they do today. `gateway stats` is in the gateway's evolving `monitoring` class. The full
-list is the gateway's `STABILITY.md`, "The `shn` CLI".
+`register`, `login`, `clients`, `revoke`, `rotate`, `doctor` and, from shn-sdk v1.18.0,
+`renew`): their flags, exit codes and the key files they write. `eligibility`,
+`priorauth`, `send-test`, `scenario-key` and `scenario-sign` are test tooling, outside
+the promise; the examples below show what they do today. `gateway stats` is in the
+gateway's evolving `monitoring` class. The full list is the gateway's `STABILITY.md`,
+"The `shn` CLI".
 
 ## Preview network
 

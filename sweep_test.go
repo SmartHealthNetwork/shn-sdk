@@ -56,6 +56,15 @@ const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|M
 	`|\bK1\b|PR #[0-9]+|#[0-9]{2,}\b|docs/superpowers|(?i:\bslice[ -][0-9][a-z]?\b)|\bBo\b|review-fixes|\bround-[0-9]\b` +
 	`|ledger[ -][0-9]|(?i:ledger[ -]item[ -][0-9])|option[ -][A-Z] ruling|A′|\bA'[ .,)]|\bT-[0-9]\b|\b[SM]F[0-9]+\b` +
 	`|(?i:spec §|spec[ (]*[0-9]{4}-[0-9]{2}-[0-9]{2})` +
+	// Citations of an internal design document, which a partner cannot read: by section
+	// ("the CDex design §14.5", "design, §6.2", "design (§3.3", "the notifications design's
+	// rule (§7.2") and by name with no section ("the notifications design", "signable-content
+	// design", "multi-version contracts design"), the closed list of those documents' names.
+	// The fix for a match is to state what the document decided, or to cite the
+	// published specification (a Da Vinci, FHIR or Subscriptions Backport IG section) that
+	// says it. "design" followed by other words before a section sign ("the design of the
+	// Backport IG §3"), and "by design", are prose and pass.
+	`|(?i:\bdesign(?:'s [a-z]+)?[ ,;(]*§)|(?i:\b(?:notifications|cdex|signable(?:-content)?|conformance(?:-enforcement)?-levels|core|(?:exchange-)?contracts|ingress-auth|relay-fidelity)[ -]design\b)` +
 	// Un-hyphenated review and ruling citations: "fix round N" (the hyphenated
 	// \bround-[0-9]\b above misses it) and "ruling YYYY-MM-DD" as its own citation
 	// form. Both reached this module's CLI sources in one comment pair. And a bare task
@@ -133,6 +142,24 @@ func TestInternalTokenPattern_Forms(t *testing.T) {
 	re := regexp.MustCompile(internalTokenPattern)
 
 	mustMatch := []string{
+		// Internal design-document citations: each form that reached the published modules.
+		`// notifications design, §6.2 and §6.3) from its identity and, when`,
+		`// the adaptive address re-key was not made: see the CDex design §14.5.`,
+		`// (design §3.3, Lanes). A discovered lane has its own signal, its`,
+		`// CheckInteraction is the notifications design's rule (§7.2, §9) on the`,
+		`// the leg's authority (the design, §12), whatever else the Task says.`,
+		`// 2.0.0's descriptor leaves out (signable design §7): endpoints.patientAccess,`,
+		`// signable-content design §3.5).`,
+		`// Subscription that crosses the network (the notifications design; each §`,
+		`// linebridge.go is module 2, the IG-line bridge (core design §3.3): the`,
+		`// CONFORMANCE_ENFORCEMENT; the conformance-levels design §4): not run at`,
+		`// CheckInteraction is the design's rule (§7.2, §9) on the interactions`,
+		`// level (§3 of the conformance-enforcement-levels design). The ZERO VALUE`,
+		`// the contractVersion stamp-verify check (multi-version contracts design, published-SDK`,
+		`// multi-version exchange-contracts design:`,
+		`// the UDAP B2B ingress-auth design.`,
+		`// it would have been uncoded (relay fidelity, as the relay-fidelity design`,
+		`// answer to a framed DTR operation (§14.5 of the CDex design): the base the`,
 		// A slice id with a letter suffix. `slice 1a` reached a new shipped file's comment
 		// because the arm ended in \b and the letter defeated the boundary.
 		`// slice 1a emits findings before any policy exists`,
@@ -185,6 +212,7 @@ func TestInternalTokenPattern_Forms(t *testing.T) {
 	// is spelled. sweepUnits is what closes that, and these rows are its
 	// rejection test.
 	mustMatchWrapped := []string{
+		"// The subscriber's half of a notification (the notifications\n// design §6.2 step 5): the subscriber's gateway",
 		"\t// frame carrying the app status and relays it 200-to-Hub (verbatim; spec\n\t// 2026-07-17) — the error-branch sibling of respondLeg.",
 		"// Also writes a *RouteRefusalError (the version-routing legible refusal, spec\n// 2026-08-10 §4) as its 422 — one chokepoint covers every origination site.",
 	}
@@ -207,6 +235,12 @@ func TestInternalTokenPattern_Forms(t *testing.T) {
 	// Boundary rows, one per widening above. Without them a widening is a
 	// one-way ratchet — nothing states where it is supposed to STOP.
 	mustNotMatch := []string{
+		// "design" as prose, and a design followed by other words before a published spec's
+		// section sign.
+		`// by design, the gateway never retries a refused leg`,
+		`// the API's design keeps one client per leg`,
+		`// a redesign of the frame keeps the Backport IG §3 handshake`,
+		`// the design of the Subscriptions Backport IG §3 states the handshake`,
 		// Prose about a PUBLISHED spec is partner-facing and must survive.
 		`// the FHIR specification requires a searchset Bundle here`,
 		`// see the spec for the full profile list`,

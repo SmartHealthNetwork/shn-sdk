@@ -426,7 +426,7 @@ func TestSendTest_SignsItsScenarios(t *testing.T) {
 	}
 }
 
-// signScenarioRequest signs the request as it will be sent: its target with
+// scenarioRequestAssertion signs the request as it will be sent: its target with
 // the query, and its body, which it puts back for sending.
 func TestSignScenarioRequest_BindsTheQueryAndKeepsTheBody(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
@@ -435,10 +435,11 @@ func TestSignScenarioRequest_BindsTheQueryAndKeepsTheBody(t *testing.T) {
 	}
 	body := `{"branch":"covered"}`
 	req := httptest.NewRequest(http.MethodPost, "http://gw.example/scenario/uc01?wait=30", strings.NewReader(body))
-	if err := signScenarioRequest(req, "send-test", "my-provider", priv, time.Now()); err != nil {
+	h, err := scenarioRequestAssertion(req, "send-test", "my-provider", priv, time.Now())
+	if err != nil {
 		t.Fatal(err)
 	}
-	verifyScenario(t, req.Header.Get(scenarioHeader), http.MethodPost, "/scenario/uc01?wait=30", []byte(body), "my-provider", pub)
+	verifyScenario(t, h, http.MethodPost, "/scenario/uc01?wait=30", []byte(body), "my-provider", pub)
 	if got, _ := io.ReadAll(req.Body); string(got) != body || req.ContentLength != int64(len(body)) {
 		t.Fatalf("the body to send is %q (length %d), want %q", got, req.ContentLength, body)
 	}

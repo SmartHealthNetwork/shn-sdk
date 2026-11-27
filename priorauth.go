@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/SmartHealthNetwork/shn-sdk/internal/signedsend"
 )
 
 // PriorAuthRequest is the dev-VISIBLE input to RunPriorAuth: the member to prior-auth
@@ -743,9 +745,9 @@ func (id Identity) runLegFramed(ctx context.Context, c *http.Client, ep Endpoint
 		return nil, fmt.Errorf("build /route request: %w", err)
 	}
 	hubReq.Header.Set("Content-Type", "application/json")
-	hubReq.Header.Set("X-Holder-Assertion", hubAssertion)
 
-	hubResp, err := c.Do(hubReq)
+	// Sent without following a redirect: a 3xx is not the Hub's answer.
+	hubResp, err := signedsend.Do(c, hubReq, map[string]string{signedsend.HolderAssertion: hubAssertion})
 	if err != nil {
 		return nil, fmt.Errorf("POST /route: %w", err)
 	}

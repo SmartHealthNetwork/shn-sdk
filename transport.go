@@ -13,6 +13,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/SmartHealthNetwork/shn-sdk/internal/signedsend"
 )
 
 // StatusError is returned when the server responds with a non-2xx status (by
@@ -53,7 +55,9 @@ func NewClient() *http.Client {
 
 // PostRaw POSTs the EXACT bytes raw to url (no marshalling), applying headers plus
 // Content-Type: application/json. If out is non-nil and the response is 2xx, the body
-// is unmarshalled into out. Non-2xx → *StatusError. Use this (not PostJSON) whenever
+// is unmarshalled into out. Non-2xx → *StatusError, a 3xx included: it follows no
+// redirect, whatever client it is given, so a header it sends (an assertion among
+// them) goes only to url. Use this (not PostJSON) whenever
 // the request body is bound to a signature: the bytes hashed by the caller MUST equal
 // the bytes sent, and PostJSON re-marshals internally.
 func PostRaw(ctx context.Context, client *http.Client, url string, raw []byte, out any, headers map[string]string) error {
@@ -65,10 +69,7 @@ func PostRaw(ctx context.Context, client *http.Client, url string, raw []byte, o
 		return fmt.Errorf("shnsdk: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := client.Do(req)
+	resp, err := signedsend.Do(client, req, headers)
 	if err != nil {
 		return fmt.Errorf("shnsdk: do request: %w", err)
 	}
@@ -92,7 +93,7 @@ func PostRaw(ctx context.Context, client *http.Client, url string, raw []byte, o
 // http.DefaultClient), applies the given headers plus Content-Type:
 // application/json. If out is non-nil and the response is 2xx, the response body
 // is unmarshalled into out. A non-2xx status causes an error carrying the status
-// code and response body text.
+// code and response body text. It follows no redirect, as PostRaw.
 func PostJSON(ctx context.Context, client *http.Client, url string, body any, out any, headers map[string]string) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {

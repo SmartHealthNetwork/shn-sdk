@@ -707,7 +707,10 @@ func parsePASInquiry(body []byte) (PASInquiry, int, string) {
 	}
 	var doc map[string]any
 	_ = json.Unmarshal(body, &doc)
-	member, containedPatient := inquiryClaimPatient(doc, cl.Patient.Reference)
+	member, containedPatient, noMember := inquiryClaimPatient(doc, cl.Patient.Reference)
+	if noMember {
+		return bad(msgPatientCarriesNoMember)
+	}
 	if memberNamesNoOne(member) {
 		return bad(msgRequestNamesNoOne)
 	}

@@ -164,6 +164,21 @@ shn clients --accounts https://accounts.shn-preview.org
 shn revoke acme-7f3a --accounts https://accounts.shn-preview.org
 ```
 
+From shn-sdk v1.18.0, renew your registration with your holder's current
+keys (`PUT /register/{id}/lease`). `shn renew` reads the keys in `-out` and changes nothing
+there:
+
+```sh
+shn renew acme-7f3a --registrar https://registrar.shn-preview.org -out ./keys
+# → renewed acme-7f3a. No lease runs: nothing lapses.
+```
+
+It exits `0` when the registrar renewed the registration. It exits `1` when the registrar
+refused it (the keys are not the holder's current ones, or the holder is a founding one),
+or when the keys in `-out` cannot be read, and then it sends nothing. It exits `3` when
+the registrar did not confirm it; renew again later. No lease runs
+today, so nothing lapses whether or not you renew.
+
 ---
 
 ## 3. Build / Run

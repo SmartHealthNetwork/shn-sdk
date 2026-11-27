@@ -155,8 +155,7 @@ type ResponderConfig struct {
 	// responder) — safe default for existing constructors. See NewFeedFrameResolver.
 	ResolveFrames func(holderID string) []string
 
-	// StampContractVersion opts this Responder into the contractVersion stamp (multi-version contracts design,
-	// published-SDK parity — v0.38.0): every SUCCESS (2xx) framed answer gets
+	// StampContractVersion opts this Responder into the contractVersion stamp (published-SDK parity — v0.38.0): every SUCCESS (2xx) framed answer gets
 	// a FrameHeaderContractVersion header. The TOKEN is computed internally, per
 	// leg, from the request's TransactionType (contractTokenForTxType — the SAME
 	// mapping RunPriorAuth's originator side uses to build its expectedToken:

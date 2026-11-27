@@ -277,31 +277,46 @@ func containedObjects(list []any) []map[string]any {
 	return out
 }
 
-// inquiryClaimPatient is the member a PAS inquiry names by its Claim.patient
-// ref, as a payer's Smart Gateway reads it. A Patient reference
-// (readPatientReference) names its id. A "#<id>" naming the one Patient the
-// Claim contains names that Patient's member identifier (a contained id is
-// local to the Claim), and contained is that Patient; a URN naming the one
-// Patient entry with that fullUrl names that Patient by its id, else by its
-// member identifier (claimPatientTarget). Any other reference names no
-// Patient: the member is "", which names no one.
-func inquiryClaimPatient(doc map[string]any, ref string) (member string, contained map[string]any) {
-	if id, _, ok := readPatientReference(ref); ok {
-		return id, nil
+// pasPatientRefMember is the member a PAS request's patient reference names, read by
+// structure as a payer's Smart Gateway reads it: the one reading the inquiry, the
+// submission and the update share, for Claim.patient and for each other subject
+// they compare with it. holder is the resource that carries ref, whose contained
+// list a "#<id>" names into.
+//
+// A Patient reference (readPatientReference) names its id. A "#<id>" or URN that
+// names one Patient (claimPatientTarget: one the holder contains, or the one
+// Bundle entry under that fullUrl) names that Patient's member: a contained Patient
+// its member identifier (a contained id is local to its holder), an entry its id,
+// else its member identifier. Such a Patient that holds no member key names no one
+// (noMember), never the reference's text. Any other reference names no Patient:
+// "", which names no one.
+func pasPatientRefMember(doc, holder map[string]any, ref string) (member string, conforms, noMember bool) {
+	if id, conforms, ok := readPatientReference(ref); ok {
+		return id, conforms, false
 	}
-	p, isContained := claimPatientTarget(doc, firstClaim(doc), ref)
-	switch {
-	case p == nil:
-		return "", nil
-	case isContained:
-		m, _ := containedPatientMember(p)
-		return m, p
+	p, contained := claimPatientTarget(doc, holder, ref)
+	if p == nil {
+		return "", false, false
 	}
-	if id, _ := p["id"].(string); id != "" {
-		return id, nil
+	if !contained {
+		if id, _ := p["id"].(string); id != "" {
+			return id, true, false
+		}
 	}
-	m, _ := containedPatientMember(p)
-	return m, nil
+	if m, ok := containedPatientMember(p); ok {
+		return m, true, false
+	}
+	return "", true, true
+}
+
+// inquiryClaimPatient is the member a PAS inquiry names by its Claim.patient ref
+// (pasPatientRefMember), and, for a "#<id>", the contained Patient it names.
+func inquiryClaimPatient(doc map[string]any, ref string) (member string, contained map[string]any, noMember bool) {
+	member, _, noMember = pasPatientRefMember(doc, firstClaim(doc), ref)
+	if p, isContained := claimPatientTarget(doc, firstClaim(doc), ref); isContained {
+		contained = p
+	}
+	return member, contained, noMember
 }
 
 // inquiryReferenceKey is the Patient a reference in a PAS inquiry names, as
@@ -316,7 +331,7 @@ func inquiryReferenceKey(doc map[string]any, ref string) string {
 	if !strings.HasPrefix(ref, "urn:") {
 		return ""
 	}
-	member, _ := inquiryClaimPatient(doc, ref)
+	member, _, _ := inquiryClaimPatient(doc, ref)
 	if member == "" {
 		return ""
 	}

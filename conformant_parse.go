@@ -80,7 +80,10 @@ type conformantClaimSubmit struct {
 	qrSubject      string // QuestionnaireResponse.subject.reference, or "" if no QR
 	hasDR          bool   // a DiagnosticReport entry is present (FR-20 pended branch)
 	drSubject      string // DiagnosticReport.subject.reference, or "" if no DR
-	bundle         []byte // the Bundle as received, read whole for another patient (pasCarriesAnotherPatient)
+	// The order, Coverage and DiagnosticReport resources, which a "#<id>" subject
+	// names into (pasPatientRefMember); nil when absent.
+	srJSON, covJSON, drJSON []byte
+	bundle                  []byte // the Bundle as received, read whole for another patient (pasCarriesAnotherPatient)
 }
 
 // parseConformantClaimSubmit does ONE pass over a CONFORMANT PAS Claim Bundle, indexing entries
@@ -136,17 +139,17 @@ func parseConformantClaimSubmit(body []byte) (conformantClaimSubmit, bool) {
 			// gateway; this fence had read only ServiceRequest and wrongly refused
 			// a conformant DME bundle (twin-fence corpus:
 			// upd-accept-devicerequest-order).
-			cs.srSubject = subjectRef(e.Resource, "subject")
+			cs.srSubject, cs.srJSON = subjectRef(e.Resource, "subject"), e.Resource
 			cs.haveOrder = true
 		case "Coverage":
-			cs.covBeneficiary = subjectRef(e.Resource, "beneficiary")
+			cs.covBeneficiary, cs.covJSON = subjectRef(e.Resource, "beneficiary"), e.Resource
 			cs.haveCoverage = true
 		case "QuestionnaireResponse":
 			cs.qrJSON = e.Resource
 			cs.qrSubject = subjectRef(e.Resource, "subject")
 		case "DiagnosticReport":
 			cs.hasDR = true
-			cs.drSubject = subjectRef(e.Resource, "subject")
+			cs.drSubject, cs.drJSON = subjectRef(e.Resource, "subject"), e.Resource
 		}
 	}
 	if cs.claimPatient == "" {
@@ -196,35 +199,51 @@ func bindConformantClaimSubject(cs conformantClaimSubmit) (status int, msg strin
 	// names it by an id that names no one, names no patient: refused before
 	// any consistency check, with the text and in the order a payer's Smart
 	// Gateway refuses it at strict.
-	if member, _ := pasClaimSubject(cs.bundle, cs.claimPatient); memberNamesNoOne(member) {
+	// A Claim.patient resolving to a Patient that holds no member key names no
+	// one either, with the text that says what the request must carry.
+	member, _, noMember := pasClaimSubject(cs.bundle, cs.claimPatient)
+	if noMember {
+		return 400, msgPatientCarriesNoMember, nil
+	}
+	if memberNamesNoOne(member) {
 		return 400, msgRequestNamesNoOne, nil
 	}
-	member := pasMemberFromRef(cs.claimPatient)
+	var doc map[string]any
+	_ = json.Unmarshal(cs.bundle, &doc)
 	seen := map[string]bool{}
-	// same reports whether a subject is the member's, or one this cannot read,
-	// which it records.
-	same := func(ref string) bool {
+	// same reports whether a subject is the member's, read by the same
+	// structure as Claim.patient (pasPatientRefMember), or one this cannot
+	// read, which it records.
+	same := func(holderJSON []byte, ref string) bool {
 		if pasUnreadablePatientRef(ref) {
 			seen[ref] = true
 			return true
 		}
-		return pasMemberFromRef(ref) == member
+		if id, _, ok := readPatientReference(ref); ok {
+			return id == member
+		}
+		var holder map[string]any
+		_ = json.Unmarshal(holderJSON, &holder)
+		if m, _, none := pasPatientRefMember(doc, holder, ref); !none && m != "" {
+			return m == member
+		}
+		return ref == member
 	}
-	if !same(cs.srSubject) {
+	if !same(cs.srJSON, cs.srSubject) {
 		return 403, "inconsistent patient in PAS bundle", nil
 	}
-	if !same(cs.covBeneficiary) {
+	if !same(cs.covJSON, cs.covBeneficiary) {
 		return 403, "inconsistent patient in PAS bundle", nil
 	}
 	if cs.qrJSON != nil {
 		if cs.qrSubject == "" {
 			return 403, "PAS bundle QuestionnaireResponse missing subject", nil
 		}
-		if !same(cs.qrSubject) {
+		if !same(cs.qrJSON, cs.qrSubject) {
 			return 403, "inconsistent patient in PAS bundle", nil
 		}
 	}
-	if cs.hasDR && !same(cs.drSubject) {
+	if cs.hasDR && !same(cs.drJSON, cs.drSubject) {
 		return 403, "inconsistent patient in PAS bundle", nil
 	}
 	// Nothing else it carries, contained or nested, is or names another
@@ -288,24 +307,20 @@ func pasMemberFromRef(ref string) string {
 	return ref
 }
 
-// pasClaimSubject is the member a PAS submit or update names by its Claim.patient
-// ref, as a payer's Smart Gateway reads it, and whether the id it is read from is
-// a FHIR id. A Patient reference (readPatientReference) names its id. A "#<id>"
-// naming the one Patient the Claim contains, or a URN naming the one Patient
-// entry with that fullUrl (claimPatientTarget), names the reference itself. Any
-// other reference names no Patient: the member is "", which names no one.
-func pasClaimSubject(bundle []byte, ref string) (member string, conforms bool) {
+// pasClaimSubject is the member a PAS submit or update names by its operative
+// Claim's patient reference, as a payer's Smart Gateway reads it
+// (pasPatientRefMember), whether the id it is read from is a FHIR id, and whether
+// the reference resolves to a Patient that holds no member key. A bundle that
+// cannot be read as a JSON object names no one.
+func pasClaimSubject(bundle []byte, ref string) (member string, conforms, noMember bool) {
 	if id, conforms, ok := readPatientReference(ref); ok {
-		return id, conforms
+		return id, conforms, false
 	}
 	var doc map[string]any
 	if json.Unmarshal(bundle, &doc) != nil {
-		return "", false
+		return "", false, false
 	}
-	if p, _ := claimPatientTarget(doc, firstClaim(doc), ref); p != nil {
-		return ref, true
-	}
-	return "", false
+	return pasPatientRefMember(doc, firstClaim(doc), ref)
 }
 
 // conformantBundleMember returns the bare member id bound by a conformantClaimSubmit, in either
@@ -313,7 +328,8 @@ func pasClaimSubject(bundle []byte, ref string) (member string, conforms bool) {
 // canonical member the engine binds — a ledger keyed on the raw reference would file one patient
 // under two keys depending on which lane submitted.
 func conformantBundleMember(cs conformantClaimSubmit) string {
-	return pasMemberFromRef(cs.claimPatient)
+	member, _, _ := pasClaimSubject(cs.bundle, cs.claimPatient)
+	return member
 }
 
 // conformantUpdateFacts holds the cross-resource FR-21/FR-32 facts the CONFORMANT

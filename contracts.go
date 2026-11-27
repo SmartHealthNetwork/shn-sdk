@@ -5,8 +5,7 @@ import (
 	"strings"
 )
 
-// Contract-version tokens are the generalized capability grammar of the
-// multi-version exchange-contracts design:
+// Contract-version tokens are the network's capability grammar:
 // "<contract>@<line>", where a contract names a message-surface family within a
 // workstream (pa.pas) and a line is the wire-significant major.minor of the IG
 // generation this build speaks natively. Patch versions are never wire-significant.

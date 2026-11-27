@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/SmartHealthNetwork/shn-sdk/internal/signedsend"
 )
 
 // Token is a per-leg, scope-bound authorization minted by the network's
@@ -93,7 +95,8 @@ func tokenSigningPayload(t Token) []byte {
 // the Hub refused it (response leg authorization failed). Authorize checks
 // only that a signature is present. To refuse a token that is not signed by the
 // Framework or not bound to the leg before sealing it in, verify it with
-// VerifyBound against the Framework's key, as a Smart Gateway does.
+// VerifyBound against the Framework's key, as a Smart Gateway does. It
+// follows no redirect, whatever c does: a 3xx is not a token.
 func (id Identity) Authorize(ctx context.Context, c *http.Client, authzURL string, req AuthorizeRequest) (Token, error) {
 	if c == nil {
 		c = http.DefaultClient
@@ -111,9 +114,9 @@ func (id Identity) Authorize(ctx context.Context, c *http.Client, authzURL strin
 		return Token{}, fmt.Errorf("shnsdk: build authorize request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Holder-Assertion", hdr)
 
-	resp, err := c.Do(httpReq)
+	// Sent without following a redirect: a 3xx is not a token.
+	resp, err := signedsend.Do(c, httpReq, map[string]string{signedsend.HolderAssertion: hdr})
 	if err != nil {
 		return Token{}, fmt.Errorf("shnsdk: POST /authorize: %w", err)
 	}

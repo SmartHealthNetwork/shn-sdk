@@ -28,6 +28,8 @@ import (
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	acct "github.com/SmartHealthNetwork/shn-sdk/accounts"
+
+	"github.com/SmartHealthNetwork/shn-sdk/internal/signedsend"
 )
 
 // payerIDList is a repeatable -payer-id system=value flag (FR-G42 Gate A
@@ -302,8 +304,9 @@ func cmdRotate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Holder-Assertion", hdr)
-	resp, err := http.DefaultClient.Do(req)
+	// Sent without following a redirect: the assertion goes only to the
+	// registrar, and a 3xx is a failed rotation.
+	resp, err := signedsend.Do(nil, req, map[string]string{signedsend.HolderAssertion: hdr})
 	if err != nil {
 		fmt.Fprintf(stderr, "shn rotate: PUT /register/%s: %v\n", id, err)
 		return 1
